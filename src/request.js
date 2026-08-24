@@ -1,6 +1,7 @@
 import http from 'node:http'
 import https from 'node:https'
 import { URL } from 'node:url'
+import { gunzipSync } from 'node:zlib'
 
 // 上游连接复用（keep-alive）：减少每次 TLS/TCP 握手，改善连接体验与延迟
 const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 64 })
@@ -160,7 +161,7 @@ export function probeModel(provider, model) {
   const isHttps = provider.baseUrl.startsWith('https://')
   const mod = isHttps ? https : http
   const url = new URL(provider.baseUrl + (provider.pathPrefix || '') + '/v1/chat/completions')
-  const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json' }
+  const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }
   if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
   const payload = Buffer.from(JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false }))
   headers['content-length'] = payload.length
@@ -171,9 +172,12 @@ export function probeModel(provider, model) {
       const c = []
       res.on('data', (d) => c.push(d))
       res.on('end', () => {
-        const buf = Buffer.concat(c).toString('utf8').trim()
+        const raw = Buffer.concat(c)
+        // 兼容上游缺 content-encoding 头但仍返回 gzip：按魔数 1f 8b 尝试解压，避免 JSON 解析/统计断链
+        const buf = (raw.length >= 2 && raw[0] === 0x1f && raw[1] === 0x8b) ? (() => { try { return gunzipSync(raw) } catch { return raw } })() : raw
+        const text = buf.toString('utf8').trim()
         const ok = res.statusCode >= 200 && res.statusCode < 300
-        resolve({ ok, code: res.statusCode, ms: Date.now() - started, err: ok ? null : (buf.slice(0, 120) || ('HTTP ' + res.statusCode)) })
+        resolve({ ok, code: res.statusCode, ms: Date.now() - started, err: ok ? null : (text.slice(0, 120) || ('HTTP ' + res.statusCode)) })
       })
     })
     req.setTimeout(30000, () => req.destroy(Object.assign(new Error('probe timeout'), { code: 'ETIMEDOUT' })))

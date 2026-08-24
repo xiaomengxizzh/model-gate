@@ -158,5 +158,7 @@ export function cacheHitMiss(api, usage) {
     return { hit: cacheRead, miss }
   }
 
+  // 无任何缓存字段但有 prompt 总量：视为本次全部未缓存（hit=0, miss=prompt），命中率归 0 而非悬空 "—"
+  if (promptTokens > 0) return { hit: 0, miss: promptTokens }
   return { hit: 0, miss: 0 }
 }
