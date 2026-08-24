@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 setlocal
 chcp 65001 >nul
 title model-gateway 本地模型网关
