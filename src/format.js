@@ -103,28 +103,60 @@ export function adapterFor(api) {
 }
 export { makeOA, hasTools }
 
-// ── 缓存命中/未命中 字段映射（按上游协议取数，避免各厂商字段名不一导致解析错位）──
-const CACHE_FIELD = {
-  openai:    { hit: ['prompt_cache_hit_tokens', 'prompt_tokens_details.cached_tokens', 'cache_read_input_tokens'], miss: ['prompt_cache_miss_tokens', 'cache_creation_input_tokens', 'prompt_tokens_details.text_tokens', 'prompt_tokens_details.audio_tokens'] },
-  anthropic: { hit: ['cache_read_input_tokens'], miss: ['cache_creation_input_tokens'] },
-  gemini:    { hit: [], miss: [] }, // Gemini 无标准缓存计数，返回 0
-}
+// ── 缓存命中/未命中 字段映射（四桶互斥模型，按上游协议精确取数）──
+// 命中率口径（业界标准，DeepSeek 官方文档 + DeepSeek Harness 交叉验证）：
+//   hitRate = cacheRead / (cacheRead + cacheWrite + uncachedInput)
+//   计费 prompt = cacheRead(命中) + cacheWrite(写入缓存) + uncachedInput(未缓存)，三者互斥不重叠；
+//   cacheWrite 是「本次首次写入缓存」，属未命中侧，一并计入分母。
+// 各协议字段语义（2026-08 调研确认）：
+//   DeepSeek  : prompt_cache_hit_tokens(命中) + prompt_cache_miss_tokens(未命中) = prompt_tokens（两者都直接给）
+//   OpenAI    : prompt_tokens_details.cached_tokens(命中)；prompt_tokens **包含** cached → 未命中 = prompt_tokens − cached
+//   OpenRouter: 同 OpenAI（另报 cache_write_tokens=本次新写入缓存，属未命中侧）
+//   Anthropic : cache_read_input_tokens(命中)；cache_creation_input_tokens(写缓存) + input_tokens(断点后未缓存) = 未命中
+//   Gemini    : usageMetadata.cachedContentTokenCount(命中)；promptTokenCount 含 cached → 未命中 = prompt − cached
+function num(v) { return (typeof v === 'number' && Number.isFinite(v) && v > 0) ? v : 0 }
 function pickPath(o, path) {
   let v = o
   for (const p of path.split('.')) { if (v && typeof v === 'object') v = v[p]; else return 0 }
-  return typeof v === 'number' ? v : 0
+  return num(v)
 }
-// 返回 { hit, miss }；未识别的协议回退到 openai 语义
+// 返回 { hit, miss }；hit=缓存命中，miss=未命中（=未缓存 + 写入缓存）。未识别的协议回退到 openai 语义。
 export function cacheHitMiss(api, usage) {
   if (!usage || typeof usage !== 'object') return { hit: 0, miss: 0 }
-  const f = CACHE_FIELD[api || 'openai'] || CACHE_FIELD.openai
-  let hit = 0, miss = 0
-  for (const k of f.hit) hit += pickPath(usage, k)
-  for (const k of f.miss) miss += pickPath(usage, k)
-  // 容错：不少上游只报命中量、不报未命中量（如 OpenAI 仅 cached_tokens/text_tokens）。
-  // 用「prompt 总量 − 命中量」推算未命中，避免缓存命中率被恒算成 100%。
-  if (miss <= 0 && hit > 0 && typeof usage.prompt_tokens === 'number' && usage.prompt_tokens > hit) {
-    miss = usage.prompt_tokens - hit
+  const a = api || 'openai'
+
+  // Anthropic：总输入 = read + creation + input_tokens；未命中 = creation + input_tokens（input_tokens 是「最后一个缓存断点之后」未缓存部分）
+  if (a === 'anthropic') {
+    const read = num(usage.cache_read_input_tokens)
+    const creation = num(usage.cache_creation_input_tokens)
+    const input = num(usage.input_tokens)
+    return { hit: read, miss: creation + input }
   }
-  return { hit, miss }
+
+  // Gemini：命中在 usageMetadata.cachedContentTokenCount；promptTokenCount 含 cached
+  if (a === 'gemini') {
+    const um = usage.usageMetadata || {}
+    const hit = num(um.cachedContentTokenCount)
+    const prompt = num(um.promptTokenCount)
+    return { hit, miss: Math.max(0, prompt - hit) }
+  }
+
+  // openai 兼容（DeepSeek / OpenAI / OpenRouter / opencode zen）
+  const promptTokens = num(usage.prompt_tokens)
+  // 命中：优先 OpenAI/OpenRouter 的 cached_tokens，回退 DeepSeek 的 prompt_cache_hit_tokens（两者语义相同，一般不同时出现）
+  const cacheRead = pickPath(usage, 'prompt_tokens_details.cached_tokens') || num(usage.prompt_cache_hit_tokens)
+  // 写入缓存（OpenRouter / GPT-5.6+ 才报；DeepSeek 不报）——属未命中侧
+  const cacheWrite = pickPath(usage, 'prompt_tokens_details.cache_write_tokens')
+  // DeepSeek 独立未命中字段（最准确，直接给全，优先采用）
+  const dMiss = num(usage.prompt_cache_miss_tokens)
+
+  // 有任一缓存字段才进入计算；否则无法判断，返回 0/0（面板显示 —，不虚报）
+  if (cacheRead > 0 || cacheWrite > 0 || dMiss > 0) {
+    // 未命中：DeepSeek 报独立 miss 时直接用；否则用「prompt_tokens − cacheRead」减法
+    // （prompt_tokens 含缓存命中，减出互斥的未命中，自然包含 cacheWrite 与未缓存部分）
+    const miss = dMiss > 0 ? dMiss : Math.max(0, promptTokens - cacheRead)
+    return { hit: cacheRead, miss }
+  }
+
+  return { hit: 0, miss: 0 }
 }

@@ -19,7 +19,7 @@
 | 思考强度 | 每模型可配允许档位 `effortOptions`（本地校验，非法 400）与默认档位 `reasoning` |
 | 缓存 | keep-alive 连接复用 · **会话/上游亲和**（同前缀稳定同上游，降厂商缓存碎片化）· **主动预热 preheat** · **命中率路由 + 趋势骤降告警**；流式也解析 usage 计入命中；命中率按 hit/(hit+miss) 真实统计 |
 | 安全 | 管理令牌 `MG_ADMIN_TOKEN` · 数据面客户端 Key `MG_CLIENT_KEY`（加密存储）· Key 加密落盘 · 转发剥离客户端授权头 · 虚拟模型名 |
-| 可观测 | provider/model 维度统计 · p50/p95 · 延迟趋势 · 每模型天级 token/缓存命中率 · 日志文件 |
+| 可观测 | provider/model 维度统计 · 模型级平均延迟 · p50/p95 · 延迟趋势 · 每模型天级 token/缓存命中率 · **按对话统计**（会话 ID 或时间切分）· 日志文件 |
 | 互转 | OpenAI ⇄ Anthropic ⇄ Gemini（含 function calling） |
 | 合规 | 空 model 且无默认 → 显式 400 |
 
@@ -87,7 +87,8 @@
 
 ## 安全
 
-- **管理令牌**：`MG_ADMIN_TOKEN` 设置后，所有 `/api/*` 需 `Authorization: Bearer <token>`；未设置时控制台对回环可访问，但启动会打警告。
+- **管理令牌**：设置后所有 `/api/*` 需 `Authorization: Bearer <token>`，未授权返回 401；未设置时控制台对回环可访问，但启动会打警告。三种设置方式（优先级从高到低）：① 环境变量 `MG_ADMIN_TOKEN`；② `gateway.json` 的 `server.adminToken`；③ 控制面板顶部「令牌」按钮——**面板录入即写服务端并热生效**（加密存于 keys 库，重启不失效），留空则关闭保护。若设了环境变量，以环境变量为准。
+- **面板门禁**：启用管理令牌后，打开控制台先显示**登录卡片**，输入正确令牌才进入主界面（令牌错误红字提示）。浏览器记住当前网关实例（按启动时间戳 `startedAt` 判定），同一实例内刷新不再要求输入；**网关重启后需重新输入令牌**。
 - **数据面鉴权**：`MG_CLIENT_KEY` 或面板里的 `clientKey` 设置后，`/v1/*` 需携带同一 Key，否则 401；不配则不鉴权（向后兼容）。
 - **转发鉴权**：向各上游转发时**剥离客户端自带** `Authorization/Cookie/x-api-key/proxy-*`，统一由网关注入，杜绝绕过。
 - **Key 加密落盘**：`config/keys.local.json` **始终 AES-256-GCM 加密**（文件头 `MG1:`），主密钥优先取 `MG_KEYS_MASTER`，否则自动生成并持久化到用户目录的 `master.key`。`clientKey` 同样加密存于 keys 库，不写明文。文件启动时收紧权限（Windows `icacls` / 其它 `chmod 0600`）。
@@ -102,9 +103,34 @@
 - 命中率路由：同一模型多上游时，优先近期缓存命中率更高的上游。
 - 主动预热 `preheat` + 命中率趋势告警（命中率骤降≥20 且仍≥30% 时告警，提示缓存碎片化）。
 
-命中率口径：`hit / (hit + miss)`。不少上游只报命中量不报未命中量（如 OpenAI 用 `prompt_tokens_details.cached_tokens` 当命中、未命中在 `text_tokens`），网关会把未命中量也算进去（缺报时用 `prompt_tokens − hit` 推算），避免缓存/未缓存被恒算成 100%。
+命中率口径：`hit / (hit + miss)`，按**提示词 token**（不含输出）加权累计。各协议按官方字段精确取数，不混用：
+
+| 上游协议 | 命中（hit） | 未命中（miss） |
+|---|---|---|
+| DeepSeek | `prompt_cache_hit_tokens` | `prompt_cache_miss_tokens`（两者之和 = `prompt_tokens`） |
+| OpenAI / OpenRouter | `prompt_tokens_details.cached_tokens` | `prompt_tokens − cached_tokens`（`prompt_tokens` 含命中） |
+| Anthropic | `cache_read_input_tokens` | `cache_creation_input_tokens + input_tokens`（`input_tokens` 为断点后未缓存部分） |
+| Gemini | `usageMetadata.cachedContentTokenCount` | `promptTokenCount − cachedContentTokenCount` |
+
+注意：命中率反映的是「本次请求提示词里有多少比例从厂商缓存读取」。在 agent 多轮循环、长 system 前缀高度复用的场景下，命中率接近 90%+ 是**正常且理想**的（重复前缀无需重算）；若希望降低，通常是前缀不稳定（如 system 里塞了时间戳/动态值）或请求分散到不同上游所致，与公式无关。
 
 某模型缓存「继承」给另一模型：厂商侧缓存按模型名区分，无法跨模型复用；真正省 token 靠让相同前缀稳定走相同 模型+上游。
+
+## 按对话统计
+
+数据统计页「全局统计」卡片内置三种模式：**全局 / 按模型 / 按对话**。按对话模式以「会话」为单位聚合 token 与缓存命中：
+
+- **会话 ID 优先**：请求头 `X-Conversation-Id` / `X-Session-Id`，或请求体 `session_id` / `conversation_id`。Agent 在自定义请求头里带固定会话 ID 即可精确统计（如 opencode 的 provider extraHeaders）。
+- **无 ID 兜底**：同来源请求间隔 ≤ 5 分钟视为同一对话，超过自动开新对话（面板以 `⌁` 标记区分兜底会话）。
+- 保留最近 50 个对话，超量自动清理最旧的。
+
+## 连通性测试
+
+「模型配置」页的测试按钮（赛璐璐面板）：
+
+- **单测**：每个上游/模型卡片上的「测」按钮，向上游发一次真实请求验证连通（上游 GET `/v1/models` 探可达；模型 POST 最小对话请求探可调用），结果以徽章显示 `通 xx ms` / `失败 xx ms`，可反复点击重新测试。
+- **统测**：卡片区头部「测试」按钮一次测全部。上游走 `/api/probe`（无 id = 全部上游）；模型走 `/api/model-test`（无 id = 全部模型，服务端循环一次返回）。失败时面板明确提示原因，不误报「完成」。
+- **模型级平均延迟**：模型卡片显示 `请求X · 错Y · 均 xx ms` 统计行，随真实请求流量累计（与上游卡片的 p50/p95 口径同级，重启清零）。
 
 ## 启动与日志
 

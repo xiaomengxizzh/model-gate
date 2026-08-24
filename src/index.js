@@ -2,6 +2,7 @@ import http from 'node:http'
 import { readFileSync, chmodSync, existsSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
+import { gunzipSync } from 'node:zlib'
 import { loadConfig, createRouter, buildProvider, configPaths, writeJsonAtomic , keysEncrypt } from './router.js'
 import { createLogger } from './logger.js'
 import { forward, probe, probeModel, warm } from './request.js'
@@ -28,6 +29,15 @@ async function collectBody(stream, maxBytes = 64 * 1024 * 1024) {
   return Buffer.concat(chunks)
 }
 
+// 上游偶发返回 gzip 响应却不带 content-encoding 头（如 opencodezen），会导致 usage 解析失败、统计断链
+const GZIP_MAGIC = Buffer.from([0x1f, 0x8b])
+function maybeGunzip(buf) {
+  if (buf && buf.length >= 2 && buf[0] === GZIP_MAGIC[0] && buf[1] === GZIP_MAGIC[1]) {
+    try { return gunzipSync(buf) } catch { return buf }
+  }
+  return buf
+}
+
 // 转发头：剥离客户端授权/敏感头，统一由网关注入鉴权，防止绕过
 function buildHeaders(req, provider, bodyBuf, cfg) {
   const headers = {}
@@ -38,6 +48,7 @@ function buildHeaders(req, provider, bodyBuf, cfg) {
   }
   headers['user-agent'] = 'model-gateway/0.1'
   if (!headers['accept']) headers['accept'] = 'application/json'
+  headers['accept-encoding'] = 'identity' // 请求上游返回明文，避免 gzip 导致响应体解析失败
   if (provider.apiKey) headers['authorization'] = 'Bearer ' + provider.apiKey
   const extra = Object.assign({}, (cfg.defaults || {}).extraHeaders, provider.extraHeaders)
   for (const [k, v] of Object.entries(extra)) headers[k.toLowerCase()] = v
@@ -201,17 +212,18 @@ function buildStatus(state) {
     const m = (s.byModel && s.byModel[name]) || { requests: 0, errors: 0 }
     const dk = (s.daily && s.daily[name] && s.daily[name][todayKey()]) || { tokens: 0, hit: 0, miss: 0 }
     const hitRate = (dk.hit + dk.miss) > 0 ? Math.round((dk.hit / (dk.hit + dk.miss)) * 1000) / 10 : null
-    return { name, provider: d.provider, alias: d.alias || [], fallbacks: d.fallbacks || [], maxConcurrent: d.maxConcurrent || 0, qps: d.qps || 0, reasoning: d.reasoning || '', effortOptions: d.effortOptions || [], dailyQuota: d.dailyQuota || 0, quota: d.quota || 0, maxContext: d.maxContext || 0, probe: m.probe || null, requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate, affinity: state.affinity[name] || null }
+    return { name, provider: d.provider, alias: d.alias || [], fallbacks: d.fallbacks || [], maxConcurrent: d.maxConcurrent || 0, qps: d.qps || 0, reasoning: d.reasoning || '', effortOptions: d.effortOptions || [], dailyQuota: d.dailyQuota || 0, quota: d.quota || 0, maxContext: d.maxContext || 0, probe: m.probe || null, requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate, affinity: state.affinity[name] || null, avgMs: m.latencyCount ? Math.round(m.latencySum / m.latencyCount) : null }
   })
   const defaults = state.cfg.defaults || {}
   const todayTotal = models.reduce((a, m) => a + (m.today || 0), 0)
   return {
     needAuth: !!state.adminToken,
-    server: { maxBodyBytes: (state.cfg.server && state.cfg.server.maxBodyBytes) || 0, keyEncrypted: !!(process.env.MG_KEYS_MASTER) || keysFileEncrypted(state.paths.keys) },
+    server: { maxBodyBytes: (state.cfg.server && state.cfg.server.maxBodyBytes) || 0, keyEncrypted: !!(process.env.MG_KEYS_MASTER) || keysFileEncrypted(state.paths.keys), host: (state.cfg.server && state.cfg.server.host) || '127.0.0.1', port: (state.cfg.server && state.cfg.server.port) || 8787 },
     startedAt: state.st.startedAt, uptimeMs: Date.now() - state.st.startedAt,
     counters: Object.assign({}, state.st.counters),
     global: { requests: s.global.requests, errors: s.global.errors, retries: s.global.retries, interrupts: s.global.interrupts, tokenCount: s.global.tokens, todayTokens: todayTotal, avgMs: s.global.confirmed ? Math.round(s.global.latencySum / s.global.confirmed) : null, p50: pct(s.global.lats, 50), p95: pct(s.global.lats, 95), latTrend: s.global.latTrend || [] },
     cache: { trend: state.cacheTrend || [], alert: state.cacheAlert || null },
+    dialogues: Object.values(state.dialogue).filter(d => d.requests > 0).sort((a, b) => b.lastAt - a.lastAt).slice(0, 30).map(d => ({ id: d.id, named: d.named, requests: d.requests, tokens: d.tokens, hit: d.hit, miss: d.miss, hitRate: (d.hit + d.miss) > 0 ? Math.round(d.hit / (d.hit + d.miss) * 1000) / 10 : null, startAt: d.startAt, lastAt: d.lastAt })),
     providers,
     models,
     defaults: { provider: defaults.provider || null, model: defaults.model || '', clientKey: currentClientKey(state) ? '********' : '', directory: defaults.directory || [], preheat: defaults.preheat || [], retry: defaults.retry || {}, timeout: defaults.timeout || {}, concurrency: defaults.concurrency || {}, extraHeaders: defaults.extraHeaders || {} },
@@ -235,6 +247,8 @@ function staticModels(cfg) {
 function reloadConfig(state) {
   state.cfg = loadConfig()
   state.router = createRouter(state.cfg)
+  // 管理令牌优先级：环境变量 MG_ADMIN_TOKEN > server.adminToken > 面板设置（keys.__mg_admin）
+  state.adminToken = process.env.MG_ADMIN_TOKEN || (state.cfg.server && state.cfg.server.adminToken) || (state.cfg._keys && state.cfg._keys.__mg_admin) || ''
   const ids = Object.keys(state.cfg.providers || {})
   for (const id of ids) if (!state.stats.byProvider[id]) state.stats.byProvider[id] = { requests:0, errors:0, retries:0, latencySum:0, latencyCount:0, tokens:0 }
 }
@@ -312,6 +326,38 @@ async function doProbeModel(state, model) {
   return { id: model, ok: r.ok, code: r.code, ms: r.ms, err: r.err || null }
 }
 
+// ── 按对话（会话）统计：会话 ID 优先，无 ID 按时间间隔切分兜底 ──
+const DIALOGUE_GAP_MS = 300000 // 无会话 ID 时，间隔超过 5 分钟视为新对话
+// 解析本次请求归属的对话 ID：优先请求头 X-Conversation-Id / X-Session-Id，其次 body session_id/conversation_id；
+// 都没有则复用「当前无 ID 对话」（间隔 ≤ 阈值），否则新建 conv-<时间戳> 对话。
+function resolveDialogue(state, req, body) {
+  const h = req.headers || {}
+  const named = h['x-conversation-id'] || h['x-session-id'] || (body && (body.session_id || body.conversation_id))
+  if (named && String(named).trim()) return String(named).trim()
+  const now = Date.now()
+  if (state.dUnnamed && (now - state.dUnnamed.lastAt) <= DIALOGUE_GAP_MS) return state.dUnnamed.id
+  const id = 'conv-' + now
+  state.dUnnamed = state.dialogue[id] = { id, requests: 0, tokens: 0, hit: 0, miss: 0, startAt: now, lastAt: now, named: false }
+  return id
+}
+function tallyDialogue(state, id, tokens, hit, miss) {
+  if (!id) return
+  const now = Date.now()
+  let d = state.dialogue[id]
+  if (!d) { d = state.dialogue[id] = { id, requests: 0, tokens: 0, hit: 0, miss: 0, startAt: now, lastAt: now, named: !id.startsWith('conv-') } }
+  d.requests += 1
+  d.tokens += tokens || 0
+  d.hit += hit || 0
+  d.miss += miss || 0
+  d.lastAt = now
+  // 容量保护：对话过多时清掉最旧的（保留最近 50 个 + 当前无 ID 对话）
+  const keys = Object.keys(state.dialogue)
+  if (keys.length > 80) {
+    const victims = keys.filter(k => state.dialogue[k] !== state.dUnnamed).sort((a, b) => state.dialogue[a].lastAt - state.dialogue[b].lastAt).slice(0, keys.length - 50)
+    for (const k of victims) delete state.dialogue[k]
+  }
+}
+
 // 转发：按路由序列（本模型 + fallbackModels 多上游）尝试 + 熔断，跨模型换名改写
 async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
   const cfg = state.cfg
@@ -321,6 +367,7 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
   let injectedEffort = false
   let requestModel = null
   const dir = (cfg.defaults && cfg.defaults.directory) || []
+  const dialogueId = resolveDialogue(state, req, body)
   if (body && body.model) {
     const hit = state.router.resolve(body.model)
     requestModel = hit.canonicalName
@@ -405,6 +452,7 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
       o.lats.push(latency); if (o.lats.length > 200) o.lats.shift()
       state.stats.global.latencySum += latency; state.stats.global.confirmed += 1
       state.stats.global.lats.push(latency); if (state.stats.global.lats.length > 200) state.stats.global.lats.shift()
+      bm.latencySum = (bm.latencySum || 0) + latency; bm.latencyCount = (bm.latencyCount || 0) + 1
       agg(state, pid, 'retries', result.retries || 0)
       if (result.ok) {
         markOk(state, pid)
@@ -415,9 +463,10 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
             if (!again.ok) throw new Error('reconnect status ' + again.status)
             return again.stream
           }
-          return { kind: 'stream', res: result, pid, modelName, serving, api, reconnect: reconnector }
+          return { kind: 'stream', res: result, pid, modelName, serving, api, reconnect: reconnector, dialogueId }
         }
         let out = await collectBody(result.stream)
+        out = maybeGunzip(out)
         const parsed = tryParse(out)
         const usage = parsed && parsed.usage
         if (usage) {
@@ -429,6 +478,7 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
           const sg = state.stats.byModel[serving || modelName] = state.stats.byModel[serving || modelName] || { requests: 0, errors: 0 }
           sg.tokens = (sg.tokens || 0) + (usage.total_tokens || 0)
           tallyDaily(state, serving || modelName, usage.total_tokens || 0, hit, miss)
+          tallyDialogue(state, dialogueId, usage.total_tokens || 0, hit, miss)
         }
         if (api !== 'openai') { const p = tryParse(out); if (p) { let nb; try { nb = Buffer.from(JSON.stringify(adapterFor(api).fromUpstream(p))) } catch { nb = null } if (nb) out = nb } }
         // 「名字没对上」加固：跨模型兜底改写请求 model 后，响应 model 回写为客户端请求名，避免客户端续写/统计错位
@@ -436,7 +486,7 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
           const p2 = tryParse(out)
           if (p2 && p2.model) { p2.model = body.model; out = Buffer.from(JSON.stringify(p2)) }
         }
-        return { kind: 'json', status: result.status, contentType: 'application/json', body: out, pid, modelName, asSSE: degraded || undefined }
+        return { kind: 'json', status: result.status, contentType: 'application/json', body: out, pid, modelName, asSSE: degraded || undefined, dialogueId }
       }
       // 非重试错误码（4xx）：业务问题，不熔断、不 fallback，直接返回
       markOk(state, pid)
@@ -450,6 +500,7 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
       o.lats.push(latency); if (o.lats.length > 200) o.lats.shift()
       state.stats.global.latencySum += latency; state.stats.global.confirmed += 1
       state.stats.global.lats.push(latency); if (state.stats.global.lats.length > 200) state.stats.global.lats.shift()
+      bm.latencySum = (bm.latencySum || 0) + latency; bm.latencyCount = (bm.latencyCount || 0) + 1
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
       agg(state, pid, 'retries', err.retries || 0)
       if (err.status === 429) { const th = throttleOf(state, pid); th.rateUntil = Date.now() + (err.retryAfter || 3000) }
@@ -504,7 +555,24 @@ function makeHandler(state) {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
         res.end(html); return
       }
-      if (path === '/api/auth' && req.method === 'GET') { sendJson(res, 200, { needAuth: !!state.adminToken }); return }
+      if (path === '/api/auth' && req.method === 'GET') { sendJson(res, 200, { needAuth: !!state.adminToken, startedAt: state.st.startedAt }); return }
+
+      // 面板设置管理令牌：写入加密 keys 库并热生效。未启用鉴权时开放（本地初始化）；已启用时需携带当前令牌。
+      if (path === '/api/admin-token' && req.method === 'POST') {
+        if (state.adminToken && !adminOk(req, state)) { sendJson(res, 401, { error: '未授权：修改管理令牌需携带当前令牌' }); return }
+        const body = tryParse(await collectBody(req)) || {}
+        const token = typeof body.token === 'string' ? body.token.trim() : ''
+        const keys = Object.assign({}, state.cfg._keys)
+        if (token) keys.__mg_admin = token
+        else delete keys.__mg_admin
+        const enc = keysEncrypt(keys)
+        if (!enc) { sendJson(res, 400, { error: '无法加密 keys.local.json：缺少主密钥，已拒绝写入' }); return }
+        writeFileSync(state.paths.keys, enc)
+        hardenKeyFile(state.paths.keys)
+        reloadConfig(state)
+        sendJson(res, 200, { ok: true, needAuth: !!state.adminToken })
+        return
+      }
 
       if (path === '/api/status' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; sendJson(res, 200, buildStatus(state)); return }
       if (path === '/api/model-stats' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const days = Math.min(90, Math.max(1, parseInt(new URL(url, 'http://x').searchParams.get('days') || '7', 10) || 7)); const out = {}; const now = new Date(); const modelNames = Object.keys(state.cfg.models || {}); if (days === 1) { for (const name of modelNames) { const mh = state.stats.hourly[name] || {}; const arr = []; for (let i2 = 23; i2 >= 0; i2--) { const hd = new Date(now.getTime() - i2 * 3600 * 1000); const hk = todayKey(hd) + ':' + String(hd.getHours()).padStart(2, '0'); const c = mh[hk]; arr.push({ date: String(hd.getHours()).padStart(2, '0') + ':00', tokens: c ? c.tokens : 0, hitRate: (c && (c.hit + c.miss) > 0) ? Math.round((c.hit / (c.hit + c.miss)) * 1000) / 10 : null }) } out[name] = arr } } else { for (const name of modelNames) { const md = state.stats.daily[name] || {}; const arr = []; for (let i2 = days - 1; i2 >= 0; i2--) { const d = new Date(now); d.setDate(d.getDate() - i2); const k = todayKey(d); const c = md[k]; arr.push({ date: k, tokens: c ? c.tokens : 0, hitRate: (c && (c.hit + c.miss) > 0) ? Math.round((c.hit / (c.hit + c.miss)) * 1000) / 10 : null }) } out[name] = arr } } sendJson(res, 200, { days, mode: days === 1 ? 'hourly' : 'daily', models: out }); return }
@@ -538,9 +606,15 @@ function makeHandler(state) {
         if (!await requireAdmin(req, res)) return
         const body = tryParse(await collectBody(req)) || {}
         const id = String(body.id || '')
-        if (!id || !(state.cfg.models || {})[id]) { sendJson(res, 400, { error: '未知模型: ' + id }); return }
-        const r = await doProbeModel(state, id)
-        sendJson(res, 200, { ok: true, result: r, status: buildStatus(state) }); return
+        if (id) {
+          if (!(state.cfg.models || {})[id]) { sendJson(res, 400, { error: '未知模型: ' + id }); return }
+          const r = await doProbeModel(state, id)
+          sendJson(res, 200, { ok: true, result: r, status: buildStatus(state) }); return
+        }
+        // 无 id → 批量测全部模型（与 /api/probe 对齐）
+        const results = []
+        for (const mid of Object.keys(state.cfg.models || {})) results.push(await doProbeModel(state, mid))
+        sendJson(res, 200, { ok: true, results, status: buildStatus(state) }); return
       }
 
       // —— 数据面客户端鉴权：配置了 clientKey 则校验 Bearer，否则向后兼容不鉴权 ——
@@ -580,9 +654,9 @@ function makeHandler(state) {
           rewriteModel: (body && body.model) || null, // 「名字没对上」：响应 model 回写为客户端请求名
           onTokens: (n, usage) => {
             const total = (usage && typeof usage.total_tokens === 'number' && usage.total_tokens > 0) ? usage.total_tokens : n
-            if (total > 0) { agg(state, out.pid, 'tokens', total); const sm = out.serving || out.modelName; const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }; sg.tokens = (sg.tokens || 0) + total; tallyDaily(state, sm, total, 0, 0) }
+            if (total > 0) { agg(state, out.pid, 'tokens', total); const sm = out.serving || out.modelName; const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }; sg.tokens = (sg.tokens || 0) + total; tallyDaily(state, sm, total, 0, 0); tallyDialogue(state, out.dialogueId, total, 0, 0) }
           },
-          onUsage: (u) => { const c = cacheHitMiss(out.api, u); if (c.hit > 0 || c.miss > 0) { const sm = out.serving || out.modelName; noteCacheStat(state, sm, out.pid, c.hit, c.miss); tallyDaily(state, sm, 0, c.hit, c.miss) } },
+          onUsage: (u) => { const c = cacheHitMiss(out.api, u); if (c.hit > 0 || c.miss > 0) { const sm = out.serving || out.modelName; noteCacheStat(state, sm, out.pid, c.hit, c.miss); tallyDaily(state, sm, 0, c.hit, c.miss); tallyDialogue(state, out.dialogueId, 0, c.hit, c.miss) } },
         })
         return
       }
@@ -622,7 +696,7 @@ export function start(opts = {}) {
   const pids = (() => { const o = {}; for (const id of Object.keys(cfg.providers || {})) o[id] = { requests:0, errors:0, retries:0, latencySum:0, latencyCount:0, tokens:0 }; return o })()
   const state = {
     cfg, log, router: createRouter(cfg),
-    adminToken: process.env.MG_ADMIN_TOKEN || (cfg.server && cfg.server.adminToken) || '',
+    adminToken: process.env.MG_ADMIN_TOKEN || (cfg.server && cfg.server.adminToken) || (cfg._keys && cfg._keys.__mg_admin) || '',
     paths: cfg._paths || configPaths(),
     st: { startedAt: Date.now(), uses: {}, counters: { requests: 0, errors: 0, retries: 0, interrupts: 0 } },
     health: {},
@@ -633,6 +707,8 @@ export function start(opts = {}) {
     cacheStat: {},       // "模型\0上游" → { hit, miss }（命中率路由）
     cacheTrend: [],      // 全局缓存命中率趋势样本 { t, v }（告警基线）
     cacheAlert: null,    // 最近一次命中率骤降告警
+    dialogue: {},        // 对话维度统计：id -> { requests, tokens, hit, miss, startAt, lastAt, named }
+    dUnnamed: null,      // 无会话 ID 时的当前兜底对话（按间隔切分）
     stats: { global: { requests:0, errors:0, retries:0, interrupts:0, tokens:0, latencySum:0, confirmed:0, lats: [], latTrend: [] }, byProvider: pids, byModel: {}, daily: {}, hourly: {} },
   }
   try { const _sf = state.paths.stats; const _j = existsSync(_sf) ? JSON.parse(readFileSync(_sf, 'utf8') || '{}') : {}; state.stats.daily = Object.assign({}, state.stats.daily, _j.daily || {}); state.stats.hourly = Object.assign({}, state.stats.hourly, _j.hourly || {}); for (const [n, t] of Object.entries(_j.byModel || {})) { state.stats.byModel[n] = Object.assign(state.stats.byModel[n] || { requests: 0, errors: 0 }, { tokens: (t && t.tokens) || 0 }) } } catch { /* 统计文件缺失/损坏则从空开始 */ }
