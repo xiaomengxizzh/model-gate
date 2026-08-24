@@ -75,7 +75,7 @@
 要点：
 - `defaults.model`：**虚拟共用模型名**。客户端统一请求这个名字时，网关把它当作「默认链」——沿 `defaults.directory` 首项把**真实模型名**发给上游，并把响应里的 `model` 回写为该虚拟名（虚拟名会出现在 `/v1/models`）。不会把虚拟名透传给上游（否则上游会报 `Model <虚拟名> is not supported`）。
 - `defaults.clientKey`：数据面鉴权 Key。面板录入后改存**加密 keys 库**，`/api/status` 只回掩码 `********`，不会明文落盘。
-- `defaults.directory`：跨模型兜底。`mode: afterAll` 表示按序全部尝试，`onFail` 表示仅当前模型失败时才启用后续。
+- `defaults.directory`：跨模型兜底。`mode: afterAll` 表示按序全部尝试，`onFail` 表示仅当前模型失败时才启用后续。**整条链(a→b→c)一轮全败后网关会回到队首反复重试（循环兜底）**，直到成功 / 业务 4xx / 整体超时 / 全部熔断；单轮兜底时间上限由 `defaults.timeout.loopMs`（默认 120000ms）约束，最长一次请求的兜底重试时长不会超过它。请求日志会带 `chain=实际尝试过的模型链` 标记，可直接看到兜底是否触发。
 - `models.<名>.effortOptions`：允许的思考强度档位（客户端传的档位不在列表 → 本地 400）。`reasoning`：客户端未指定时注入的默认档位。
 - `models.<名>.dailyQuota/quota/maxContext`：0=不限；超限的模型在路由中被自动跳过并切到目录中的下一模型。`quota` 已持久化到 `stats.json`，重启不失效。
 - `defaults.preheat`：主动缓存预热，默认空（关闭）。配置后按 `everyMs` 周期性向该模型上游发 `max_tokens:1` 的带长 `system` 请求，保持厂商 prefix cache 存活。
@@ -180,4 +180,5 @@ model-gateway/
 
 - 重试仅发生在尚未向客户端回 2xx 响应头之前；一旦开始回传不再整请求自动重试（避免重复内容），改为断流显式收尾。
 - 流式"断点续传"是重连重放 + 内容去重；OpenAI 协议无二进制断点，重放偏移会降级为"少量可能重复"并记日志。
+- 流式中断（未正常收到 `[DONE]` 即终止）会计入全局 `interrupts` 中断计数并打 `sse 流中断` 日志；断流前已产生的 token 仍按内容累计，但因拿不到上游 `usage`，无法补记 prompt token。
 - 客户端大体积流式上传目前先整体缓冲再转发以支持重试；对常规对话已足够。

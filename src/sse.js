@@ -138,5 +138,6 @@ export async function relayStream(client, firstUpstream, opts) {
 
   await pump(firstUpstream)
   if (opts.onTokens) { try { opts.onTokens(contentChars, lastUsage) } catch {} }
+  if (opts.onEnd) { try { opts.onEnd({ interrupted: !done }) } catch {} }
   if (!client.destroyed) try { client.end() } catch { }
 }

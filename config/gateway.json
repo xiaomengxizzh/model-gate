@@ -4,7 +4,7 @@
     "model": "",
     "clientKey": "",
     "retry": { "maxAttempts": 3, "initialDelayMs": 500, "maxDelayMs": 8000, "jitter": 0.2 },
-    "timeout": { "connectMs": 15000, "firstByteMs": 90000, "idleMs": 60000, "overallMs": 0 },
+    "timeout": { "connectMs": 15000, "firstByteMs": 90000, "idleMs": 60000, "overallMs": 0, "loopMs": 120000 },
     "extraHeaders": {},
     "preheat": []
   },

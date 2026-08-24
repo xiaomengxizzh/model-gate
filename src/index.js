@@ -421,9 +421,17 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
   if (qps > 0) await rateWait(state, modelName, qps)
   let lastErr = null
   let tried = false
+  const loopMs = (cfg.defaults && cfg.defaults.timeout && cfg.defaults.timeout.loopMs) || 120000
+  const loopDeadline = Date.now() + loopMs
+  const _sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const chainModels = []            // 实际尝试过的 serving 模型链（跨模型兜底/循环标记，供日志/面板查看）
   try {
-  for (const route of routes) {
-    const serving = route.model
+  // 循环兜底：整条路由链(a→b→c)一轮失败后回到队首反复尝试，直到成功 / 业务4xx / 整体超时(loopMs)
+  while (Date.now() < loopDeadline) {
+    let cycleTried = false
+    for (const route of routes) {
+      if (Date.now() >= loopDeadline) break
+      const serving = route.model
     const lim = routeLimit(state, cfg, serving, body)
     if (lim) { log && log.warn('skip model (' + lim + ')', serving || '-', '-> next'); continue } // 额度/上下文超限：自动断连并按目录切换到下一模型
     const provs = (route.mode === 'onFail') ? route.providers.slice(0, 1) : orderCandidates(state, route.model, route.providers)
@@ -434,6 +442,8 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
     if (!healthy(h, Date.now())) { markFail(state, pid, prov.circuit); continue } // 熔断中：跳过，视为失败推进
     if (prov._def.apiKeyEnv && !prov.keyOk) { log && log.warn('skip provider (no key)', pid); continue }
     tried = true
+    cycleTried = true
+    if (chainModels[chainModels.length - 1] !== serving) chainModels.push(serving)
     agg(state, pid, 'requests', 1); state.st.counters.requests += 1; bm.requests += 1
     // 跨模型兜底：把发给上游的 model 名改写为该兜底模型名
     const routeBody = (route.model && body && route.model !== body.model) ? Object.assign({}, body, { model: route.model }) : body
@@ -463,7 +473,7 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
             if (!again.ok) throw new Error('reconnect status ' + again.status)
             return again.stream
           }
-          return { kind: 'stream', res: result, pid, modelName, serving, api, reconnect: reconnector, dialogueId }
+          return { kind: 'stream', res: result, pid, modelName, serving, api, reconnect: reconnector, dialogueId, chain: chainModels.join('>') }
         }
         let out = await collectBody(result.stream)
         out = maybeGunzip(out)
@@ -486,12 +496,12 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
           const p2 = tryParse(out)
           if (p2 && p2.model) { p2.model = body.model; out = Buffer.from(JSON.stringify(p2)) }
         }
-        return { kind: 'json', status: result.status, contentType: 'application/json', body: out, pid, modelName, asSSE: degraded || undefined, dialogueId }
+        return { kind: 'json', status: result.status, contentType: 'application/json', body: out, pid, modelName, asSSE: degraded || undefined, dialogueId, chain: chainModels.join('>') }
       }
       // 非重试错误码（4xx）：业务问题，不熔断、不 fallback，直接返回
       markOk(state, pid)
       const out = await collectBody(result.stream)
-      if (out.length) return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: out, pid, modelName }
+      if (out.length) return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: out, pid, modelName, chain: chainModels.join('>') }
       return { kind: 'json', status: result.status || 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'gateway upstream error', type: 'upstream_error', status: result.status } })), pid, modelName }
     } catch (err) {
       const latency = Date.now() - attemptStart
@@ -512,8 +522,11 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
     }
     } // for pid
   } // for route
-  if (!tried) return { kind: 'json', status: 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: lastErr ? lastErr.message : 'no usable provider (无可用上游：可能未配 Key 或全部熔断)', type: 'no_provider' } })) }
-  return { kind: 'json', status: 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: (lastErr && lastErr.message) || 'all providers failed', type: 'all_providers_failed' } })) }
+  if (!cycleTried) break // 整轮没有任何上游被真正尝试（全熔断/无 key/全额度跳过）：再循环无意义，直接收尾
+  await _sleep(300)      // 一轮全败后回到队首前稍停，避免空转打爆上游
+  } // while() 有界循环兜底：整条链(a→b→c)失败后回到 a 继续，直到成功 / 业务4xx / 整体超时 / 全部熔断
+  if (!tried) return { kind: 'json', status: 502, contentType: 'application/json', chain: chainModels.join('>'), body: Buffer.from(JSON.stringify({ error: { message: lastErr ? lastErr.message : 'no usable provider (无可用上游：可能未配 Key 或全部熔断)', type: 'no_provider' } })) }
+  return { kind: 'json', status: 502, contentType: 'application/json', chain: chainModels.join('>'), body: Buffer.from(JSON.stringify({ error: { message: lastErr && lastErr.message ? (lastErr.message + '（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）') : 'all providers failed（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）', type: 'all_providers_failed' } })) }
   } finally {
     if (releaseModel) releaseModel()
   }
@@ -634,10 +647,11 @@ function makeHandler(state) {
       const out = await forwardChain(state, req, fUrl, fPath, req.method, bodyBuf, body, log)
       // 请求级日志：记录每次数据面请求的请求模型/实际服务模型/上游与结果，便于定位空响应与连接问题（不含消息正文/密钥）
       const reqModel = (body && body.model) || '-'
+      const _chain = (n) => n || ''
       if (out.kind === 'stream') {
-        log.info('data ' + req.method + ' ' + fPath + ' model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-') + ' stream')
+        log.info('data ' + req.method + ' ' + fPath + ' model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-') + ' chain=' + _chain(out.chain) + ' stream')
       } else {
-        log.info('data ' + req.method + ' ' + fPath + ' -> ' + (out.status || '-') + ' model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-'))
+        log.info('data ' + req.method + ' ' + fPath + ' -> ' + (out.status || '-') + ' model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-') + ' chain=' + _chain(out.chain))
         if (out.kind === 'json' && out.status >= 200 && out.status < 300 && out.body && out.body.length) {
           const _j = tryParse(out.body)
           const _cs = (_j && Array.isArray(_j.choices)) ? _j.choices : []
@@ -657,6 +671,7 @@ function makeHandler(state) {
             if (total > 0) { agg(state, out.pid, 'tokens', total); const sm = out.serving || out.modelName; const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }; sg.tokens = (sg.tokens || 0) + total; tallyDaily(state, sm, total, 0, 0); tallyDialogue(state, out.dialogueId, total, 0, 0) }
           },
           onUsage: (u) => { const c = cacheHitMiss(out.api, u); if (c.hit > 0 || c.miss > 0) { const sm = out.serving || out.modelName; noteCacheStat(state, sm, out.pid, c.hit, c.miss); tallyDaily(state, sm, 0, c.hit, c.miss); tallyDialogue(state, out.dialogueId, 0, c.hit, c.miss) } },
+          onEnd: (info) => { if (info && info.interrupted) { state.st.counters.interrupts += 1; state.stats.global.interrupts += 1; log && log.warn('sse 流中断，已计入中断' , 'model=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-'), 'chain=' + (out.chain || '-')) } },
         })
         return
       }
