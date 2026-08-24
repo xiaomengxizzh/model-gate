@@ -10,6 +10,8 @@ import { isStreamResponse, writeUpstreamHeaders, relayStream } from './sse.js'
 
 const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-length','upgrade','keep-alive','te','trailer'])
 const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection'])
+// 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
+const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
 const ADMIN_PAGE = new URL('./admin.html', import.meta.url)
 
 const FAIL_OPEN_THRESHOLD = 5       // 连续失败熔断阈值（放宽：平台偶发慢/抖不轻易熔断）
@@ -532,13 +534,17 @@ function makeHandler(state) {
       const clientKey = currentClientKey(state)
       if (clientKey && !clientAuthOk(req, clientKey)) { sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } }); return }
 
-      if (req.method === 'GET' && path === '/v1/models') { sendJson(res, 200, staticModels(state.cfg)); return }
-      if (!path.startsWith('/v1')) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
+      if (req.method === 'GET' && (path === '/v1/models' || path === '/models')) { sendJson(res, 200, staticModels(state.cfg)); return }
+      const isChat = CHAT_PATHS.has(path)
+      if (!path.startsWith('/v1') && !isChat) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
 
       // —— 数据面转发（无鉴权保护，鉴权交给各上游 key） ——
       const bodyBuf = req.method === 'POST' || req.method === 'PUT' ? await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)) : null
       const body = bodyBuf && bodyBuf.length ? tryParse(bodyBuf) : null
-      const out = await forwardChain(state, req, url, path, req.method, bodyBuf, body, log)
+      // 入口路径别名：把不带 /v1 的 Chat 兼容路径规范化为 /v1/chat/completions，使 base URL 填 http://127.0.0.1:8787 也被正确代理
+      const fPath = (isChat && path !== '/v1/chat/completions') ? '/v1/chat/completions' : path
+      const fUrl = (fPath === path) ? url : (fPath + url.slice(path.length))
+      const out = await forwardChain(state, req, fUrl, fPath, req.method, bodyBuf, body, log)
       if (out.kind === 'stream') {
         writeUpstreamHeaders(res, out.res)
         await relayStream(res, out.res.stream, {
