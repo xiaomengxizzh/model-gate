@@ -1,0 +1,3 @@
+# Windows 批处理文件必须保持 CRLF 行尾，否则 cmd.exe 解析出错（表现为双击打不开）
+*.bat text eol=crlf
+*.cmd text eol=crlf

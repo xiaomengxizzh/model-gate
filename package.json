@@ -1,0 +1,14 @@
+{
+  "name": "model-gateway",
+  "version": "0.1.0",
+  "description": "Local OpenAI-compatible API gateway: retry / layered timeout / SSE resilience / health check / model routing, reusable by multiple agents (zcode/trae/dsh) across multiple model backends",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node scripts/test/run.mjs",
+    "check": "node --check src/index.js && node --check src/router.js && node --check src/request.js && node --check src/sse.js && node --check src/format.js && node --check src/logger.js"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,10 @@
+# 运行时与凭据：永不入库
+logs/
+node_modules/
+config/*.local.json
+*.local.json
+.env
+
+config/stats.json
+# 探活类残留文件
+*.mg_probe.txt

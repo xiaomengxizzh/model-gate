@@ -1,0 +1,10 @@
+# 编辑器统一换行：.bat/.cmd 必须 CRLF，否则 cmd.exe 无法正确解析（会“打不开/无法启动”）
+root = true
+
+[*.bat]
+end_of_line = crlf
+charset = utf-8
+
+[*.cmd]
+end_of_line = crlf
+charset = utf-8
