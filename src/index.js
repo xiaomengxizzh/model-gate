@@ -11,6 +11,7 @@ import { isStreamResponse, writeUpstreamHeaders, relayStream } from './sse.js'
 
 const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-length','upgrade','keep-alive','te','trailer'])
 const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection'])
+const STREAM_DROP_THRESHOLD = 3 // 同一上游连续流式中断 >= 该值，后续请求绕开它（不被 markOk 重置）
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
 const ADMIN_PAGE = new URL('./admin.html', import.meta.url)
@@ -31,10 +32,10 @@ async function collectBody(stream, maxBytes = 64 * 1024 * 1024) {
 
 // 上游偶发返回 gzip 响应却不带 content-encoding 头（如 opencodezen），会导致 usage 解析失败、统计断链
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b])
-function maybeGunzip(buf) {
-  if (buf && buf.length >= 2 && buf[0] === GZIP_MAGIC[0] && buf[1] === GZIP_MAGIC[1]) {
-    try { return gunzipSync(buf) } catch { return buf }
-  }
+function maybeGunzip(buf, contentEncoding) {
+  // 只要上游申报了 gzip 或魔数命中，就必须能解压成功；否则抛错让上层当作失败走 fallback，避免放行垃圾字节
+  const wants = /gzip/i.test(contentEncoding || '') || (buf && buf.length >= 2 && buf[0] === GZIP_MAGIC[0] && buf[1] === GZIP_MAGIC[1])
+  if (wants) return gunzipSync(buf)
   return buf
 }
 
@@ -430,7 +431,6 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
   while (Date.now() < loopDeadline) {
     let cycleTried = false
     for (const route of routes) {
-      if (Date.now() >= loopDeadline) break
       const serving = route.model
     const lim = routeLimit(state, cfg, serving, body)
     if (lim) { log && log.warn('skip model (' + lim + ')', serving || '-', '-> next'); continue } // 额度/上下文超限：自动断连并按目录切换到下一模型
@@ -440,6 +440,7 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
     const prov = buildProvider(cfg, pid)
     const h = ensureHst(state, pid)
     if (!healthy(h, Date.now())) { markFail(state, pid, prov.circuit); continue } // 熔断中：跳过，视为失败推进
+    if ((h.streamDrops || 0) >= STREAM_DROP_THRESHOLD) { log && log.warn('skip provider (流中断过多，绕开)', pid); markFail(state, pid, prov.circuit); continue } // 连续流式中断过多：绕开该上游，走其他上游/模型
     if (prov._def.apiKeyEnv && !prov.keyOk) { log && log.warn('skip provider (no key)', pid); continue }
     tried = true
     cycleTried = true
@@ -476,7 +477,7 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
           return { kind: 'stream', res: result, pid, modelName, serving, api, reconnect: reconnector, dialogueId, chain: chainModels.join('>') }
         }
         let out = await collectBody(result.stream)
-        out = maybeGunzip(out)
+        out = maybeGunzip(out, result.headers && result.headers['content-encoding'])
         const parsed = tryParse(out)
         const usage = parsed && parsed.usage
         if (usage) {
@@ -500,6 +501,8 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
       }
       // 非重试错误码（4xx）：业务问题，不熔断、不 fallback，直接返回
       markOk(state, pid)
+      // 3xx 重定向对 Chat 端点属于异常：不跟随、不裸透传，明确转 502，避免客户端误跟随或解析错乱
+      if (result.status >= 300 && result.status < 400) return { kind: 'json', status: 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'upstream returned unexpected redirect (' + result.status + ')', type: 'upstream_error', status: result.status } })), pid, modelName, chain: chainModels.join('>') }
       const out = await collectBody(result.stream)
       if (out.length) return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: out, pid, modelName, chain: chainModels.join('>') }
       return { kind: 'json', status: result.status || 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'gateway upstream error', type: 'upstream_error', status: result.status } })), pid, modelName }
@@ -671,7 +674,22 @@ function makeHandler(state) {
             if (total > 0) { agg(state, out.pid, 'tokens', total); const sm = out.serving || out.modelName; const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }; sg.tokens = (sg.tokens || 0) + total; tallyDaily(state, sm, total, 0, 0); tallyDialogue(state, out.dialogueId, total, 0, 0) }
           },
           onUsage: (u) => { const c = cacheHitMiss(out.api, u); if (c.hit > 0 || c.miss > 0) { const sm = out.serving || out.modelName; noteCacheStat(state, sm, out.pid, c.hit, c.miss); tallyDaily(state, sm, 0, c.hit, c.miss); tallyDialogue(state, out.dialogueId, 0, c.hit, c.miss) } },
-          onEnd: (info) => { if (info && info.interrupted) { state.st.counters.interrupts += 1; state.stats.global.interrupts += 1; log && log.warn('sse 流中断，已计入中断' , 'model=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-'), 'chain=' + (out.chain || '-')) } },
+          onEnd: (info) => {
+            if (!info) return
+            const sm = out.serving || out.modelName
+            const h = ensureHst(state, out.pid)
+            if (info.interrupted) {
+              state.st.counters.interrupts += 1; state.stats.global.interrupts += 1
+              agg(state, out.pid, 'errors', 1); state.st.counters.errors += 1
+              const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }
+              sg.errors = (sg.errors || 0) + 1
+              // 独立连续中断计数（markOk 不会重置它）：连续多次流中断让路由绕开该上游
+              h.streamDrops = (h.streamDrops || 0) + 1
+              log && log.warn('sse 流中断(续传' + ((info.reconnects || 0)) + '次仍失败)，已计入中断+上游错误，该上游累计连续中断 ' + h.streamDrops, 'model=' + sm + ' provider=' + (out.pid || '-'), 'chain=' + (out.chain || '-'))
+            } else {
+              h.streamDrops = 0 // 正常完成一次流：重置连续中断计数
+            }
+          },
         })
         return
       }
