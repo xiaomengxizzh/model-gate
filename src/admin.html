@@ -373,6 +373,8 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 function gem(id){const i=(id||'').toLowerCase();return i.includes('deepseek')?'deepseek':i.includes('relay')?'relay':i.includes('local')?'local':'generic'}
 function toast(msg,type){const t=$('#toast');t.textContent=msg;t.className='toast show '+(type||'');clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),2200)}
 function markDirty(){dirty=true}
+function getTemplates(){try{return JSON.parse(localStorage.getItem('mg-templates')||'{}')||{}}catch(e){return{}}}
+function setTemplates(m){localStorage.setItem('mg-templates',JSON.stringify(m||{}))}
 
 /* 鉴权 fetch */
 async function japi(path,opts={}){const h=Object.assign({'Content-Type':'application/json'},opts.headers||{});if(TOKEN)h['Authorization']='Bearer '+TOKEN;const r=await fetch(path,Object.assign({},opts,{headers:h}));if(r.status===401){openToken('需要管理令牌');throw new Error('unauthorized')}return r}
@@ -444,7 +446,7 @@ function renderStatsPanel(){const title=$('#gTitle'),box=$('#global');if(!title)
   const names=Object.keys(C.models||{}).filter(n=>{const m=C.models[n];if(!m)return false;return !gProv||m.provider===gProv||(m.fallbacks||[]).includes(gProv)})
   if(!names.length){box.innerHTML='<div class="empty">无匹配模型</div>';return}
   box.innerHTML=names.map(n=>{const S=(ST.byM&&ST.byM[n])||{requests:0,errors:0,tokens:0,today:0,hitRate:null};const m=C.models[n];return '<div class="kvrow"><span class="k">'+esc(n)+' <small>· '+esc(m?m.provider:'')+'</small>'+(m&&m.dailyQuota>0?'<small>· 日限 '+msFmt(m.dailyQuota)+'</small>':'')+'</span><span class="v"><em>'+msShort(S.today||0)+'</em> 今日 · '+msShort(S.tokens||0)+' 总计<br><small>请求'+(S.requests||0)+' · 错'+(S.errors||0)+' · 缓存 '+(S.hitRate==null?'—':S.hitRate+'%')+'</small></span></div>'}).join('')}
-let _persistTimer=null, _dragIdx=-1
+let _persistTimer=null, _dragIdx=-1, _tplName=''
 function persistDir(){clearTimeout(_persistTimer);_persistTimer=setTimeout(()=>{dirty&&saveAll()},700)}
 // FLIP 平滑重排：before→after 用 translateY 过渡实现"挤压"
 function flipTransition(parent){
@@ -464,6 +466,7 @@ function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
   ctrl.innerHTML='<div class="dirrow apiRow" title="OpenAI 兼容格式：各 Agent 的 Base URL 填这里"><label>API 地址</label><input class="input" id="apiBase" value="'+esc(apiUrl)+'" readonly><span class="apiTag">OpenAI 格式</span></div>'
    +'<div class="dirrow"><label>虚拟共用模型名</label><input class="input" id="vmName" value="'+esc(C.defaults.model||'')+'" placeholder="如 auto"></div>'
    +'<div class="dirrow"><label>客户端接入 Key</label><input class="input" id="vmKey" value="'+esc(C.defaults.clientKey||'')+'" placeholder="留空=不鉴权"></div>'
+   +'<div class="dirrow" title="把当前「默认上游目录」保存为模板，可快速切换/删除"><label>模板</label><select class="select" id="tplSel" style="flex:1"><option value="">— 选模板 —</option>'+(Object.keys(getTemplates()).map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''))+'</select><input class="input" id="tplName" value="'+esc(_tplName)+'" placeholder="模板名" style="flex:1"><button class="mini" id="tplSave" title="保存当前目录为新模板">存</button><button class="mini" id="tplApply" title="应用所选模板">用</button><button class="mini del" id="tplDel" title="删除所选模板">×</button></div>'
    +'<div class="dirrow"><label>加入已有模型</label><select class="select" id="dirAdd"><option value="">— 选择 —</option>'+(Object.keys(C.models).filter(n=>!dir.some(e=>e.model===n)).map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''))+'</select></div>';
   // 目录条目
   if(!dir.length){box.innerHTML='<div class="dirEmpty">暂无模型目录。从上方「加入已有模型」把模型拉进目录，拖动 ⠿ 排序，<b>首项即默认模型</b>；全挂后按序往下切换。</div>';}
@@ -480,6 +483,12 @@ function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
   const vmN=$('#vmName');if(vmN){vmN.oninput=()=>{C.defaults.model=vmN.value.trim();markDirty()};vmN.onchange=()=>persistDir()}
   const vmK=$('#vmKey');if(vmK){vmK.oninput=()=>{C.defaults.clientKey=vmK.value.trim();markDirty()};vmK.onchange=()=>persistDir()}
   const dirAdd=$('#dirAdd');if(dirAdd)dirAdd.onchange=()=>{if(dirAdd.value){C.defaults.directory.push({model:dirAdd.value,mode:'afterAll',providers:[]});renderRoute();markDirty();persistDir()}}
+  // 模型目录模板：保存当前目录 / 应用模板 / 删除模板（存 localStorage，随面板持久）
+  const tplSel=$('#tplSel'),tplName=$('#tplName'),tplSave=$('#tplSave'),tplApply=$('#tplApply'),tplDel=$('#tplDel');
+  if(tplName)tplName.oninput=()=>{_tplName=tplName.value}
+  if(tplSave)tplSave.onclick=()=>{const nm=(tplName.value||'').trim();if(!nm){toast('请输入模板名','err');return}const m=getTemplates();m[nm]=JSON.parse(JSON.stringify(C.defaults.directory||[]));setTemplates(m);_tplName='';renderRoute();toast('已保存模板：'+nm,'ok')}
+  if(tplApply)tplApply.onclick=()=>{const nm=(tplSel.value||'');if(!nm){toast('请先选择模板','err');return}const t=getTemplates()[nm];if(!Array.isArray(t)){toast('模板数据无效','err');return}C.defaults.directory=JSON.parse(JSON.stringify(t));markDirty();persistDir();toast('已应用模板：'+nm,'ok')}
+  if(tplDel)tplDel.onclick=()=>{const nm=(tplSel.value||'');if(!nm){toast('请先选择模板','err');return}if(!confirm('确定删除模板「'+nm+'」？'))return;const m=getTemplates();delete m[nm];setTemplates(m);renderRoute();toast('已删除模板：'+nm,'ok')}
   box.querySelectorAll('[data-role="providers"]').forEach(inp=>{inp.oninput=()=>{const i=+inp.closest('.diritem').dataset.i;C.defaults.directory[i].providers=inp.value.split(',').map(s=>s.trim()).filter(Boolean);markDirty()};inp.onchange=()=>persistDir()})
   box.querySelectorAll('[data-role="mode"]').forEach(sel=>sel.onchange=()=>{const i=+sel.closest('.diritem').dataset.i;C.defaults.directory[i].mode=sel.value;markDirty();persistDir()})
   box.querySelectorAll('[data-role="rm"]').forEach(rm=>rm.onclick=()=>{C.defaults.directory.splice(+rm.closest('.diritem').dataset.i,1);renderRoute();markDirty();persistDir()})
