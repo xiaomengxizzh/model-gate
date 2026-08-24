@@ -17,7 +17,7 @@
 | 限速 | 429 尊重 `Retry-After` 排队 · 请求体超限 413 |
 | 额度/上下文 | 每模型日额度 `dailyQuota` · 总额度 `quota`（已持久化，重启不失效）· 最大上下文 `maxContext`（中文按 1 字≈1 token 估算）· 超限自动切下一模型 |
 | 思考强度 | 每模型可配允许档位 `effortOptions`（本地校验，非法 400）与默认档位 `reasoning` |
-| 缓存 | keep-alive 连接复用 · **会话/上游亲和**（同前缀稳定同上游，降厂商缓存碎片化）· **主动预热 preheat** · **命中率路由 + 趋势骤降告警**；流式也解析 usage 计入命中 |
+| 缓存 | keep-alive 连接复用 · **会话/上游亲和**（同前缀稳定同上游，降厂商缓存碎片化）· **主动预热 preheat** · **命中率路由 + 趋势骤降告警**；流式也解析 usage 计入命中；命中率按 hit/(hit+miss) 真实统计 |
 | 安全 | 管理令牌 `MG_ADMIN_TOKEN` · 数据面客户端 Key `MG_CLIENT_KEY`（加密存储）· Key 加密落盘 · 转发剥离客户端授权头 · 虚拟模型名 |
 | 可观测 | provider/model 维度统计 · p50/p95 · 延迟趋势 · 每模型天级 token/缓存命中率 · 日志文件 |
 | 互转 | OpenAI ⇄ Anthropic ⇄ Gemini（含 function calling） |
@@ -36,6 +36,8 @@
 ## 接入 Agent
 
 各 Agent 的 Base URL 填 `http://127.0.0.1:8787/v1`，模型名填 `config/models` 中配置的名字（或别名/虚拟名）。配了 `clientKey` 时需带 `Authorization: Bearer <clientKey>`。
+
+网关同时兼容 `/chat/completions` 与 `/v1/chat/completions`、`/models` 与 `/v1/models`——所以 Base URL 填 `http://127.0.0.1:8787`（不带 `/v1`）也能接入，代理自动拼的两种路径都能用。
 
 ## 配置（`config/gateway.json`，本地覆盖 `gateway.local.json`）
 
@@ -71,7 +73,7 @@
 ```
 
 要点：
-- `defaults.model`：**虚拟共用模型名**。客户端统一请求这个名字，网关自动落到 `defaults.provider`（虚拟名会出现在 `/v1/models`）。
+- `defaults.model`：**虚拟共用模型名**。客户端统一请求这个名字时，网关把它当作「默认链」——沿 `defaults.directory` 首项把**真实模型名**发给上游，并把响应里的 `model` 回写为该虚拟名（虚拟名会出现在 `/v1/models`）。不会把虚拟名透传给上游（否则上游会报 `Model <虚拟名> is not supported`）。
 - `defaults.clientKey`：数据面鉴权 Key。面板录入后改存**加密 keys 库**，`/api/status` 只回掩码 `********`，不会明文落盘。
 - `defaults.directory`：跨模型兜底。`mode: afterAll` 表示按序全部尝试，`onFail` 表示仅当前模型失败时才启用后续。
 - `models.<名>.effortOptions`：允许的思考强度档位（客户端传的档位不在列表 → 本地 400）。`reasoning`：客户端未指定时注入的默认档位。
@@ -100,7 +102,14 @@
 - 命中率路由：同一模型多上游时，优先近期缓存命中率更高的上游。
 - 主动预热 `preheat` + 命中率趋势告警（命中率骤降≥20 且仍≥30% 时告警，提示缓存碎片化）。
 
+命中率口径：`hit / (hit + miss)`。不少上游只报命中量不报未命中量（如 OpenAI 用 `prompt_tokens_details.cached_tokens` 当命中、未命中在 `text_tokens`），网关会把未命中量也算进去（缺报时用 `prompt_tokens − hit` 推算），避免缓存/未缓存被恒算成 100%。
+
 某模型缓存「继承」给另一模型：厂商侧缓存按模型名区分，无法跨模型复用；真正省 token 靠让相同前缀稳定走相同 模型+上游。
+
+## 启动与日志
+
+- **健壮启动**：`start.bat` 启动前会自动清理**占用 8787 的残留/孤儿 node 进程**，避免 `EADDRINUSE` 与「旧实例占着端口、agent 连不上」造成的空窗；前台运行，关闭窗口即停。
+- **请求级日志**：每次数据面请求写一行 `data <METHOD> <path> -> <status> model=<请求模型> serving=<实际服务模型> provider=<上游>`。若返回 **2xx 却无正文内容**会额外告警 `data 2xx 无正文内容 ...`，便于定位空响应。日志只记元数据，**不含消息正文/密钥**。
 
 ## 协议互转（OpenAI ⇄ Anthropic ⇄ Gemini）
 
@@ -111,13 +120,14 @@
 ```text
 model-gateway/
   config/gateway.json    # 配置模板
-  src/index.js           # HTTP 入口 + 路由 + 治理状态（熔断/并发/QPS/额度/统计/缓存亲和与告警）
+  src/index.js           # HTTP 入口 + 路由 + 治理状态 + 请求级日志（熔断/并发/QPS/额度/统计/缓存亲和与告警）
   src/router.js          # 配置加载 + key 加密读写/解密 + 模型->provider 路由
   src/request.js         # 后端转发 + keep-alive + 分层/整体超时 + 退避重试 + 熔断计数 + 预热 warm
   src/sse.js             # SSE 断流续传 + 多协议流式重建 + 模型名回写 + usage/命中解析
   src/format.js          # 协议适配（含 per-api 缓存字段映射 cacheHitMiss）
   src/logger.js          # 控制台 + 文件日志（密钥脱敏）
   src/admin.html         # 赛璐璐风格控制面板
+  start.bat              # 健壮启动脚本（自动清理占用 8787 的残留进程）
   scripts/test/          # 按主题拆分的集成测试 + 索引运行器
   logs/                  # 运行时日志（gitignore）
 ```
