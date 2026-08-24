@@ -51,6 +51,7 @@ export async function relayStream(client, firstUpstream, opts) {
   let resolved = true
   let contentChars = 0
   let usageReported = false
+  let lastUsage = null
 
   function sendRaw(txt) { if (!client.destroyed) client.write(txt) }
   function sendDataJson(payload) { sendRaw('data: ' + JSON.stringify(payload) + '\n\n') }
@@ -74,7 +75,7 @@ export async function relayStream(client, firstUpstream, opts) {
     }
     if (protocol === 'openai') {
       // 流末 usage（缓存命中）解析，仅首次上报，续传重播不重复计入
-      if (opts.onUsage && !usageReported) { const u = maybeExtractUsage(dataStr); if (u) { usageReported = true; opts.onUsage(u) } }
+      if (opts.onUsage && !usageReported) { const u = maybeExtractUsage(dataStr); if (u) { usageReported = true; lastUsage = u; opts.onUsage(u) } }
       // 「名字没对上」加固：回写响应 model 为客户端请求名（含首个空 content 事件）
       const reb = maybeRewriteModel(dataStr, opts.rewriteModel)
       sendRaw((reb != null ? 'data: ' + reb : ev) + '\n\n')
@@ -136,6 +137,6 @@ export async function relayStream(client, firstUpstream, opts) {
   }
 
   await pump(firstUpstream)
-  if (opts.onTokens) { try { opts.onTokens(contentChars) } catch {} }
+  if (opts.onTokens) { try { opts.onTokens(contentChars, lastUsage) } catch {} }
   if (!client.destroyed) try { client.end() } catch { }
 }

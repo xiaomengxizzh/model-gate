@@ -123,8 +123,23 @@ async function acquireSem(th) { if (th.inFlight >= th.max) await new Promise((s)
 function todayKey(d) { const x = d || new Date(); return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0') }
 function tallyDaily(state, modelName, tokens, hit, miss) { if (!modelName) return; const now = new Date(); const k = todayKey(now); const m = state.stats.daily[modelName] || (state.stats.daily[modelName] = {}); const c = m[k] || (m[k] = { tokens: 0, hit: 0, miss: 0 }); c.tokens += tokens || 0; c.hit += hit || 0; c.miss += miss || 0; const hk = k + ':' + String(now.getHours()).padStart(2, '0'); const hm = state.stats.hourly[modelName] || (state.stats.hourly[modelName] = {}); const h = hm[hk] || (hm[hk] = { tokens: 0, hit: 0, miss: 0 }); h.tokens += tokens || 0; h.hit += hit || 0; h.miss += miss || 0 }
 function agg(state, pid, field, delta) { if (state.stats.byProvider[pid]) state.stats.byProvider[pid][field] += delta; state.stats.global[field] += delta }
-// 粗略估计 prompt 的 token 数（用于 maxContext 判断，约每 3 字符≈1 token）
-function estPromptTokens(body) { let n = 0; for (const m of (body && body.messages) || []) { const c = m && m.content; if (typeof c === 'string') n += c.length; else if (Array.isArray(c)) for (const x of c) n += (x && (x.text || x.content || '')).length || 0 } return Math.ceil(n / 3) + 4 }
+// 粗略估计 prompt 的 token 数（用于 maxContext 判断）：中文/全角按 1 字≈1 token，其它按约 4 字符≈1 token
+function estPromptTokens(body) {
+  let t = 0
+  for (const m of (body && body.messages) || []) {
+    const c = m && m.content
+    const parts = typeof c === 'string' ? [c] : (Array.isArray(c) ? c.map((x) => (x && (x.text || x.content || '')) || '') : [])
+    for (const s of parts) {
+      for (let i = 0; i < s.length; i++) {
+        const ch = s.codePointAt(i)
+        if ((ch >= 0x3400 && ch <= 0x4DBF) || (ch >= 0x4E00 && ch <= 0x9FFF) || (ch >= 0xFF00 && ch <= 0xFFEF)) t += 1
+        else t += 0.25
+        if (ch > 0xFFFF) i++
+      }
+    }
+  }
+  return Math.ceil(t) + 8
+}
 // 模型额度/上下文判定：命中则返回原因，否则 null（超限的模型在路由中被跳过并切到下一模型）
 function routeLimit(state, cfg, model, body) {
   if (!model) return null
@@ -190,14 +205,14 @@ function buildStatus(state) {
   const todayTotal = models.reduce((a, m) => a + (m.today || 0), 0)
   return {
     needAuth: !!state.adminToken,
-    server: { maxBodyBytes: (state.cfg.server && state.cfg.server.maxBodyBytes) || 0, keyEncrypted: !!(process.env.MG_KEYS_MASTER) },
+    server: { maxBodyBytes: (state.cfg.server && state.cfg.server.maxBodyBytes) || 0, keyEncrypted: !!(process.env.MG_KEYS_MASTER) || keysFileEncrypted(state.paths.keys) },
     startedAt: state.st.startedAt, uptimeMs: Date.now() - state.st.startedAt,
     counters: Object.assign({}, state.st.counters),
     global: { requests: s.global.requests, errors: s.global.errors, retries: s.global.retries, interrupts: s.global.interrupts, tokenCount: s.global.tokens, todayTokens: todayTotal, avgMs: s.global.confirmed ? Math.round(s.global.latencySum / s.global.confirmed) : null, p50: pct(s.global.lats, 50), p95: pct(s.global.lats, 95), latTrend: s.global.latTrend || [] },
     cache: { trend: state.cacheTrend || [], alert: state.cacheAlert || null },
     providers,
     models,
-    defaults: { provider: defaults.provider || null, model: defaults.model || '', clientKey: (defaults.clientKey || process.env.MG_CLIENT_KEY) ? '********' : '', directory: defaults.directory || [], preheat: defaults.preheat || [], retry: defaults.retry || {}, timeout: defaults.timeout || {}, concurrency: defaults.concurrency || {}, extraHeaders: defaults.extraHeaders || {} },
+    defaults: { provider: defaults.provider || null, model: defaults.model || '', clientKey: currentClientKey(state) ? '********' : '', directory: defaults.directory || [], preheat: defaults.preheat || [], retry: defaults.retry || {}, timeout: defaults.timeout || {}, concurrency: defaults.concurrency || {}, extraHeaders: defaults.extraHeaders || {} },
   }
 }
 
@@ -226,8 +241,12 @@ function saveConfig(state, body) {
   const providers = body.providers !== undefined ? body.providers : (cur.providers || {})
   const models = body.models !== undefined ? body.models : (cur.models || {})
   const defaults = body.defaults !== undefined ? body.defaults : (cur.defaults || {})
-  // 客户端 Key 掩码('********')视为未改动：保留原值，避免面板读改写覆盖真实 Key
-  if (defaults && defaults.clientKey === '********') { const curK = (cur.defaults && cur.defaults.clientKey) || ''; delete defaults.clientKey; if (curK) defaults.clientKey = curK }
+  // 客户端 Key：'********' 掩码视为未改动（不清空）；其它值（含清空 ''）写入加密 keys 库，不再明文进 local，与 provider key 同样加密落盘
+  let newClientKey = null
+  if (defaults && typeof defaults.clientKey === 'string' && defaults.clientKey !== '********') { newClientKey = defaults.clientKey }
+  defaults.clientKey = ''
+  // 掩码=未改动：若存在旧版明文 defaults.clientKey，迁移进加密 keys 库并清掉明文，避免掩码保存导致 key 丢失
+  if (newClientKey == null) { const legacy = (cur.defaults && cur.defaults.clientKey) || ''; if (legacy && legacy !== '********') newClientKey = legacy }
   for (const [mn, m] of Object.entries(models)) {
     if (!providers[m.provider]) return { error: '模型「' + mn + '」引用了不存在的上游 ' + m.provider }
     for (const fb of m.fallbacks || []) if (!providers[fb]) return { error: '模型「' + mn + '」的备用上游 ' + fb + ' 不存在' }
@@ -245,6 +264,15 @@ function saveConfig(state, body) {
   }
   const clean = {}
   for (const [id, p] of Object.entries(providers || {})) { const { keyOk, keySource, ...rest } = p || {}; clean[id] = rest }
+  if (newClientKey != null) {
+    const keys = Object.assign({}, cur._keys)
+    if (newClientKey) keys.__mg_client = newClientKey
+    else delete keys.__mg_client
+    const enc = keysEncrypt(keys)
+    if (!enc) return { error: '无法加密 keys.local.json：缺少主密钥，已拒绝保存 clientKey' }
+    writeFileSync(state.paths.keys, enc)
+    hardenKeyFile(state.paths.keys)
+  }
   writeJsonAtomic(state.paths.local, { providers: clean, models, defaults })
   reloadConfig(state)
   return {}
@@ -323,7 +351,7 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
     }
   }
   const started = Date.now()
-  const modelName = (body && body.model) || (cfg.defaults && cfg.defaults.provider) || (routes[0] && routes[0].providers && routes[0].providers[0]) || null
+  const modelName = (body && body.model) || (routes[0] && routes[0].model) || (cfg.defaults && cfg.defaults.provider) || (routes[0] && routes[0].providers && routes[0].providers[0]) || null
   const bm = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
 
   let releaseModel = null
@@ -437,6 +465,10 @@ function ensureSt(state, pid) {
   return state.stats.byProvider[pid]
 }
 
+function keysFileEncrypted(path) { try { return readFileSync(path, 'utf8').trimStart().startsWith('MG1:') } catch { return false } }
+// 数据面客户端 Key：环境变量优先，其次加密 keys 库（__mg_client），最后兼容旧 defaults.clientKey
+function currentClientKey(state) { return process.env.MG_CLIENT_KEY || (state.cfg._keys && state.cfg._keys.__mg_client) || (state.cfg.defaults && state.cfg.defaults.clientKey) || '' }
+
 function makeHandler(state) {
   const log = state.log
   const logFile = () => state.cfg.server && state.cfg.server.logFile
@@ -460,7 +492,7 @@ function makeHandler(state) {
       if (path === '/api/auth' && req.method === 'GET') { sendJson(res, 200, { needAuth: !!state.adminToken }); return }
 
       if (path === '/api/status' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; sendJson(res, 200, buildStatus(state)); return }
-if (path === '/api/model-stats' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const days = Math.min(90, Math.max(1, parseInt(new URL(url, 'http://x').searchParams.get('days') || '7', 10) || 7)); const out = {}; const now = new Date(); const modelNames = Object.keys(state.cfg.models || {}); if (days === 1) { for (const name of modelNames) { const mh = state.stats.hourly[name] || {}; const arr = []; for (let i2 = 23; i2 >= 0; i2--) { const hd = new Date(now.getTime() - i2 * 3600 * 1000); const hk = todayKey(hd) + ':' + String(hd.getHours()).padStart(2, '0'); const c = mh[hk]; arr.push({ date: String(hd.getHours()).padStart(2, '0') + ':00', tokens: c ? c.tokens : 0, hitRate: (c && (c.hit + c.miss) > 0) ? Math.round((c.hit / (c.hit + c.miss)) * 1000) / 10 : null }) } out[name] = arr } } else { for (const name of modelNames) { const md = state.stats.daily[name] || {}; const arr = []; for (let i2 = days - 1; i2 >= 0; i2--) { const d = new Date(now); d.setDate(d.getDate() - i2); const k = todayKey(d); const c = md[k]; arr.push({ date: k, tokens: c ? c.tokens : 0, hitRate: (c && (c.hit + c.miss) > 0) ? Math.round((c.hit / (c.hit + c.miss)) * 1000) / 10 : null }) } out[name] = arr } } sendJson(res, 200, { days, mode: days === 1 ? 'hourly' : 'daily', models: out }); return }
+      if (path === '/api/model-stats' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const days = Math.min(90, Math.max(1, parseInt(new URL(url, 'http://x').searchParams.get('days') || '7', 10) || 7)); const out = {}; const now = new Date(); const modelNames = Object.keys(state.cfg.models || {}); if (days === 1) { for (const name of modelNames) { const mh = state.stats.hourly[name] || {}; const arr = []; for (let i2 = 23; i2 >= 0; i2--) { const hd = new Date(now.getTime() - i2 * 3600 * 1000); const hk = todayKey(hd) + ':' + String(hd.getHours()).padStart(2, '0'); const c = mh[hk]; arr.push({ date: String(hd.getHours()).padStart(2, '0') + ':00', tokens: c ? c.tokens : 0, hitRate: (c && (c.hit + c.miss) > 0) ? Math.round((c.hit / (c.hit + c.miss)) * 1000) / 10 : null }) } out[name] = arr } } else { for (const name of modelNames) { const md = state.stats.daily[name] || {}; const arr = []; for (let i2 = days - 1; i2 >= 0; i2--) { const d = new Date(now); d.setDate(d.getDate() - i2); const k = todayKey(d); const c = md[k]; arr.push({ date: k, tokens: c ? c.tokens : 0, hitRate: (c && (c.hit + c.miss) > 0) ? Math.round((c.hit / (c.hit + c.miss)) * 1000) / 10 : null }) } out[name] = arr } } sendJson(res, 200, { days, mode: days === 1 ? 'hourly' : 'daily', models: out }); return }
       if (path === '/api/logs' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const lines = parseInt(new URL(url, 'http://x').searchParams.get('lines') || '200', 10) || 200; sendJson(res, 200, { lines: readLogTail(logFile(), lines) }); return }
       if (path === '/api/config/reload' && req.method === 'POST') { if (!await requireAdmin(req, res)) return; reloadConfig(state); sendJson(res, 200, { ok: true }); return }
       if (path === '/api/config/save' && req.method === 'POST') {
@@ -497,7 +529,7 @@ if (path === '/api/model-stats' && req.method === 'GET') { if (!await requireAdm
       }
 
       // —— 数据面客户端鉴权：配置了 clientKey 则校验 Bearer，否则向后兼容不鉴权 ——
-      const clientKey = process.env.MG_CLIENT_KEY || (state.cfg.defaults && state.cfg.defaults.clientKey) || ''
+      const clientKey = currentClientKey(state)
       if (clientKey && !clientAuthOk(req, clientKey)) { sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } }); return }
 
       if (req.method === 'GET' && path === '/v1/models') { sendJson(res, 200, staticModels(state.cfg)); return }
@@ -514,7 +546,10 @@ if (path === '/api/model-stats' && req.method === 'GET') { if (!await requireAdm
           maxReconnects: 2, log, reconnect: out.reconnect,
           protocol: out.api || 'openai', extract: (out.api && out.api !== 'openai') ? adapterFor(out.api).extractStreamContent : undefined,
           rewriteModel: (body && body.model) || null, // 「名字没对上」：响应 model 回写为客户端请求名
-          onTokens: (n) => { if (n > 0) { agg(state, out.pid, 'tokens', n); const sm = out.serving || out.modelName; const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }; sg.tokens = (sg.tokens || 0) + n; tallyDaily(state, sm, n, 0, 0) } },
+          onTokens: (n, usage) => {
+            const total = (usage && typeof usage.total_tokens === 'number' && usage.total_tokens > 0) ? usage.total_tokens : n
+            if (total > 0) { agg(state, out.pid, 'tokens', total); const sm = out.serving || out.modelName; const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }; sg.tokens = (sg.tokens || 0) + total; tallyDaily(state, sm, total, 0, 0) }
+          },
           onUsage: (u) => { const c = cacheHitMiss(out.api, u); if (c.hit > 0 || c.miss > 0) { const sm = out.serving || out.modelName; noteCacheStat(state, sm, out.pid, c.hit, c.miss); tallyDaily(state, sm, 0, c.hit, c.miss) } },
         })
         return
@@ -568,8 +603,8 @@ export function start(opts = {}) {
     cacheAlert: null,    // 最近一次命中率骤降告警
     stats: { global: { requests:0, errors:0, retries:0, interrupts:0, tokens:0, latencySum:0, confirmed:0, lats: [], latTrend: [] }, byProvider: pids, byModel: {}, daily: {}, hourly: {} },
   }
-  try { const _sf = state.paths.stats; const _j = existsSync(_sf) ? JSON.parse(readFileSync(_sf, 'utf8') || '{}') : {}; state.stats.daily = Object.assign({}, state.stats.daily, _j.daily || {}); state.stats.hourly = Object.assign({}, state.stats.hourly, _j.hourly || {}) } catch { /* 统计文件缺失/损坏则从空开始 */ }
-  setInterval(() => { try { writeFileSync(state.paths.stats, JSON.stringify({ daily: state.stats.daily, hourly: state.stats.hourly })) } catch {} }, 30000).unref()
+  try { const _sf = state.paths.stats; const _j = existsSync(_sf) ? JSON.parse(readFileSync(_sf, 'utf8') || '{}') : {}; state.stats.daily = Object.assign({}, state.stats.daily, _j.daily || {}); state.stats.hourly = Object.assign({}, state.stats.hourly, _j.hourly || {}); for (const [n, t] of Object.entries(_j.byModel || {})) { state.stats.byModel[n] = Object.assign(state.stats.byModel[n] || { requests: 0, errors: 0 }, { tokens: (t && t.tokens) || 0 }) } } catch { /* 统计文件缺失/损坏则从空开始 */ }
+  setInterval(() => { try { const q = {}; for (const [n, m] of Object.entries(state.stats.byModel || {})) q[n] = { tokens: m.tokens || 0 }; writeFileSync(state.paths.stats, JSON.stringify({ daily: state.stats.daily, hourly: state.stats.hourly, byModel: q })) } catch {} }, 30000).unref()
   setInterval(() => { const l = state.stats.global.lats; const avg = (l && l.length) ? Math.round(l.reduce((a, b) => a + b, 0) / l.length) : 0; const tr = state.stats.global.latTrend; tr.push({ t: Date.now(), v: avg }); if (tr.length > 80) tr.shift() }, 10000).unref()
   // B4 主动缓存预热：按 defaults.preheat 周期向模型上游发送带长 system 前缀的最小请求，保持厂商 prefix cache 存活
   ;(() => { const lastWarm = {}; setInterval(async () => {
@@ -608,6 +643,7 @@ export function start(opts = {}) {
     }
   }, 30000).unref() })()
   if (state.adminToken) log.info('管理 API 已启用令牌保护（MG_ADMIN_TOKEN）')
+  else log.warn('未设置 MG_ADMIN_TOKEN：管理 API(/api/*)无鉴权裸露，仅建议绑定回环地址使用')
   hardenKeyFile(state.paths.keys)
   const server = opts.server || http.createServer(makeHandler(state))
   const host = (cfg.server && cfg.server.host) || '127.0.0.1'
