@@ -121,7 +121,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .vpanel{animation:fade .3s steps(4,end)}.vpanel[hidden]{display:none}
 /* 模型配置：左=上游+模型路由，右=默认上游目录，各半宽，目录滚动 */
 .cfg-grid{grid-template-columns:1fr 1fr;grid-template-rows:minmax(0,1fr);align-items:stretch;height:580px}
-.cfg-grid .col:first-child .card:first-child{flex:none;height:290px}
+.cfg-grid .col:first-child .card:first-child{flex:none;height:auto;max-height:340px}
 .dirCard #dirCtrl{flex:none;display:flex;flex-direction:column;gap:8px;border-bottom:2px solid var(--edge);margin-bottom:8px;padding-bottom:8px}
 .dirCard #route{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:8px;padding-right:4px;font-family:var(--font-mono);scrollbar-gutter:stable}
 .dirrow{display:flex;align-items:center;gap:8px}.dirrow label{flex:none;font-size:10.5px;letter-spacing:.05em;color:var(--ink3);min-width:92px}.dirrow .input,.dirrow .select{flex:1}
