@@ -333,13 +333,26 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
     }
     // 模型配置默认值，客户端未指定时才注入（客户端自带优先）
     if (hit.def.reasoning && body.reasoning_effort === undefined) { body.reasoning_effort = hit.def.reasoning; injectedEffort = true }
-    // 路由序列：先本模型自身上游，再按 defaults.directory 顺序做跨模型兜底（首个为默认）
-    routes.push({ model: requestModel, mode: 'afterAll', providers: [hit.def.provider, ...(hit.def.fallbacks || [])].filter(Boolean) })
-    for (const e of dir) {
-      if (!e || typeof e.model !== 'string' || !e.model || e.model === requestModel) continue
-      if (routes.some((r) => r.model === e.model)) continue
-      const _m = cfg.models && cfg.models[e.model]
-      routes.push({ model: e.model, mode: (e.mode === 'onFail' ? 'onFail' : 'afterAll'), providers: (e.providers && e.providers.length ? e.providers.filter(Boolean) : (_m ? [ _m.provider, ...(_m.fallbacks || []) ].filter(Boolean) : [])) })
+    if (hit.def.virtual) {
+      // 虚拟共用模型名：等价「未指定模型」，走 defaults.directory 默认链（首项即真实默认模型），
+      // 把真实模型名发给上游；否则会把虚拟名透传上去导致 "Model <虚拟名> is not supported"
+      if (dir.length) {
+        for (const e of dir) { if (e && typeof e.model === 'string' && e.model) { const _m = cfg.models && cfg.models[e.model]; routes.push({ model: e.model, mode: (e.mode === 'onFail' ? 'onFail' : 'afterAll'), providers: (e.providers && e.providers.length ? e.providers.filter(Boolean) : (_m ? [ _m.provider, ...(_m.fallbacks || []) ].filter(Boolean) : [])) }) } }
+        const d0 = routes[0] && cfg.models && cfg.models[routes[0].model]
+        if (d0) { maxModel = d0.maxConcurrent || 0; qps = d0.qps || 0 }
+      } else {
+        routes.push({ model: null, providers: [hit.def.provider].filter(Boolean) })
+        if (!(cfg.defaults && cfg.defaults.provider)) return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '未指定默认上游（请配置 defaults.provider 或 defaults.directory）', type: 'missing_model' } })) }
+      }
+    } else {
+      // 路由序列：先本模型自身上游，再按 defaults.directory 顺序做跨模型兜底（首个为默认）
+      routes.push({ model: requestModel, mode: 'afterAll', providers: [hit.def.provider, ...(hit.def.fallbacks || [])].filter(Boolean) })
+      for (const e of dir) {
+        if (!e || typeof e.model !== 'string' || !e.model || e.model === requestModel) continue
+        if (routes.some((r) => r.model === e.model)) continue
+        const _m = cfg.models && cfg.models[e.model]
+        routes.push({ model: e.model, mode: (e.mode === 'onFail' ? 'onFail' : 'afterAll'), providers: (e.providers && e.providers.length ? e.providers.filter(Boolean) : (_m ? [ _m.provider, ...(_m.fallbacks || []) ].filter(Boolean) : [])) })
+      }
     }
   } else {
     // 默认路径：直接走 defaults.directory（首项即默认模型），否则用 defaults.provider
