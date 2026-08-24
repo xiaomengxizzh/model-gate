@@ -389,6 +389,8 @@ function flipTransition(parent){
   }))
 }
 function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
+  // 重绘保护：记录正在编辑的输入框（id / data-role+索引 与光标），渲染后恢复，避免打断输入
+  const _act=document.activeElement;let _fid='',_frole='',_fi=-1,_caret=-1;if(_act&&_act.tagName==='INPUT'){_fid=_act.id||'';_frole=_act.getAttribute('data-role')||'';const _it=_act.closest('.diritem');_fi=_it?(+_it.dataset.i):-1;_caret=_act.selectionStart||0};
   const dir=(C.defaults.directory||[]).slice()
   // 控制区：虚拟模型名 + 客户端Key + 加入已有模型
   ctrl.innerHTML='<div class="dirrow"><label>虚拟共用模型名</label><input class="input" id="vmName" value="'+esc(C.defaults.model||'')+'" placeholder="如 auto"></div>'
@@ -405,10 +407,10 @@ function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
     +'<input class="input pr" data-role="providers" value="'+esc((e.providers||[]).join(', '))+'" placeholder="上游 provider id（空=用模型自带）">'
     +'<span class="rm" data-role="rm" title="移出目录">×</span>'
     +'</div>').join('')}
-  const vmN=$('#vmName');if(vmN)vmN.oninput=()=>{C.defaults.model=vmN.value.trim();markDirty();persistDir()}
-  const vmK=$('#vmKey');if(vmK)vmK.oninput=()=>{C.defaults.clientKey=vmK.value.trim();markDirty();persistDir()}
+  const vmN=$('#vmName');if(vmN){vmN.oninput=()=>{C.defaults.model=vmN.value.trim();markDirty()};vmN.onchange=()=>persistDir()}
+  const vmK=$('#vmKey');if(vmK){vmK.oninput=()=>{C.defaults.clientKey=vmK.value.trim();markDirty()};vmK.onchange=()=>persistDir()}
   const dirAdd=$('#dirAdd');if(dirAdd)dirAdd.onchange=()=>{if(dirAdd.value){C.defaults.directory.push({model:dirAdd.value,mode:'afterAll',providers:[]});renderRoute();markDirty();persistDir()}}
-  box.querySelectorAll('[data-role="providers"]').forEach(inp=>inp.oninput=()=>{const i=+inp.closest('.diritem').dataset.i;C.defaults.directory[i].providers=inp.value.split(',').map(s=>s.trim()).filter(Boolean);markDirty();persistDir()})
+  box.querySelectorAll('[data-role="providers"]').forEach(inp=>{inp.oninput=()=>{const i=+inp.closest('.diritem').dataset.i;C.defaults.directory[i].providers=inp.value.split(',').map(s=>s.trim()).filter(Boolean);markDirty()};inp.onchange=()=>persistDir()})
   box.querySelectorAll('[data-role="mode"]').forEach(sel=>sel.onchange=()=>{const i=+sel.closest('.diritem').dataset.i;C.defaults.directory[i].mode=sel.value;markDirty();persistDir()})
   box.querySelectorAll('[data-role="rm"]').forEach(rm=>rm.onclick=()=>{C.defaults.directory.splice(+rm.closest('.diritem').dataset.i,1);renderRoute();markDirty();persistDir()})
   // 拖拽排序（指针 + FLIP 平滑）
@@ -430,6 +432,10 @@ function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
       window.addEventListener('pointermove',onMove);window.addEventListener('pointerup',onUp);
     });
   });
+  // 重绘后恢复正在编辑的输入框焦点与光标（支持 id 与 data-role+索引两种定位）
+  let _el=_fid?document.getElementById(_fid):null;
+  if(!_el&&_frole){_el=document.querySelector('.diritem[data-i="'+_fi+'"] [data-role="'+_frole+'"]')}
+  if(_el){_el.focus();if(_caret>=0)try{_el.setSelectionRange(_caret,_caret)}catch{}}
 }
 function switchView(v){document.querySelectorAll('#viewtabs button').forEach(b=>b.classList.toggle('on',b.getAttribute('data-v')===v));['config','stats','log'].forEach(p=>{const el=$('#v-'+p);if(el)el.hidden=(p!==v)})}
 (function(){const tabs=$('#viewtabs');if(tabs)tabs.addEventListener('click',(e)=>{const b=e.target.closest('button');if(b)switchView(b.getAttribute('data-v'))})})();
