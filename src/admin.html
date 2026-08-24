@@ -594,7 +594,7 @@ async function saveAll(){const r=await jpost('/api/config/save',{providers:C.pro
   if(r.ok){dirty=false;if(r.d.status)ingestStatus(r.d.status);toast('配置已保存并生效','ok')}else toast((r.d&&r.d.error)||'保存失败','err')}
 $('#saveAll').addEventListener('click',saveAll);
 $('#reloadCfg').addEventListener('click',async()=>{if(dirty&&!confirm('面板有未保存修改，确定丢弃并从文件重载？'))return;const r=await jpost('/api/config/reload',{});if(r.ok){dirty=false;await pollStatus();toast('已从配置文件重载','ok')}});
-$('#refresh').addEventListener('click',()=>{pollStatus();pollLogs()});
+$('#refresh').addEventListener('click',async()=>{await pollStatus();await pollLogs();renderModelStats();toast('已刷新','ok')});
 
 function startTimers(){timerA=setInterval(pollStatus,INTERVAL);timerB=setInterval(pollLogs,LOG_INTERVAL);setInterval(()=>{ if(liveOn) renderModelStats() },10000);renderModelStats()}
 function stopTimers(){clearInterval(timerA);clearInterval(timerB)}
