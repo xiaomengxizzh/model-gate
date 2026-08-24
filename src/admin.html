@@ -297,7 +297,7 @@ document.querySelectorAll('#themeSel button').forEach(b=>b.addEventListener('cli
 /* 工具 */
 function fmtUptime(ms){const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60),s2=s%60,p=n=>String(n).padStart(2,'0');return p(h)+':'+p(m)+':'+p(s2)}
 function animate(el,from,to){const dur=380,t0=performance.now();(function step(t){const k=Math.min(1,(t-t0)/dur),e=1-Math.pow(1-k,3);el.textContent=String(Math.round(from+(to-from)*e));if(k<1)requestAnimationFrame(step);else{el.textContent=String(to);el.classList.add('flash');setTimeout(()=>el.classList.remove('flash'),600)}})(t0)}
-function drawTrend(cv,data){const ctx=cv.getContext('2d'),W=cv.width,H=cv.height;ctx.clearRect(0,0,W,H);const vs=data.map(d=>d.v||0);const mx=Math.max.apply(null,vs.concat([1]));ctx.lineWidth=2;ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--cel-accent').trim()||'#86a0ff';ctx.beginPath();vs.forEach((v,i)=>{const x=i/(vs.length-1||1)*W,y=H-4-(Math.min(v,mx)/mx)*(H-10);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke()}
+function drawTrend(cv,data){const dpr=window.devicePixelRatio||1;const _r=cv.getBoundingClientRect();const W=Math.max(120,Math.round(_r.width)),H=Math.max(40,Math.round(_r.height));cv.width=W*dpr;cv.height=H*dpr;const ctx=cv.getContext('2d');if(dpr!==1)ctx.setTransform(dpr,0,0,dpr,0,0);const vs=data.map(d=>d.v||0);const mx=Math.max.apply(null,vs.concat([1]));ctx.lineWidth=2;ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--cel-accent').trim()||'#86a0ff';ctx.beginPath();vs.forEach((v,i)=>{const x=i/(vs.length-1||1)*W,y=H-4-(Math.min(v,mx)/mx)*(H-10);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke()}
 // 滚动条只在内容真正超出时显示（避免系统「始终显示滚动条」导致没超出也出现）
 function fitAllScroll(){for(const id of ['#providers','#models','#route','#global','#params']){const el=$(id);if(el)el.style.overflowY=(el.scrollHeight>el.clientHeight+8)?'auto':'hidden'}}
 function circuitOf(){const r={};if(v('fCF'))r.maxFailures=Math.max(1,parseInt(v('fCF'),10));if(v('fCD'))r.openDurationMs=Math.max(1,parseInt(v('fCD'),10));return Object.keys(r).length?r:null}
@@ -310,11 +310,20 @@ function msCol(i){return MS_CEL[i%MS_CEL.length]}
 function msAuthH(){const h={};if(window.TOKEN)h['Authorization']='Bearer '+window.TOKEN;return h}
 async function renderModelStats(){
   const cv=$('#msChart'); if(!cv) return
+  // 画布按其实际显示尺寸 + 设备像素比初始化：消除 width:100% 造成的横向拉伸失真，
+  // 并让鼠标 tooltip 用到的显示像素坐标与画图坐标(padL/maxTk 等)一致
+  const dpr=window.devicePixelRatio||1
+  const _r=cv.getBoundingClientRect()
+  const W=Math.max(320, Math.round(_r.width))
+  const H=Math.max(160, Math.round(_r.height))
+  cv.width=W*dpr; cv.height=H*dpr
+  const ctx=cv.getContext('2d')
+  if(dpr!==1) ctx.setTransform(dpr,0,0,dpr,0,0)
+  ctx.clearRect(0,0,W,H)
   let data={}
   try{ data=(await (await fetch('/api/model-stats?days='+msDays,{headers:msAuthH()})).json()).models||{} }catch(e){ return }
   const names=Object.keys(data).filter(n=>data[n].some(p=>p.tokens>0||p.hitRate!=null))
-  const ctx=cv.getContext('2d'), W=cv.width, H=cv.height; ctx.clearRect(0,0,W,H)
-  if(!names.length){ $('#msLegend').innerHTML='<span class=\"mstit empty\">暂无数据</span>'; return }
+  if(!names.length){ $('#msLegend').innerHTML='<span class="mstit empty">暂无数据</span>'; return }
   const N = msDays === 1 ? 24 : msDays
   const padL=56,padR=14,padT=14,padB=26
   const maxQ=Math.max(0,...names.map(n=>{const m=C.models[n];return msDays===1?((m&&m.dailyQuota)||0):((m&&m.quota)||0)}))
