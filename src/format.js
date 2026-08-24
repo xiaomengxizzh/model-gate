@@ -105,7 +105,7 @@ export { makeOA, hasTools }
 
 // ── 缓存命中/未命中 字段映射（按上游协议取数，避免各厂商字段名不一导致解析错位）──
 const CACHE_FIELD = {
-  openai:    { hit: ['prompt_cache_hit_tokens', 'prompt_tokens_details.cached_tokens', 'cache_read_input_tokens'], miss: ['prompt_cache_miss_tokens', 'cache_creation_input_tokens'] },
+  openai:    { hit: ['prompt_cache_hit_tokens', 'prompt_tokens_details.cached_tokens', 'cache_read_input_tokens'], miss: ['prompt_cache_miss_tokens', 'cache_creation_input_tokens', 'prompt_tokens_details.text_tokens', 'prompt_tokens_details.audio_tokens'] },
   anthropic: { hit: ['cache_read_input_tokens'], miss: ['cache_creation_input_tokens'] },
   gemini:    { hit: [], miss: [] }, // Gemini 无标准缓存计数，返回 0
 }
@@ -121,5 +121,10 @@ export function cacheHitMiss(api, usage) {
   let hit = 0, miss = 0
   for (const k of f.hit) hit += pickPath(usage, k)
   for (const k of f.miss) miss += pickPath(usage, k)
+  // 容错：不少上游只报命中量、不报未命中量（如 OpenAI 仅 cached_tokens/text_tokens）。
+  // 用「prompt 总量 − 命中量」推算未命中，避免缓存命中率被恒算成 100%。
+  if (miss <= 0 && hit > 0 && typeof usage.prompt_tokens === 'number' && usage.prompt_tokens > hit) {
+    miss = usage.prompt_tokens - hit
+  }
   return { hit, miss }
 }

@@ -558,6 +558,19 @@ function makeHandler(state) {
       const fPath = (isChat && path !== '/v1/chat/completions') ? '/v1/chat/completions' : path
       const fUrl = (fPath === path) ? url : (fPath + url.slice(path.length))
       const out = await forwardChain(state, req, fUrl, fPath, req.method, bodyBuf, body, log)
+      // 请求级日志：记录每次数据面请求的请求模型/实际服务模型/上游与结果，便于定位空响应与连接问题（不含消息正文/密钥）
+      const reqModel = (body && body.model) || '-'
+      if (out.kind === 'stream') {
+        log.info('data ' + req.method + ' ' + fPath + ' model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-') + ' stream')
+      } else {
+        log.info('data ' + req.method + ' ' + fPath + ' -> ' + (out.status || '-') + ' model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-'))
+        if (out.kind === 'json' && out.status >= 200 && out.status < 300 && out.body && out.body.length) {
+          const _j = tryParse(out.body)
+          const _cs = (_j && Array.isArray(_j.choices)) ? _j.choices : []
+          const _has = _cs.some((c) => { const m = c && c.message; return m && typeof m.content === 'string' && m.content.length })
+          if (!_has) log.warn('data 2xx 无正文内容 model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-'))
+        }
+      }
       if (out.kind === 'stream') {
         writeUpstreamHeaders(res, out.res)
         await relayStream(res, out.res.stream, {
