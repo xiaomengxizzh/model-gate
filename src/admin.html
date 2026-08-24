@@ -402,7 +402,7 @@ function renderModels(){
     if(m.reasoning)tags.push('<span class="tag">思 '+esc(m.reasoning)+'</span>');
     if(m.maxConcurrent)tags.push('<span class="tag">并发 '+m.maxConcurrent+'</span>');
     if(m.qps)tags.push('<span class="tag">QPS '+m.qps+'</span>');
-    let pb='';if(m.probe&&m.probe.ok)pb='<span class="badge pok">通 '+(m.probe.ms||'-')+'ms</span>';else if(m.probe&&!m.probe.ok)pb='<span class="badge perr" title="'+esc((m.probe.err||'连接失败')+' ('+(m.probe.code||'-')+')')+'">失败'+(m.probe.ms!=null?' '+m.probe.ms+'ms':'')+'</span>';
+    let pb='';const prb=(ST.byM&&ST.byM[name]&&ST.byM[name].probe)||m.probe;if(prb&&prb.ok)pb='<span class="badge pok">通 '+(prb.ms||'-')+'ms</span>';else if(prb&&!prb.ok)pb='<span class="badge perr" title="'+esc((prb.err||'连接失败')+' ('+(prb.code||'-')+')')+'">失败'+(prb.ms!=null?' '+prb.ms+'ms':'')+'</span>';
     const statline=(m.requests>0||m.errors>0||m.avgMs!=null)?('<div class="statsline">请求'+(m.requests||0)+' · 错'+(m.errors||0)+(m.avgMs!=null?' · 均'+m.avgMs+'ms':'')+'</div>'):'';
     const disp=name.length>22?name.slice(0,22)+'…':name;
     return '<div class="row" data-act="edit" data-id="'+esc(name)+'" style="cursor:pointer"><span class="gem generic"></span><div class="cell"><div class="lbl" title="'+esc(name)+'">'+esc(disp)+'</div><div class="detail">'+esc(m.provider)+(tags.length?' · '+tags.join(' · '):'')+'</div>'+statline+'</div><div class="right">'
