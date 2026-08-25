@@ -757,17 +757,43 @@ function makeHandler(state) {
         sendJson(res, 200, { ok: true, results, status: buildStatus(state) }); return
       }
 
-      // —— 数据面客户端鉴权：配置了 clientKey 则校验 Bearer，否则向后兼容不鉴权 ——
+      // —— 数据面客户端鉴权（两阶段，Phase1 Step4）——
+      // 一阶段：全局 clientKey（常规 agent 零额外开销，行为与旧版完全一致）
       const clientKey = currentClientKey(state)
-      if (clientKey && !clientAuthOk(req, clientKey)) { log && log.warn('数据面鉴权拒绝(401)', path, 'ip=' + ((req.socket && req.socket.remoteAddress) || '-') + ' ua=' + String(req.headers['user-agent'] || '-').slice(0, 40)); sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } }); return }
+      if (clientKey && !clientAuthOk(req, clientKey)) {
+        // 二阶段（仅当配置了虚拟模型）：解析 body.model 逐虚拟模型 key 校验；否则按旧口径 401
+        const vms = state.cfg.virtualModels || []
+        if (vms.length && CHAT_PATHS.has(path) && (req.method === 'POST' || req.method === 'PUT')) {
+          const bodyBuf2 = await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
+          const body2 = bodyBuf2 && bodyBuf2.length ? tryParse(bodyBuf2) : null
+          const reqModel = body2 && typeof body2.model === 'string' ? body2.model.trim() : ''
+          const vm = vms.find(v => v.name === reqModel)
+          const vmKey = vm ? (state.cfg._keys && state.cfg._keys['__mg_vm_' + vm.name]) : null
+          if (vm && vmKey) {
+            // 虚拟模型独立 Key：过期检查（元数据 expiresAt）+ 常量时间比较
+            const meta = state.cfg._keys && state.cfg._keys['__mg_vm_meta_' + vm.name]
+            if (meta && meta.expiresAt && Date.now() > Number(meta.expiresAt)) {
+              log && log.warn('数据面鉴权拒绝(401 虚拟key已过期)', path, 'model=' + vm.name); sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } }); return
+            }
+            if (clientAuthOk(req, vmKey)) { req.__mgBodyBuf = bodyBuf2; req.__mgBody = body2 } // 校验通过：缓存 body 供后续转发复用
+            else { log && log.warn('数据面鉴权拒绝(401 虚拟key不匹配)', path, 'model=' + vm.name); sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } }); return }
+          } else {
+            // 未命中任何「绑了 key 的虚拟模型」→ 统一 401（不区分模型不存在/key 错，防虚拟模型名枚举）
+            log && log.warn('数据面鉴权拒绝(401)', path, 'ip=' + ((req.socket && req.socket.remoteAddress) || '-') + ' ua=' + String(req.headers['user-agent'] || '-').slice(0, 40)); sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } }); return
+          }
+        } else {
+          log && log.warn('数据面鉴权拒绝(401)', path, 'ip=' + ((req.socket && req.socket.remoteAddress) || '-') + ' ua=' + String(req.headers['user-agent'] || '-').slice(0, 40)); sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } }); return
+        }
+      }
 
       if (req.method === 'GET' && (path === '/v1/models' || path === '/models')) { sendJson(res, 200, staticModels(state.cfg)); return }
       const isChat = CHAT_PATHS.has(path)
       if (!path.startsWith('/v1') && !isChat) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
 
-      // —— 数据面转发（无鉴权保护，鉴权交给各上游 key） ——
-      const bodyBuf = req.method === 'POST' || req.method === 'PUT' ? await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)) : null
-      const body = bodyBuf && bodyBuf.length ? tryParse(bodyBuf) : null
+      // —— 数据面转发（二阶段鉴权已收集 body 时直接复用，流不可二次读取） ——
+      let bodyBuf = req.__mgBodyBuf || null
+      if (!bodyBuf && (req.method === 'POST' || req.method === 'PUT')) bodyBuf = await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
+      const body = req.__mgBody || (bodyBuf && bodyBuf.length ? tryParse(bodyBuf) : null)
       // 入口路径别名：把不带 /v1 的 Chat 兼容路径规范化为 /v1/chat/completions，使 base URL 填 http://127.0.0.1:8787 也被正确代理
       const fPath = (isChat && path !== '/v1/chat/completions') ? '/v1/chat/completions' : path
       const fUrl = (fPath === path) ? url : (fPath + url.slice(path.length))

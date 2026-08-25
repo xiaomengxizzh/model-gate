@@ -14,3 +14,6 @@ scripts/dev.gateway.json
 scripts/tmp-trunc/
 # 探活类残留文件
 *.mg_probe.txt
+
+# 本地验证隔离目录（不入库）
+.tmp-cfgdir/
