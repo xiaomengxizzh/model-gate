@@ -108,7 +108,7 @@
 | 上游协议 | 命中（hit） | 未命中（miss） |
 |---|---|---|
 | DeepSeek | `prompt_cache_hit_tokens` | `prompt_cache_miss_tokens`（两者之和 = `prompt_tokens`） |
-| OpenAI / OpenRouter | `prompt_tokens_details.cached_tokens` | `prompt_tokens − cached_tokens`（`prompt_tokens` 含命中） |
+| OpenAI 兼容（含同类聚合服务） | `prompt_tokens_details.cached_tokens` | `prompt_tokens − cached_tokens`（`prompt_tokens` 含命中） |
 | Anthropic | `cache_read_input_tokens` | `cache_creation_input_tokens + input_tokens`（`input_tokens` 为断点后未缓存部分） |
 | Gemini | `usageMetadata.cachedContentTokenCount` | `promptTokenCount − cachedContentTokenCount` |
 
@@ -120,7 +120,7 @@
 
 数据统计页「全局统计」卡片内置三种模式：**全局 / 按模型 / 按对话**。按对话模式以「会话」为单位聚合 token 与缓存命中：
 
-- **会话 ID 优先**：请求头 `X-Conversation-Id` / `X-Session-Id`，或请求体 `session_id` / `conversation_id`。Agent 在自定义请求头里带固定会话 ID 即可精确统计（如 opencode 的 provider extraHeaders）。
+- **会话 ID 优先**：请求头 `X-Conversation-Id` / `X-Session-Id`，或请求体 `session_id` / `conversation_id`。Agent 在自定义请求头里带固定会话 ID 即可精确统计（部分 Agent 支持配置自定义请求头）。
 - **无 ID 兜底**：同来源请求间隔 ≤ 5 分钟视为同一对话，超过自动开新对话（面板以 `⌁` 标记区分兜底会话）。
 - 保留最近 50 个对话，超量自动清理最旧的。
 
