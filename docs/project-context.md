@@ -49,8 +49,9 @@ docs/          # 规划与交接文档
 
 ## 5. 关键机制
 
-- **forwardChain 重试 + 循环兜底（src/index.js ~L421-533）**：
-  三层重试（forward 内退避）→ 同模型 fallbacks → 跨模型 directory；外层 `while(loopDeadline)` **循环回队首**，受 `loopMs`(默认120s) 与熔断护栏约束；**deadline 只卡「开新轮」，一轮内所有候选都会被尝试**（避免慢上游饿死兜底）。成功/502 都带 `chain=` 兜底链标记。
+- **forwardChain 重试 + 循环兜底（src/index.js ~L363-533）**：
+  三层重试（forward 内退避）→ 同模型 fallbacks → 跨模型 directory；外层 `while(loopDeadline)` **循环回队首**，受 `loopMs`(默认120s) 与熔断护栏约束；**deadline 只卡「开新轮」，一轮内所有候选都会被尝试**（避免慢上游饿死兜底）。成功/502 都带 `chain=` 兜底链标记。**每个新请求永远从队首重新决策（无会话粘滞）**：在途请求不迁移走完；链首恢复后下一个请求即回归，唯一延迟是熔断窗口（连续 5 败 open 10s：`FAIL_OPEN_THRESHOLD/COOLDOWN`；429 另有 provider 级 `rateUntil`=Retry-After）。
+- **模型探针 probeModel（src/request.js）**：POST max_tokens=1 真实调用，**超时 90s**——某思考型模型实测 5s~90s+ 波动（上游代理内部重试期间不发字节），30s 会误报 ETIMEDOUT（已修）；上游级 probe（GET /v1/models 可达性）仍 20s。
 - **SSE 续传**：流中途断开 → `maxReconnects=2` 重连去重；续传仍失败 → `onEnd({interrupted})` → 记中断+上游错误+**`streamDrops` 连续中断计数**，≥`STREAM_DROP_THRESHOLD`(3) 后路由**绕开该上游**（`markOk` 不重置 streamDrops，故真正生效）。
 - **下游客户端断线(relayStream, sse.js)**：绑定客户端连接 `close/error` → `clientGoneAt` 标记 + 主动销毁上游流 + 停 idle 定时器，杜绝死等挂起上游导致的连接/资源泄漏与续传浪费；`pump` 对续传链用 `return resume(...)` **完整等待**（不能裸调 `resume()`），否则主流程会在续传补完前就执行 `client.end()` 把客户端掐断——这也是「对话直接中断」的根因。
 - **统计持久化**：daily/hourly/byModel/dialogue/global/byProvider/latTrend 每30s落盘 `stats.json` 并在重启恢复（此前做的「重启即归零」已修）。
@@ -63,6 +64,13 @@ docs/          # 规划与交接文档
 虚拟共享模型+客户端key、入口别名、健壮 start.bat、请求级日志(含 chain)、缓存命中真统计、流式中断计数+绕开、有界循环兜底、并发限流（每上游 maxPerProvider 默认8）、统计全量持久化、面板大量修复（bat CRLF、曲线图、滚动条挤卡片、上游卡 3 张、模板、输入不被打断、刷新反馈等）。
 
 **SSE 下游截断加固（本轮）**：固定了「上游停摆+客户端断开→上游连接泄漏」与「续传中被 `client.end()` 掐断→对话直接中断」两处根因（sse.js：客户端 close 监听销毁上游流 + `return resume()` 等完整续传链）；配套隔离沙箱回归测试 `scripts/tmp-trunc/`（含 client-truncation.mjs + gateway.json，仅本地用、不入库），14 场景全绿（S1 基线/S2 abort/S3 cancel/S4 上游停摆+S5 续传完整/S6 续传中断释放/S7 并发）。
+
+**曲线图渲染两轮修复 + 探针加长 + 本地协议转换代理接入（本轮）**：
+- 曲线图①隐藏态守卫：`renderModelStats`/`drawTrend` 在面板 `display:none` 时 rect=0，直接跳过（不再按 320×160 兜底尺寸固化位图）；`switchView('stats')` rAF 重绘 + `redrawTrend` + resize 联动重绘。
+- 曲线图②鉴权根因：`msAuthH()` 误用 `window.TOKEN`（**全文件从未赋值**，登录令牌实际在模块变量 `TOKEN`）→ `/api/model-stats` 永远 401 → 画布空白「暂无数据」。已改用 `TOKEN`。教训：**面板新接口鉴权一律走 `japi()` 或模块 `TOKEN`**；验证勿 stub fetch，会绕过真实鉴权路径。
+- `probeModel` 超时 30s→90s（对齐 firstByteMs）。
+- **本地协议转换代理接入**：代理部署在本地独立目录（不在本仓库内，含自启 bat）；某上游 baseUrl 指向 `http://127.0.0.1:3050`（代理已绑定回环、日志落盘其目录内），key 走**用户级环境变量**（用户选择保留环境变量设计，勿再建议迁移）。背景：该上游的 API 通道对当前账户等级不开放（403），经代理以兼容协议接入；其中某思考型模型经代理可用但瞬时限流频发（响应 5s~90s+），由另一上游兜底。代理已经安全审计：无窃密行为、零第三方依赖。
+- `scripts/dev.gateway.json` 已建（8788，models 镜像生产+代理上游，logFile=logs/dev.log），Phase 1 第 0 步完成。
 
 ## 7. 开发/验证作业法（重要）
 
@@ -85,13 +93,16 @@ docs/          # 规划与交接文档
 
 ## 9. 陷阱清单
 
-- `.bat` 用 CRLF（LF 会让 cmd 崩）。
-- `gateway.local.json` / `keys.local.json` / `stats.json` / `logs/` **永不提交**（gitignore 已覆盖）。
+- `.bat` 用 CRLF（LF 会让 cmd 崩）；**chcp 65001 下 echo 行含全角括号`（）`会让 cmd 解析错位吃字节**，下一行被截断当命令执行——bat 中文行一律用半角标点（外部代理项目的 start.bat 踩过）。
+- `gateway.local.json` / `keys.local.json` / `stats.json` / `logs/` / `*.bak` 备份 **永不提交**（gitignore 已覆盖）。
 - 虚拟名/响应 model 名：兜底改写后响应 model 要**回写为客户端请求名**（防「名字没对上」）。
 - Mode BaseURL 不含 `/v1`；模型思考强度由 `effortOptions`/`reasoning` 控制。
 - `commit` 时留意 `.gitignore`/`package.json` 常因 CRLF/LF 显示为 modified 而实为噪音，别误提交（按实际内容 diff 判断）。
+- 面板 admin.html 是**每请求 readFileSync 读盘**，改完刷新浏览器即生效（无需重启网关）；但浏览器可能缓存旧页，验证用 Ctrl+F5。
 
 ## 10. 当前运行态（每次会话先确认）
 
-- 上一轮结束时**网关未被拉起**（8787 空闲）。需要时 `start.bat` 启动。
-- 真实配置存在 `gateway.local.json`（含真实上游 baseUrl / key 名，勿读内容外泄）。
+- **8787 生产网关**：由用户管理（start.bat 前台），2026-08-25 11:29 起运行中；某上游已指向本地代理 3050（探针 90s 修复需再重启一次才生效）。
+- **本地协议转换代理**：独立目录内的 start.bat 启动，监听 127.0.0.1:3050，日志落盘代理目录内；key 来自用户级环境变量（网关进程需继承该变量——新起的进程自动继承）。
+- **8788 开发网关**：默认停止；`MG_CONFIG=scripts/dev.gateway.json MG_ADMIN_TOKEN=<测试令牌>` 启动。
+- 真实配置存在 `gateway.local.json`（含真实上游 baseUrl / key 名，勿读内容外泄）；改动前备份为 `.bak`（gitignore 已覆盖）。
