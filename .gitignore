@@ -6,5 +6,9 @@ config/*.local.json
 .env
 
 config/stats.json
+# 开发网关配置（8788，不入库）
+scripts/dev.gateway.json
+# 下游截断回归测试沙箱（仅本地用，不入库）
+scripts/tmp-trunc/
 # 探活类残留文件
 *.mg_probe.txt

@@ -52,6 +52,9 @@ export async function relayStream(client, firstUpstream, opts) {
   let contentChars = 0
   let usageReported = false
   let lastUsage = null
+  const clientGoneAt = { t: null }   // 下游客户端断线标记（何时检测到，null 表示仍在线）
+  let curStream = firstUpstream      // 当前正读取的上游流（首次或续传之后）
+  function destroyUpstream() { try { if (curStream && typeof curStream.destroy === 'function') curStream.destroy() } catch {} }
 
   function sendRaw(txt) { if (!client.destroyed) client.write(txt) }
   function sendDataJson(payload) { sendRaw('data: ' + JSON.stringify(payload) + '\n\n') }
@@ -89,19 +92,28 @@ export async function relayStream(client, firstUpstream, opts) {
 
   let phaseAsync = 'first'
   let acc = ''
+  // —— 下游客户端断线处理：一旦 ''close'' 就标记 + 销毁上游流 + 停 idle 定时器，杜绝死等上游/连接泄漏/续传浪费 ——
+  let idleT = null
+  const clearIdle = () => { if (idleT) { clearTimeout(idleT); idleT = null } }
+  const markGone = () => {
+    if (clientGoneAt.t != null) return
+    clientGoneAt.t = Date.now()
+    clearIdle()
+    destroyUpstream()
+    log && log.warn('sse 下游客户端已断开，中止中继并销毁上游连接')
+  }
+  if (typeof client.on === 'function') { try { client.on('close', markGone); client.on('error', markGone) } catch {} }
 
   async function pump(stream) {
     let buf = ''
-    let idleT = null
-    const arm = () => { clearTimeout(idleT); if (idleMs) idleT = setTimeout(() => { if (!done) resume('idle-timeout') }, idleMs) }
-    const clear = () => clearTimeout(idleT)
+    const arm = () => { clearIdle(); if (idleMs) idleT = setTimeout(() => { if (!done && clientGoneAt.t == null) resume('idle-timeout') }, idleMs) }
     arm()
     try {
       let pendingError = null
       stream.on && stream.on('error', (e) => { pendingError = e })
       for await (const chunk of stream) {
-        if (done || client.destroyed) { stream.destroy && stream.destroy(); break }
-        clear(); arm()
+        if (done || clientGoneAt.t != null || client.destroyed) { stream.destroy && stream.destroy(); break }
+        clearIdle(); arm()
         buf += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
         let sep
         while ((sep = buf.indexOf('\n\n')) !== -1) {
@@ -114,18 +126,19 @@ export async function relayStream(client, firstUpstream, opts) {
         if (done) break
         keepalive()
       }
-      clear()
-      if (done) return
-      if (protocol === 'openai') resume(pendingError ? ('error:' + (pendingError.code || pendingError.message)) : 'end')
+      clearIdle()
+      if (done || clientGoneAt.t != null) return
+      if (protocol === 'openai') return resume(pendingError ? ('error:' + (pendingError.code || pendingError.message)) : 'end') // 必须 await/return 续传链：否则 main 在续传完成前就继续并 end() 掐断
       else { sendDone(); done = true } // 非 openai 协议无 [DONE] 结束标记：上游流自然结束即正常完成
     } catch (e) {
-      clear()
-      if (!done) resume('error:' + (e.code || e.message))
+      clearIdle()
+      if (done || clientGoneAt.t != null) return
+      return resume('error:' + (e.code || e.message))
     }
   }
 
   async function resume(reason) {
-    if (done || client.destroyed || retries >= maxReconnects) { if (!done) finalize('断流续传' + (maxReconnects ? '用尽' : '失败') + '，结束'); return }
+    if (done || clientGoneAt.t != null || client.destroyed || retries >= maxReconnects) { if (!done) finalize('断流续传' + (maxReconnects ? '用尽' : '失败') + '，结束'); return }
     retries++
     phaseAsync = 'resume'; resolved = false; acc = ''
     log && log.warn('sse 断流(' + reason + ')，第 ' + retries + '/' + maxReconnects + ' 次续传重连')
@@ -133,11 +146,13 @@ export async function relayStream(client, firstUpstream, opts) {
     let st
     try { st = await reconnect() } catch (e) { return resume('reconnect:' + (e.message || 'fail')) }
     if (!st || (st.statusCode !== undefined && st.statusCode >= 400)) return resume('reconnect-status:' + (st && st.statusCode))
+    curStream = st
     await pump(st)
   }
 
   await pump(firstUpstream)
   if (opts.onTokens) { try { opts.onTokens(contentChars, lastUsage) } catch {} }
   if (opts.onEnd) { try { opts.onEnd({ interrupted: !done, reconnects: retries }) } catch {} }
+  if (typeof client.removeListener === 'function') { try { client.removeListener('close', markGone); client.removeListener('error', markGone) } catch {} }
   if (!client.destroyed) try { client.end() } catch { }
 }

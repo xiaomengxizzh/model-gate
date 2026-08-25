@@ -297,7 +297,8 @@ document.querySelectorAll('#themeSel button').forEach(b=>b.addEventListener('cli
 /* 工具 */
 function fmtUptime(ms){const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60),s2=s%60,p=n=>String(n).padStart(2,'0');return p(h)+':'+p(m)+':'+p(s2)}
 function animate(el,from,to){const dur=380,t0=performance.now();(function step(t){const k=Math.min(1,(t-t0)/dur),e=1-Math.pow(1-k,3);el.textContent=String(Math.round(from+(to-from)*e));if(k<1)requestAnimationFrame(step);else{el.textContent=String(to);el.classList.add('flash');setTimeout(()=>el.classList.remove('flash'),600)}})(t0)}
-function drawTrend(cv,data){const dpr=window.devicePixelRatio||1;const _r=cv.getBoundingClientRect();const W=Math.max(120,Math.round(_r.width)),H=Math.max(40,Math.round(_r.height));cv.width=W*dpr;cv.height=H*dpr;const ctx=cv.getContext('2d');if(dpr!==1)ctx.setTransform(dpr,0,0,dpr,0,0);const vs=data.map(d=>d.v||0);const mx=Math.max.apply(null,vs.concat([1]));ctx.lineWidth=2;ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--cel-accent').trim()||'#86a0ff';ctx.beginPath();vs.forEach((v,i)=>{const x=i/(vs.length-1||1)*W,y=H-4-(Math.min(v,mx)/mx)*(H-10);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke()}
+function drawTrend(cv,data){const dpr=window.devicePixelRatio||1;const _r=cv.getBoundingClientRect();if(!_r.width)return;const W=Math.max(120,Math.round(_r.width)),H=Math.max(40,Math.round(_r.height));cv.width=W*dpr;cv.height=H*dpr;const ctx=cv.getContext('2d');if(dpr!==1)ctx.setTransform(dpr,0,0,dpr,0,0);const vs=data.map(d=>d.v||0);const mx=Math.max.apply(null,vs.concat([1]));ctx.lineWidth=2;ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--cel-accent').trim()||'#86a0ff';ctx.beginPath();vs.forEach((v,i)=>{const x=i/(vs.length-1||1)*W,y=H-4-(Math.min(v,mx)/mx)*(H-10);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke()}
+function redrawTrend(){const tr=$('#tr');if(tr&&ST.global&&ST.global.latTrend&&ST.global.latTrend.length)drawTrend(tr,ST.global.latTrend)}
 // 滚动条只在内容真正超出时显示（避免系统「始终显示滚动条」导致没超出也出现）
 function fitAllScroll(){for(const id of ['#providers','#models','#route','#global','#params']){const el=$(id);if(el)el.style.overflowY=(el.scrollHeight>el.clientHeight+8)?'auto':'hidden'}}
 function circuitOf(){const r={};if(v('fCF'))r.maxFailures=Math.max(1,parseInt(v('fCF'),10));if(v('fCD'))r.openDurationMs=Math.max(1,parseInt(v('fCD'),10));return Object.keys(r).length?r:null}
@@ -310,6 +311,8 @@ function msCol(i){return MS_CEL[i%MS_CEL.length]}
 function msAuthH(){const h={};if(window.TOKEN)h['Authorization']='Bearer '+window.TOKEN;return h}
 async function renderModelStats(){
   const cv=$('#msChart'); if(!cv) return
+  // 面板隐藏(display:none)时无布局，rect 为 0：跳过以免按兜底尺寸固化位图；切回本视图时由 switchView 重绘
+  if(!cv.getBoundingClientRect().width) return
   // 画布按其实际显示尺寸 + 设备像素比初始化：消除 width:100% 造成的横向拉伸失真，
   // 并让鼠标 tooltip 用到的显示像素坐标与画图坐标(padL/maxTk 等)一致
   const dpr=window.devicePixelRatio||1
@@ -516,7 +519,7 @@ function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
   if(!_el&&_frole){_el=document.querySelector('.diritem[data-i="'+_fi+'"] [data-role="'+_frole+'"]')}
   if(_el){_el.focus();if(_caret>=0)try{_el.setSelectionRange(_caret,_caret)}catch{}}
 }
-function switchView(v){document.querySelectorAll('#viewtabs button').forEach(b=>b.classList.toggle('on',b.getAttribute('data-v')===v));['config','stats','log'].forEach(p=>{const el=$('#v-'+p);if(el)el.hidden=(p!==v)})}
+function switchView(v){document.querySelectorAll('#viewtabs button').forEach(b=>b.classList.toggle('on',b.getAttribute('data-v')===v));['config','stats','log'].forEach(p=>{const el=$('#v-'+p);if(el)el.hidden=(p!==v)});if(v==='stats')requestAnimationFrame(()=>{renderModelStats();redrawTrend()})}
 (function(){const tabs=$('#viewtabs');if(tabs)tabs.addEventListener('click',(e)=>{const b=e.target.closest('button');if(b)switchView(b.getAttribute('data-v'))})})();
 function renderHealth(){const errs=(ST.global&&ST.global.errors)||0,h=$('#health');if(errs===0){h.classList.remove('deg');$('#healthTxt').textContent='健康'}else{h.classList.add('deg');$('#healthTxt').textContent='降级 · '+errs}}
 function buildCfrom(s){C.providers={};for(const p of s.providers||[])C.providers[p.id]={baseUrl:p.baseUrl,apiKeyEnv:p.apiKeyEnv||'',pathPrefix:p.pathPrefix||'',extraHeaders:p.extraHeaders||{},keyOk:p.hasKey,keySource:p.keySource,api:p.api||'openai',circuit:p.circuit||null};
@@ -617,7 +620,7 @@ $('#refresh').addEventListener('click',async()=>{await pollStatus();await pollLo
 function startTimers(){timerA=setInterval(pollStatus,INTERVAL);timerB=setInterval(pollLogs,LOG_INTERVAL);setInterval(()=>{ if(liveOn) renderModelStats() },10000);renderModelStats()}
 function stopTimers(){clearInterval(timerA);clearInterval(timerB)}
 setInterval(()=>{$('#up').textContent=fmtUptime(Date.now()-startedAt)},1000);
-window.addEventListener('resize',fitAllScroll);
+window.addEventListener('resize',()=>{fitAllScroll();renderModelStats();redrawTrend()});
 $('#gateBtn').addEventListener('click',async()=>{const t=($('#gateTok').value||'').trim();if(!t){$('#gateErr').textContent='请输入令牌';return}if(await verifyToken(t)){TOKEN=t;localStorage.setItem('mg-token',t);localStorage.setItem('mg-startedAt',String(gwStartedAt));enterConsole()}else{$('#gateErr').textContent='令牌错误，请重试';$('#gateTok').value='';$('#gateTok').focus()}});
 $('#gateTok').addEventListener('keydown',(e)=>{if(e.key==='Enter')$('#gateBtn').click()});
 init();

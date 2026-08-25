@@ -52,6 +52,7 @@ docs/          # 规划与交接文档
 - **forwardChain 重试 + 循环兜底（src/index.js ~L421-533）**：
   三层重试（forward 内退避）→ 同模型 fallbacks → 跨模型 directory；外层 `while(loopDeadline)` **循环回队首**，受 `loopMs`(默认120s) 与熔断护栏约束；**deadline 只卡「开新轮」，一轮内所有候选都会被尝试**（避免慢上游饿死兜底）。成功/502 都带 `chain=` 兜底链标记。
 - **SSE 续传**：流中途断开 → `maxReconnects=2` 重连去重；续传仍失败 → `onEnd({interrupted})` → 记中断+上游错误+**`streamDrops` 连续中断计数**，≥`STREAM_DROP_THRESHOLD`(3) 后路由**绕开该上游**（`markOk` 不重置 streamDrops，故真正生效）。
+- **下游客户端断线(relayStream, sse.js)**：绑定客户端连接 `close/error` → `clientGoneAt` 标记 + 主动销毁上游流 + 停 idle 定时器，杜绝死等挂起上游导致的连接/资源泄漏与续传浪费；`pump` 对续传链用 `return resume(...)` **完整等待**（不能裸调 `resume()`），否则主流程会在续传补完前就执行 `client.end()` 把客户端掐断——这也是「对话直接中断」的根因。
 - **统计持久化**：daily/hourly/byModel/dialogue/global/byProvider/latTrend 每30s落盘 `stats.json` 并在重启恢复（此前做的「重启即归零」已修）。
 - **曲线图/按模型/按对话/按上游**统计面板；缓存命中率按 `cacheRead/(cacheRead+cacheWrite+uncached)` 协议分桶精确算。
 - **gzip**：转发出 `accept-encoding:identity`，Magic 或申报 gzip 都强制解压，失败视为失败走 fallback。
@@ -60,6 +61,8 @@ docs/          # 规划与交接文档
 ## 6. 近期已交付
 
 虚拟共享模型+客户端key、入口别名、健壮 start.bat、请求级日志(含 chain)、缓存命中真统计、流式中断计数+绕开、有界循环兜底、并发限流（每上游 maxPerProvider 默认8）、统计全量持久化、面板大量修复（bat CRLF、曲线图、滚动条挤卡片、上游卡 3 张、模板、输入不被打断、刷新反馈等）。
+
+**SSE 下游截断加固（本轮）**：固定了「上游停摆+客户端断开→上游连接泄漏」与「续传中被 `client.end()` 掐断→对话直接中断」两处根因（sse.js：客户端 close 监听销毁上游流 + `return resume()` 等完整续传链）；配套隔离沙箱回归测试 `scripts/tmp-trunc/`（含 client-truncation.mjs + gateway.json，仅本地用、不入库），14 场景全绿（S1 基线/S2 abort/S3 cancel/S4 上游停摆+S5 续传完整/S6 续传中断释放/S7 并发）。
 
 ## 7. 开发/验证作业法（重要）
 
