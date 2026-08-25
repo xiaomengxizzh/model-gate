@@ -120,7 +120,17 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .tabs button.on{color:#111;background:var(--cel-accent);border-color:var(--cel-accent)}
 .vpanel{animation:fade .3s steps(4,end)}.vpanel[hidden]{display:none}
 /* 模型配置：左=上游+模型路由，右=默认上游目录，各半宽，目录滚动 */
-.cfg-grid{grid-template-columns:1fr 1fr;grid-template-rows:minmax(0,1fr);align-items:stretch;height:580px}
+.cfg-grid{grid-template-columns:1fr 1fr;align-items:start}
+.cfg-grid #providers,.cfg-grid #models{max-height:340px}
+/* 虚拟模型管理器（折叠列表 + 展开编辑器） */
+#vmList{display:flex;flex-direction:column;gap:8px;overflow-y:auto;max-height:420px;padding-right:4px;scrollbar-gutter:stable}
+.vmrow{display:flex;align-items:center;gap:8px;padding:8px 9px;background:var(--card2);border:2px solid var(--edge);border-radius:var(--r-md);cursor:pointer;box-shadow:2px 2px 0 var(--shadow)}
+.vmrow .vmArrow{color:var(--ink3);flex:none;width:14px}
+.vmrow .vmName{font-weight:600;font-family:var(--font-mono)}
+.vmrow .vmSum{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;color:var(--ink3);font-family:var(--font-mono)}
+.vmEdit{padding:9px;border:2px dashed var(--edge);border-radius:var(--r-md);display:flex;flex-direction:column;gap:8px;margin:-2px 0 4px 14px}
+.vmEdit .dirList{display:flex;flex-direction:column;gap:6px;max-height:200px;overflow-y:auto;padding-right:4px}
+.vmHint{font-size:10.5px;color:var(--ink3);margin-left:auto}
 .cfg-grid .col:first-child .card:first-child{flex:none;height:auto;max-height:340px}
 .dirCard #dirCtrl{flex:none;display:flex;flex-direction:column;gap:8px;border-bottom:2px solid var(--edge);margin-bottom:8px;padding-bottom:8px}
 .dirCard #route{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:8px;padding-right:4px;font-family:var(--font-mono);scrollbar-gutter:stable}
@@ -215,6 +225,10 @@ button:disabled{opacity:.45;cursor:not-allowed}
           <div id="dirCtrl"></div>
           <div class="dirList" id="route"><div class="empty">—</div></div>
         </section>
+        <section class="card" id="vmCard">
+          <h3>虚拟模型 <span class="n" id="vmCount"></span><button class="plus" id="addVm">＋ 新增</button></h3>
+          <div id="vmList"><div class="empty">—</div></div>
+        </section>
       </div>
     </div>
   </div>
@@ -285,7 +299,7 @@ const prev={requests:0,errors:0,retries:0,interrupts:0};
 let startedAt=Date.now(),logCounter=0,dirty=false,Cinit=false,modalOpen=false;
 let TOKEN=localStorage.getItem('mg-token')||'';
 let gwStartedAt=0; // 当前网关实例的启动时间戳（与 localStorage mg-startedAt 比对，判断是否重启过）
-let C={providers:{},models:{},defaults:{provider:null,retry:{},timeout:{}}};
+let C={providers:{},models:{},defaults:{provider:null,retry:{},timeout:{}},virtualModels:[]};
 let ST={byP:{},global:{},needAuth:false};
 
 /* 主题 */
@@ -467,8 +481,8 @@ function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
   // 控制区：API 地址（只读，随网关端口变化）+ 虚拟模型名 + 客户端Key + 加入已有模型
   const apiUrl='http://'+((ST.server&&ST.server.host)||'127.0.0.1')+':'+((ST.server&&ST.server.port)||8787)+'/v1';
   ctrl.innerHTML='<div class="dirrow apiRow" title="OpenAI 兼容格式：各 Agent 的 Base URL 填这里"><label>API 地址</label><input class="input" id="apiBase" value="'+esc(apiUrl)+'" readonly><span class="apiTag">OpenAI 格式</span></div>'
-   +'<div class="dirrow"><label>虚拟共用模型名</label><input class="input" id="vmName" value="'+esc(C.defaults.model||'')+'" placeholder="如 auto"></div>'
    +'<div class="dirrow"><label>客户端接入 Key</label><input class="input" id="vmKey" value="'+esc(C.defaults.clientKey||'')+'" placeholder="留空=不鉴权"></div>'
+   +'<div class="dirrow"><label>虚拟共用模型名</label><input class="input" id="vmName" value="'+esc(C.defaults.model||'')+'" placeholder="如 auto"></div>'
    +'<div class="dirrow" title="把当前「默认上游目录」保存为模板，可快速切换/删除"><label>模板</label><select class="select" id="tplSel" style="flex:1"><option value="">— 选模板 —</option>'+(Object.keys(getTemplates()).map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''))+'</select><input class="input" id="tplName" value="'+esc(_tplName)+'" placeholder="模板名" style="flex:1"><button class="mini" id="tplSave" title="保存当前目录为新模板">存</button><button class="mini" id="tplApply" title="应用所选模板">用</button><button class="mini del" id="tplDel" title="删除所选模板">×</button></div>'
    +'<div class="dirrow"><label>加入已有模型</label><select class="select" id="dirAdd"><option value="">— 选择 —</option>'+(Object.keys(C.models).filter(n=>!dir.some(e=>e.model===n)).map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''))+'</select></div>';
   // 目录条目
@@ -519,18 +533,106 @@ function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
   if(!_el&&_frole){_el=document.querySelector('.diritem[data-i="'+_fi+'"] [data-role="'+_frole+'"]')}
   if(_el){_el.focus();if(_caret>=0)try{_el.setSelectionRange(_caret,_caret)}catch{}}
 }
+/* 虚拟模型管理器：折叠列表 + 展开编辑器（输入 oninput 直改 C 不重绘；结构变化才重绘，规避轮询打断输入） */
+const _vmOpen=new Set()
+function renderVirtualModels(){
+  const box=$('#vmList');if(!box)return
+  const list=C.virtualModels||[]
+  const cnt=$('#vmCount');if(cnt)cnt.textContent=list.length+' 个'
+  if(!list.length){box.innerHTML='<div class="empty">暂无虚拟模型。点「＋ 新增」为不同 Agent 创建独立入口（各自目录与 Key，互不可越权）。</div>';return}
+  box.innerHTML=list.map((v,i)=>{
+    const open=_vmOpen.has(v.name)
+    const dirSummary=(v.directory||[]).map(e=>e.model).join(' → ')||'(空目录)'
+    const expBadge=v.expiresAt?((new Date(v.expiresAt)<new Date())?'<span class="badge perr">已过期</span>':'<span class="badge">限期</span>'):''
+    const keyBadge=v.keySet?'<span class="badge pok">Key·设</span>':'<span class="badge off">无Key</span>'
+    const head='<div class="vmrow" data-i="'+i+'" data-vrole="toggle"><span class="vmArrow">'+(open?'▾':'▸')+'</span><span class="vmName">'+esc(v.name)+'</span>'+keyBadge+expBadge+'<span class="vmSum" title="'+esc(dirSummary)+'">'+esc(dirSummary.length>34?dirSummary.slice(0,34)+'…':dirSummary)+'</span></div>'
+    if(!open)return head
+    const dirRows=(v.directory||[]).map((e,di)=>{
+      const mn=e.model.length>16?e.model.slice(0,16)+'…':e.model
+      return '<div class="diritem" data-di="'+di+'">'
+        +'<span class="dn'+(di===0?' first':'')+'">'+(di===0?'默认':'#'+(di+1))+'</span>'
+        +'<span class="mn" title="'+esc(e.model)+'">'+esc(mn)+'</span>'
+        +'<select class="select sel" data-vrole="mode"><option value="afterAll"'+(e.mode!=='onFail'?' selected':'')+'>全部失败后</option><option value="onFail"'+(e.mode==='onFail'?' selected':'')+'>失败即切</option></select>'
+        +'<input class="input pr" data-vrole="providers" value="'+esc((e.providers||[]).join(', '))+'" placeholder="上游（空=模型自带）">'
+        +'<span class="rm" data-vrole="vup" title="上移">↑</span><span class="rm" data-vrole="vdown" title="下移">↓</span><span class="rm" data-vrole="vrm" title="移出">×</span>'
+        +'</div>'}).join('')
+    return head+'<div class="vmEdit" data-i="'+i+'">'
+      +'<div class="dirrow"><label>名称</label><input class="input" data-vrole="name" value="'+esc(v.name)+'" placeholder="唯一名，如 gate-a"></div>'
+      +'<div class="dirrow"><label>加入已有模型</label><select class="select" data-vrole="vadd"><option value="">— 选择 —</option>'+(Object.keys(C.models).filter(n=>!(v.directory||[]).some(e=>e.model===n)).map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''))+'</select></div>'
+      +'<div class="dirList">'+(dirRows||'<div class="dirEmpty">目录为空：从上方「加入已有模型」添加，首项即默认。</div>')+'</div>'
+      +'<div class="dirrow"><label>独立 Key</label><input class="input" type="password" data-vrole="vmkey" placeholder="'+(v.keySet?'已存储（输入新值=更换；清空后失焦=删除）':'未设置（回退全局 Key）')+'" style="flex:1"></div>'
+      +'<div class="dirrow"><label>Key 过期</label><input class="input" type="datetime-local" data-vrole="exp" value="'+esc(v.expiresAt||'')+'" style="flex:1.2"><label style="flex:none">备注</label><input class="input" data-vrole="note" value="'+esc(v.note||'')+'" placeholder="备注" style="flex:1"></div>'
+      +'<div class="dirrow"><label>额度/限流</label><input class="input" data-vrole="quota" value="'+(v.quota||0)+'" title="总额度 token（0=不限）" style="width:88px"><input class="input" data-vrole="dailyQuota" value="'+(v.dailyQuota||0)+'" title="日额度 token（0=不限）" style="width:88px"><input class="input" data-vrole="maxContext" value="'+(v.maxContext||0)+'" title="上下文上限（0=不限）" style="width:104px"><input class="input" data-vrole="maxConcurrent" value="'+(v.maxConcurrent||0)+'" title="并发（0=不限）" style="width:76px"><input class="input" data-vrole="qps" value="'+(v.qps||0)+'" title="QPS（0=不限）" style="width:66px"></div>'
+      +'<div class="dirrow"><button class="mini" data-vrole="preview">🔍 试算路由</button><button class="mini del" data-vrole="vdel">删除</button><span class="vmHint">改动后点顶部「保存配置」生效</span></div>'
+      +'</div>'
+  }).join('')
+  bindVmEvents(box)
+}
+function bindVmEvents(box){
+  box.onclick=async(ev)=>{
+    const t=ev.target.closest('[data-vrole]');if(!t)return
+    const scope=t.closest('.vmEdit')||t.closest('.vmrow')
+    const i=scope?+scope.dataset.i:-1
+    const v=C.virtualModels[i];if(!v)return
+    const role=t.dataset.vrole
+    if(role==='toggle'){_vmOpen.has(v.name)?_vmOpen.delete(v.name):_vmOpen.add(v.name);renderVirtualModels()}
+    else if(role==='vadd'&&t.value){v.directory=v.directory||[];v.directory.push({model:t.value,mode:'afterAll',providers:[]});markDirty();renderVirtualModels()}
+    else if(role==='vup'||role==='vdown'){const di=+t.closest('.diritem').dataset.di,to=role==='vup'?di-1:di+1;if(to<0||to>=v.directory.length)return;const[a]=v.directory.splice(di,1);v.directory.splice(to,0,a);markDirty();renderVirtualModels()}
+    else if(role==='vrm'){v.directory.splice(+t.closest('.diritem').dataset.di,1);markDirty();renderVirtualModels()}
+    else if(role==='preview'){await vmPreview(v)}
+    else if(role==='vdel'){if(!confirm('确定删除虚拟模型「'+v.name+'」？其独立 Key 将一并清除。'))return;C.virtualModels.splice(i,1);_vmOpen.delete(v.name);markDirty();await saveAll();renderVirtualModels()}
+  }
+  box.oninput=(ev)=>{
+    const t=ev.target.closest('[data-vrole]');if(!t)return
+    const edit=t.closest('.vmEdit');if(!edit)return
+    const v=C.virtualModels[+edit.dataset.i];if(!v)return
+    const role=t.dataset.vrole
+    if(role==='providers'&&t.closest('.diritem')){v.directory[+t.closest('.diritem').dataset.di].providers=t.value.split(',').map(s=>s.trim()).filter(Boolean);markDirty()}
+    else if(role==='exp'){v.expiresAt=t.value;markDirty()}
+    else if(role==='note'){v.note=t.value;markDirty()}
+    else if(['quota','dailyQuota','maxContext','maxConcurrent','qps'].includes(role)){v[role]=Math.max(0,Number(t.value)||0);markDirty()}
+  }
+  box.onchange=async(ev)=>{
+    const t=ev.target.closest('[data-vrole]');if(!t)return
+    const edit=t.closest('.vmEdit')
+    const v=edit?C.virtualModels[+edit.dataset.i]:null;if(!v)return
+    const role=t.dataset.vrole
+    if(role==='name'){const nn=t.value.trim();if(_vmOpen.has(v.name)){_vmOpen.delete(v.name);_vmOpen.add(nn)}v.name=nn;markDirty()}
+    else if(role==='mode'&&t.closest('.diritem')){v.directory[+t.closest('.diritem').dataset.di].mode=t.value;markDirty()}
+    else if(role==='vmkey'){const val=t.value.trim();const r=await jpost('/api/keys',{id:'__mg_vm_'+v.name,key:val,version:ST.configVersion})
+      if(r.status===409){if(confirm('配置已被他处更新，加载最新后请重设 Key。')){dirty=false;await pollStatus()}}
+      else if(r.ok){toast('独立 Key 已'+(val?'更新':'清除'),'ok');t.value='';pollStatus()}
+      else toast((r.d&&r.d.error)||'Key 保存失败','err')}
+  }
+}
+async function vmPreview(v){
+  const r=await jpost('/api/route-preview',{model:v.name})
+  if(!r.ok){toast((r.d&&r.d.error)||'试算失败','err');return}
+  const h=(r.d&&r.d.hit)||{}
+  let html
+  if(h.type==='virtual'){
+    html='<div class="field"><label>命中虚拟模型：'+esc(h.name)+(h.quotaState?'（'+esc(h.quotaState)+'）':'')+'</label></div>'
+      +'<div class="hint2">目录链（首项=默认）：</div><div class="beans" style="margin-top:6px">'
+      +(h.directory||[]).map((e,i)=>'<span class="mchip"><b>'+(i+1)+'</b> '+esc(e.model)+(e.limit?' · <em>'+esc(e.limit)+'</em>':'')+' ← '+esc((e.providers||[]).join(',')||'默认上游')+'</span>').join('')+'</div>'
+  } else if(h.type==='defaults'){html='<div class="hint2">命中旧入口（defaults 链）</div>'}
+  else if(h.type==='unknown'){html='<div class="hint2" style="color:var(--err)">'+esc(h.note||'未知名')+'</div>'}
+  else{html='<div class="hint2">真实模型：'+esc(h.name||'')+' @ '+esc(h.provider||'')+'</div>'}
+  openModal('路由试算 · '+esc(v.name),html,closeModal)
+}
+$('#addVm').addEventListener('click',()=>{const nm='vm-'+String(Date.now()).slice(-4);C.virtualModels.push({name:nm,directory:[],quota:0,dailyQuota:0,maxContext:0,maxConcurrent:0,qps:0,expiresAt:'',note:''});_vmOpen.add(nm);markDirty();renderVirtualModels()});
 function switchView(v){document.querySelectorAll('#viewtabs button').forEach(b=>b.classList.toggle('on',b.getAttribute('data-v')===v));['config','stats','log'].forEach(p=>{const el=$('#v-'+p);if(el)el.hidden=(p!==v)});if(v==='stats')requestAnimationFrame(()=>{renderModelStats();redrawTrend()})}
 (function(){const tabs=$('#viewtabs');if(tabs)tabs.addEventListener('click',(e)=>{const b=e.target.closest('button');if(b)switchView(b.getAttribute('data-v'))})})();
 function renderHealth(){const errs=(ST.global&&ST.global.errors)||0,h=$('#health');if(errs===0){h.classList.remove('deg');$('#healthTxt').textContent='健康'}else{h.classList.add('deg');$('#healthTxt').textContent='降级 · '+errs}}
 function buildCfrom(s){C.providers={};for(const p of s.providers||[])C.providers[p.id]={baseUrl:p.baseUrl,apiKeyEnv:p.apiKeyEnv||'',pathPrefix:p.pathPrefix||'',extraHeaders:p.extraHeaders||{},keyOk:p.hasKey,keySource:p.keySource,api:p.api||'openai',circuit:p.circuit||null};
   C.models={};for(const m of s.models||[])C.models[m.name]={provider:m.provider,alias:m.alias||[],fallbacks:m.fallbacks||[],maxConcurrent:m.maxConcurrent||0,qps:m.qps||0,reasoning:m.reasoning||'',effortOptions:m.effortOptions||[],dailyQuota:m.dailyQuota||0,quota:m.quota||0,maxContext:m.maxContext||0,probe:m.probe||null,requests:m.requests||0,errors:m.errors||0,avgMs:m.avgMs!=null?m.avgMs:null};
-  C.defaults={provider:(s.defaults&&s.defaults.provider)||null,model:(s.defaults&&s.defaults.model)||'',clientKey:(s.defaults&&s.defaults.clientKey)||'',directory:(s.defaults&&s.defaults.directory)||[],retry:(s.defaults&&s.defaults.retry)||{},timeout:(s.defaults&&s.defaults.timeout)||{},concurrency:(s.defaults&&s.defaults.concurrency)||{},extraHeaders:{}}
+  C.defaults={provider:(s.defaults&&s.defaults.provider)||null,model:(s.defaults&&s.defaults.model)||'',clientKey:(s.defaults&&s.defaults.clientKey)||'',directory:(s.defaults&&s.defaults.directory)||[],retry:(s.defaults&&s.defaults.retry)||{},timeout:(s.defaults&&s.defaults.timeout)||{},concurrency:(s.defaults&&s.defaults.concurrency)||{},extraHeaders:{}};
+  C.virtualModels=(s.virtualModels||[]).map(v=>({name:v.name,directory:v.directory||[],quota:v.quota||0,dailyQuota:v.dailyQuota||0,maxContext:v.maxContext||0,maxConcurrent:v.maxConcurrent||0,qps:v.qps||0,keySet:!!v.keySet,expiresAt:v.expiresAt||'',note:v.note||''}));
   Cinit=true}
-function ingestStatus(s){if(s.startedAt)startedAt=s.startedAt;(s.needAuth!=null)&&(ST.needAuth=s.needAuth);ST.global=s.global||{};ST.server=s.server||{};ST.dialogues=s.dialogues||[];ST.byP={};for(const p of s.providers||[])ST.byP[p.id]=p.st;
+function ingestStatus(s){if(s.startedAt)startedAt=s.startedAt;(s.needAuth!=null)&&(ST.needAuth=s.needAuth);ST.configVersion=s.configVersion||0;ST.global=s.global||{};ST.server=s.server||{};ST.dialogues=s.dialogues||[];ST.byP={};for(const p of s.providers||[])ST.byP[p.id]=p.st;
   ST.byM={};for(const mn of s.models||[])ST.byM[mn.name]=mn;
   if(!Cinit){buildCfrom(s)}
   else{for(const p of s.providers||[]){if(C.providers[p.id]){C.providers[p.id].keyOk=p.hasKey;C.providers[p.id].keySource=p.keySource}}} // 每次轮询同步 Key 来源，保证删/存后徽标即时更新
-  renderStats(s.counters||{});renderHealth();renderProviders();renderModels();renderParams();renderGControls();renderStatsPanel();renderRoute();fitAllScroll()}
+  renderStats({requests:(s.global||{}).requests||0,errors:(s.global||{}).errors||0,retries:(s.global||{}).retries||0,interrupts:(s.global||{}).interrupts||0});renderHealth();renderProviders();renderModels();renderParams();renderGControls();renderStatsPanel();renderRoute();renderVirtualModels();fitAllScroll()}
 async function pollStatus(){try{const r=await japi('/api/status');if(!r.ok)return;ingestStatus(await r.json())}catch(e){}}
 function showGate(){const g=$('#gate');if(g)g.hidden=false;const i=$('#gateTok');if(i)setTimeout(()=>i.focus(),80)}
 function hideGate(){const g=$('#gate');if(g)g.hidden=true}
@@ -609,10 +711,12 @@ document.addEventListener('click',(e)=>{const t=e.target.closest('[data-act]');i
 $('#probeAll').addEventListener('click',async()=>{toast('正在测试所有上游…');try{const r=await jpost('/api/probe',{});if(r.ok&&r.d.status)ingestStatus(r.d.status);toast('测试完成','ok')}catch(e){}});
 $('#testAllModels').addEventListener('click',async()=>{const names=Object.keys(C.models);if(!names.length){toast('暂无模型','err');return}toast('正在测试 '+names.length+' 个模型…');try{const r=await jpost('/api/model-test',{});if(!r.ok){toast('测试失败：'+((r.d&&r.d.error)||'HTTP '+r.status),'err');return}if(r.d.status)ingestStatus(r.d.status);toast('测试完成','ok')}catch(e){toast('测试失败：'+e.message,'err')}});
 
-function refresh(){renderProviders();renderModels();renderParams();renderStatsPanel();renderRoute();renderModelStats()}
+function refresh(){renderProviders();renderModels();renderParams();renderStatsPanel();renderRoute();renderVirtualModels();renderModelStats()}
 
-async function saveAll(){const r=await jpost('/api/config/save',{providers:C.providers,models:C.models,defaults:C.defaults});
-  if(r.ok){dirty=false;if(r.d.status)ingestStatus(r.d.status);toast('配置已保存并生效','ok')}else toast((r.d&&r.d.error)||'保存失败','err')}
+async function saveAll(){const r=await jpost('/api/config/save',{providers:C.providers,models:C.models,defaults:C.defaults,virtualModels:C.virtualModels,version:ST.configVersion});
+  if(r.ok){dirty=false;if(r.d.status)ingestStatus(r.d.status);toast('配置已保存并生效','ok')}
+  else if(r.status===409){if(confirm('配置已被他处更新（版本过期）。加载最新配置将丢弃当前未保存修改，继续？')){dirty=false;await pollStatus();toast('已加载最新配置，请重新修改','ok')}}
+  else toast((r.d&&r.d.error)||'保存失败','err')}
 $('#saveAll').addEventListener('click',saveAll);
 $('#reloadCfg').addEventListener('click',async()=>{if(dirty&&!confirm('面板有未保存修改，确定丢弃并从文件重载？'))return;const r=await jpost('/api/config/reload',{});if(r.ok){dirty=false;await pollStatus();toast('已从配置文件重载','ok')}});
 $('#refresh').addEventListener('click',async()=>{await pollStatus();await pollLogs();renderModelStats();toast('已刷新','ok')});

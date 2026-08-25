@@ -238,7 +238,8 @@ function buildStatus(state) {
     const m = (s.byModel && s.byModel[v.name]) || { requests: 0, errors: 0 }
     const dk = (s.daily && s.daily[v.name] && s.daily[v.name][todayKey()]) || { tokens: 0, hit: 0, miss: 0 }
     const keyId = '__mg_vm_' + v.name
-    return { name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps, keySet: !!(state.cfg._keys && state.cfg._keys[keyId]), requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate: (dk.hit + dk.miss) > 0 ? Math.round(dk.hit / (dk.hit + dk.miss) * 1000) / 10 : null }
+    const meta = (state.cfg._keys && state.cfg._keys['__mg_vm_meta_' + v.name]) || {}
+    return { name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps, keySet: !!(state.cfg._keys && state.cfg._keys[keyId]), expiresAt: meta.expiresAt || '', note: meta.note || '', requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate: (dk.hit + dk.miss) > 0 ? Math.round(dk.hit / (dk.hit + dk.miss) * 1000) / 10 : null }
   })
   return {
     needAuth: !!state.adminToken,
@@ -343,26 +344,35 @@ async function doSaveConfig(state, body) {
     for (const f of ['dailyQuota', 'quota', 'maxContext', 'maxConcurrent', 'qps']) if (vm[f] != null && (!Number.isFinite(Number(vm[f])) || Number(vm[f]) < 0)) return { error: '虚拟模型「' + name + '」的 ' + f + ' 必须为非负数字' }
   }
   const cleanVms = vmsIn.map(vm => ({ name: vm.name.trim(), directory: vm.directory.map(e => ({ model: e.model, mode: e.mode === 'onFail' ? 'onFail' : 'afterAll', providers: (e.providers || []).filter(Boolean) })), quota: Number(vm.quota) || 0, dailyQuota: Number(vm.dailyQuota) || 0, maxContext: Number(vm.maxContext) || 0, maxConcurrent: Number(vm.maxConcurrent) || 0, qps: Number(vm.qps) || 0 }))
-  // 删除虚拟模型时同步清理其独立 Key，防孤儿 key 被同名新建继承
+  // 删除虚拟模型时同步清理其独立 Key 与元数据，防孤儿 key 被同名新建继承
   const removedVms = (cur.virtualModels || []).filter(v => !vmNames.has(v.name))
-  if (newClientKey != null) {
-    // 盘上最新 keys 合并（而非内存副本），消除「复活已删 key」的窗口
-    const keys = Object.assign({}, readKeysFresh(state.paths.keys))
-    if (newClientKey) keys.__mg_client = newClientKey
-    else delete keys.__mg_client
+  // keys 库同步（一次读盘一次写）：clientKey 迁移 / 虚拟模型 meta（expiresAt/note）/ 删除清理
+  const keys = Object.assign({}, readKeysFresh(state.paths.keys))
+  let keysChanged = false
+  if (newClientKey != null) { if (newClientKey) keys.__mg_client = newClientKey; else delete keys.__mg_client; keysChanged = true }
+  for (const vmRaw of vmsIn) {
+    const vmName = vmRaw.name.trim()
+    const mid = '__mg_vm_meta_' + vmName
+    const exp = typeof vmRaw.expiresAt === 'string' ? vmRaw.expiresAt.trim() : ''
+    const note = typeof vmRaw.note === 'string' ? vmRaw.note.trim() : ''
+    const want = (exp || note) ? { expiresAt: exp, note } : null
+    const curMeta = keys[mid]
+    if (want && (!curMeta || curMeta.expiresAt !== want.expiresAt || curMeta.note !== want.note)) { keys[mid] = want; keysChanged = true }
+    else if (!want && curMeta) { delete keys[mid]; keysChanged = true }
+  }
+  for (const v of removedVms) {
+    const kid = '__mg_vm_' + v.name, mid = '__mg_vm_meta_' + v.name
+    if (kid in keys) { delete keys[kid]; keysChanged = true }
+    if (mid in keys) { delete keys[mid]; keysChanged = true }
+  }
+  if (keysChanged) {
     const enc = keysEncrypt(keys)
-    if (!enc) return { error: '无法加密 keys.local.json：缺少主密钥，已拒绝保存 clientKey' }
+    if (!enc) return { error: '无法加密 keys.local.json：缺少主密钥，已拒绝保存' }
     writeFileSync(state.paths.keys, enc)
     hardenKeyFile(state.paths.keys)
   }
   const newVersion = (cur.configVersion || 0) + 1
   writeJsonAtomic(state.paths.local, { configVersion: newVersion, providers: clean, models, defaults, virtualModels: cleanVms })
-  if (removedVms.length) {
-    const keys = Object.assign({}, readKeysFresh(state.paths.keys))
-    let changed = false
-    for (const v of removedVms) { const kid = '__mg_vm_' + v.name; if (kid in keys) { delete keys[kid]; changed = true } }
-    if (changed) { const enc = keysEncrypt(keys); if (enc) { writeFileSync(state.paths.keys, enc); hardenKeyFile(state.paths.keys) } }
-  }
   reloadConfig(state)
   return { version: newVersion }
 }
