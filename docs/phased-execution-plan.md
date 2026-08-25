@@ -111,6 +111,13 @@ agent 可调用**多个虚拟模型**，各带独立 Key、各绑自己的目录
 5. **probe**：按能力做连通测试（embedding 极小 input）。
 6. **models 列表**：`/v1/models` 带能力维度（分组或 capability 字段）。
 
+#### 协议转换架构（借鉴 sub2api apicompat 包，2026-08-25 增补）
+协议数增长时两两直写是 N² 复杂度，采纳其三层设计：
+1. **IR 中转**：以 OpenAI Responses 风格为中间表示，每协议只需「入口→IR」「IR→出口」两个转换器（N 协议 2N 个，非 N²）；`thinking`/`cache_control`/结构化 system 等字段经 IR 会丢失。
+2. **直连桥逃生舱**：字段保真敏感的组合（如 OpenAI⇄Anthropic）保留直连桥跳过 IR——现有 `format.js` 的直写互转即直连桥，保留并纳入新架构。
+3. **流式事件顺序 wire 测试**：协议转换的流式事件顺序是隐性契约（例：OpenAI SDK 累积式流助手要求 `content_part.added` 先于 `output_text.delta`，缺失即 IndexError）。每个转换器配 wire 级事件顺序测试，钉住契约防回归。
+现有 `sse.js` 的多协议流式重建纳入此测试体系（现有 20 场景矩阵测故障，不测事件顺序契约，互补）。
+
 ### `virtualModels[i].capability`
 - 默认 `chat`；Embedding 虚拟模型设 `capability:"embedding"`。
 
@@ -150,6 +157,13 @@ agent 可调用**多个虚拟模型**，各带独立 Key、各绑自己的目录
 ### 3.4 Video（最难，最后）`/v1/videos/generations` + `/v1/videos/<id>`
 - **异步任务 + 轮询**：create 返回 taskId → GET 轮询上游 → 返回结果。
 - 需**任务态存储**（内存 + 可选持久化）、TTL、取消；与同步中继范式冲突，**单独设计任务池，不与同步路径混用**。
+- **任务池五原则（借鉴 sub2api ASYNC_IMAGE_TASKS 成品设计，2026-08-25 增补，Image 异步同样适用）**：
+  1. **大结果外置**：视频/图像等 MB 级结果落盘 `data/tasks/`（或对象存储），任务记录只存小 JSON（引用+状态），防内存被结果撑爆；
+  2. **同 key 轮询隔离**：只有提交任务时用的那把虚拟模型 Key 能轮询该任务，跨 key 轮询返回 not found（防越权窥测）；
+  3. **功能门控**：存储未配置/未启用时异步端点返回 404 + 启动 WARN 列出缺失配置项（不做半残运行）；
+  4. **关闭不搁浅**：停用开关后拒新任务，在途任务保持可轮询直至终态；
+  5. **失败不存大 payload**：结果写盘失败 → 任务标 failed，绝不持久化原始大响应。
+  另采纳其配套细节：轮询响应带 `expiresAt`；任务终态（completed/failed/expired）明确枚举。
 
 ### 跨项
 - **记账扩展**：token 不再唯一——按能力分指标（`tokens|chars|generations|bytes`）。
