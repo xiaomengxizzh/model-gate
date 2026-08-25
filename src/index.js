@@ -3,7 +3,7 @@ import { readFileSync, chmodSync, existsSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
 import { gunzipSync } from 'node:zlib'
-import { loadConfig, createRouter, buildProvider, configPaths, writeJsonAtomic , keysEncrypt } from './router.js'
+import { loadConfig, createRouter, buildProvider, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh } from './router.js'
 import { createLogger } from './logger.js'
 import { forward, probe, probeModel, warm } from './request.js'
 import { adapterFor, cacheHitMiss } from './format.js'
@@ -219,6 +219,7 @@ function buildStatus(state) {
   const todayTotal = models.reduce((a, m) => a + (m.today || 0), 0)
   return {
     needAuth: !!state.adminToken,
+    configVersion: state.cfg.configVersion || 0,
     server: { maxBodyBytes: (state.cfg.server && state.cfg.server.maxBodyBytes) || 0, keyEncrypted: !!(process.env.MG_KEYS_MASTER) || keysFileEncrypted(state.paths.keys), host: (state.cfg.server && state.cfg.server.host) || '127.0.0.1', port: (state.cfg.server && state.cfg.server.port) || 8787 },
     startedAt: state.st.startedAt, uptimeMs: Date.now() - state.st.startedAt,
     counters: Object.assign({}, state.st.counters),
@@ -253,8 +254,24 @@ function reloadConfig(state) {
   const ids = Object.keys(state.cfg.providers || {})
   for (const id of ids) if (!state.stats.byProvider[id]) state.stats.byProvider[id] = { requests:0, errors:0, retries:0, latencySum:0, latencyCount:0, tokens:0 }
 }
-function saveConfig(state, body) {
+// 写盘互斥：saveConfig/saveKeys 当前为同步函数（事件循环天然串行、无交错），
+// 此队列固化「读改写全程独占」语义，防止未来异步化（fs/promises）后出现交错写与 tmp 同名冲突
+let _cfgWriteChain = Promise.resolve()
+function withConfigWriteLock(fn) {
+  const run = _cfgWriteChain.then(fn, fn)
+  _cfgWriteChain = run.then(() => {}, () => {})
+  return run
+}
+// configVersion 校验：调用方显式带 version 且已过期 → 冲突；缺省视为旧版客户端，宽容放行（响应带最新 version 供自愈）
+function versionConflict(state, body) {
+  const cv = Number(body && body.version)
+  if (body && body.version !== undefined && Number.isFinite(cv) && cv !== (state.cfg.configVersion || 0)) return { conflict: true, currentVersion: state.cfg.configVersion || 0 }
+  return null
+}
+function saveConfig(state, body) { return withConfigWriteLock(() => doSaveConfig(state, body)) }
+async function doSaveConfig(state, body) {
   const cur = state.cfg
+  const _c = versionConflict(state, body); if (_c) return _c
   const providers = body.providers !== undefined ? body.providers : (cur.providers || {})
   const models = body.models !== undefined ? body.models : (cur.models || {})
   const defaults = body.defaults !== undefined ? body.defaults : (cur.defaults || {})
@@ -282,7 +299,8 @@ function saveConfig(state, body) {
   const clean = {}
   for (const [id, p] of Object.entries(providers || {})) { const { keyOk, keySource, ...rest } = p || {}; clean[id] = rest }
   if (newClientKey != null) {
-    const keys = Object.assign({}, cur._keys)
+    // 盘上最新 keys 合并（而非内存副本），消除「复活已删 key」的窗口
+    const keys = Object.assign({}, readKeysFresh(state.paths.keys))
     if (newClientKey) keys.__mg_client = newClientKey
     else delete keys.__mg_client
     const enc = keysEncrypt(keys)
@@ -290,20 +308,27 @@ function saveConfig(state, body) {
     writeFileSync(state.paths.keys, enc)
     hardenKeyFile(state.paths.keys)
   }
-  writeJsonAtomic(state.paths.local, { providers: clean, models, defaults })
+  const newVersion = (cur.configVersion || 0) + 1
+  writeJsonAtomic(state.paths.local, { configVersion: newVersion, providers: clean, models, defaults })
   reloadConfig(state)
-  return {}
+  return { version: newVersion }
 }
-function saveKeys(state, body) {
-  const keys = Object.assign({}, state.cfg._keys)
+function saveKeys(state, body) { return withConfigWriteLock(() => doSaveKeys(state, body)) }
+async function doSaveKeys(state, body) {
+  const _c = versionConflict(state, body); if (_c) return _c
+  // 盘上最新 keys 合并（而非内存副本）
+  const keys = Object.assign({}, readKeysFresh(state.paths.keys))
   if (body.key) keys[body.id] = body.key
   else delete keys[body.id]
   const enc = keysEncrypt(keys)
   if (!enc) return { error: '无法加密 keys.local.json：缺少主密钥（MG_KEYS_MASTER 未设置且自动主密钥不可用），已拒绝明文写入' }
   writeFileSync(state.paths.keys, enc)
   hardenKeyFile(state.paths.keys)
+  // key 变更同样推进 configVersion（读盘合并 local 顶层，避免覆盖其他字段）
+  const newVersion = (state.cfg.configVersion || 0) + 1
+  writeJsonAtomic(state.paths.local, Object.assign({}, readJson(state.paths.local, {}), { configVersion: newVersion }))
   reloadConfig(state)
-  return {}
+  return { version: newVersion }
 }
 
 async function doProbe(state, id) {
@@ -598,16 +623,18 @@ function makeHandler(state) {
         if (!await requireAdmin(req, res)) return
         const body = tryParse(await collectBody(req))
         if (!body || typeof body !== 'object') { sendJson(res, 400, { error: '请求体必须为 JSON' }); return }
-        const r = saveConfig(state, body)
+        const r = await saveConfig(state, body)
         if (r.error) { sendJson(res, 400, { error: r.error }); return }
+        if (r.conflict) { sendJson(res, 409, { error: '配置版本已过期（他处已保存过新版本），请刷新后重试', currentVersion: r.currentVersion }); return }
         sendJson(res, 200, { ok: true, status: buildStatus(state) }); return
       }
       if (path === '/api/keys' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
         const body = tryParse(await collectBody(req))
         if (!body || !body.id) { sendJson(res, 400, { error: '缺少 provider id' }); return }
-        const kr = saveKeys(state, body)
+        const kr = await saveKeys(state, body)
         if (kr.error) { sendJson(res, 400, { error: kr.error }); return }
+        if (kr.conflict) { sendJson(res, 409, { error: '配置版本已过期（他处已保存过新版本），请刷新后重试', currentVersion: kr.currentVersion }); return }
         sendJson(res, 200, { ok: true, status: buildStatus(state) }); return
       }
       if (path === '/api/probe' && req.method === 'POST') {

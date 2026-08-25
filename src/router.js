@@ -5,7 +5,9 @@ import { spawnSync } from 'node:child_process'
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 
 export function configPaths() {
-  const dir = join(process.cwd(), 'config')
+  // MG_CONFIG_DIR：可选。多实例隔离时为实例指定独立配置目录（keys/stats 随之独立）；未设置=cwd/config（单实例零配置）
+  const envDir = (process.env.MG_CONFIG_DIR || '').trim()
+  const dir = envDir || join(process.cwd(), 'config')
   return { dir, local: join(dir, 'gateway.local.json'), keys: join(dir, 'keys.local.json'), stats: join(dir, 'stats.json') }
 }
 
@@ -33,6 +35,7 @@ export function loadConfig(opts = {}) {
     base.providers = Object.assign({}, base.providers, patch.providers)
     base.models = Object.assign({}, base.models, patch.models)
     base.defaults = Object.assign({}, base.defaults, patch.defaults)
+    base.configVersion = Number(patch.configVersion) || 0
   }
   base._keys = readKeys(p.keys)                // { providerId: key }，gitignored，不入库
   base._paths = p
@@ -125,3 +128,5 @@ function readKeys(p) {
   if (raw.trimStart().startsWith('MG1:')) return keysDecrypt(raw)
   try { const o = JSON.parse(raw); return o && typeof o === 'object' ? o : {} } catch { return {} }
 }
+// 从盘上读取最新 keys（解密），供写路径合并使用——消除「基于内存旧副本写回」复活已删 key 的窗口
+export function readKeysFresh(p) { return readKeys(p) }
