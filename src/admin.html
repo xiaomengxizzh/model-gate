@@ -308,7 +308,7 @@ function msShort(n){return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(
 function msFmt(n){return n>=1e9?(Math.round(n/1e9*10)/10)+'B':n>=1e6?(Math.round(n/1e6*10)/10)+'M':n>=1e3?(Math.round(n/1e3*10)/10)+'K':String(n)}
 function msHex(d){const v=parseInt(d.slice(1),16);return '#'+(((v>>16)*.55<<16)|((v>>8&255)*.55<<8)|((v&255)*.55)).toString(16).padStart(6,'0')}
 function msCol(i){return MS_CEL[i%MS_CEL.length]}
-function msAuthH(){const h={};if(window.TOKEN)h['Authorization']='Bearer '+window.TOKEN;return h}
+function msAuthH(){const h={};if(TOKEN)h['Authorization']='Bearer '+TOKEN;return h}
 async function renderModelStats(){
   const cv=$('#msChart'); if(!cv) return
   // 面板隐藏(display:none)时无布局，rect 为 0：跳过以免按兜底尺寸固化位图；切回本视图时由 switchView 重绘
