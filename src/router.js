@@ -24,6 +24,29 @@ export function writeJsonAtomic(path, obj) {
 }
 
 // 配置加载：gateway.json 为准 + gateway.local.json 覆盖；并读取面板写入的 keys.local.json
+// virtualModels 规范化（loadConfig 容错路径）：非法项跳过并警告，不让手改坏配置宕机；面板保存路径另有强校验
+function normalizeVirtualModels(vms, base) {
+  const out = []
+  const models = base.models || {}
+  const taken = new Set(Object.keys(models))
+  for (const m of Object.values(models)) for (const a of m.alias || []) taken.add(a)
+  if (base.defaults && base.defaults.model) taken.add(base.defaults.model)
+  for (const vm of Array.isArray(vms) ? vms : []) {
+    const name = vm && typeof vm.name === 'string' ? vm.name.trim() : ''
+    if (!name) { console.warn('[virtualModels] 跳过：缺少 name'); continue }
+    if (taken.has(name)) { console.warn('[virtualModels] 跳过：名字与真实模型/别名/默认虚拟名冲突: ' + name); continue }
+    const dir = (Array.isArray(vm.directory) ? vm.directory : []).filter(e => e && typeof e.model === 'string' && models[e.model])
+    if (!dir.length) { console.warn('[virtualModels] 跳过：目录为空或引用不存在的模型: ' + name); continue }
+    out.push({
+      name,
+      directory: dir.map(e => ({ model: e.model, mode: e.mode === 'onFail' ? 'onFail' : 'afterAll', providers: Array.isArray(e.providers) ? e.providers.filter(Boolean) : [] })),
+      quota: Number(vm.quota) || 0, dailyQuota: Number(vm.dailyQuota) || 0, maxContext: Number(vm.maxContext) || 0,
+      maxConcurrent: Number(vm.maxConcurrent) || 0, qps: Number(vm.qps) || 0,
+    })
+  }
+  return out
+}
+
 export function loadConfig(opts = {}) {
   const p = configPaths()
   let mainFile = opts.configFile || (process.env.MG_CONFIG && existsSync(process.env.MG_CONFIG) ? process.env.MG_CONFIG : null)
@@ -36,7 +59,9 @@ export function loadConfig(opts = {}) {
     base.models = Object.assign({}, base.models, patch.models)
     base.defaults = Object.assign({}, base.defaults, patch.defaults)
     base.configVersion = Number(patch.configVersion) || 0
+    if (patch.virtualModels !== undefined) base.virtualModels = patch.virtualModels
   }
+  base.virtualModels = normalizeVirtualModels(base.virtualModels, base)
   base._keys = readKeys(p.keys)                // { providerId: key }，gitignored，不入库
   base._paths = p
   return base
@@ -76,16 +101,22 @@ export function createRouter(cfg) {
   }
   const defaultProvider = cfg.defaults && cfg.defaults.provider
   const virtualModel = cfg.defaults && cfg.defaults.model
+  const vms = new Map((cfg.virtualModels || []).map(v => [v.name, v]))
   function resolve(model) {
+    // 优先级：真实模型/别名 → 虚拟模型（自带 directory 快照）→ 旧 defaults.model → 默认上游兜底
+    if (model && vms.has(model)) {
+      const vm = vms.get(model)
+      return { canonicalName: vm.name, known: true, def: { isVirtualModel: true, name: vm.name, directory: vm.directory, quota: vm.quota, dailyQuota: vm.dailyQuota, maxContext: vm.maxContext, maxConcurrent: vm.maxConcurrent, qps: vm.qps } }
+    }
     if (model && virtualModel && model === virtualModel) {
       if (!defaultProvider) throw new Error('defaults.provider 未设置，无法用虚拟共用模型名: ' + model)
-      return { canonicalName: virtualModel, def: { provider: defaultProvider, virtual: true } }
+      return { canonicalName: virtualModel, known: true, def: { virtual: true } }
     }
-    if (model) { const hit = alias.get(model); if (hit) return { canonicalName: hit.name, def: hit.def } }
-    if (defaultProvider) return { canonicalName: model || '(默认)', def: { provider: defaultProvider } }
+    if (model) { const hit = alias.get(model); if (hit) return { canonicalName: hit.name, known: true, def: hit.def } }
+    if (defaultProvider) return { canonicalName: model || '(默认)', known: !!model && alias.has(model), def: { provider: defaultProvider } }
     throw new Error('model 未在 config/models 中配置，且未设置 defaults.provider: ' + model)
   }
-  return { resolve }
+  return { resolve, hasVirtualModels: () => vms.size > 0 }
 }
 // 机器级主密钥：优先取 MG_KEYS_MASTER，否则自动生成并持久化到用户目录，保证 keys.local.json 永远加密落盘
 function machineMaster() {

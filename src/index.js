@@ -136,6 +136,14 @@ function modelThrottleOf(state, name, max) { if (!state.throttleModel[name]) sta
 async function acquireSem(th) { if (th.inFlight >= th.max) await new Promise((s) => th.wait.push(s)); th.inFlight += 1; return () => { th.inFlight -= 1; if (th.wait.length) (th.wait.shift())() } }
 function todayKey(d) { const x = d || new Date(); return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0') }
 function tallyDaily(state, modelName, tokens, hit, miss) { if (!modelName) return; const now = new Date(); const k = todayKey(now); const m = state.stats.daily[modelName] || (state.stats.daily[modelName] = {}); const c = m[k] || (m[k] = { tokens: 0, hit: 0, miss: 0 }); c.tokens += tokens || 0; c.hit += hit || 0; c.miss += miss || 0; const hk = k + ':' + String(now.getHours()).padStart(2, '0'); const hm = state.stats.hourly[modelName] || (state.stats.hourly[modelName] = {}); const h = hm[hk] || (hm[hk] = { tokens: 0, hit: 0, miss: 0 }); h.tokens += tokens || 0; h.hit += hit || 0; h.miss += miss || 0 }
+// 虚拟模型入口账本：serving 与入口名不同且入口是虚拟模型时，同步计入虚拟名（供其自身 quota/dailyQuota 检查）
+function tallyVirtual(state, modelName, serving, tokens) {
+  if (!modelName || !serving || modelName === serving) return
+  if (!(state.cfg.virtualModels || []).some(v => v.name === modelName)) return
+  const svg = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
+  svg.tokens = (svg.tokens || 0) + (tokens || 0)
+  tallyDaily(state, modelName, tokens, 0, 0)
+}
 function agg(state, pid, field, delta) { if (state.stats.byProvider[pid]) state.stats.byProvider[pid][field] += delta; state.stats.global[field] += delta }
 // 粗略估计 prompt 的 token 数（用于 maxContext 判断）：中文/全角按 1 字≈1 token，其它按约 4 字符≈1 token
 function estPromptTokens(body) {
@@ -155,6 +163,15 @@ function estPromptTokens(body) {
   return Math.ceil(t) + 8
 }
 // 模型额度/上下文判定：命中则返回原因，否则 null（超限的模型在路由中被跳过并切到下一模型）
+// 虚拟模型入口额度检查：账本按虚拟名独立记账（目录内各模型消耗同时计入），超限返回文案
+function virtualQuotaExceeded(state, vmDef) {
+  const used = (state.stats.byModel[vmDef.name] && state.stats.byModel[vmDef.name].tokens) || 0
+  if (vmDef.quota > 0 && used >= vmDef.quota) return '总额度已用尽'
+  const dk = state.stats.daily[vmDef.name] && state.stats.daily[vmDef.name][todayKey()]
+  if (vmDef.dailyQuota > 0 && dk && (dk.tokens || 0) >= vmDef.dailyQuota) return '今日额度已用尽'
+  return null
+}
+
 function routeLimit(state, cfg, model, body) {
   if (!model) return null
   const md = cfg.models && cfg.models[model]; if (!md) return null
@@ -217,9 +234,16 @@ function buildStatus(state) {
   })
   const defaults = state.cfg.defaults || {}
   const todayTotal = models.reduce((a, m) => a + (m.today || 0), 0)
+  const virtualModels = (state.cfg.virtualModels || []).map(v => {
+    const m = (s.byModel && s.byModel[v.name]) || { requests: 0, errors: 0 }
+    const dk = (s.daily && s.daily[v.name] && s.daily[v.name][todayKey()]) || { tokens: 0, hit: 0, miss: 0 }
+    const keyId = '__mg_vm_' + v.name
+    return { name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps, keySet: !!(state.cfg._keys && state.cfg._keys[keyId]), requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate: (dk.hit + dk.miss) > 0 ? Math.round(dk.hit / (dk.hit + dk.miss) * 1000) / 10 : null }
+  })
   return {
     needAuth: !!state.adminToken,
     configVersion: state.cfg.configVersion || 0,
+    virtualModels,
     server: { maxBodyBytes: (state.cfg.server && state.cfg.server.maxBodyBytes) || 0, keyEncrypted: !!(process.env.MG_KEYS_MASTER) || keysFileEncrypted(state.paths.keys), host: (state.cfg.server && state.cfg.server.host) || '127.0.0.1', port: (state.cfg.server && state.cfg.server.port) || 8787 },
     startedAt: state.st.startedAt, uptimeMs: Date.now() - state.st.startedAt,
     counters: Object.assign({}, state.st.counters),
@@ -243,6 +267,7 @@ function staticModels(cfg) {
   const data = Object.keys(cfg.models || {}).map((id) => ({ id, object: 'model', owned_by: 'model-gateway' }))
   const vm = (cfg.defaults && cfg.defaults.model) || ''
   if (vm && !data.some((m) => m.id === vm)) data.push({ id: vm, object: 'model', owned_by: 'model-gateway' })
+  for (const v of cfg.virtualModels || []) if (!data.some((m) => m.id === v.name)) data.push({ id: v.name, object: 'model', owned_by: 'model-gateway' })
   return { object: 'list', data }
 }
 
@@ -298,6 +323,28 @@ async function doSaveConfig(state, body) {
   }
   const clean = {}
   for (const [id, p] of Object.entries(providers || {})) { const { keyOk, keySource, ...rest } = p || {}; clean[id] = rest }
+  // —— virtualModels 强校验（面板保存路径；loadConfig 另有容错规范化，手改坏配置不宕机）——
+  const vmsIn = body.virtualModels !== undefined ? body.virtualModels : (cur.virtualModels || [])
+  const vmNames = new Set()
+  for (const vm of vmsIn) {
+    if (!vm || typeof vm.name !== 'string' || !vm.name.trim()) return { error: '虚拟模型缺少名称' }
+    const name = vm.name.trim()
+    if (vmNames.has(name)) return { error: '虚拟模型名重复: ' + name }
+    vmNames.add(name)
+    if (models[name]) return { error: '虚拟模型名与真实模型冲突: ' + name }
+    if (defaults.model === name) return { error: '虚拟模型名与默认虚拟共用名冲突: ' + name }
+    for (const [mn, m] of Object.entries(models)) for (const a of m.alias || []) if (a === name) return { error: '虚拟模型名与模型「' + mn + '」的别名冲突: ' + name }
+    if (!Array.isArray(vm.directory) || !vm.directory.length) return { error: '虚拟模型「' + name + '」的目录为空' }
+    for (const e of vm.directory) {
+      if (!e || typeof e.model !== 'string' || !e.model) return { error: '虚拟模型「' + name + '」目录包含无效项' }
+      if (!models[e.model]) return { error: '虚拟模型「' + name + '」目录引用了不存在的模型 ' + e.model }
+      for (const pr of (e.providers || [])) if (pr && !providers[pr]) return { error: '虚拟模型「' + name + '」目录引用了不存在的上游 ' + pr }
+    }
+    for (const f of ['dailyQuota', 'quota', 'maxContext', 'maxConcurrent', 'qps']) if (vm[f] != null && (!Number.isFinite(Number(vm[f])) || Number(vm[f]) < 0)) return { error: '虚拟模型「' + name + '」的 ' + f + ' 必须为非负数字' }
+  }
+  const cleanVms = vmsIn.map(vm => ({ name: vm.name.trim(), directory: vm.directory.map(e => ({ model: e.model, mode: e.mode === 'onFail' ? 'onFail' : 'afterAll', providers: (e.providers || []).filter(Boolean) })), quota: Number(vm.quota) || 0, dailyQuota: Number(vm.dailyQuota) || 0, maxContext: Number(vm.maxContext) || 0, maxConcurrent: Number(vm.maxConcurrent) || 0, qps: Number(vm.qps) || 0 }))
+  // 删除虚拟模型时同步清理其独立 Key，防孤儿 key 被同名新建继承
+  const removedVms = (cur.virtualModels || []).filter(v => !vmNames.has(v.name))
   if (newClientKey != null) {
     // 盘上最新 keys 合并（而非内存副本），消除「复活已删 key」的窗口
     const keys = Object.assign({}, readKeysFresh(state.paths.keys))
@@ -309,7 +356,13 @@ async function doSaveConfig(state, body) {
     hardenKeyFile(state.paths.keys)
   }
   const newVersion = (cur.configVersion || 0) + 1
-  writeJsonAtomic(state.paths.local, { configVersion: newVersion, providers: clean, models, defaults })
+  writeJsonAtomic(state.paths.local, { configVersion: newVersion, providers: clean, models, defaults, virtualModels: cleanVms })
+  if (removedVms.length) {
+    const keys = Object.assign({}, readKeysFresh(state.paths.keys))
+    let changed = false
+    for (const v of removedVms) { const kid = '__mg_vm_' + v.name; if (kid in keys) { delete keys[kid]; changed = true } }
+    if (changed) { const enc = keysEncrypt(keys); if (enc) { writeFileSync(state.paths.keys, enc); hardenKeyFile(state.paths.keys) } }
+  }
   reloadConfig(state)
   return { version: newVersion }
 }
@@ -396,6 +449,10 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
   const dialogueId = resolveDialogue(state, req, body)
   if (body && body.model) {
     const hit = state.router.resolve(body.model)
+    // 决策 1：已配置虚拟模型后，未知名不再静默走 defaults 链（防 key 隔离被无感绕过），明确 404
+    if (!hit.known && (state.cfg.virtualModels || []).length) {
+      return { kind: 'json', status: 404, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '未知模型名: ' + body.model + '。可用虚拟模型见 GET /v1/models', type: 'unknown_model' } })) }
+    }
     requestModel = hit.canonicalName
     maxModel = hit.def.maxConcurrent || 0
     qps = hit.def.qps || 0
@@ -406,7 +463,27 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
     }
     // 模型配置默认值，客户端未指定时才注入（客户端自带优先）
     if (hit.def.reasoning && body.reasoning_effort === undefined) { body.reasoning_effort = hit.def.reasoning; injectedEffort = true }
-    if (hit.def.virtual) {
+    if (hit.def.isVirtualModel) {
+      // 用自身 directory 快照建 routes（providers 空时回退模型默认上游+fallbacks，与 defaults 分支同构）
+      for (const e of hit.def.directory) {
+        if (!e || typeof e.model !== 'string' || !e.model) continue
+        const _m = cfg.models && cfg.models[e.model]
+        routes.push({ model: e.model, mode: e.mode, providers: (e.providers && e.providers.length ? e.providers.filter(Boolean) : (_m ? [_m.provider, ...(_m.fallbacks || [])].filter(Boolean) : [])) })
+      }
+      if (!routes.length) return { kind: 'json', status: 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '虚拟模型 ' + hit.def.name + ' 的目录无可路由模型', type: 'no_route' } })) }
+      // 决策 3 连锁：虚拟模型透传思考强度，但用链首真实模型自身的 effortOptions 补本地校验（廉价参数检查先行于额度判断）
+      const d0vm = routes[0] && cfg.models && cfg.models[routes[0].model]
+      if (d0vm && d0vm.effortOptions && d0vm.effortOptions.length && body.reasoning_effort !== undefined && body.reasoning_effort !== null && !d0vm.effortOptions.includes(String(body.reasoning_effort))) {
+        return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'reasoning_effort 不支持 ' + body.reasoning_effort + '（' + routes[0].model + ' 允许：' + d0vm.effortOptions.join(', ') + '）', type: 'UnsupportedParamsError' } })) }
+      }
+      // 入口上下文约束（虚拟模型自身的 maxContext，区别于目录内各模型自己的限制）
+      if (hit.def.maxContext > 0 && body.messages && estPromptTokens(body) >= hit.def.maxContext) {
+        return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '超出虚拟模型 ' + hit.def.name + ' 的上下文上限 (' + hit.def.maxContext + ')', type: 'context_limit' } })) }
+      }
+      // 虚拟模型自身额度 = 入口总额度（目录内各模型消耗计入虚拟名账本）：超限拒绝服务，而非切目录（目录切换是模型级故障语义）
+      const vq = virtualQuotaExceeded(state, hit.def)
+      if (vq) return { kind: 'json', status: 429, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '虚拟模型 ' + hit.def.name + ' ' + vq, type: 'quota_exceeded' } })) }
+    } else if (hit.def.virtual) {
       // 虚拟共用模型名：等价「未指定模型」，走 defaults.directory 默认链（首项即真实默认模型），
       // 把真实模型名发给上游；否则会把虚拟名透传上去导致 "Model <虚拟名> is not supported"
       if (dir.length) {
@@ -514,6 +591,7 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
           const sg = state.stats.byModel[serving || modelName] = state.stats.byModel[serving || modelName] || { requests: 0, errors: 0 }
           sg.tokens = (sg.tokens || 0) + (usage.total_tokens || 0)
           tallyDaily(state, serving || modelName, usage.total_tokens || 0, hit, miss)
+          tallyVirtual(state, modelName, serving, usage.total_tokens || 0)
           tallyDialogue(state, dialogueId, usage.total_tokens || 0, hit, miss)
         }
         if (api !== 'openai') { const p = tryParse(out); if (p) { let nb; try { nb = Buffer.from(JSON.stringify(adapterFor(api).fromUpstream(p))) } catch { nb = null } if (nb) out = nb } }
@@ -522,7 +600,7 @@ async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
           const p2 = tryParse(out)
           if (p2 && p2.model) { p2.model = body.model; out = Buffer.from(JSON.stringify(p2)) }
         }
-        return { kind: 'json', status: result.status, contentType: 'application/json', body: out, pid, modelName, asSSE: degraded || undefined, dialogueId, chain: chainModels.join('>') }
+        return { kind: 'json', status: result.status, contentType: 'application/json', body: out, pid, modelName, serving, asSSE: degraded || undefined, dialogueId, chain: chainModels.join('>') }
       }
       // 非重试错误码（4xx）：业务问题，不熔断、不 fallback，直接返回
       markOk(state, pid)
@@ -617,6 +695,25 @@ function makeHandler(state) {
 
       if (path === '/api/status' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; sendJson(res, 200, buildStatus(state)); return }
       if (path === '/api/model-stats' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const days = Math.min(90, Math.max(1, parseInt(new URL(url, 'http://x').searchParams.get('days') || '7', 10) || 7)); const out = {}; const now = new Date(); const modelNames = Object.keys(state.cfg.models || {}); if (days === 1) { for (const name of modelNames) { const mh = state.stats.hourly[name] || {}; const arr = []; for (let i2 = 23; i2 >= 0; i2--) { const hd = new Date(now.getTime() - i2 * 3600 * 1000); const hk = todayKey(hd) + ':' + String(hd.getHours()).padStart(2, '0'); const c = mh[hk]; arr.push({ date: String(hd.getHours()).padStart(2, '0') + ':00', tokens: c ? c.tokens : 0, hitRate: (c && (c.hit + c.miss) > 0) ? Math.round((c.hit / (c.hit + c.miss)) * 1000) / 10 : null }) } out[name] = arr } } else { for (const name of modelNames) { const md = state.stats.daily[name] || {}; const arr = []; for (let i2 = days - 1; i2 >= 0; i2--) { const d = new Date(now); d.setDate(d.getDate() - i2); const k = todayKey(d); const c = md[k]; arr.push({ date: k, tokens: c ? c.tokens : 0, hitRate: (c && (c.hit + c.miss) > 0) ? Math.round((c.hit / (c.hit + c.miss)) * 1000) / 10 : null }) } out[name] = arr } } sendJson(res, 200, { days, mode: days === 1 ? 'hourly' : 'daily', models: out }); return }
+      if (path === '/api/route-preview' && req.method === 'POST') {
+        if (!await requireAdmin(req, res)) return
+        const body = tryParse(await collectBody(req)) || {}
+        const model = String(body.model || '').trim()
+        if (!model) { sendJson(res, 400, { error: '缺少 model' }); return }
+        let hit
+        try { hit = state.router.resolve(model) } catch (e) { sendJson(res, 200, { ok: true, hit: { type: 'unknown', model, note: e.message } }); return }
+        const vms = state.cfg.virtualModels || []
+        if (hit.def.isVirtualModel) {
+          const items = hit.def.directory.map(e => {
+            const _m = state.cfg.models
+            const provs = (e.providers && e.providers.length ? e.providers : (_m && _m[e.model] ? [_m[e.model].provider, ...(_m[e.model].fallbacks || [])] : []))
+            return { model: e.model, mode: e.mode, providers: provs, limit: routeLimit(state, state.cfg, e.model, null) }
+          })
+          sendJson(res, 200, { ok: true, hit: { type: 'virtual', name: hit.def.name, directory: items, quota: hit.def.quota, dailyQuota: hit.def.dailyQuota, used: (state.stats.byModel[hit.def.name] || {}).tokens || 0, quotaState: virtualQuotaExceeded(state, hit.def) } }); return
+        }
+        if (hit.def.virtual) { sendJson(res, 200, { ok: true, hit: { type: 'defaults', name: hit.canonicalName, directory: state.cfg.defaults.directory || [] } }); return }
+        sendJson(res, 200, { ok: true, hit: { type: hit.known ? 'model' : 'unknown', name: hit.canonicalName, provider: hit.def.provider || null, note: hit.known ? null : (vms.length ? '将返回 404（已配置虚拟模型）' : '将走默认上游兜底') } }); return
+      }
       if (path === '/api/logs' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const lines = parseInt(new URL(url, 'http://x').searchParams.get('lines') || '200', 10) || 200; sendJson(res, 200, { lines: readLogTail(logFile(), lines) }); return }
       if (path === '/api/config/reload' && req.method === 'POST') { if (!await requireAdmin(req, res)) return; reloadConfig(state); sendJson(res, 200, { ok: true }); return }
       if (path === '/api/config/save' && req.method === 'POST') {
@@ -698,7 +795,7 @@ function makeHandler(state) {
           rewriteModel: (body && body.model) || null, // 「名字没对上」：响应 model 回写为客户端请求名
           onTokens: (n, usage) => {
             const total = (usage && typeof usage.total_tokens === 'number' && usage.total_tokens > 0) ? usage.total_tokens : n
-            if (total > 0) { agg(state, out.pid, 'tokens', total); const sm = out.serving || out.modelName; const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }; sg.tokens = (sg.tokens || 0) + total; tallyDaily(state, sm, total, 0, 0); tallyDialogue(state, out.dialogueId, total, 0, 0) }
+            if (total > 0) { agg(state, out.pid, 'tokens', total); const sm = out.serving || out.modelName; const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }; sg.tokens = (sg.tokens || 0) + total; tallyDaily(state, sm, total, 0, 0); tallyVirtual(state, out.modelName, out.serving, total); tallyDialogue(state, out.dialogueId, total, 0, 0) }
           },
           onUsage: (u) => { const c = cacheHitMiss(out.api, u); if (c.hit > 0 || c.miss > 0) { const sm = out.serving || out.modelName; noteCacheStat(state, sm, out.pid, c.hit, c.miss); tallyDaily(state, sm, 0, c.hit, c.miss); tallyDialogue(state, out.dialogueId, 0, c.hit, c.miss) } },
           onEnd: (info) => {
