@@ -535,7 +535,10 @@ function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
 }
 /* 虚拟模型管理器：折叠列表 + 展开编辑器（输入 oninput 直改 C 不重绘；结构变化才重绘，规避轮询打断输入） */
 const _vmOpen=new Set()
+const _vmKeyDraft={} // 独立 Key 输入草稿：key 值不经 C（直接提交 /api/keys），重绘时恢复草稿防丢字
 function renderVirtualModels(){
+  // 编辑中跳过重绘：轮询（3s）重建编辑器会导致输入闪烁/丢字；配置数据在轮询间不变，跳过安全（结构变化由用户操作主动触发重绘）
+  if(document.activeElement&&document.activeElement.closest&&document.activeElement.closest('.vmEdit'))return
   const box=$('#vmList');if(!box)return
   const list=C.virtualModels||[]
   const cnt=$('#vmCount');if(cnt)cnt.textContent=list.length+' 个'
@@ -560,7 +563,7 @@ function renderVirtualModels(){
       +'<div class="dirrow"><label>名称</label><input class="input" data-vrole="name" value="'+esc(v.name)+'" placeholder="唯一名，如 gate-a"></div>'
       +'<div class="dirrow"><label>加入已有模型</label><select class="select" data-vrole="vadd"><option value="">— 选择 —</option>'+(Object.keys(C.models).filter(n=>!(v.directory||[]).some(e=>e.model===n)).map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''))+'</select></div>'
       +'<div class="dirList">'+(dirRows||'<div class="dirEmpty">目录为空：从上方「加入已有模型」添加，首项即默认。</div>')+'</div>'
-      +'<div class="dirrow"><label>独立 Key</label><input class="input" type="password" data-vrole="vmkey" placeholder="'+(v.keySet?'已存储（输入新值=更换；清空后失焦=删除）':'未设置（回退全局 Key）')+'" style="flex:1"></div>'
+      +'<div class="dirrow"><label>独立 Key</label><input class="input" type="password" data-vrole="vmkey" value="'+esc(_vmKeyDraft[v.name]||'')+'" placeholder="'+(v.keySet?'已存储（输入新值=更换；清空后失焦=删除）':'未设置（回退全局 Key）')+'" style="flex:1"></div>'
       +'<div class="dirrow"><label>Key 过期</label><input class="input" type="datetime-local" data-vrole="exp" value="'+esc(v.expiresAt||'')+'" style="flex:1.2"><label style="flex:none">备注</label><input class="input" data-vrole="note" value="'+esc(v.note||'')+'" placeholder="备注" style="flex:1"></div>'
       +'<div class="dirrow"><label>额度/限流</label><input class="input" data-vrole="quota" value="'+(v.quota||0)+'" title="总额度 token（0=不限）" style="width:88px"><input class="input" data-vrole="dailyQuota" value="'+(v.dailyQuota||0)+'" title="日额度 token（0=不限）" style="width:88px"><input class="input" data-vrole="maxContext" value="'+(v.maxContext||0)+'" title="上下文上限（0=不限）" style="width:104px"><input class="input" data-vrole="maxConcurrent" value="'+(v.maxConcurrent||0)+'" title="并发（0=不限）" style="width:76px"><input class="input" data-vrole="qps" value="'+(v.qps||0)+'" title="QPS（0=不限）" style="width:66px"></div>'
       +'<div class="dirrow"><button class="mini" data-vrole="preview">🔍 试算路由</button><button class="mini del" data-vrole="vdel">删除</button><span class="vmHint">改动后点顶部「保存配置」生效</span></div>'
@@ -588,6 +591,7 @@ function bindVmEvents(box){
     const v=C.virtualModels[+edit.dataset.i];if(!v)return
     const role=t.dataset.vrole
     if(role==='providers'&&t.closest('.diritem')){v.directory[+t.closest('.diritem').dataset.di].providers=t.value.split(',').map(s=>s.trim()).filter(Boolean);markDirty()}
+    else if(role==='vmkey'){_vmKeyDraft[v.name]=t.value}
     else if(role==='exp'){v.expiresAt=t.value;markDirty()}
     else if(role==='note'){v.note=t.value;markDirty()}
     else if(['quota','dailyQuota','maxContext','maxConcurrent','qps'].includes(role)){v[role]=Math.max(0,Number(t.value)||0);markDirty()}
@@ -601,7 +605,7 @@ function bindVmEvents(box){
     else if(role==='mode'&&t.closest('.diritem')){v.directory[+t.closest('.diritem').dataset.di].mode=t.value;markDirty()}
     else if(role==='vmkey'){const val=t.value.trim();const r=await jpost('/api/keys',{id:'__mg_vm_'+v.name,key:val,version:ST.configVersion})
       if(r.status===409){if(confirm('配置已被他处更新，加载最新后请重设 Key。')){dirty=false;await pollStatus()}}
-      else if(r.ok){toast('独立 Key 已'+(val?'更新':'清除'),'ok');t.value='';pollStatus()}
+      else if(r.ok){toast('独立 Key 已'+(val?'更新':'清除'),'ok');delete _vmKeyDraft[v.name];t.value='';pollStatus()}
       else toast((r.d&&r.d.error)||'Key 保存失败','err')}
   }
 }
