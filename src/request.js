@@ -42,10 +42,15 @@ function single(provider, url, method, headers, bodyBuf, timeout) {
     const req = mod.request(reqOpts, (res) => {
       settled = true
       clearTimeout(firstByteTimer)
+      // 头到达后转入空闲检测（idleMs）：思考型上游首 token 前可静默数十秒，
+      // 沿用 connectMs 会把活连接误杀在 15s（connectMs 只该管建连阶段）
+      req.setTimeout(timeout.idleMs || 60000, () => req.destroy(Object.assign(new Error('upstream idle'), { code: 'ETIMEDOUT' })))
       resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, headers: res.headers, stream: res, retryAfter: parseRetryAfter(res.headers) })
     })
     const firstByteTimer = setTimeout(() => req.destroy(new Error('first-byte timeout')), timeout.firstByteMs)
-    req.setTimeout(timeout.connectMs, () => req.destroy(Object.assign(new Error('connect timeout'), { code: 'ETIMEDOUT' })))
+    // 建连+等响应头阶段：总时长由 firstByteTimer 墙钟兜底，socket 静默上限对齐 firstByteMs，
+    // 避免慢思考上游被更短的 connect 空闲定时器提前掐断
+    req.setTimeout(timeout.firstByteMs, () => req.destroy(Object.assign(new Error('connect timeout'), { code: 'ETIMEDOUT' })))
     req.on('error', (err) => {
       if (settled) return
       settled = true
@@ -76,7 +81,7 @@ async function settle(attempt, cfg, last) {
 export async function forward(provider, path, method, headers, bodyBuf, opts = {}, log) {
   const url = new URL(provider.baseUrl + (provider.pathPrefix || '') + path)
   const retry = Object.assign({ maxAttempts: 1, initialDelayMs: 500, maxDelayMs: 8000, jitter: 0.2 }, opts.retry)
-  const timeout = Object.assign({ connectMs: 10000, firstByteMs: 60000 }, opts.timeout)
+  const timeout = Object.assign({ connectMs: 10000, firstByteMs: 60000, idleMs: 60000 }, opts.timeout)
   const overallMs = timeout.overallMs || 0
   const t0 = Date.now()
 
