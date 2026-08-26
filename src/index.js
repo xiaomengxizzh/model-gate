@@ -8,10 +8,9 @@ import { createLogger } from './logger.js'
 import { forward, probe, probeModel, warm } from './request.js'
 import { adapterFor, cacheHitMiss } from './format.js'
 import { isStreamResponse, writeUpstreamHeaders, relayStream } from './sse.js'
+import { forwardChain, routeLimit, virtualQuotaExceeded } from './forward.js'
+import { todayKey } from './shared.js'
 
-const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-length','upgrade','keep-alive','te','trailer'])
-const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection'])
-const STREAM_DROP_THRESHOLD = 3 // 同一上游连续流式中断 >= 该值，后续请求绕开它（不被 markOk 重置）
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
 const ADMIN_PAGE = new URL('./admin.html', import.meta.url)
@@ -31,31 +30,6 @@ async function collectBody(stream, maxBytes = 64 * 1024 * 1024) {
 }
 
 // 上游偶发返回 gzip 响应却不带 content-encoding 头（如 opencodezen），会导致 usage 解析失败、统计断链
-const GZIP_MAGIC = Buffer.from([0x1f, 0x8b])
-function maybeGunzip(buf, contentEncoding) {
-  // 只要上游申报了 gzip 或魔数命中，就必须能解压成功；否则抛错让上层当作失败走 fallback，避免放行垃圾字节
-  const wants = /gzip/i.test(contentEncoding || '') || (buf && buf.length >= 2 && buf[0] === GZIP_MAGIC[0] && buf[1] === GZIP_MAGIC[1])
-  if (wants) return gunzipSync(buf)
-  return buf
-}
-
-// 转发头：剥离客户端授权/敏感头，统一由网关注入鉴权，防止绕过
-function buildHeaders(req, provider, bodyBuf, cfg) {
-  const headers = {}
-  for (const [k, v] of Object.entries(req.headers)) {
-    const lk = k.toLowerCase()
-    if (HOP_BY_HOP.has(lk) || STRIP_IN.has(lk)) continue
-    headers[k] = v
-  }
-  headers['user-agent'] = 'model-gateway/0.1'
-  if (!headers['accept']) headers['accept'] = 'application/json'
-  headers['accept-encoding'] = 'identity' // 请求上游返回明文，避免 gzip 导致响应体解析失败
-  if (provider.apiKey) headers['authorization'] = 'Bearer ' + provider.apiKey
-  const extra = Object.assign({}, (cfg.defaults || {}).extraHeaders, provider.extraHeaders)
-  for (const [k, v] of Object.entries(extra)) headers[k.toLowerCase()] = v
-  if (bodyBuf && bodyBuf.length) headers['content-length'] = bodyBuf.length
-  return headers
-}
 
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj)
@@ -64,6 +38,7 @@ function sendJson(res, status, obj) {
 }
 function tryParse(buf) { try { return JSON.parse(buf.toString('utf8')) } catch { return null } }
 
+function pct(arr, p) { if (!arr || !arr.length) return null; const a = [...arr].sort((x, y) => x - y); const i = Math.min(a.length - 1, Math.max(0, Math.ceil(a.length * p / 100) - 1)); return Math.round(a[i]) }
 function safeTokenCmp(a, b) {
   if (!a || !b || a.length !== b.length) return false
   let d = 0
@@ -104,37 +79,17 @@ function markFail(state, pid, circuit) {
   else h.state = 'half'
 }
 function effState(h, now) { return (h.state === 'open' && h.openUntil <= now) ? 'half' : h.state }
-function maxConcur(cfg) { return (cfg.defaults && cfg.defaults.concurrency && cfg.defaults.concurrency.maxPerProvider) || 8 }
-function throttleOf(state, pid) {
-  if (!state.throttle[pid]) state.throttle[pid] = { max: maxConcur(state.cfg), inFlight: 0, wait: [], rateUntil: 0 }
-  return state.throttle[pid]
+const STATS_RETENTION_DAYS = 90 // stats 历史保留窗口（天）：daily/hourly 超窗键在每次落盘时清理，防 stats.json 无界膨胀
+function pruneStatsHistory(state) {
+  const cutoff = todayKey(new Date(Date.now() - STATS_RETENTION_DAYS * 86400000))
+  for (const bucket of [state.stats.daily, state.stats.hourly]) {
+    for (const model of Object.keys(bucket || {})) {
+      const days = bucket[model]
+      for (const k of Object.keys(days)) if (k.split(':')[0] < cutoff) delete days[k]
+      if (!Object.keys(days).length) delete bucket[model]
+    }
+  }
 }
-// 每 provider 并发信号量 + 429 排队（rateUntil 内新请求等待）
-async function acquireProvider(state, pid, cfg) {
-  const th = throttleOf(state, pid)
-  const r = th.rateUntil
-  if (r > Date.now()) await new Promise((s) => setTimeout(s, Math.min(r - Date.now(), 60000)))
-  if (th.inFlight >= th.max) await new Promise((s) => th.wait.push(s))
-  th.inFlight += 1
-  return () => { th.inFlight -= 1; if (th.wait.length) (th.wait.shift())() }
-}
-function pct(arr, p) { if (!arr || !arr.length) return null; const a = [...arr].sort((x, y) => x - y); const i = Math.min(a.length - 1, Math.max(0, Math.ceil(a.length * p / 100) - 1)); return Math.round(a[i]) }
-function rateWait(state, name, qps) {
-  const now = Date.now()
-  const cap = Math.max(1, Math.ceil(qps))
-  let q = state.qpsToken[name]
-  if (!q) q = state.qpsToken[name] = { tokens: cap, last: now }
-  const refill = (now - q.last) * qps / 1000
-  q.tokens = Math.min(cap, q.tokens + refill)
-  q.last = now
-  if (q.tokens >= 1) { q.tokens -= 1; return }
-  const need = 1 - q.tokens
-  q.tokens = 0
-  return new Promise((res) => setTimeout(res, Math.max(0, Math.round((need / qps) * 1000))))
-}
-function modelThrottleOf(state, name, max) { if (!state.throttleModel[name]) state.throttleModel[name] = { max, inFlight: 0, wait: [] }; return state.throttleModel[name] }
-async function acquireSem(th) { if (th.inFlight >= th.max) await new Promise((s) => th.wait.push(s)); th.inFlight += 1; return () => { th.inFlight -= 1; if (th.wait.length) (th.wait.shift())() } }
-function todayKey(d) { const x = d || new Date(); return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0') }
 function tallyDaily(state, modelName, tokens, hit, miss) { if (!modelName) return; const now = new Date(); const k = todayKey(now); const m = state.stats.daily[modelName] || (state.stats.daily[modelName] = {}); const c = m[k] || (m[k] = { tokens: 0, hit: 0, miss: 0 }); c.tokens += tokens || 0; c.hit += hit || 0; c.miss += miss || 0; const hk = k + ':' + String(now.getHours()).padStart(2, '0'); const hm = state.stats.hourly[modelName] || (state.stats.hourly[modelName] = {}); const h = hm[hk] || (hm[hk] = { tokens: 0, hit: 0, miss: 0 }); h.tokens += tokens || 0; h.hit += hit || 0; h.miss += miss || 0 }
 // 虚拟模型入口账本：serving 与入口名不同且入口是虚拟模型时，同步计入虚拟名（供其自身 quota/dailyQuota 检查）
 function tallyVirtual(state, modelName, serving, tokens) {
@@ -145,41 +100,6 @@ function tallyVirtual(state, modelName, serving, tokens) {
   tallyDaily(state, modelName, tokens, 0, 0)
 }
 function agg(state, pid, field, delta) { if (state.stats.byProvider[pid]) state.stats.byProvider[pid][field] += delta; state.stats.global[field] += delta }
-// 粗略估计 prompt 的 token 数（用于 maxContext 判断）：中文/全角按 1 字≈1 token，其它按约 4 字符≈1 token
-function estPromptTokens(body) {
-  let t = 0
-  for (const m of (body && body.messages) || []) {
-    const c = m && m.content
-    const parts = typeof c === 'string' ? [c] : (Array.isArray(c) ? c.map((x) => (x && (x.text || x.content || '')) || '') : [])
-    for (const s of parts) {
-      for (let i = 0; i < s.length; i++) {
-        const ch = s.codePointAt(i)
-        if ((ch >= 0x3400 && ch <= 0x4DBF) || (ch >= 0x4E00 && ch <= 0x9FFF) || (ch >= 0xFF00 && ch <= 0xFFEF)) t += 1
-        else t += 0.25
-        if (ch > 0xFFFF) i++
-      }
-    }
-  }
-  return Math.ceil(t) + 8
-}
-// 模型额度/上下文判定：命中则返回原因，否则 null（超限的模型在路由中被跳过并切到下一模型）
-// 虚拟模型入口额度检查：账本按虚拟名独立记账（目录内各模型消耗同时计入），超限返回文案
-function virtualQuotaExceeded(state, vmDef) {
-  const used = (state.stats.byModel[vmDef.name] && state.stats.byModel[vmDef.name].tokens) || 0
-  if (vmDef.quota > 0 && used >= vmDef.quota) return '总额度已用尽'
-  const dk = state.stats.daily[vmDef.name] && state.stats.daily[vmDef.name][todayKey()]
-  if (vmDef.dailyQuota > 0 && dk && (dk.tokens || 0) >= vmDef.dailyQuota) return '今日额度已用尽'
-  return null
-}
-
-function routeLimit(state, cfg, model, body) {
-  if (!model) return null
-  const md = cfg.models && cfg.models[model]; if (!md) return null
-  if (md.quota > 0 && ((state.stats.byModel[model] && state.stats.byModel[model].tokens) || 0) >= md.quota) return '总额度已用尽'
-  if (md.dailyQuota > 0 && ((state.stats.daily[model] && state.stats.daily[model][todayKey()] && state.stats.daily[model][todayKey()].tokens) || 0) >= md.dailyQuota) return '今日额度已用尽'
-  if (md.maxContext > 0 && body && body.messages && estPromptTokens(body) >= md.maxContext) return '超出上下文上限'
-  return null
-}
 
 // ── 缓存降碎片化（A2 会话/上游亲和 + B5 命中率路由）──
 // 记录某模型最近一次成功使用哪个上游，回填到状态，供前端展示。
@@ -193,18 +113,6 @@ function noteCacheStat(state, model, pid, hit, miss) {
 }
 // 候选上游排序：优先"上次成功"的亲和上游（保持同一上游复用其厂商缓存），
 // 其次按近期缓存命中率从高到低，其余保持原顺序。
-function orderCandidates(state, model, providers) {
-  const rate = (pid) => { const c = state.cacheStat && state.cacheStat[model + '\u0000' + pid]; return (c && (c.hit + c.miss) > 0) ? c.hit / (c.hit + c.miss) : null }
-  const fav = state.affinity && state.affinity[model]
-  return providers.slice().sort((a, b) => {
-    if (fav) { if (a === fav) return -1; if (b === fav) return 1 }
-    const sa = rate(a), sb = rate(b)
-    if (sa != null && sb != null) return sb - sa
-    if (sa != null) return -1
-    if (sb != null) return 1
-    return 0
-  })
-}
 
 function buildStatus(state) {
   const now = Date.now()
@@ -416,19 +324,7 @@ async function doProbeModel(state, model) {
 }
 
 // ── 按对话（会话）统计：会话 ID 优先，无 ID 按时间间隔切分兜底 ──
-const DIALOGUE_GAP_MS = 300000 // 无会话 ID 时，间隔超过 5 分钟视为新对话
 // 解析本次请求归属的对话 ID：优先请求头 X-Conversation-Id / X-Session-Id，其次 body session_id/conversation_id；
-// 都没有则复用「当前无 ID 对话」（间隔 ≤ 阈值），否则新建 conv-<时间戳> 对话。
-function resolveDialogue(state, req, body) {
-  const h = req.headers || {}
-  const named = h['x-conversation-id'] || h['x-session-id'] || (body && (body.session_id || body.conversation_id))
-  if (named && String(named).trim()) return String(named).trim()
-  const now = Date.now()
-  if (state.dUnnamed && (now - state.dUnnamed.lastAt) <= DIALOGUE_GAP_MS) return state.dUnnamed.id
-  const id = 'conv-' + now
-  state.dUnnamed = state.dialogue[id] = { id, requests: 0, tokens: 0, hit: 0, miss: 0, startAt: now, lastAt: now, named: false }
-  return id
-}
 function tallyDialogue(state, id, tokens, hit, miss) {
   if (!id) return
   const now = Date.now()
@@ -447,206 +343,6 @@ function tallyDialogue(state, id, tokens, hit, miss) {
   }
 }
 
-// 转发：按路由序列（本模型 + fallbackModels 多上游）尝试 + 熔断，跨模型换名改写
-async function forwardChain(state, req, url, path, method, bodyBuf, body, log) {
-  const cfg = state.cfg
-  let routes = []
-  let maxModel = 0
-  let qps = 0
-  let injectedEffort = false
-  let requestModel = null
-  const dir = (cfg.defaults && cfg.defaults.directory) || []
-  const dialogueId = resolveDialogue(state, req, body)
-  if (body && body.model) {
-    const hit = state.router.resolve(body.model)
-    // 决策 1：已配置虚拟模型后，未知名不再静默走 defaults 链（防 key 隔离被无感绕过），明确 404
-    if (!hit.known && (state.cfg.virtualModels || []).length) {
-      return { kind: 'json', status: 404, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '未知模型名: ' + body.model + '。可用虚拟模型见 GET /v1/models', type: 'unknown_model' } })) }
-    }
-    requestModel = hit.canonicalName
-    maxModel = hit.def.maxConcurrent || 0
-    qps = hit.def.qps || 0
-    // 思考强度（LiteLLM 风格）：每个模型可配允许档位列表，客户端传的档位不在列表内则本地直接拒绝，不放给上游
-    const opts = hit.def.effortOptions
-    if (opts && opts.length && body.reasoning_effort !== undefined && body.reasoning_effort !== null && !opts.includes(String(body.reasoning_effort))) {
-      return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'reasoning_effort 不支持 ' + body.reasoning_effort + '（该模型允许：' + hit.def.effortOptions.join(', ') + '）', type: 'UnsupportedParamsError' } })) }
-    }
-    // 模型配置默认值，客户端未指定时才注入（客户端自带优先）
-    if (hit.def.reasoning && body.reasoning_effort === undefined) { body.reasoning_effort = hit.def.reasoning; injectedEffort = true }
-    if (hit.def.isVirtualModel) {
-      // 用自身 directory 快照建 routes（providers 空时回退模型默认上游+fallbacks，与 defaults 分支同构）
-      for (const e of hit.def.directory) {
-        if (!e || typeof e.model !== 'string' || !e.model) continue
-        const _m = cfg.models && cfg.models[e.model]
-        routes.push({ model: e.model, mode: e.mode, providers: (e.providers && e.providers.length ? e.providers.filter(Boolean) : (_m ? [_m.provider, ...(_m.fallbacks || [])].filter(Boolean) : [])) })
-      }
-      if (!routes.length) return { kind: 'json', status: 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '虚拟模型 ' + hit.def.name + ' 的目录无可路由模型', type: 'no_route' } })) }
-      // 决策 3 连锁：虚拟模型透传思考强度，但用链首真实模型自身的 effortOptions 补本地校验（廉价参数检查先行于额度判断）
-      const d0vm = routes[0] && cfg.models && cfg.models[routes[0].model]
-      if (d0vm && d0vm.effortOptions && d0vm.effortOptions.length && body.reasoning_effort !== undefined && body.reasoning_effort !== null && !d0vm.effortOptions.includes(String(body.reasoning_effort))) {
-        return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'reasoning_effort 不支持 ' + body.reasoning_effort + '（' + routes[0].model + ' 允许：' + d0vm.effortOptions.join(', ') + '）', type: 'UnsupportedParamsError' } })) }
-      }
-      // 入口上下文约束（虚拟模型自身的 maxContext，区别于目录内各模型自己的限制）
-      if (hit.def.maxContext > 0 && body.messages && estPromptTokens(body) >= hit.def.maxContext) {
-        return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '超出虚拟模型 ' + hit.def.name + ' 的上下文上限 (' + hit.def.maxContext + ')', type: 'context_limit' } })) }
-      }
-      // 虚拟模型自身额度 = 入口总额度（目录内各模型消耗计入虚拟名账本）：超限拒绝服务，而非切目录（目录切换是模型级故障语义）
-      const vq = virtualQuotaExceeded(state, hit.def)
-      if (vq) return { kind: 'json', status: 429, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '虚拟模型 ' + hit.def.name + ' ' + vq, type: 'quota_exceeded' } })) }
-    } else if (hit.def.virtual) {
-      // 虚拟共用模型名：等价「未指定模型」，走 defaults.directory 默认链（首项即真实默认模型），
-      // 把真实模型名发给上游；否则会把虚拟名透传上去导致 "Model <虚拟名> is not supported"
-      if (dir.length) {
-        for (const e of dir) { if (e && typeof e.model === 'string' && e.model) { const _m = cfg.models && cfg.models[e.model]; routes.push({ model: e.model, mode: (e.mode === 'onFail' ? 'onFail' : 'afterAll'), providers: (e.providers && e.providers.length ? e.providers.filter(Boolean) : (_m ? [ _m.provider, ...(_m.fallbacks || []) ].filter(Boolean) : [])) }) } }
-        const d0 = routes[0] && cfg.models && cfg.models[routes[0].model]
-        if (d0) { maxModel = d0.maxConcurrent || 0; qps = d0.qps || 0 }
-      } else {
-        routes.push({ model: null, providers: [hit.def.provider].filter(Boolean) })
-        if (!(cfg.defaults && cfg.defaults.provider)) return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '未指定默认上游（请配置 defaults.provider 或 defaults.directory）', type: 'missing_model' } })) }
-      }
-    } else {
-      // 路由序列：先本模型自身上游，再按 defaults.directory 顺序做跨模型兜底（首个为默认）
-      routes.push({ model: requestModel, mode: 'afterAll', providers: [hit.def.provider, ...(hit.def.fallbacks || [])].filter(Boolean) })
-      for (const e of dir) {
-        if (!e || typeof e.model !== 'string' || !e.model || e.model === requestModel) continue
-        if (routes.some((r) => r.model === e.model)) continue
-        const _m = cfg.models && cfg.models[e.model]
-        routes.push({ model: e.model, mode: (e.mode === 'onFail' ? 'onFail' : 'afterAll'), providers: (e.providers && e.providers.length ? e.providers.filter(Boolean) : (_m ? [ _m.provider, ...(_m.fallbacks || []) ].filter(Boolean) : [])) })
-      }
-    }
-  } else {
-    // 默认路径：直接走 defaults.directory（首项即默认模型），否则用 defaults.provider
-    if (dir.length) {
-      for (const e of dir) { if (e && typeof e.model === 'string' && e.model) { const _m = cfg.models && cfg.models[e.model]; routes.push({ model: e.model, mode: (e.mode === 'onFail' ? 'onFail' : 'afterAll'), providers: (e.providers && e.providers.length ? e.providers.filter(Boolean) : (_m ? [ _m.provider, ...(_m.fallbacks || []) ].filter(Boolean) : [])) }) } }
-      const d0 = routes[0] && cfg.models && cfg.models[routes[0].model]
-      if (d0) { maxModel = d0.maxConcurrent || 0; qps = d0.qps || 0 }
-    } else {
-      routes.push({ model: null, providers: [cfg.defaults && cfg.defaults.provider].filter(Boolean) })
-      if (!(cfg.defaults && cfg.defaults.provider)) return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '\u672a\u6307\u5b9a model\uff0c\u4e14\u672a\u8bbe\u7f6e\u9ed8\u8ba4\u4e0a\u6e38\uff08\u8bf7\u5728\u9762\u677f\u300c\u9ed8\u8ba4\u4e0a\u6e38\u300d\u4e2d\u9009\u62e9\uff09', type: 'missing_model' } })) }
-    }
-  }
-  const started = Date.now()
-  const modelName = (body && body.model) || (routes[0] && routes[0].model) || (cfg.defaults && cfg.defaults.provider) || (routes[0] && routes[0].providers && routes[0].providers[0]) || null
-  const bm = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
-
-  let releaseModel = null
-  if (maxModel > 0) releaseModel = await acquireSem(modelThrottleOf(state, modelName, maxModel))
-  if (qps > 0) await rateWait(state, modelName, qps)
-  let lastErr = null
-  let tried = false
-  const loopMs = (cfg.defaults && cfg.defaults.timeout && cfg.defaults.timeout.loopMs) || 120000
-  const loopDeadline = Date.now() + loopMs
-  const _sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-  const chainModels = []            // 实际尝试过的 serving 模型链（跨模型兜底/循环标记，供日志/面板查看）
-  try {
-  // 循环兜底：整条路由链(a→b→c)一轮失败后回到队首反复尝试，直到成功 / 业务4xx / 整体超时(loopMs)
-  while (Date.now() < loopDeadline) {
-    let cycleTried = false
-    for (const route of routes) {
-      const serving = route.model
-    const lim = routeLimit(state, cfg, serving, body)
-    if (lim) { log && log.warn('skip model (' + lim + ')', serving || '-', '-> next'); continue } // 额度/上下文超限：自动断连并按目录切换到下一模型
-    const provs = (route.mode === 'onFail') ? route.providers.slice(0, 1) : orderCandidates(state, route.model, route.providers)
-    for (const pid of provs) {
-    if (!pid || !cfg.providers[pid]) continue
-    const prov = buildProvider(cfg, pid)
-    const h = ensureHst(state, pid)
-    if (!healthy(h, Date.now())) { markFail(state, pid, prov.circuit); continue } // 熔断中：跳过，视为失败推进
-    if ((h.streamDrops || 0) >= STREAM_DROP_THRESHOLD) { log && log.warn('skip provider (流中断过多，绕开)', pid); markFail(state, pid, prov.circuit); continue } // 连续流式中断过多：绕开该上游，走其他上游/模型
-    if (prov._def.apiKeyEnv && !prov.keyOk) { log && log.warn('skip provider (no key)', pid); continue }
-    tried = true
-    cycleTried = true
-    if (chainModels[chainModels.length - 1] !== serving) chainModels.push(serving)
-    agg(state, pid, 'requests', 1); state.st.counters.requests += 1; bm.requests += 1
-    // 跨模型兜底：把发给上游的 model 名改写为该兜底模型名
-    const routeBody = (route.model && body && route.model !== body.model) ? Object.assign({}, body, { model: route.model }) : body
-    let turl = url, tbuf = bodyBuf, api = prov.api
-    let degraded = false
-    if (api !== 'openai' && routeBody) { const ad = adapterFor(api); const r = ad.build(routeBody); if ((routeBody.tools || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true } turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body)) }
-    else if ((injectedEffort || routeBody !== body) && routeBody) tbuf = Buffer.from(JSON.stringify(routeBody))
-    const headers = buildHeaders(req, prov, tbuf, cfg)
-    const release = await acquireProvider(state, pid, cfg)
-    const attemptStart = Date.now()
-    try {
-      const result = await forward(prov, turl, req.method, headers, tbuf, cfg.defaults || {}, log)
-      const latency = Date.now() - attemptStart
-      const o = ensureSt(state, pid)
-      o.latencySum += latency; o.latencyCount += 1
-      o.lats.push(latency); if (o.lats.length > 200) o.lats.shift()
-      state.stats.global.latencySum += latency; state.stats.global.confirmed += 1
-      state.stats.global.lats.push(latency); if (state.stats.global.lats.length > 200) state.stats.global.lats.shift()
-      bm.latencySum = (bm.latencySum || 0) + latency; bm.latencyCount = (bm.latencyCount || 0) + 1
-      agg(state, pid, 'retries', result.retries || 0)
-      if (result.ok) {
-        markOk(state, pid)
-        noteAffinity(state, serving || route.model, pid) // 记录本次成功上游，供后续请求保持亲和、复用其缓存
-        if (isStreamResponse(result)) {
-          const reconnector = async () => {
-            const again = await forward(prov, turl, req.method, headers, tbuf, cfg.defaults || {}, log)
-            if (!again.ok) throw new Error('reconnect status ' + again.status)
-            return again.stream
-          }
-          return { kind: 'stream', res: result, pid, modelName, serving, api, reconnect: reconnector, dialogueId, chain: chainModels.join('>') }
-        }
-        let out = await collectBody(result.stream)
-        out = maybeGunzip(out, result.headers && result.headers['content-encoding'])
-        const parsed = tryParse(out)
-        const usage = parsed && parsed.usage
-        if (usage) {
-          const c = cacheHitMiss(api, usage)
-          const hit = c.hit, miss = c.miss
-          noteCacheStat(state, serving || modelName, pid, hit, miss) // 按(模型,上游)记录缓存命中，供命中率路由与趋势告警使用
-          agg(state, pid, 'tokens', usage.total_tokens || 0); state.stats.global.tokens += usage.total_tokens || 0
-          // 按"实际响应的模型"累计其额度用量（日额度 + 累计额度）
-          const sg = state.stats.byModel[serving || modelName] = state.stats.byModel[serving || modelName] || { requests: 0, errors: 0 }
-          sg.tokens = (sg.tokens || 0) + (usage.total_tokens || 0)
-          tallyDaily(state, serving || modelName, usage.total_tokens || 0, hit, miss)
-          tallyVirtual(state, modelName, serving, usage.total_tokens || 0)
-          tallyDialogue(state, dialogueId, usage.total_tokens || 0, hit, miss)
-        }
-        if (api !== 'openai') { const p = tryParse(out); if (p) { let nb; try { nb = Buffer.from(JSON.stringify(adapterFor(api).fromUpstream(p))) } catch { nb = null } if (nb) out = nb } }
-        // 「名字没对上」加固：跨模型兜底改写请求 model 后，响应 model 回写为客户端请求名，避免客户端续写/统计错位
-        if (body && body.model && route.model && route.model !== body.model) {
-          const p2 = tryParse(out)
-          if (p2 && p2.model) { p2.model = body.model; out = Buffer.from(JSON.stringify(p2)) }
-        }
-        return { kind: 'json', status: result.status, contentType: 'application/json', body: out, pid, modelName, serving, asSSE: degraded || undefined, dialogueId, chain: chainModels.join('>') }
-      }
-      // 非重试错误码（4xx）：业务问题，不熔断、不 fallback，直接返回
-      markOk(state, pid)
-      // 3xx 重定向对 Chat 端点属于异常：不跟随、不裸透传，明确转 502，避免客户端误跟随或解析错乱
-      if (result.status >= 300 && result.status < 400) return { kind: 'json', status: 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'upstream returned unexpected redirect (' + result.status + ')', type: 'upstream_error', status: result.status } })), pid, modelName, chain: chainModels.join('>') }
-      const out = await collectBody(result.stream)
-      if (out.length) return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: out, pid, modelName, chain: chainModels.join('>') }
-      return { kind: 'json', status: result.status || 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'gateway upstream error', type: 'upstream_error', status: result.status } })), pid, modelName }
-    } catch (err) {
-      const latency = Date.now() - attemptStart
-      const o = ensureSt(state, pid)
-      o.latencySum += latency; o.latencyCount += 1
-      o.lats.push(latency); if (o.lats.length > 200) o.lats.shift()
-      state.stats.global.latencySum += latency; state.stats.global.confirmed += 1
-      state.stats.global.lats.push(latency); if (state.stats.global.lats.length > 200) state.stats.global.lats.shift()
-      bm.latencySum = (bm.latencySum || 0) + latency; bm.latencyCount = (bm.latencyCount || 0) + 1
-      agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
-      agg(state, pid, 'retries', err.retries || 0)
-      if (err.status === 429) { const th = throttleOf(state, pid); th.rateUntil = Date.now() + (err.retryAfter || 3000) }
-      markFail(state, pid, prov && prov.circuit)
-      lastErr = err
-      log && log.warn('provider failed', pid, err.message, '-> next fallback')
-    } finally {
-      release()
-    }
-    } // for pid
-  } // for route
-  if (!cycleTried) break // 整轮没有任何上游被真正尝试（全熔断/无 key/全额度跳过）：再循环无意义，直接收尾
-  await _sleep(300)      // 一轮全败后回到队首前稍停，避免空转打爆上游
-  } // while() 有界循环兜底：整条链(a→b→c)失败后回到 a 继续，直到成功 / 业务4xx / 整体超时 / 全部熔断
-  if (!tried) return { kind: 'json', status: 502, contentType: 'application/json', chain: chainModels.join('>'), body: Buffer.from(JSON.stringify({ error: { message: lastErr ? lastErr.message : 'no usable provider (无可用上游：可能未配 Key 或全部熔断)', type: 'no_provider' } })) }
-  return { kind: 'json', status: 502, contentType: 'application/json', chain: chainModels.join('>'), body: Buffer.from(JSON.stringify({ error: { message: lastErr && lastErr.message ? (lastErr.message + '（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）') : 'all providers failed（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）', type: 'all_providers_failed' } })) }
-  } finally {
-    if (releaseModel) releaseModel()
-  }
-}
 function hardenKeyFile(path) {
   if (!existsSync(path)) return
   try {
@@ -664,6 +360,7 @@ function keysFileEncrypted(path) { try { return readFileSync(path, 'utf8').trimS
 // 数据面客户端 Key：环境变量优先，其次加密 keys 库（__mg_client），最后兼容旧 defaults.clientKey
 function currentClientKey(state) { return process.env.MG_CLIENT_KEY || (state.cfg._keys && state.cfg._keys.__mg_client) || (state.cfg.defaults && state.cfg.defaults.clientKey) || '' }
 
+const FWD_DEPS = { ensureHst, markFail, markOk, healthy, effState: (h, now) => (h.state === 'open' && h.openUntil <= now) ? 'half' : h.state, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tryParse, collectBody }
 function makeHandler(state) {
   const log = state.log
   const logFile = () => state.cfg.server && state.cfg.server.logFile
@@ -807,7 +504,7 @@ function makeHandler(state) {
       // 入口路径别名：把不带 /v1 的 Chat 兼容路径规范化为 /v1/chat/completions，使 base URL 填 http://127.0.0.1:8787 也被正确代理
       const fPath = (isChat && path !== '/v1/chat/completions') ? '/v1/chat/completions' : path
       const fUrl = (fPath === path) ? url : (fPath + url.slice(path.length))
-      const out = await forwardChain(state, req, fUrl, fPath, req.method, bodyBuf, body, log)
+      const out = await forwardChain(FWD_DEPS, state, req, fUrl, fPath, req.method, bodyBuf, body, log)
       // 请求级日志：记录每次数据面请求的请求模型/实际服务模型/上游与结果，便于定位空响应与连接问题（不含消息正文/密钥）
       const reqModel = (body && body.model) || '-'
       const _chain = (n) => n || ''
@@ -905,7 +602,7 @@ export function start(opts = {}) {
     stats: { global: { requests:0, errors:0, retries:0, interrupts:0, tokens:0, latencySum:0, confirmed:0, lats: [], latTrend: [] }, byProvider: pids, byModel: {}, daily: {}, hourly: {} },
   }
   try { const _sf = state.paths.stats; const _j = existsSync(_sf) ? JSON.parse(readFileSync(_sf, 'utf8') || '{}') : {}; state.stats.daily = Object.assign({}, state.stats.daily, _j.daily || {}); state.stats.hourly = Object.assign({}, state.stats.hourly, _j.hourly || {}); for (const [n, t] of Object.entries(_j.byModel || {})) { state.stats.byModel[n] = Object.assign(state.stats.byModel[n] || { requests: 0, errors: 0 }, { tokens: (t && t.tokens) || 0 }) }; const _dlg = _j.dialogue || {}; for (const k of Object.keys(_dlg)) state.dialogue[k] = _dlg[k]; let _u = null; for (const k of Object.keys(state.dialogue)) { if (k.startsWith('conv-') && (!_u || state.dialogue[k].lastAt > _u.lastAt)) _u = state.dialogue[k] } state.dUnnamed = _u || null; const _g = _j.global || {}; for (const k of ['requests','errors','retries','interrupts','tokens','latencySum','confirmed']) if (typeof _g[k] === 'number') state.stats.global[k] = _g[k]; if (Array.isArray(_g.lats)) state.stats.global.lats = _g.lats; if (Array.isArray(_g.latTrend)) state.stats.global.latTrend = _g.latTrend; for (const [pid, po] of Object.entries(_j.byProvider || {})) { const o = ensureSt(state, pid); for (const k of ['requests','errors','retries','latencySum','latencyCount','tokens']) if (typeof po[k] === 'number') o[k] = po[k]; if (Array.isArray(po.lats)) o.lats = po.lats; if (po.probe) o.probe = po.probe } } catch { /* 统计文件缺失/损坏则从空开始 */ }
-  setInterval(() => { try { const q = {}; for (const [n, m] of Object.entries(state.stats.byModel || {})) q[n] = { tokens: m.tokens || 0 }; const g = state.stats.global || {}; const globalP = { requests: g.requests||0, errors: g.errors||0, retries: g.retries||0, interrupts: g.interrupts||0, tokens: g.tokens||0, latencySum: g.latencySum||0, confirmed: g.confirmed||0, lats: g.lats||[], latTrend: g.latTrend||[] }; const provP = {}; for (const [pid, o] of Object.entries(state.stats.byProvider || {})) provP[pid] = { requests: o.requests||0, errors: o.errors||0, retries: o.retries||0, latencySum: o.latencySum||0, latencyCount: o.latencyCount||0, tokens: o.tokens||0, lats: o.lats||[], probe: o.probe||null }; writeFileSync(state.paths.stats, JSON.stringify({ daily: state.stats.daily, hourly: state.stats.hourly, byModel: q, dialogue: state.dialogue, global: globalP, byProvider: provP })) } catch {} }, 30000).unref()
+  setInterval(() => { try { pruneStatsHistory(state); const q = {}; for (const [n, m] of Object.entries(state.stats.byModel || {})) q[n] = { tokens: m.tokens || 0 }; const g = state.stats.global || {}; const globalP = { requests: g.requests||0, errors: g.errors||0, retries: g.retries||0, interrupts: g.interrupts||0, tokens: g.tokens||0, latencySum: g.latencySum||0, confirmed: g.confirmed||0, lats: g.lats||[], latTrend: g.latTrend||[] }; const provP = {}; for (const [pid, o] of Object.entries(state.stats.byProvider || {})) provP[pid] = { requests: o.requests||0, errors: o.errors||0, retries: o.retries||0, latencySum: o.latencySum||0, latencyCount: o.latencyCount||0, tokens: o.tokens||0, lats: o.lats||[], probe: o.probe||null }; writeFileSync(state.paths.stats, JSON.stringify({ daily: state.stats.daily, hourly: state.stats.hourly, byModel: q, dialogue: state.dialogue, global: globalP, byProvider: provP })) } catch {} }, 30000).unref()
   setInterval(() => { const l = state.stats.global.lats; const avg = (l && l.length) ? Math.round(l.reduce((a, b) => a + b, 0) / l.length) : 0; const tr = state.stats.global.latTrend; tr.push({ t: Date.now(), v: avg }); if (tr.length > 80) tr.shift() }, 10000).unref()
   // B4 主动缓存预热：按 defaults.preheat 周期向模型上游发送带长 system 前缀的最小请求，保持厂商 prefix cache 存活
   ;(() => { const lastWarm = {}; setInterval(async () => {
