@@ -152,8 +152,19 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     if (opts && opts.length && body.reasoning_effort !== undefined && body.reasoning_effort !== null && !opts.includes(String(body.reasoning_effort))) {
       return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'reasoning_effort 不支持 ' + body.reasoning_effort + '（该模型允许：' + hit.def.effortOptions.join(', ') + '）', type: 'UnsupportedParamsError' } })) }
     }
-    // 模型配置默认值，客户端未指定时才注入（客户端自带优先）
-    if (hit.def.reasoning && body.reasoning_effort === undefined) { body.reasoning_effort = hit.def.reasoning; injectedEffort = true }
+    // 思考强度参数格式（可选，models.<名>.effortFormat）：
+    //   reasoning_effort（默认）：OpenAI 风格字符串，DeepSeek/OpenAI 系；
+    //   thinking：MiniMax 风格对象 { type }，如 MiniMax-M3 的 thinking:{"type":"adaptive"}。
+    // 客户端入口统一为 reasoning_effort，网关按格式转换；thinking 格式下删除 reasoning_effort 避免上游混淆。
+    const effFmt = hit.def.effortFormat || 'reasoning_effort'
+    const effVal = body.reasoning_effort
+    if (effFmt === 'thinking') {
+      const val = (effVal !== undefined && effVal !== null) ? String(effVal) : (hit.def.reasoning || '')
+      if (val) { body.thinking = { type: val }; delete body.reasoning_effort; injectedEffort = true }
+    } else if (hit.def.reasoning && effVal === undefined) {
+      // 模型配置默认值，客户端未指定时才注入（客户端自带优先）
+      body.reasoning_effort = hit.def.reasoning; injectedEffort = true
+    }
     if (hit.def.isVirtualModel) {
       // 用自身 directory 快照建 routes（providers 空时回退模型默认上游+fallbacks，与 defaults 分支同构）
       for (const e of hit.def.directory) {
@@ -166,6 +177,11 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       const d0vm = routes[0] && cfg.models && cfg.models[routes[0].model]
       if (d0vm && d0vm.effortOptions && d0vm.effortOptions.length && body.reasoning_effort !== undefined && body.reasoning_effort !== null && !d0vm.effortOptions.includes(String(body.reasoning_effort))) {
         return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'reasoning_effort 不支持 ' + body.reasoning_effort + '（' + routes[0].model + ' 允许：' + d0vm.effortOptions.join(', ') + '）', type: 'UnsupportedParamsError' } })) }
+      }
+      // 思考强度格式透传链首真实模型：链首是 thinking 格式（如 MiniMax-M3）时，把 reasoning_effort 入口转为 thinking 对象注入
+      if (d0vm && (d0vm.effortFormat || '') === 'thinking') {
+        const vmVal = (body.reasoning_effort !== undefined && body.reasoning_effort !== null) ? String(body.reasoning_effort) : (d0vm.reasoning || '')
+        if (vmVal) { body.thinking = { type: vmVal }; delete body.reasoning_effort; injectedEffort = true }
       }
       // 入口上下文约束（虚拟模型自身的 maxContext，区别于目录内各模型自己的限制）
       if (hit.def.maxContext > 0 && body.messages && estPromptTokens(body) >= hit.def.maxContext) {
@@ -181,6 +197,11 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         for (const e of dir) { if (e && typeof e.model === 'string' && e.model) { const _m = cfg.models && cfg.models[e.model]; routes.push({ model: e.model, mode: (e.mode === 'onFail' ? 'onFail' : 'afterAll'), providers: (e.providers && e.providers.length ? e.providers.filter(Boolean) : (_m ? [ _m.provider, ...(_m.fallbacks || []) ].filter(Boolean) : [])) }) } }
         const d0 = routes[0] && cfg.models && cfg.models[routes[0].model]
         if (d0) { maxModel = d0.maxConcurrent || 0; qps = d0.qps || 0 }
+        // 虚拟共用名入口透传链首真实模型的思考强度格式（链首 thinking 格式时转 thinking 对象）
+        if (d0 && (d0.effortFormat || '') === 'thinking') {
+          const vmVal = (body.reasoning_effort !== undefined && body.reasoning_effort !== null) ? String(body.reasoning_effort) : (d0.reasoning || '')
+          if (vmVal) { body.thinking = { type: vmVal }; delete body.reasoning_effort; injectedEffort = true }
+        }
       } else {
         routes.push({ model: null, providers: [hit.def.provider].filter(Boolean) })
         if (!(cfg.defaults && cfg.defaults.provider)) return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '未指定默认上游（请配置 defaults.provider 或 defaults.directory）', type: 'missing_model' } })) }
