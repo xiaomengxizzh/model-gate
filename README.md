@@ -80,6 +80,7 @@
 - `models.<名>.dailyQuota/quota/maxContext`：0=不限；超限的模型在路由中被自动跳过并切到目录中的下一模型。`quota` 已持久化到 `stats.json`，重启不失效。
 - `defaults.preheat`：主动缓存预热，默认空（关闭）。配置后按 `everyMs` 周期性向该模型上游发 `max_tokens:1` 的带长 `system` 请求，保持厂商 prefix cache 存活。
 - `gateway.local.json`（已 gitignore）：真实 baseUrl / Key 名 / 私有覆盖放这里，浅合并覆盖 `gateway.json` 的 providers/models/defaults；`server` 段始终取自 `gateway.json`。`MG_CONFIG=/path/config.json` 可指定别处配置。
+- **上游 HTTP 代理 `proxy`**：默认不配置＝直连。字段可放 `defaults.proxy`（全局）或 `providers.<名>.proxy`（单上游覆盖）；形如 `"http://user:pass@127.0.0.1:7890"`。也可不写配置、直接给网关进程设系统级 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。**优先级**：`providers.<名>.proxy` > `defaults.proxy` > 环境变量；显式置 `""`/`false` 可对某一上游关闭。**全局 `defaults.proxy` 也可在面板「默认上游」卡「网络代理」输入框配置并保存（持久化，不再丢）**。网关用 Node 内置 `https` 的 **CONNECT 隧道**实现，零依赖；`proxy.proxy` 指向 Clash/mihomo 等本地混合端口即可让上游请求走代理出口（**注意**：网关的转发、探活、模型测试、预热一律经代理；本机回环上游如 `127.0.0.1:3050` 自动跳过代理直连）。
 
 ## 模型名回写
 

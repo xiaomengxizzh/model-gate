@@ -1,5 +1,7 @@
 import http from 'node:http'
 import https from 'node:https'
+import net from 'node:net'
+import tls from 'node:tls'
 import { URL } from 'node:url'
 import { gunzipSync } from 'node:zlib'
 
@@ -7,6 +9,75 @@ import { gunzipSync } from 'node:zlib'
 const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 64 })
 const HTTPS_AGENT = new https.Agent({ keepAlive: true, maxSockets: 64 })
 function agentFor(provider) { return /^https:/i.test(provider.baseUrl) ? HTTPS_AGENT : HTTP_AGENT }
+
+// ---------- 上游 HTTP 代理（CONNECT 隧道，零第三方依赖） ----------
+// provider.proxy 形如 http://user:pass@host:port。仅用于非回环上游（本地 3050/9877 等自动直连）。
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '0.0.0.0'])
+function normalizeProxy(proxy) {
+  if (proxy && typeof proxy === 'object') return { host: proxy.host, port: Number(proxy.port) || 7890, auth: proxy.auth || null }
+  if (typeof proxy === 'string' && proxy) {
+    try {
+      const u = new URL(proxy)
+      if (!u.hostname) return null
+      return { host: u.hostname, port: Number(u.port) || 7890, auth: (u.username ? 'Basic ' + Buffer.from(decodeURIComponent(u.username) + ':' + decodeURIComponent(u.password || '')).toString('base64') : null) }
+    } catch { return null }
+  }
+  return null
+}
+// 经代理打开一条到目标:端口的 TLS 隧道（HTTP CONNECT）。
+function connectViaProxy(targetHost, targetPort, p) {
+  return new Promise((resolve, reject) => {
+    const raw = net.connect(p.port, p.host)
+    const fail = (e) => { try { raw.destroy() } catch { } reject(e) }
+    raw.on('error', (e) => fail(new Error('proxy error: ' + (e && e.message))))
+    raw.once('connect', () => {
+      let r = 'CONNECT ' + targetHost + ':' + targetPort + ' HTTP/1.1\r\nHost: ' + targetHost + ':' + targetPort + '\r\n'
+      if (p.auth) r += 'Proxy-Authorization: ' + p.auth + '\r\n'
+      r += '\r\n'
+      raw.write(r)
+    })
+    let buf = Buffer.alloc(0)
+    raw.on('data', (d) => {
+      buf = Buffer.concat([buf, d])
+      const idx = buf.indexOf('\r\n\r\n'); if (idx === -1) return
+      raw.removeAllListeners('data')
+      const line = buf.slice(0, idx).toString('utf8').split('\r\n')[0]
+      const code = parseInt(line.split(' ')[1] || '', 10)
+      if (code !== 200) { fail(new Error('proxy CONNECT failed: ' + line)); return }
+      const tlsSock = tls.connect({ socket: raw, servername: targetHost })
+      tlsSock.once('secureConnect', () => resolve(tlsSock))
+      tlsSock.on('error', (e) => fail(e))
+    })
+  })
+}
+const PROXY_CACHE = new Map()
+function proxyAgentFor(proxy) {
+  const p = normalizeProxy(proxy); if (!p) return null
+  const key = JSON.stringify(p)
+  let e = PROXY_CACHE.get(key); if (e) return e
+  const make = (isHttps) => {
+    const Base = isHttps ? https.Agent : http.Agent
+    const ag = new Base({ keepAlive: true, maxSockets: 64 })
+    if (isHttps) ag.createConnection = (options, cb) => { connectViaProxy(options.host, Number(options.port) || 443, p).then((s) => cb(null, s), (er) => cb(er)) }
+    return ag
+  }
+  e = { host: p.host, port: p.port, https: make(true), http: make(false) }
+  PROXY_CACHE.set(key, e)
+  return e
+}
+// 统一构建请求上下文：按是否回环 + 是否配置代理，决定直连还是走代理。
+//  - https 目标经代理：CONNECT 隧道（origin-form 路径 + 保持目标 host 供 SNI/Host）
+//  - http 目标经代理：absolute-form（path 为完整 URL + 注入 Host 头）
+function ctxFor(provider, url, method, headers) {
+  const isHttps = url.protocol === 'https:'
+  const mod = isHttps ? https : http
+  const proxy = (provider && provider.proxy && !LOOPBACK.has(url.hostname)) ? proxyAgentFor(provider.proxy) : null
+  if (proxy) {
+    if (isHttps) return { mod, reqOpts: { method, hostname: url.hostname, port: url.port || 443, path: url.pathname + url.search, headers, agent: proxy.https } }
+    return { mod, reqOpts: { method, hostname: proxy.host, port: proxy.port, path: url.href, headers: Object.assign({}, headers, { host: url.host }), agent: proxy.http } }
+  }
+  return { mod, reqOpts: { method, hostname: url.hostname, port: url.port || (isHttps ? 443 : 80), path: url.pathname + url.search, headers, agent: isHttps ? HTTPS_AGENT : HTTP_AGENT } }
+}
 
 const RETRYABLE_HTTP = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 function isRetryableCode(c) { return RETRYABLE_HTTP.has(c) }
@@ -32,12 +103,7 @@ function parseRetryAfter(headers) {
 // 单次转发（全双工，流式）。resolve: 收到上游响应头即返回 stream
 function single(provider, url, method, headers, bodyBuf, timeout) {
   return new Promise((resolve, reject) => {
-    const isHttps = provider.baseUrl.startsWith('https://')
-    const mod = isHttps ? https : http
-    const reqOpts = {
-      method, hostname: url.hostname, port: url.port || (isHttps ? 443 : 80),
-      path: url.pathname + url.search, headers, agent: isHttps ? HTTPS_AGENT : HTTP_AGENT,
-    }
+    const { mod, reqOpts } = ctxFor(provider, url, method, headers)
     let settled = false
     const req = mod.request(reqOpts, (res) => {
       settled = true
@@ -112,17 +178,14 @@ export async function forward(provider, path, method, headers, bodyBuf, opts = {
 
 // 探测上游可用性（在线检活）：GET {base}{prefix}/v1/models，单次不重试
 export function probe(provider) {
-  const isHttps = provider.baseUrl.startsWith('https://')
-  const mod = isHttps ? https : http
   const url = new URL(provider.baseUrl + (provider.pathPrefix || '') + '/v1/models')
+  const { mod, reqOpts } = ctxFor(provider, url, 'GET', {})
   return new Promise((resolve) => {
     const headers = { 'user-agent': 'model-gateway/0.1', accept: 'application/json' }
     if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
+    reqOpts.headers = headers
     const started = Date.now()
-    const req = mod.request({
-      method: 'GET', hostname: url.hostname, port: url.port || (isHttps ? 443 : 80),
-      path: url.pathname + url.search, headers, agent: isHttps ? HTTPS_AGENT : HTTP_AGENT,
-    }, (res) => {
+    const req = mod.request(reqOpts, (res) => {
       res.resume()
       // 检活语义=可达性：只要拿到 HTTP 响应（含 4xx/5xx）即视为"通"，避免把慢/401 误判为不通；
       // 只有超时/拒连/DNS 失败才算不通。code 保留给界面展示实际状态码。
@@ -137,17 +200,16 @@ export function probe(provider) {
 // 缓存预热：向模型上游发送一个携带长 system 前缀的最小请求（max_tokens=1），保持厂商侧 prefix cache 存活。
 // 在「预热」语义下只关心能否成功送达（拿到 2xx 响应头），不读响应体、不累计额度，避免污染配额统计。
 export function warm(provider, model, systemPrompt, opts = {}, log) {
-  const isHttps = provider.baseUrl.startsWith('https://')
-  const mod = isHttps ? https : http
   const url = new URL(provider.baseUrl + (provider.pathPrefix || '') + '/v1/chat/completions')
   const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json' }
   if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
   const payload = Buffer.from(JSON.stringify({ model: model, messages: [{ role: 'system', content: systemPrompt }], max_tokens: 1, stream: false }))
   headers['content-length'] = payload.length
+  const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
   const to = Object.assign({ connectMs: 10000, firstByteMs: 60000 }, (opts && opts.timeout) || {})
   const started = Date.now()
   return new Promise((resolve) => {
-    const req = mod.request({ method: 'POST', hostname: url.hostname, port: url.port || (isHttps ? 443 : 80), path: url.pathname + url.search, headers, agent: isHttps ? HTTPS_AGENT : HTTP_AGENT }, (res) => {
+    const req = mod.request(reqOpts, (res) => {
       res.resume(); res.destroy() // 只需状态码，立即释放，不读响应
       const ok = res.statusCode >= 200 && res.statusCode < 300
       if (!ok && log) log.warn('preheat status', res.statusCode)
@@ -163,16 +225,15 @@ export function warm(provider, model, systemPrompt, opts = {}, log) {
 // 模型连通测试：向该模型所属上游发一个极小量的真实 chat 请求（max_tokens=1），验证"这个模型名能真正被调用"
 // 返回 { ok, code, ms, err, body }，body 为响应首片段用于展示后端告警。
 export function probeModel(provider, model) {
-  const isHttps = provider.baseUrl.startsWith('https://')
-  const mod = isHttps ? https : http
   const url = new URL(provider.baseUrl + (provider.pathPrefix || '') + '/v1/chat/completions')
   const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }
   if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
   const payload = Buffer.from(JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false }))
   headers['content-length'] = payload.length
+  const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
   return new Promise((resolve) => {
     const started = Date.now()
-    const req = mod.request({ method: 'POST', hostname: url.hostname, port: url.port || (isHttps ? 443 : 80), path: url.pathname + url.search, headers }, (res) => {
+    const req = mod.request(reqOpts, (res) => {
       res.setTimeout(20000, () => res.destroy())
       const c = []
       res.on('data', (d) => c.push(d))

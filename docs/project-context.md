@@ -1,7 +1,7 @@
 # model-gateway · 项目交接 / 上下文速览
 
 > 供下一次会话的 AI 快速掌握项目全貌、红线与未完成事项。请先读本文件，再动代码。
-> 位置：`E:\ai\aiwork\working\model-gateway`
+> 位置：`E:\ai\workplace\idproject\model-gateway`（2026-08-27 确认；旧文档曾写 `E:\ai\aiwork\working\model-gateway`，已迁移）
 
 ---
 
@@ -70,6 +70,7 @@ docs/          # 规划与交接文档
 - 曲线图②鉴权根因：`msAuthH()` 误用 `window.TOKEN`（**全文件从未赋值**，登录令牌实际在模块变量 `TOKEN`）→ `/api/model-stats` 永远 401 → 画布空白「暂无数据」。已改用 `TOKEN`。教训：**面板新接口鉴权一律走 `japi()` 或模块 `TOKEN`**；验证勿 stub fetch，会绕过真实鉴权路径。
 - `probeModel` 超时 30s→90s（对齐 firstByteMs）。
 - **本地协议转换代理接入**：代理部署在本地独立目录（不在本仓库内，含自启 bat）；某上游 baseUrl 指向 `http://127.0.0.1:3050`（代理已绑定回环、日志落盘其目录内），key 走**用户级环境变量**（用户选择保留环境变量设计，勿再建议迁移）。背景：该上游的 API 通道对当前账户等级不开放（403），经代理以兼容协议接入；其中某思考型模型经代理可用但瞬时限流频发（响应 5s~90s+），由另一上游兜底。代理已经安全审计：无窃密行为、零第三方依赖。
+- **上游 HTTP 代理（proxy）已完整接通（2026-08-27）**：`router.js`（provider.proxy > defaults.proxy > 环境变量，回环自动直连）+ `request.js`（CONNECT 隧道，零依赖）为转发层；本次补齐 `buildStatus` 回显、`saveConfig` 持久化（含格式校验 400）、面板「默认上游」卡「网络代理」输入项——面板保存不再丢 proxy。此前半成品状态见 `session-reflection-2026-08-26.md`，已收尾。
 - `scripts/dev.gateway.json` 已建（8788，models 镜像生产+代理上游，logFile=logs/dev.log），Phase 1 第 0 步完成。
 
 ## 7. 开发/验证作业法（重要）
@@ -83,11 +84,13 @@ docs/          # 规划与交接文档
 
 ## 8. 进行中 / 已规划（下一步）
 
-已写入 `docs/phased-execution-plan.md`，三阶段：
+三阶段计划见 `docs/phased-execution-plan.md`，进度（2026-08-27 确认）：
 
-1. **Phase 1（下一动作）** — 多虚拟模型 `virtualModels`（各自 Directory 快照）+ 每模型独立 Key（`__mg_vm_*`）+ **并发写安全**（saveConfig/saveKeys 异步写互斥 + 读改写锁内 + 单调 `configVersion`，过期保存 409）+ 面板交换「虚拟共用模型名↔客户端接入 Key」位置 + 新增虚拟模型管理器 + `/v1/models` 聚合。能力仍=Chat，兼容旧 gatemodel。
-2. **Phase 2** — 能力维度框架（**能力六件套**：entry→adapter→provider能力声明→accounting→probe→models）+ Embedding。
-3. **Phase 3** — Rerank / Audio / Image / Video（Video 异步任务+轮询单独设计，最后做）。
+- **Phase 1（多虚拟模型 + 独立 Key + 并发写安全）已落地**：virtualModels/两阶段鉴权/configVersion 409/写锁/MG_CONFIG_DIR/route-preview/未知名 404 全部可用，CHANGELOG 0.2.0。
+- **技术债清理已完成**：TD1 测试沉淀（scripts/test 15 用例 + run.mjs）、TD2 stats 90 天保留窗口、TD3 forwardChain 拆至 forward.js。
+- **proxy 收尾已完成（2026-08-27）**：面板「网络代理」输入项 + 持久化 + 回显（见第 6 节）。
+- **Phase 2（下一动作）** — 能力维度框架（能力六件套：entry→adapter→provider 能力声明→accounting→probe→models）+ Embedding；协议转换采纳 sub2api 的 IR 中转 + 直连桥 + 流式事件顺序 wire 测试。virtualModels 已有 `priority` 字段位预留、exact/prefix 混合匹配留本阶段启用。
+- **Phase 3** — Rerank / Audio / Image / Video（Video 异步任务池 + node:sqlite 持久化单独设计，最后做）。
 
 已定决策：每虚拟模型**独有 key**；每虚拟模型**必须绑非空目录**；**保留旧 gatemodel/clientKey 兼容**；**不迁移 localstorage 模板、不做 schema 版本化**（虚拟模型存自包含快照）。
 
@@ -102,7 +105,7 @@ docs/          # 规划与交接文档
 
 ## 10. 当前运行态（每次会话先确认）
 
-- **8787 生产网关**：由用户管理（start.bat 前台），2026-08-25 11:29 起运行中；某上游已指向本地代理 3050（探针 90s 修复需再重启一次才生效）。
-- **本地协议转换代理**：独立目录内的 start.bat 启动，监听 127.0.0.1:3050，日志落盘代理目录内；key 来自用户级环境变量（网关进程需继承该变量——新起的进程自动继承）。
-- **8788 开发网关**：默认停止；`MG_CONFIG=scripts/dev.gateway.json MG_ADMIN_TOKEN=<测试令牌>` 启动。
+- **8787 生产网关**：由用户管理（start.bat 前台），2026-08-27 00:07 实测运行中（PID 46976，`/healthz` ok）。`config/gateway.local.json` 为 v17（configVersion 17，面板保存最新版），含 5 上游（opencodego/opencodezen/openrouter/command code/gmi）与 2 模型；`keys.local.json`/`stats.json` 当前 0 字节——key 全部走环境变量（合理）；stats 空说明可能被重置过或进程从未在本目录写盘，留意。
+- **本地协议转换代理**：独立目录内的 start.bat 启动，监听 127.0.0.1:3050，日志落盘代理目录内；key 来自用户级环境变量（网关进程需继承该变量——新起的进程自动继承）。**2026-08-27 00:07 实测 3050 未在监听**，使用前需先启动。
+- **8788 开发网关**：默认停止；`MG_CONFIG=scripts/dev.gateway.json MG_ADMIN_TOKEN=<测试令牌>` 启动。开发验证优先用 `MG_CONFIG_DIR` 独立目录 + 本地 mock（见第 7 节）。
 - 真实配置存在 `gateway.local.json`（含真实上游 baseUrl / key 名，勿读内容外泄）；改动前备份为 `.bak`（gitignore 已覆盖）。

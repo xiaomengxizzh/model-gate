@@ -78,6 +78,12 @@ export function buildProvider(cfg, id) {
   const def = (cfg.providers || {})[id]
   if (!def) throw new Error('unknown provider: ' + id)
   const pk = resolveKey(cfg, def, id)
+  // 上游 HTTP 代理：per-provider `proxy` > defaults.proxy > 环境变量 HTTP(S)_PROXY。
+  // 显式置 "" / false 可对本 provider 关闭(回环上游如本地 3050 自动不走代理)。
+  const envProxy = (process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy) || ''
+  let proxy
+  if (def.proxy === '' || def.proxy === false) proxy = ''
+  else proxy = def.proxy || ((cfg.defaults && cfg.defaults.proxy) || envProxy)
   return {
     id,
     api: def.api || 'openai',
@@ -88,6 +94,7 @@ export function buildProvider(cfg, id) {
     apiKey: pk.key,
     keyOk: !!pk.key,
     keySource: pk.source,
+    proxy: String(proxy || ''),
     _def: def,
   }
 }

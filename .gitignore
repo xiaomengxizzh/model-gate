@@ -17,3 +17,5 @@ scripts/tmp-trunc/
 
 # 本地验证隔离目录（不入库）
 .tmp-cfgdir/
+# WorkBuddy 工作区记忆（不入库）
+.workbuddy/

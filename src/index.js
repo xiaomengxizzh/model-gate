@@ -161,7 +161,7 @@ function buildStatus(state) {
     dialogues: Object.values(state.dialogue).filter(d => d.requests > 0).sort((a, b) => b.lastAt - a.lastAt).slice(0, 30).map(d => ({ id: d.id, named: d.named, requests: d.requests, tokens: d.tokens, hit: d.hit, miss: d.miss, hitRate: (d.hit + d.miss) > 0 ? Math.round(d.hit / (d.hit + d.miss) * 1000) / 10 : null, startAt: d.startAt, lastAt: d.lastAt })),
     providers,
     models,
-    defaults: { provider: defaults.provider || null, model: defaults.model || '', clientKey: currentClientKey(state) ? '********' : '', directory: defaults.directory || [], preheat: defaults.preheat || [], retry: defaults.retry || {}, timeout: defaults.timeout || {}, concurrency: defaults.concurrency || {}, extraHeaders: defaults.extraHeaders || {} },
+    defaults: { provider: defaults.provider || null, model: defaults.model || '', clientKey: currentClientKey(state) ? '********' : '', directory: defaults.directory || [], preheat: defaults.preheat || [], retry: defaults.retry || {}, timeout: defaults.timeout || {}, concurrency: defaults.concurrency || {}, extraHeaders: defaults.extraHeaders || {}, proxy: defaults.proxy || '' },
   }
 }
 
@@ -229,6 +229,11 @@ async function doSaveConfig(state, body) {
   for (const e of (defaults.preheat || [])) {
     if (!e || typeof e.model !== 'string' || !e.model || typeof e.system !== 'string' || !e.system) return { error: '缓存预热项需同时包含 model 与 system（预热用的长 system 前缀）' }
     if (!models[e.model]) return { error: '缓存预热引用了不存在的模型 ' + e.model }
+  }
+  // 上游代理：可选。空字符串/undefined=直连；非空须为合法 http(s):// 代理地址（可带 user:pass），避免垃圾值落到转发层
+  if (defaults.proxy != null && defaults.proxy !== '' && defaults.proxy !== false) {
+    if (typeof defaults.proxy !== 'string') return { error: 'defaults.proxy 必须为字符串或空（http://user:pass@host:port）' }
+    try { const pu = new URL(defaults.proxy); if (!/^https?:$/.test(pu.protocol) || !pu.hostname) throw new Error('bad') } catch { return { error: 'defaults.proxy 不是合法的 http(s) 代理地址: ' + defaults.proxy } }
   }
   const clean = {}
   for (const [id, p] of Object.entries(providers || {})) { const { keyOk, keySource, ...rest } = p || {}; clean[id] = rest }
