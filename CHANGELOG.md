@@ -8,6 +8,7 @@
 - **面板「网络代理」输入项**（「默认上游」卡）：`defaults.proxy` 全局代理可在面板配置（留空=直连，形如 `http://user:pass@127.0.0.1:7890`），保存即持久化——修复此前「面板一保存 `defaults.proxy` 即被丢弃、网关连不上 Clash」的反复现象。
 - **`/api/status` 回显 `defaults.proxy`**：面板可读到当前代理配置。
 - **保存校验**：`defaults.proxy` 非空时必须为合法 http(s) 代理地址，非法值 400 拦截（防垃圾值落到转发层）。
+- **代理模式 `proxyMode`**（`auto` 默认 / `direct` / `global`，面板「代理模式」下拉）：auto=按配置（provider 级 > 全局 > 环境变量，显式关闭生效）；direct=全部上游强制直连；global=非回环上游全部强制走全局代理（回环豁免）。保存即热生效，不重启。
 
 ### Fixed
 - 上游代理特性完整接通（代码 + 配置持久化 + 面板置项三件套齐备）：`src/router.js` 的 proxy 解析（provider 级 > defaults > 环境变量，回环直连）、`src/request.js` 的 CONNECT 隧道（零依赖）此前为半成品，仅实现了转发层读取；本次补齐 `saveConfig` 持久化与面板配置入口，消除「改配置生效、面板保存丢失」的分裂。

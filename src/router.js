@@ -78,12 +78,20 @@ export function buildProvider(cfg, id) {
   const def = (cfg.providers || {})[id]
   if (!def) throw new Error('unknown provider: ' + id)
   const pk = resolveKey(cfg, def, id)
-  // 上游 HTTP 代理：per-provider `proxy` > defaults.proxy > 环境变量 HTTP(S)_PROXY。
-  // 显式置 "" / false 可对本 provider 关闭(回环上游如本地 3050 自动不走代理)。
+  // 上游 HTTP 代理（三模式）：defaults.proxyMode = auto(默认) | direct | global。
+  //  - auto   ：现状——per-provider `proxy` > defaults.proxy > 环境变量；显式置 ""/false 关闭；
+  //  - direct ：全部直连，无视任何 proxy 配置（含单上游关闭/全局/环境变量）；
+  //  - global ：非回环上游强制走默认代理（defaults.proxy 或环境变量），忽略单上游关闭设置；
+  // 回环目标在任何模式下由 request.js 的 ctxFor 自动直连（本地上游不被代理掐死）。
   const envProxy = (process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy) || ''
+  const mode = (cfg.defaults && cfg.defaults.proxyMode) || 'auto'
   let proxy
-  if (def.proxy === '' || def.proxy === false) proxy = ''
-  else proxy = def.proxy || ((cfg.defaults && cfg.defaults.proxy) || envProxy)
+  if (mode === 'direct') proxy = ''
+  else if (mode === 'global') proxy = (cfg.defaults && cfg.defaults.proxy) || envProxy
+  else {
+    if (def.proxy === '' || def.proxy === false) proxy = ''
+    else proxy = def.proxy || ((cfg.defaults && cfg.defaults.proxy) || envProxy)
+  }
   return {
     id,
     api: def.api || 'openai',
