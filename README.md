@@ -80,11 +80,11 @@
 - `models.<名>.dailyQuota/quota/maxContext`：0=不限；超限的模型在路由中被自动跳过并切到目录中的下一模型。`quota` 已持久化到 `stats.json`，重启不失效。
 - `defaults.preheat`：主动缓存预热，默认空（关闭）。配置后按 `everyMs` 周期性向该模型上游发 `max_tokens:1` 的带长 `system` 请求，保持厂商 prefix cache 存活。
 - `gateway.local.json`（已 gitignore）：真实 baseUrl / Key 名 / 私有覆盖放这里，浅合并覆盖 `gateway.json` 的 providers/models/defaults；`server` 段始终取自 `gateway.json`。`MG_CONFIG=/path/config.json` 可指定别处配置。
-- **上游 HTTP 代理 `proxy`**：默认不配置＝直连。字段可放 `defaults.proxy`（全局）或 `providers.<名>.proxy`（单上游覆盖）；形如 `"http://user:pass@127.0.0.1:7890"`。也可不写配置、直接给网关进程设系统级 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。**优先级**：`providers.<名>.proxy` > `defaults.proxy` > 环境变量；显式置 `""`/`false` 可对某一上游关闭。**全局 `defaults.proxy` 也可在面板「默认上游」卡「网络代理」输入框配置并保存（持久化，不再丢）**。网关用 Node 内置 `https` 的 **CONNECT 隧道**实现，零依赖；`proxy.proxy` 指向 Clash/mihomo 等本地混合端口即可让上游请求走代理出口（**注意**：网关的转发、探活、模型测试、预热一律经代理；本机回环上游如 `127.0.0.1:3050` 自动跳过代理直连）。
+- **上游 HTTP 代理 `proxy`**：默认不配置＝直连。字段可放 `defaults.proxy`（全局）或 `providers.<名>.proxy`（单上游覆盖）；形如 `"http://user:pass@127.0.0.1:7890"`。也可不写配置、直接给网关进程设系统级 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。**优先级**：`providers.<名>.proxy` > `defaults.proxy` > 环境变量。**按上游定名单**（auto 模式生效）：单上游 `proxy` 留空/缺省 = 继承全局；填 `http(s)://...` = 强制走该代理；填 `direct`（或 `false`）= 强制直连、无视全局。**全局 `defaults.proxy` 可在面板「默认上游」卡「网络代理」输入框配置，单上游名单在「上游服务」编辑弹窗「代理」字段配置（均持久化，不再丢）**。网关用 Node 内置 `https` 的 **CONNECT 隧道**实现，零依赖；`proxy.proxy` 指向 Clash/mihomo 等本地混合端口即可让上游请求走代理出口（**注意**：网关的转发、探活、模型测试、预热一律经代理；本机回环上游如 `127.0.0.1:3050` 自动跳过代理直连）。
 - **代理模式 `proxyMode`**（`auto` 默认 / `direct` / `global`，面板「代理模式」下拉或配置 `defaults.proxyMode`）：
-  - `auto`：按配置——回环直连；非回环按 `providers.<名>.proxy` > `defaults.proxy` > 环境变量，显式 `""`/`false` 的单上游强制直连；
+  - `auto`：按配置/名单——回环直连；非回环按 `providers.<名>.proxy` > `defaults.proxy` > 环境变量，名单里标 `direct`/`false` 的单上游强制直连；
   - `direct`：全部上游强制直连，无视任何代理配置（断代理排查/临时绕开 Clash）；
-  - `global`：非回环上游**全部**强制走全局代理（`defaults.proxy` 或环境变量），忽略单上游关闭设置；回环仍自动直连。
+  - `global`：非回环上游**全部**强制走全局代理（`defaults.proxy` 或环境变量），忽略单上游名单（含 `direct`）；回环仍自动直连。
   - 三者切换只需保存配置即热生效（`reloadConfig`），不重启网关。
 
 ## 模型名回写

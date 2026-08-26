@@ -79,9 +79,10 @@ export function buildProvider(cfg, id) {
   if (!def) throw new Error('unknown provider: ' + id)
   const pk = resolveKey(cfg, def, id)
   // 上游 HTTP 代理（三模式）：defaults.proxyMode = auto(默认) | direct | global。
-  //  - auto   ：现状——per-provider `proxy` > defaults.proxy > 环境变量；显式置 ""/false 关闭；
+  //  - auto   ：现状——per-provider `proxy` > defaults.proxy > 环境变量；单上游显式 `direct`/`false` 关闭（强制直连）；
+  //             单上游留空/缺省 = 继承 defaults.proxy（全局）；
   //  - direct ：全部直连，无视任何 proxy 配置（含单上游关闭/全局/环境变量）；
-  //  - global ：非回环上游强制走默认代理（defaults.proxy 或环境变量），忽略单上游关闭设置；
+  //  - global ：非回环上游强制走默认代理（defaults.proxy 或环境变量），忽略单上游设置（含 direct）；
   // 回环目标在任何模式下由 request.js 的 ctxFor 自动直连（本地上游不被代理掐死）。
   const envProxy = (process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy) || ''
   const mode = (cfg.defaults && cfg.defaults.proxyMode) || 'auto'
@@ -89,7 +90,7 @@ export function buildProvider(cfg, id) {
   if (mode === 'direct') proxy = ''
   else if (mode === 'global') proxy = (cfg.defaults && cfg.defaults.proxy) || envProxy
   else {
-    if (def.proxy === '' || def.proxy === false) proxy = ''
+    if (def.proxy === 'direct' || def.proxy === false) proxy = ''
     else proxy = def.proxy || ((cfg.defaults && cfg.defaults.proxy) || envProxy)
   }
   return {

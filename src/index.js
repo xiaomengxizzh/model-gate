@@ -124,7 +124,7 @@ function buildStatus(state) {
     return {
       id, baseUrl: p.baseUrl, hasKey: keyOk,
       keySource: (state.cfg._keys && state.cfg._keys[id]) ? 'keys' : (p.apiKeyEnv ? 'env' : null),
-      apiKeyEnv: p.apiKeyEnv || null, pathPrefix: p.pathPrefix || '', api: p.api || 'openai', extraHeaders: p.extraHeaders || {},
+      apiKeyEnv: p.apiKeyEnv || null, pathPrefix: p.pathPrefix || '', api: p.api || 'openai', extraHeaders: p.extraHeaders || {}, proxy: p.proxy || '',
       st: {
         requests: o.requests, errors: o.errors, retries: o.retries, tokens: o.tokens,
         avgMs: o.latencyCount ? Math.round(o.latencySum / o.latencyCount) : null,
@@ -219,6 +219,14 @@ async function doSaveConfig(state, body) {
     if (!providers[m.provider]) return { error: '模型「' + mn + '」引用了不存在的上游 ' + m.provider }
     for (const fb of m.fallbacks || []) if (!providers[fb]) return { error: '模型「' + mn + '」的备用上游 ' + fb + ' 不存在' }
     for (const f of ['dailyQuota','quota','maxContext']) if (m[f] != null && (!Number.isFinite(m[f]) || m[f] < 0)) return { error: '模型「' + mn + '」的 ' + f + ' 必须为非负数字（0=不限）' }
+  }
+  // 单上游代理（名单）：留空/undefined=继承全局；direct/false=强制直连；否则须为合法 http(s):// 地址
+  for (const [pid, p] of Object.entries(providers || {})) {
+    const pr = p && p.proxy
+    if (pr != null && pr !== '' && pr !== false && pr !== 'direct') {
+      if (typeof pr !== 'string') return { error: '上游「' + pid + '」的 proxy 必须为 留空/direct/合法 http(s) 地址' }
+      try { const pu = new URL(pr); if (!/^https?:$/.test(pu.protocol) || !pu.hostname) throw new Error('bad') } catch { return { error: '上游「' + pid + '」的 proxy 不是合法的 http(s) 代理地址: ' + pr } }
+    }
   }
   if (defaults.provider && defaults.provider !== '' && !providers[defaults.provider]) return { error: '默认上游 ' + defaults.provider + ' 不存在' }
   for (const e of (defaults.directory || [])) {
