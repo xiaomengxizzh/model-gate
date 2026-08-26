@@ -214,6 +214,9 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   if (maxModel > 0) releaseModel = await acquireSem(modelThrottleOf(state, modelName, maxModel))
   if (qps > 0) await rateWait(state, modelName, qps)
   let lastErr = null
+  let last4xx = null          // 模型级拒绝（403/404）的最后一次响应：整条链全被拒绝时回它（保留上游原始错误）
+  let last4xxPid = null       // last4xx 对应的上游（pid 是 for 循环块作用域，循环外取不到）
+  let rejectedOnly = false    // 本轮是否只有模型级拒绝（无网络错/5xx/429）：是则不再循环重试（403 是确定性拒绝，循环无意义）
   let tried = false
   const loopMs = (cfg.defaults && cfg.defaults.timeout && cfg.defaults.timeout.loopMs) || 120000
   const loopDeadline = Date.now() + loopMs
@@ -223,6 +226,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   // 循环兜底：整条路由链(a→b→c)一轮失败后回到队首反复尝试，直到成功 / 业务4xx / 整体超时(loopMs)
   while (Date.now() < loopDeadline) {
     let cycleTried = false
+    rejectedOnly = true // 每轮重置：遇到可重试类失败（catch）即置 false；整轮只有 403/404 则维持 true → 轮末 break
     for (const route of routes) {
       const serving = route.model
     const lim = routeLimit(state, cfg, serving, body)
@@ -293,11 +297,21 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         }
         return { kind: 'json', status: result.status, contentType: 'application/json', body: out, pid, modelName, serving, asSSE: degraded || undefined, dialogueId, chain: chainModels.join('>') }
       }
-      // 非重试错误码（4xx）：业务问题，不熔断、不 fallback，直接返回
+      // 非重试错误码（4xx）：业务问题，不熔断、不 fallback，直接返回；
+      // 例外：403/404 属「模型/资源级拒绝」（如上游对该模型无权限/不存在），换下一模型可能成功，记录后继续尝试而非中断
       markOk(state, pid)
       // 3xx 重定向对 Chat 端点属于异常：不跟随、不裸透传，明确转 502，避免客户端误跟随或解析错乱
       if (result.status >= 300 && result.status < 400) return { kind: 'json', status: 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'upstream returned unexpected redirect (' + result.status + ')', type: 'upstream_error', status: result.status } })), pid, modelName, chain: chainModels.join('>') }
       const out = await collectBody(result.stream)
+      if (result.status === 403 || result.status === 404) {
+        // 模型级拒绝：记入错误统计（不熔断），保留原始响应供整链全拒时回显，继续尝试下一模型
+        last4xx = { status: result.status, body: out }
+        last4xxPid = pid
+        lastErr = Object.assign(new Error('upstream ' + result.status + ' ' + (serving || '')), { status: result.status })
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
+        log && log.warn('provider rejected', pid, 'status ' + result.status, '-> next model')
+        continue
+      }
       if (out.length) return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: out, pid, modelName, chain: chainModels.join('>') }
       return { kind: 'json', status: result.status || 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'gateway upstream error', type: 'upstream_error', status: result.status } })), pid, modelName }
     } catch (err) {
@@ -313,15 +327,18 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       if (err.status === 429) { const th = throttleOf(state, pid); th.rateUntil = Date.now() + (err.retryAfter || 3000) }
       markFail(state, pid, prov && prov.circuit)
       lastErr = err
+      rejectedOnly = false // 网络错/5xx/429：可重试类失败，允许回到队首循环
       log && log.warn('provider failed', pid, err.message, '-> next fallback')
     } finally {
       release()
     }
     } // for pid
   } // for route
-  if (!cycleTried) break // 整轮没有任何上游被真正尝试（全熔断/无 key/全额度跳过）：再循环无意义，直接收尾
+  if (!cycleTried || rejectedOnly) break // 无上游被尝试，或整轮只有 403/404 模型级拒绝（确定性失败）：再循环无意义，直接收尾
   await _sleep(300)      // 一轮全败后回到队首前稍停，避免空转打爆上游
   } // while() 有界循环兜底：整条链(a→b→c)失败后回到 a 继续，直到成功 / 业务4xx / 整体超时 / 全部熔断
+  // 整条链都是 403/404 模型级拒绝：回最后一个上游原始响应（比 502 更有信息量）
+  if (last4xx) return { kind: 'json', status: last4xx.status, contentType: 'application/json; charset=utf-8', body: last4xx.body, pid: last4xxPid, modelName, chain: chainModels.join('>') }
   if (!tried) return { kind: 'json', status: 502, contentType: 'application/json', chain: chainModels.join('>'), body: Buffer.from(JSON.stringify({ error: { message: lastErr ? lastErr.message : 'no usable provider (无可用上游：可能未配 Key 或全部熔断)', type: 'no_provider' } })) }
   return { kind: 'json', status: 502, contentType: 'application/json', chain: chainModels.join('>'), body: Buffer.from(JSON.stringify({ error: { message: lastErr && lastErr.message ? (lastErr.message + '（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）') : 'all providers failed（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）', type: 'all_providers_failed' } })) }
   } finally {
