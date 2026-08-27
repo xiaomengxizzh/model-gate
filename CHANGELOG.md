@@ -15,6 +15,7 @@
 ### Fixed
 - 上游代理特性完整接通（代码 + 配置持久化 + 面板置项三件套齐备）：`src/router.js` 的 proxy 解析（provider 级 > defaults > 环境变量，回环直连）、`src/request.js` 的 CONNECT 隧道（零依赖）此前为半成品，仅实现了转发层读取；本次补齐 `saveConfig` 持久化与面板配置入口，消除「改配置生效、面板保存丢失」的分裂。
 - **兜底被 403/404 截断**：此前目录链中某模型返回 403/404 会直接中断整个请求（不试后续模型），导致「MiniMax-M3 限流 429 → muse-spark 被 opencode 403 拒绝 → mimo-v2.5 根本没机会」——现改为 403/404（模型/资源级拒绝）记录后继续尝试下一模型；整条链都被拒绝时回最后一个上游原始响应（保留真实错误）且不进入循环兜底空转。400/401/422 等请求/鉴权类错误仍直接返回不兜底。
+- **曲线 tooltip 显示 缓存命中/未命中/输出**：统计新增输入（inTokens）与输出（outTokens）单独记账（`usage.prompt_tokens`/`completion_tokens`，流式末帧无明细则记 0 不臆造），daily/hourly 桶与 byModel 持久化扩展；`/api/model-stats` 每个数据点返回 `inTokens/outTokens/hit/miss`；曲线图 tooltip 在模型名下方显示「缓存命中 · 未命中 · 输出」三个具体数字（命中+未命中=输入，满足恒等式）。模型统计面板不加字段。
 
 ## [0.2.0] · 2026-08-25 —— 韧性加固 + Phase 1 多虚拟模型
 

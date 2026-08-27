@@ -303,11 +303,13 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           const hit = c.hit, miss = c.miss
           noteCacheStat(state, serving || modelName, pid, hit, miss) // 按(模型,上游)记录缓存命中，供命中率路由与趋势告警使用
           agg(state, pid, 'tokens', usage.total_tokens || 0); state.stats.global.tokens += usage.total_tokens || 0
-          // 按"实际响应的模型"累计其额度用量（日额度 + 累计额度）
+          // 按"实际响应的模型"累计其额度用量（日额度 + 累计额度）；输入/输出单独记（命中+未命中=输入）
           const sg = state.stats.byModel[serving || modelName] = state.stats.byModel[serving || modelName] || { requests: 0, errors: 0 }
           sg.tokens = (sg.tokens || 0) + (usage.total_tokens || 0)
-          tallyDaily(state, serving || modelName, usage.total_tokens || 0, hit, miss)
-          tallyVirtual(state, modelName, serving, usage.total_tokens || 0)
+          sg.inTokens = (sg.inTokens || 0) + (usage.prompt_tokens || 0)
+          sg.outTokens = (sg.outTokens || 0) + (usage.completion_tokens || 0)
+          tallyDaily(state, serving || modelName, usage.total_tokens || 0, hit, miss, usage.prompt_tokens || 0, usage.completion_tokens || 0)
+          tallyVirtual(state, modelName, serving, usage.total_tokens || 0, usage.prompt_tokens || 0, usage.completion_tokens || 0)
           tallyDialogue(state, dialogueId, usage.total_tokens || 0, hit, miss)
         }
         if (api !== 'openai') { const p = tryParse(out); if (p) { let nb; try { nb = Buffer.from(JSON.stringify(adapterFor(api).fromUpstream(p))) } catch { nb = null } if (nb) out = nb } }
