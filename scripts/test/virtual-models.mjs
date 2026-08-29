@@ -56,6 +56,9 @@ const saveKey = (body) => fetch(BASE + '/api/keys', { method: 'POST', headers: A
 const chat = async (model, key, extra) => { const r = await fetch(BASE + '/v1/chat/completions', { method: 'POST', headers: { 'Authorization': 'Bearer ' + (key === undefined ? 'testkey123' : key), 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 5, ...(extra || {}) }) }); const d = await r.json().catch(() => ({})); if (r.status >= 500) console.log('  [502 body]', JSON.stringify(d).slice(0, 200)); return { code: r.status, ...d } }
 const snap = (s) => ({ providers: Object.fromEntries(s.providers.map(p => [p.id, { baseUrl: p.baseUrl, apiKeyEnv: p.apiKeyEnv || '', pathPrefix: p.pathPrefix || '', extraHeaders: {}, api: p.api || 'openai' }])), models: Object.fromEntries(s.models.map(m => [m.name, { provider: m.provider, alias: [], fallbacks: [], maxConcurrent: 0, qps: 0, reasoning: '', effortOptions: m.effortOptions || [], dailyQuota: 0, quota: 0, maxContext: 0 }])), defaults: s.defaults, virtualModels: (s.virtualModels || []).map(v => ({ name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps, expiresAt: v.expiresAt || '', note: v.note || '' })) })
 
+// results 为套件级共享数组：子结果按进入时基线取增量，避免把其它文件的失败算进自己头上
+const base = count()
+
 try {
 if (!ready) {
   check('网关实例启动', false, 'healthz 超时')
@@ -133,6 +136,6 @@ if (!ready) {
   try { mock.close() } catch {}
   try { fs.rmSync(TMP, { recursive: true, force: true }) } catch {}
 }
-const c = count()
-console.log('  （virtual-models 子结果: ' + c.pass + '/' + c.total + '）')
-if (c.fail) throw new Error('virtual-models 有 ' + c.fail + ' 项失败')
+const c = count(); const mp = c.pass - base.pass; const mf = c.fail - base.fail
+console.log('  （virtual-models 子结果: ' + mp + '/' + (mp + mf) + '）')
+if (mf) throw new Error('virtual-models 有 ' + mf + ' 项失败')
