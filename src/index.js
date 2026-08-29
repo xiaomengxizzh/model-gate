@@ -213,7 +213,10 @@ async function doSaveConfig(state, body) {
   const _c = versionConflict(state, body); if (_c) return _c
   const providers = body.providers !== undefined ? body.providers : (cur.providers || {})
   const models = body.models !== undefined ? body.models : (cur.models || {})
-  const defaults = body.defaults !== undefined ? body.defaults : (cur.defaults || {})
+  // defaults 合并而非整体替换：面板等客户端只回传它认识的白名单字段，
+  // 未回传字段（affinityTtlMs / failbackProbe / preheat 等自定义或扩展项）保留现有值——任何保存都不再冲掉自定义配置。
+  // 代价：字段无法经保存接口删除（需要时直接编辑 gateway.local.json 或 /api/config/reload 后手改）。
+  const defaults = body.defaults === undefined ? (cur.defaults || {}) : Object.assign({}, cur.defaults || {}, body.defaults)
   // 客户端 Key：'********' 掩码视为未改动（不清空）；其它值（含清空 ''）写入加密 keys 库，不再明文进 local，与 provider key 同样加密落盘
   let newClientKey = null
   if (defaults && typeof defaults.clientKey === 'string' && defaults.clientKey !== '********') { newClientKey = defaults.clientKey }
