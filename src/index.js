@@ -648,8 +648,8 @@ export function start(opts = {}) {
     }
   }, 15000).unref() })()
   // 主上游回切探活（failback）：模型当前由备用上游服务时，周期性向主上游发最小请求；
-  // 连续 successStreak 次成功后清除亲和，让下一个请求回到主上游——上游恢复即自动回流，不必等亲和 TTL 过期。
-  // 只在"降级中"才探活（affinity 指向非主上游），正常态零开销；探活走 warm（真实 chat、max_tokens=1、不计额度）。
+  // 连续 successStreak 次成功后把亲和切回主上游，让下一个请求回到主上游——上游恢复即自动回流，不必等亲和 TTL 过期。
+  // 只在"降级中"才探活（affinity 指向非主上游），正常态零开销；探活用 probeChat（真实 chat、user 消息、max_tokens=1、不计额度）。
   ;(() => {
     const streak = {}   // 模型 → 连续探活成功次数
     const lastAt = {}   // 模型 → 上次探活时间
@@ -673,8 +673,10 @@ export function start(opts = {}) {
         if (r.ok) {
           streak[name] = (streak[name] || 0) + 1
           if (streak[name] >= need) {
-            delete state.affinity[name]; delete state.affinityAt[name]; streak[name] = 0
-            log && log.info('failback 主上游已恢复，清除亲和', name, '→', primary)
+            // 亲和直接置为主上游（而非清除）：无亲和时路由会退化为按缓存命中率排序，
+            // 高命中的备用上游（如 opencodego 缓存热）会把主上游挤到后面——「清除」等于把回切换成碰运气
+            state.affinity[name] = primary; state.affinityAt[name] = Date.now(); streak[name] = 0
+            log && log.info('failback 主上游已恢复，亲和切回主上游', name, '→', primary)
           }
         } else if (streak[name]) streak[name] = 0
       }

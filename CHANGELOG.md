@@ -14,6 +14,7 @@
 - **自定义 `defaults` 字段在任意一次配置保存后被静默丢弃**（如本次新增的 `affinityTtlMs`/`failbackProbe`，以及未来的任何扩展字段）：根因是 `/api/status` 只返回白名单内的 defaults 字段，面板/测试走「读-改-写」时未返回的字段被覆盖。现 `buildStatus` 的 `defaults` 改为**原样返回**（仅 `clientKey` 掩码）——一次修复覆盖所有自定义字段，无需再逐字段加白名单。
 - **`/api/status` 不暴露 provider 的 `circuit`**：此前面板/测试保存配置会把手动配的熔断参数清成 `null`（同类问题）。现已暴露并在测试 `snapshot()` 中原样带回，熔断配置不再被吃掉。
 - **回切探活请求格式修复**：探活此前复用 `warm()` 的 system-only 消息，被 LiteLLM 类网关（如 tokenrhythm/jiyuan）以 400 拒绝（`LITELLM_ERROR: messages 参数非法`）——探活从未成功，回切只能依赖亲和 TTL 兜底，且失败日志误报为 `preheat status`。新增 `probeChat()`（**user 角色**消息 + 独立 `failback probe` 日志文案），探活恢复工作，日志不再误导。
+- **回切探活动作修复（清除亲和 → 亲和置为主上游）**：探活成功时此前仅 `delete affinity`，但无亲和时路由**退化为按缓存命中率排序**——缓存热的备用上游（opencodego）会把主上游（jiyuan）挤到后面，请求继续走备用（生产日志：3 次「主上游已恢复」后请求仍在 opencodego）。现探活成功直接把 `affinity` 置为主上游，利用现有亲和机制让主上游必然排第一，且探活自动停止（`cur === primary`）形成闭环。测试同步注入缓存命中率差异（备用 100% 命中、主 0%），复现「命中率路由反超」场景——原测试 cacheStat 为空会碰巧切回，掩盖该缺陷。
 
 ## [0.2.1] · 2026-08-27 —— 上游代理（proxy）面板化收尾
 

@@ -1,5 +1,5 @@
 // 主上游回切探活（failback）契约：主上游故障切到备用后，无需真实请求试水，
-// 后台探活发现主上游恢复即自动清除亲和，下一个请求回到主上游。
+// 后台探活发现主上游恢复即把亲和切回主上游，下一个请求回到主上游。
 //
 // 关键对照：affinityTtlMs 设为 1 小时（本测试时间内绝不会过期），
 // 若仍切回主上游，则只能是 failback 探活生效，而非亲和 TTL 过期。
@@ -10,6 +10,9 @@ const hits = { A: 0, B: 0 }      // 真实请求计数
 const probes = { A: 0, B: 0 }    // 探活请求计数
 const probeRoles = []            // 探活消息角色记录（必须为 user：LiteLLM 层拒 system-only，400）
 const down = { A: false, B: false }
+// 缓存命中率注入：B（备用）响应带 cached_tokens=100（命中率 100%），A（主）带 cache_write_tokens=100（命中率 0%）。
+// 复现生产场景「无亲和时按缓存命中率排序，缓存热的备用上游反超主上游」——否则测试环境 cacheStat 为空会碰巧切回，
+// 掩盖「探活成功却切不回去」的缺陷（探活须把亲和置为主上游，而非清除后交给命中率路由）。
 const mkServer = (name) => http.createServer((req, res) => {
   let body = ''
   req.on('data', (c) => { body += c })
@@ -21,11 +24,14 @@ const mkServer = (name) => http.createServer((req, res) => {
     } catch {}
     if (isProbe) probes[name] += 1; else hits[name] += 1
     if (down[name]) { res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":"busy"}'); return }
+    const usage = name === 'B'
+      ? { prompt_tokens: 100, completion_tokens: 1, total_tokens: 101, prompt_tokens_details: { cached_tokens: 100 } }
+      : { prompt_tokens: 100, completion_tokens: 1, total_tokens: 101, prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 100 } }
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({
       id: 'x', object: 'chat.completion', created: 0, model: 't-fb-m',
       choices: [{ index: 0, message: { role: 'assistant', content: 'ok-' + name }, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      usage,
     }))
   })
 })
