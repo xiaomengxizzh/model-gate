@@ -9,7 +9,8 @@ export function check(name, ok, detail, skip) {
 export const jpost = (path, body) => fetch(GW + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(async r => ({ s: r.status, d: await r.json().catch(() => ({})) }))
 export async function snapshot() {
   const st = await (await fetch(GW + '/api/status')).json()
-  const providers = {}; for (const p of st.providers || []) providers[p.id] = { baseUrl: p.baseUrl, apiKeyEnv: p.apiKeyEnv || '', pathPrefix: p.pathPrefix || '', extraHeaders: p.extraHeaders || {}, api: p.api || 'openai' }
+  // circuit 必须原样带回：否则测试保存配置时会把手动配的熔断参数静默清成 null
+  const providers = {}; for (const p of st.providers || []) providers[p.id] = { baseUrl: p.baseUrl, apiKeyEnv: p.apiKeyEnv || '', pathPrefix: p.pathPrefix || '', extraHeaders: p.extraHeaders || {}, api: p.api || 'openai', proxy: p.proxy || '', circuit: p.circuit || null }
   const models = {}; for (const m of st.models || []) models[m.name] = { provider: m.provider, alias: m.alias || [], fallbacks: m.fallbacks || [], maxConcurrent: m.maxConcurrent || 0 }
   return { providers, models, defaults: st.defaults || {}, server: st.server || {} }
 }

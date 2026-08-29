@@ -36,9 +36,14 @@ function buildHeaders(req, provider, bodyBuf, cfg) {
 }
 function orderCandidates(state, model, providers) {
   const rate = (pid) => { const c = state.cacheStat && state.cacheStat[model + '\u0000' + pid]; return (c && (c.hit + c.miss) > 0) ? c.hit / (c.hit + c.miss) : null }
+  // 缓存亲和带有效期：过期后不再强制优先，让配置里的主上游有机会被重新试用（上游恢复后自动回流）；0=不过期
+  const rawTtl = state.cfg && state.cfg.defaults && state.cfg.defaults.affinityTtlMs
+  const ttl = (rawTtl === 0 || rawTtl === '0') ? 0 : (Number.isFinite(Number(rawTtl)) ? Number(rawTtl) : AFFINITY_TTL_MS)
+  const at = state.affinityAt && state.affinityAt[model]
   const fav = state.affinity && state.affinity[model]
+  const favLive = fav && (ttl <= 0 || (at && (Date.now() - at) < ttl))
   return providers.slice().sort((a, b) => {
-    if (fav) { if (a === fav) return -1; if (b === fav) return 1 }
+    if (favLive) { if (a === fav) return -1; if (b === fav) return 1 }
     const sa = rate(a), sb = rate(b)
     if (sa != null && sb != null) return sb - sa
     if (sa != null) return -1
@@ -49,6 +54,7 @@ function orderCandidates(state, model, providers) {
 
 const DIALOGUE_GAP_MS = 300000 // 无会话 ID 时，间隔超过 5 分钟视为新对话
 const STREAM_DROP_THRESHOLD = 3 // 同一上游连续流式中断 >= 该值，后续请求绕开它（不被 markOk 重置）
+const AFFINITY_TTL_MS = 300000  // 缓存亲和有效期（可用 defaults.affinityTtlMs 覆盖）：过期后主上游可被重新试用
 
 function maxConcur(cfg) { return (cfg.defaults && cfg.defaults.concurrency && cfg.defaults.concurrency.maxPerProvider) || 8 }
 function throttleOf(state, pid) {

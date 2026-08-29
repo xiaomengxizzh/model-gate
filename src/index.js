@@ -105,7 +105,7 @@ function agg(state, pid, field, delta) { if (state.stats.byProvider[pid]) state.
 
 // ── 缓存降碎片化（A2 会话/上游亲和 + B5 命中率路由）──
 // 记录某模型最近一次成功使用哪个上游，回填到状态，供前端展示。
-function noteAffinity(state, model, pid) { if (model && pid && state.cfg.providers[pid]) state.affinity[model] = pid }
+function noteAffinity(state, model, pid) { if (model && pid && state.cfg.providers[pid]) { state.affinity[model] = pid; state.affinityAt[model] = Date.now() } }
 // 记录某 (模型, 上游) 组合的缓存命中/未命中，用于跨模型切换后按命中率择优。
 function noteCacheStat(state, model, pid, hit, miss) {
   if (!model || !pid) return
@@ -126,7 +126,7 @@ function buildStatus(state) {
     return {
       id, baseUrl: p.baseUrl, hasKey: keyOk,
       keySource: (state.cfg._keys && state.cfg._keys[id]) ? 'keys' : (p.apiKeyEnv ? 'env' : null),
-      apiKeyEnv: p.apiKeyEnv || null, pathPrefix: p.pathPrefix || '', api: p.api || 'openai', extraHeaders: p.extraHeaders || {}, proxy: p.proxy || '',
+      apiKeyEnv: p.apiKeyEnv || null, pathPrefix: p.pathPrefix || '', api: p.api || 'openai', extraHeaders: p.extraHeaders || {}, proxy: p.proxy || '', circuit: p.circuit || null,
       st: {
         requests: o.requests, errors: o.errors, retries: o.retries, tokens: o.tokens,
         avgMs: o.latencyCount ? Math.round(o.latencySum / o.latencyCount) : null,
@@ -617,6 +617,7 @@ export function start(opts = {}) {
     throttleModel: {},
     qpsToken: {},
     affinity: {},        // 模型 → 最近一次成功上游（缓存亲和）
+    affinityAt: {},      // 模型 → 上述亲和的记录时间（配合 AFFINITY_TTL_MS 做过期，超时后主上游可被重新试用）
     cacheStat: {},       // "模型\0上游" → { hit, miss }（命中率路由）
     cacheTrend: [],      // 全局缓存命中率趋势样本 { t, v }（告警基线）
     cacheAlert: null,    // 最近一次命中率骤降告警
