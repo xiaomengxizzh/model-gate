@@ -15,6 +15,8 @@ scripts/dev.gateway.json
 scripts/tmp-trunc/
 # 探活类残留文件
 *.mg_probe.txt
+# 托盘管理器编译产物（源码 scripts/tray/mg-tray.cs 入库）
+mg-tray.exe
 
 # 本地验证隔离目录（不入库）
 .tmp-cfgdir/
