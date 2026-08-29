@@ -158,6 +158,7 @@ function buildStatus(state) {
     server: { maxBodyBytes: (state.cfg.server && state.cfg.server.maxBodyBytes) || 0, keyEncrypted: !!(process.env.MG_KEYS_MASTER) || keysFileEncrypted(state.paths.keys), host: (state.cfg.server && state.cfg.server.host) || '127.0.0.1', port: (state.cfg.server && state.cfg.server.port) || 8787 },
     startedAt: state.st.startedAt, uptimeMs: Date.now() - state.st.startedAt,
     counters: Object.assign({}, state.st.counters),
+    lastServing: state.st.lastServing || null,
     global: { requests: s.global.requests, errors: s.global.errors, retries: s.global.retries, interrupts: s.global.interrupts, tokenCount: s.global.tokens, todayTokens: todayTotal, avgMs: s.global.confirmed ? Math.round(s.global.latencySum / s.global.confirmed) : null, p50: pct(s.global.lats, 50), p95: pct(s.global.lats, 95), latTrend: s.global.latTrend || [] },
     cache: { trend: state.cacheTrend || [], alert: state.cacheAlert || null },
     dialogues: Object.values(state.dialogue).filter(d => d.requests > 0).sort((a, b) => b.lastAt - a.lastAt).slice(0, 30).map(d => ({ id: d.id, named: d.named, requests: d.requests, tokens: d.tokens, hit: d.hit, miss: d.miss, hitRate: (d.hit + d.miss) > 0 ? Math.round(d.hit / (d.hit + d.miss) * 1000) / 10 : null, startAt: d.startAt, lastAt: d.lastAt })),
@@ -443,7 +444,7 @@ function makeHandler(state) {
         if (hit.def.virtual) { sendJson(res, 200, { ok: true, hit: { type: 'defaults', name: hit.canonicalName, directory: state.cfg.defaults.directory || [] } }); return }
         sendJson(res, 200, { ok: true, hit: { type: hit.known ? 'model' : 'unknown', name: hit.canonicalName, provider: hit.def.provider || null, note: hit.known ? null : (vms.length ? '将返回 404（已配置虚拟模型）' : '将走默认上游兜底') } }); return
       }
-      if (path === '/api/logs' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const lines = parseInt(new URL(url, 'http://x').searchParams.get('lines') || '200', 10) || 200; sendJson(res, 200, { lines: readLogTail(logFile(), lines) }); return }
+      if (path === '/api/logs' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const lines = parseInt(new URL(url, 'http://x').searchParams.get('lines') || '200', 10) || 200; sendJson(res, 200, { lines: readLogTail((log && log.file) ? log.file() : logFile(), lines) }); return }
       if (path === '/api/config/reload' && req.method === 'POST') { if (!await requireAdmin(req, res)) return; reloadConfig(state); sendJson(res, 200, { ok: true }); return }
       if (path === '/api/config/save' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
@@ -532,8 +533,10 @@ function makeHandler(state) {
       const _chain = (n) => n || ''
       if (out.kind === 'stream') {
         log.info('data ' + req.method + ' ' + fPath + ' model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-') + ' chain=' + _chain(out.chain) + ' stream')
+        state.st.lastServing = { model: out.serving || out.modelName || '-', provider: out.pid || '-', at: Date.now() }
       } else {
         log.info('data ' + req.method + ' ' + fPath + ' -> ' + (out.status || '-') + ' model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-') + ' chain=' + _chain(out.chain))
+        if (out.status >= 200 && out.status < 300) state.st.lastServing = { model: out.serving || out.modelName || '-', provider: out.pid || '-', at: Date.now() }
         if (out.kind === 'json' && out.status >= 200 && out.status < 300 && out.body && out.body.length) {
           const _j = tryParse(out.body)
           const _cs = (_j && Array.isArray(_j.choices)) ? _j.choices : []
@@ -560,6 +563,7 @@ function makeHandler(state) {
             if (!info) return
             const sm = out.serving || out.modelName
             const h = ensureHst(state, out.pid)
+            if (info.clientGone) return   // 客户端主动断开：既非上游成功也非上游失败，留给下一请求自行判定，避免误熔断
             if (info.interrupted) {
               state.st.counters.interrupts += 1; state.stats.global.interrupts += 1
               agg(state, out.pid, 'errors', 1); state.st.counters.errors += 1
@@ -567,9 +571,15 @@ function makeHandler(state) {
               sg.errors = (sg.errors || 0) + 1
               // 独立连续中断计数（markOk 不会重置它）：连续多次流中断让路由绕开该上游
               h.streamDrops = (h.streamDrops || 0) + 1
-              log && log.warn('sse 流中断(续传' + ((info.reconnects || 0)) + '次仍失败)，已计入中断+上游错误，该上游累计连续中断 ' + h.streamDrops, 'model=' + sm + ' provider=' + (out.pid || '-'), 'chain=' + (out.chain || '-'))
+              // 流中断按上游失败计入熔断（与请求头阶段失败同口径）：连续 maxFailures 次中断即拉闸，
+              // 后续请求切到备用上游/下一模型。markOk 已延后到流成功结束才调用，间歇性「头 2xx」不再清零失败计数
+              const pdef = (state.cfg.providers && state.cfg.providers[out.pid]) || null
+              markFail(state, out.pid, (pdef && pdef.circuit) || null)
+              log && log.warn('sse 流中断(续传' + ((info.reconnects || 0)) + '次仍失败)，已计入中断+上游错误+熔断失败，该上游累计连续中断 ' + h.streamDrops, 'model=' + sm + ' provider=' + (out.pid || '-'), 'chain=' + (out.chain || '-'))
             } else {
               h.streamDrops = 0 // 正常完成一次流：重置连续中断计数
+              markOk(state, out.pid) // 流完整走完才算成功
+              noteAffinity(state, sm, out.pid) // 成功上游亲和在流结束时才落定
             }
           },
         })
@@ -649,7 +659,8 @@ export function start(opts = {}) {
   }, 15000).unref() })()
   // 主上游回切探活（failback）：模型当前由备用上游服务时，周期性向主上游发最小请求；
   // 连续 successStreak 次成功后把亲和切回主上游，让下一个请求回到主上游——上游恢复即自动回流，不必等亲和 TTL 过期。
-  // 只在"降级中"才探活（affinity 指向非主上游），正常态零开销；探活用 probeChat（真实 chat、user 消息、max_tokens=1、不计额度）。
+  // 只在"降级中"才探活（affinity 指向非主上游），正常态零开销；探活用 probeChat（真实 chat、user 消息、
+  // max_tokens=1、stream:true、不计额度）——按真实流式形态判定恢复，避免「头 2xx + 流中断」的上游被误判已恢复。
   ;(() => {
     const streak = {}   // 模型 → 连续探活成功次数
     const lastAt = {}   // 模型 → 上次探活时间

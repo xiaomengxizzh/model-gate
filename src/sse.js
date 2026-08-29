@@ -152,13 +152,16 @@ export async function relayStream(client, firstUpstream, opts) {
     let st
     try { st = await reconnect() } catch (e) { return resume('reconnect:' + (e.message || 'fail')) }
     if (!st || (st.statusCode !== undefined && st.statusCode >= 400)) return resume('reconnect-status:' + (st && st.statusCode))
+    // 续传必须拿到真正的流式响应：上游若以 JSON/非 SSE 应答（如降级返回错误体），直接判续传失败，
+    // 不再消耗时间去读垃圾字节——避免「断流后重连 2 次都拿到非流式体」白白耗尽续传额度
+    if (st.headers && !isStreamResponse(st)) return resume('reconnect-not-stream:' + String(st.headers['content-type'] || '').split(';')[0])
     curStream = st
     await pump(st)
   }
 
   await pump(firstUpstream)
   if (opts.onTokens) { try { opts.onTokens(contentChars, lastUsage) } catch {} }
-  if (opts.onEnd) { try { opts.onEnd({ interrupted: !done, reconnects: retries }) } catch {} }
+  if (opts.onEnd) { try { opts.onEnd({ interrupted: !done, reconnects: retries, clientGone: clientGoneAt.t != null }) } catch {} }
   if (typeof client.removeListener === 'function') { try { client.removeListener('close', markGone); client.removeListener('error', markGone) } catch {} }
   if (!client.destroyed) try { client.end() } catch { }
 }

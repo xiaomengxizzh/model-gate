@@ -290,9 +290,10 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       bm.latencySum = (bm.latencySum || 0) + latency; bm.latencyCount = (bm.latencyCount || 0) + 1
       agg(state, pid, 'retries', result.retries || 0)
       if (result.ok) {
-        markOk(state, pid)
-        noteAffinity(state, serving || route.model, pid) // 记录本次成功上游，供后续请求保持亲和、复用其缓存
         if (isStreamResponse(result)) {
+          // 流式：成败延后到流结束统一判定（index.js relayStream onEnd 里 markOk/markFail/noteAffinity）。
+          // 不能在响应头阶段 markOk——头 2xx 不代表流能走完，故障上游「头 2xx + 流中断」若在此刻被洗白，
+          // 熔断计数永远攒不齐，后续请求被亲和钉在故障主上游，「切备用/切下一模型」形同虚设。
           const reconnector = async () => {
             const again = await forward(prov, turl, req.method, headers, tbuf, cfg.defaults || {}, log)
             if (!again.ok) throw new Error('reconnect status ' + again.status)
@@ -300,6 +301,8 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           }
           return { kind: 'stream', res: result, pid, modelName, serving, api, reconnect: reconnector, dialogueId, chain: chainModels.join('>') }
         }
+        markOk(state, pid)
+        noteAffinity(state, serving || route.model, pid) // 非流式响应已完整收到：记录本次成功上游，供后续请求保持亲和、复用其缓存
         let out = await collectBody(result.stream)
         out = maybeGunzip(out, result.headers && result.headers['content-encoding'])
         const parsed = tryParse(out)

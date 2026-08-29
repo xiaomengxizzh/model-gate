@@ -224,25 +224,40 @@ export function warm(provider, model, systemPrompt, opts = {}, log) {
 
 // 主上游回切探活：与 warm 同构，但消息用 user 角色——部分上游/聚合网关的 LiteLLM
 // 层拒绝 system-only 请求（400 LITELLM_ERROR），system 前缀探活会永远失败。
-// 日志文案独立为 failback probe，避免与 preheat（B4 预热）混淆。
+// 按真实使用形态（stream:true）判定"恢复"：仅回 2xx 头不算数，流式上游必须收到首条 SSE 数据才算可用，
+// 否则间歇性「头 2xx + 流中断」的上游会被探活误判为已恢复、亲和被切回故障主上游（回切后又立刻断流）。
+// 兼容返回 JSON 的上游（非 event-stream 的 2xx 直接视为恢复）。
 export function probeChat(provider, model, message, opts = {}, log) {
   const url = new URL(provider.baseUrl + (provider.pathPrefix || '') + '/v1/chat/completions')
-  const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json' }
+  const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'text/event-stream' }
   if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
-  const payload = Buffer.from(JSON.stringify({ model: model, messages: [{ role: 'user', content: message || 'ping' }], max_tokens: 1, stream: false }))
+  const payload = Buffer.from(JSON.stringify({ model: model, messages: [{ role: 'user', content: message || 'ping' }], max_tokens: 1, stream: true }))
   headers['content-length'] = payload.length
   const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
   const to = Object.assign({ connectMs: 10000, firstByteMs: 60000 }, (opts && opts.timeout) || {})
   const started = Date.now()
   return new Promise((resolve) => {
+    let settled = false
+    let timer = null
+    const finish = (ok, code, err) => { if (settled) return; settled = true; clearTimeout(timer); resolve({ ok, status: code, ms: Date.now() - started, err: err || null }) }
+    // 响应头到达后等待首条 SSE 数据的窗口：流式上游连接成功却长时间不发事件=不可用
     const req = mod.request(reqOpts, (res) => {
-      res.resume(); res.destroy() // 只需状态码，立即释放，不读响应
-      const ok = res.statusCode >= 200 && res.statusCode < 300
-      if (!ok && log) log.warn('failback probe status', res.statusCode)
-      resolve({ ok, status: res.statusCode, ms: Date.now() - started })
+      const okStatus = res.statusCode >= 200 && res.statusCode < 300
+      const isSse = /(text|application)\/event-stream/i.test((res.headers['content-type'] || ''))
+      if (!okStatus) { res.resume(); finish(false, res.statusCode, 'HTTP ' + res.statusCode); return }
+      if (!isSse) { res.resume(); finish(true, res.statusCode, null); return } // 兼容返回 JSON 的非流式上游
+      timer = setTimeout(() => { try { res.destroy() } catch { } finish(false, res.statusCode, 'no stream event') }, 15000)
+      let buf = ''
+      res.on('data', (d) => {
+        if (settled) { try { res.destroy() } catch { } return }
+        buf += d.toString('utf8')
+        if (/data:/.test(buf)) { finish(true, res.statusCode, null); try { res.destroy() } catch { } } // 收到首条 SSE 事件即判恢复
+      })
+      res.on('error', (e) => finish(false, res.statusCode, (e && e.code) || e.message))
+      res.on('end', () => finish(false, res.statusCode, 'sse ended without data'))
     })
     req.setTimeout(to.connectMs, () => req.destroy(Object.assign(new Error('failback probe timeout'), { code: 'ETIMEDOUT' })))
-    req.on('error', (err) => resolve({ ok: false, status: null, ms: Date.now() - started, err: err.code || err.message }))
+    req.on('error', (err) => finish(false, null, err.code || err.message))
     req.write(payload)
     req.end()
   })
