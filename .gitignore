@@ -6,8 +6,9 @@ config/*.local.json
 .env
 
 config/stats.json
-# 配置备份（.bak）不入库
+# 配置备份（.bak 及带时间戳后缀）不入库
 *.bak
+*.bak-*
 # 开发网关配置（8788，不入库）
 scripts/dev.gateway.json
 # 下游截断回归测试沙箱（仅本地用，不入库）
