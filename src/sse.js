@@ -63,7 +63,13 @@ export async function relayStream(client, firstUpstream, opts) {
   function keepalive() { if (!client.destroyed) client.write(': mg-keepalive\n') }
   function finalize(note) {
     if (client.destroyed) return
-    try { sendRaw('\n: [gateway] ' + note + '\n'); sendDone() } catch { client.destroy() }
+    try {
+      // 中断时先给客户端明确交代（OpenAI 兼容错误事件），再 [DONE] 正常结束——
+      // 否则纯 [DONE] 会被客户端当「正常结束但无输出」处理（zcode 等直接静默结束对话，用户无感知）
+      sendDataJson({ error: { message: '上游流式响应中断：' + note + '，已重连 ' + retries + ' 次仍失败', type: 'stream_interrupted', code: 'STREAM_INTERRUPTED' } })
+      sendRaw('\n: [gateway] ' + note + '\n')
+      sendDone()
+    } catch { client.destroy() }
     try { client.end() } catch { }
   }
 

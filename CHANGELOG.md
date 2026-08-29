@@ -2,12 +2,22 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 托盘小窗管理器 + 日志按天分文件与 7 天保留
+
+### Added
+- **mg-tray 托盘小窗管理器**（`scripts/tray/mg-tray.cs`，Windows 自带 .NET Framework csc 编译为 ~24KB `mg-tray.exe`，零第三方依赖）：无边框置顶悬浮小窗（状态/uptime/今日 token/请求错误 + 启动/停止/重启/面板/日志按钮，可拖动、右键切置顶、✕ 缩托盘）+ 托盘常驻（双击唤出、菜单全套操作、崩溃 5s 退避自动拉活、连续快速失败 ≥5 次熔断）+「开机自启」开关（HKCU Run 键，免管理员）+ 启动前清端口残留 node（同 start.bat 语义，只杀 node.exe）；检测到端口已有 node 实例显示「外部实例/未接管」不重复拉起；数据面轮询 `/healthz` + `/api/status`（401 自动降级）。
+- `scripts/tray/build.cmd`：一键编译（系统自带 csc.exe；ASCII-only 规避批处理 GBK 解析坑）。
+
+### Changed
+- **日志按天分文件 + 7 天保留**：`logs/gateway.log` 改为落盘 `logs/gateway-YYYY-MM-DD.log`（配置 `logFile` 仅指定前缀/目录），启动/跨天清理 7 天前旧文件（含 `.old` 轮转件；历史无日期旧版按 mtime 判断）；单文件超 5MB 轮转 `.old`；`/api/logs` 改读当前天文件（logger 暴露 `file()`）；`start.bat` 前台调试用法不变。
+
 ## [0.2.3] · 2026-08-29 —— 测试套件修正与文档口径同步
 
 ### Fixed
 - **`rate429.mjs` 断言过时**：0.2.0 循环兜底后 429 排队对客户端透明——首请求在网关内按 `Retry-After` 等待并重发上游，最终 200；旧断言仍期待「首请求 502/429 + 次请求排队」的 0.2.0 前语义。现改为：首请求内部排队（耗时 ≥ Retry-After、上游恰 2 次命中）后成功，次请求冷却已过不再等待。
 - **`acl.mjs` 崩溃修复**：`st` 是已解析的 status 对象却被当函数调用（`(await st())` → TypeError），deepseek-official 存在时整个文件 ERROR——改为重新拉取 status 并对字段缺失败的容错取值。
 - **测试子结果计数隔离**：`results` 为套件级共享数组，virtual-models 结尾的子结果统计会把其它文件的失败算进自己头上误报 ERROR——改为按进入时基线取增量。
+- **SSE 续传用尽时给客户端明确交代**：流式中断、续传 2 次仍失败时，`finalize` 此前只发 `[DONE]`（正常结束标记）——zcode 等 OpenAI 兼容客户端把「无输出的 [DONE]」当对话正常结束，直接静默收场，用户无感知。现先发 OpenAI 兼容**错误事件**（`type: "stream_interrupted"`）再发 `[DONE]` 收尾，客户端可据此显示错误提示而非静默。8/25 的 `16f770a` 只修了「续传被 end 掐断」，续传用尽后的客户端信号一直是缺失的——本次补齐。
 
 ### Changed
 - README/CHANGELOG 口径同步：探活超时实为 `defaults.timeout.connectMs`（模板 15s，并非固定 10s）；分层超时表更新（转发建连阶段对齐 firstByteMs，connectMs 仅用于预热/探活）；0.2.1 补记同窗口的 TD1 测试沉淀 / TD2+TD3 重构条目。
