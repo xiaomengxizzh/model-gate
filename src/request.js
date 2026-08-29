@@ -222,6 +222,32 @@ export function warm(provider, model, systemPrompt, opts = {}, log) {
   })
 }
 
+// 主上游回切探活：与 warm 同构，但消息用 user 角色——部分上游/聚合网关的 LiteLLM
+// 层拒绝 system-only 请求（400 LITELLM_ERROR），system 前缀探活会永远失败。
+// 日志文案独立为 failback probe，避免与 preheat（B4 预热）混淆。
+export function probeChat(provider, model, message, opts = {}, log) {
+  const url = new URL(provider.baseUrl + (provider.pathPrefix || '') + '/v1/chat/completions')
+  const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json' }
+  if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
+  const payload = Buffer.from(JSON.stringify({ model: model, messages: [{ role: 'user', content: message || 'ping' }], max_tokens: 1, stream: false }))
+  headers['content-length'] = payload.length
+  const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
+  const to = Object.assign({ connectMs: 10000, firstByteMs: 60000 }, (opts && opts.timeout) || {})
+  const started = Date.now()
+  return new Promise((resolve) => {
+    const req = mod.request(reqOpts, (res) => {
+      res.resume(); res.destroy() // 只需状态码，立即释放，不读响应
+      const ok = res.statusCode >= 200 && res.statusCode < 300
+      if (!ok && log) log.warn('failback probe status', res.statusCode)
+      resolve({ ok, status: res.statusCode, ms: Date.now() - started })
+    })
+    req.setTimeout(to.connectMs, () => req.destroy(Object.assign(new Error('failback probe timeout'), { code: 'ETIMEDOUT' })))
+    req.on('error', (err) => resolve({ ok: false, status: null, ms: Date.now() - started, err: err.code || err.message }))
+    req.write(payload)
+    req.end()
+  })
+}
+
 // 模型连通测试：向该模型所属上游发一个极小量的真实 chat 请求（max_tokens=1），验证"这个模型名能真正被调用"
 // 返回 { ok, code, ms, err, body }，body 为响应首片段用于展示后端告警。
 export function probeModel(provider, model) {

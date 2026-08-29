@@ -7,13 +7,19 @@ import http from 'node:http'
 import { GW, check, snapshot, save, chat } from './utils.mjs'
 
 const hits = { A: 0, B: 0 }      // 真实请求计数
-const probes = { A: 0, B: 0 }    // 探活请求计数（探活 system 前缀为 ping，据此区分）
+const probes = { A: 0, B: 0 }    // 探活请求计数
+const probeRoles = []            // 探活消息角色记录（必须为 user：LiteLLM 层拒 system-only，400）
 const down = { A: false, B: false }
 const mkServer = (name) => http.createServer((req, res) => {
   let body = ''
   req.on('data', (c) => { body += c })
   req.on('end', () => {
-    if (body.includes('ping')) probes[name] += 1; else hits[name] += 1
+    let isProbe = false
+    try {
+      const j = JSON.parse(body)
+      if (j.messages && j.messages[0] && j.messages[0].role === 'user' && String(j.messages[0].content).includes('ping')) { isProbe = true; probeRoles.push(j.messages[0].role) }
+    } catch {}
+    if (isProbe) probes[name] += 1; else hits[name] += 1
     if (down[name]) { res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":"busy"}'); return }
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({
@@ -54,6 +60,7 @@ check('2·主上游故障后切到备用 B', hits.B === 1, { A: hits.A, B: hits.
 down.A = false
 await new Promise(r => setTimeout(r, 20000))
 check('3·降级期间后台确实发出了探活请求', probes.A >= 2, { probesA: probes.A, probesB: probes.B })
+check('3b·探活消息必须为 user 角色（LiteLLM 拒 system-only）', probeRoles.length > 0 && probeRoles.every(r => r === 'user'), { probeRoles })
 
 // 4) 真实请求应已回到主上游 A（TTL 为 1 小时未过期，只能是探活清除亲和所致）
 const before = { A: hits.A, B: hits.B }

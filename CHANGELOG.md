@@ -13,6 +13,7 @@
 ### Fixed
 - **自定义 `defaults` 字段在任意一次配置保存后被静默丢弃**（如本次新增的 `affinityTtlMs`/`failbackProbe`，以及未来的任何扩展字段）：根因是 `/api/status` 只返回白名单内的 defaults 字段，面板/测试走「读-改-写」时未返回的字段被覆盖。现 `buildStatus` 的 `defaults` 改为**原样返回**（仅 `clientKey` 掩码）——一次修复覆盖所有自定义字段，无需再逐字段加白名单。
 - **`/api/status` 不暴露 provider 的 `circuit`**：此前面板/测试保存配置会把手动配的熔断参数清成 `null`（同类问题）。现已暴露并在测试 `snapshot()` 中原样带回，熔断配置不再被吃掉。
+- **回切探活请求格式修复**：探活此前复用 `warm()` 的 system-only 消息，被 LiteLLM 类网关（如 tokenrhythm/jiyuan）以 400 拒绝（`LITELLM_ERROR: messages 参数非法`）——探活从未成功，回切只能依赖亲和 TTL 兜底，且失败日志误报为 `preheat status`。新增 `probeChat()`（**user 角色**消息 + 独立 `failback probe` 日志文案），探活恢复工作，日志不再误导。
 
 ## [0.2.1] · 2026-08-27 —— 上游代理（proxy）面板化收尾
 

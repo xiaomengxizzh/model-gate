@@ -5,7 +5,7 @@ import { basename } from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import { loadConfig, createRouter, buildProvider, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh } from './router.js'
 import { createLogger } from './logger.js'
-import { forward, probe, probeModel, warm } from './request.js'
+import { forward, probe, probeModel, probeChat, warm } from './request.js'
 import { adapterFor, cacheHitMiss } from './format.js'
 import { isStreamResponse, writeUpstreamHeaders, relayStream } from './sse.js'
 import { forwardChain, routeLimit, virtualQuotaExceeded } from './forward.js'
@@ -669,7 +669,7 @@ export function start(opts = {}) {
         let prov; try { prov = buildProvider(state.cfg, primary) } catch { continue }
         if (prov._def.apiKeyEnv && !prov.keyOk) continue
         if (!healthy(ensureHst(state, primary), now)) continue       // 主上游熔断中：交给熔断半开处理，避免打架
-        const r = await warm(prov, name, sys, state.cfg.defaults || {}, log)
+        const r = await probeChat(prov, name, sys, state.cfg.defaults || {}, log)  // user 消息探活：LiteLLM 层拒 system-only（400），warm 的 system 前缀不适用
         if (r.ok) {
           streak[name] = (streak[name] || 0) + 1
           if (streak[name] >= need) {
