@@ -11,7 +11,7 @@ if not exist "%CSC%" (
   echo [ERROR] csc.exe not found under %WINDIR%\Microsoft.NET\Framework*\v4.0.30319
   exit /b 1
 )
-"%CSC%" /nologo /target:winexe /platform:anycpu /out:"..\..\mg-tray.exe" /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll mg-tray.cs
+"%CSC%" /nologo /target:winexe /platform:anycpu /win32icon:mg-tray.ico /out:"..\..\mg-tray.exe" /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll mg-tray.cs
 if errorlevel 1 (
   echo [ERROR] build failed
   exit /b 1

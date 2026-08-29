@@ -2,10 +2,13 @@
 // 编译：scripts\tray\build.cmd → 项目根 mg-tray.exe；双击运行，无控制台窗口。
 // 职责：拉起/守护 node src/index.js（崩溃 5s 退避自动拉活，连续快速失败熔断）、
 //       悬浮小窗显示状态与快捷操作、托盘常驻、开机自启（HKCU Run）、启动前清端口残留 node（同 start.bat 语义）。
-// 外观：赛璐璐风，配色/语言与 admin.html 面板 dark 主题同源：
-//       卡片 + 2px 描边 + 硬偏移阴影(3px3px0) + 胶囊按钮悬停抬升 + 菱形 gem + 健康徽章 + 等宽字体。
+// 外观：赛璐璐 = gate-model 控制面板（admin.html dark）同源配色（--sink/--card/--card2/--edge/--cel-accent），
+//       Form.Opacity 整体半透明（0.9）；两列布局，卡内左右排布（同字号）：
+//       状态词即标题（有流量点亮「传输中」）+ 两列数据卡 + 主次分组按钮（primary 随运行态切换）。
+//       中文萝莉体（用户级字体，回退雅黑），西文/数字 Cascadia Mono，小字号 + 大间距留呼吸感。
 // 语法约束：in-box csc.exe 仅支持 C# 5——不得使用 $"" / ?. / out var / using var / nameof。
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -50,22 +53,24 @@ namespace MgTray
         }
     }
 
-    // 面板 dark 主题真值（admin.html [data-theme="dark"]）
+    // 赛璐璐配色 = gate-model 自己的控制面板（admin.html [data-theme="dark"]）真值，严格同源
     static class Theme
     {
-        public static readonly Color Sink = Color.FromArgb(0x10, 0x1A, 0x4E);      // 页面底
-        public static readonly Color Card = Color.FromArgb(0x1B, 0x25, 0x66);      // 卡片
-        public static readonly Color Card2 = Color.FromArgb(0x1D, 0x2A, 0x72);     // 行/按钮
-        public static readonly Color Edge = Color.FromArgb(0x3D, 0x4D, 0xAB);      // 描边
-        public static readonly Color Shadow = Color.FromArgb(0x0A, 0x12, 0x36);    // 硬偏移阴影
-        public static readonly Color Ink = Color.FromArgb(0xEE, 0xF1, 0xFF);       // 主文本
-        public static readonly Color Ink2 = Color.FromArgb(0xCF, 0xDC, 0xFF);      // 次文本
-        public static readonly Color Ink3 = Color.FromArgb(0xA4, 0xB0, 0xF2);      // 弱化
-        public static readonly Color Accent = Color.FromArgb(0x86, 0xA0, 0xFF);    // 主色
-        public static readonly Color AccentH = Color.FromArgb(0x9C, 0xB0, 0xFF);     // 主色悬停
-        public static readonly Color AccentD = Color.FromArgb(0x7A, 0x90, 0xF0);     // 主色按压
+        public static readonly Color Sink = Color.FromArgb(0x10, 0x1A, 0x4E);      // --sink
+        public static readonly Color Card = Color.FromArgb(0x1B, 0x25, 0x66);      // --card
+        public static readonly Color Card2 = Color.FromArgb(0x1D, 0x2A, 0x72);     // --card2
+        public static readonly Color Card3 = Color.FromArgb(0x14, 0x1D, 0x55);     // --card3
+        public static readonly Color Edge = Color.FromArgb(0x3D, 0x4D, 0xAB);      // --edge
+        public static readonly Color Shadow = Color.FromArgb(0x0A, 0x12, 0x36);    // --shadow
+        public static readonly Color Ink = Color.FromArgb(0xEE, 0xF1, 0xFF);       // --ink
+        public static readonly Color Ink2 = Color.FromArgb(0xCF, 0xDC, 0xFF);      // --ink2
+        public static readonly Color Ink3 = Color.FromArgb(0xA4, 0xB0, 0xF2);      // --ink3
+        public static readonly Color Accent = Color.FromArgb(0x86, 0xA0, 0xFF);    // --cel-accent
+        public static readonly Color Mark = Color.FromArgb(0x38, 0x66, 0xC8);      // --mark
+        public static readonly Color AccentH = Color.FromArgb(0x9C, 0xB0, 0xFF);     // accent 悬停
+        public static readonly Color AccentD = Color.FromArgb(0x7A, 0x90, 0xF0);     // accent 按压
         public static readonly Color Card2H = Color.FromArgb(0x26, 0x32, 0x7E);     // 卡2悬停
-        public static readonly Color TermBg = Color.FromArgb(0x0A, 0x0E, 0x24);    // 终端底（托盘图标底）
+        public static readonly Color TermBg = Color.FromArgb(0x0A, 0x0E, 0x24);    // --term-bg
         public static readonly Color Ok = Color.FromArgb(0x37, 0xD6, 0x7A);
         public static readonly Color Warn = Color.FromArgb(0xFF, 0xB0, 0x20);
         public static readonly Color Err = Color.FromArgb(0xFF, 0x54, 0x70);
@@ -80,8 +85,12 @@ namespace MgTray
         }
         static readonly string MonoName = Has("Cascadia Mono") ? "Cascadia Mono" : "Consolas";
         static readonly string MarkName = Has("Bahnschrift") ? "Bahnschrift" : "Arial Narrow";
+        // 中文走萝莉体（用户级安装，字族名=萝莉体 第二版），缺失回退雅黑；mono 字体无中文字形严禁配中文
+        static readonly string CnName = Has("萝莉体 第二版") ? "萝莉体 第二版" : "Microsoft YaHei UI";
         public static Font Mono(float size) { return new Font(MonoName, size * Mg.Scale); }
         public static Font Mark(float size) { return new Font(MarkName, size * Mg.Scale, FontStyle.Bold); }
+        public static Font Cn(float size) { return new Font(CnName, size * Mg.Scale); }
+        public static Font CnBold(float size) { return new Font(CnName, size * Mg.Scale, FontStyle.Bold); }
     }
 
     static class Mg
@@ -92,6 +101,9 @@ namespace MgTray
 
         [DllImport("dwmapi.dll")]
         public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+        [DllImport("user32.dll")] public static extern bool ReleaseCapture();
+        [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
 
         public static GraphicsPath RoundRect(Rectangle r, int rad)
         {
@@ -107,51 +119,50 @@ namespace MgTray
         }
     }
 
-    // 圆角按钮（电脑管家式）：底色分层 + 悬停提亮 + 按压压暗，无描边堆叠/无硬阴影
-    // kind: 0=Primary(accent 填充) 1=Ghost(card2 填充+1px 边) 2=Mini(✕ 方角)
-    internal class MgButton : Control
+    // 虚拟按钮（MiniForm 自绘 + 命中检测，不挂真实子控件）：
+    // kind: 0=Primary(accent 填充) 1=Ghost(card2 半透明填充+1px 边) 2=Mini(✕ 平时淡化、悬停红)
+    internal class MgButton
     {
-        readonly int _kind;
-        bool _hot, _down;
+        public Rectangle Rect; public string Text; public int Kind;
+        public bool Hot, Down; public EventHandler Click;
 
         public MgButton(string text, int x, int y, int w, int h, int kind)
         {
             Text = text;
-            Bounds = new Rectangle(x, y, w, h);
-            _kind = kind;
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
-                | ControlStyles.UserPaint | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
-            BackColor = Color.Transparent;
-            Font = MgFonts.Mono(9.5f);
-            Cursor = Cursors.Hand;
-            MouseEnter += delegate { _hot = true; Invalidate(); };
-            MouseLeave += delegate { _hot = false; _down = false; Invalidate(); };
-            MouseDown += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Left) { _down = true; Invalidate(); } };
-            MouseUp += delegate { if (_down) { _down = false; Invalidate(); } };
+            Rect = new Rectangle(x, y, w, h);
+            Kind = kind;
         }
 
-        protected override void OnPaint(PaintEventArgs e)
+        // primary 跟随运行态切换（启动/停止谁主推）
+        public void SetKind(int kind) { Kind = kind; }
+
+        public void Paint(Graphics g)
         {
-            var g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            var r = new Rectangle(0, 0, Width - 1, Height - 1);
-            Color fill = _kind == 0
-                ? (_down ? Theme.AccentD : (_hot ? Theme.AccentH : Theme.Accent))
-                : (_kind == 1 ? (_hot ? Theme.Card2H : Theme.Card2) : (_hot ? Theme.Card2H : Theme.Card));
-            using (var b = new SolidBrush(fill))
-            using (var p = Mg.RoundRect(r, Mg.X(8)))
+            var r = Rect; r.Width -= 1; r.Height -= 1;
+            Color fill = Kind == 0
+                ? (Down ? Theme.AccentD : (Hot ? Theme.AccentH : Theme.Accent))
+                : (Kind == 2
+                    ? (Hot ? Color.FromArgb(60, Theme.Err) : Color.FromArgb(150, Theme.Card2))
+                    : (Hot ? Color.FromArgb(200, Theme.Card2H) : Color.FromArgb(150, Theme.Card2)));
+            using (var p = Mg.RoundRect(r, Mg.X(10)))
             {
-                g.FillPath(b, p);
-                if (_kind == 1)
+                using (var b = new SolidBrush(fill)) g.FillPath(b, p);
+                if (Kind == 1 || Kind == 2)
                 {
-                    using (var pen = new Pen(Theme.Edge)) g.DrawPath(pen, p);
+                    using (var pen = new Pen(Kind == 2 && Hot ? Theme.Err : Theme.Edge)) g.DrawPath(pen, p);
                 }
             }
-            Color txt = _kind == 0
+            Color txt = Kind == 0
                 ? Color.White
-                : (_kind == 2 ? (_hot ? Theme.Accent : Theme.Ink3) : (_hot ? Theme.Ink : Theme.Ink2));
-            TextRenderer.DrawText(g, Text, Font, r, txt,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                : (Kind == 2 ? (Hot ? Theme.Err : Theme.Ink2)
+                              : (Hot ? Theme.Ink : Theme.Ink2));
+            using (var b = new SolidBrush(txt))
+            using (var sf = (StringFormat)StringFormat.GenericTypographic.Clone())
+            {
+                sf.Alignment = StringAlignment.Center;
+                sf.LineAlignment = StringAlignment.Center;
+                g.DrawString(Text, MgFonts.Cn(9.5f), b, new RectangleF(Rect.X, Rect.Y - Mg.X(1), Rect.Width, Rect.Height), sf);
+            }
         }
     }
 
@@ -167,6 +178,7 @@ namespace MgTray
         public bool Owned;        // 由本托盘拉起且存活
         public string State;      // running / stopped / starting
         public string CurModel;   // 最近一次成功服务的模型（/api/status lastServing）
+        public string Upstream;   // 最近一次成功服务的上游 provider（lastServing.provider）
     }
 
     internal class TrayApp : ApplicationContext
@@ -186,9 +198,12 @@ namespace MgTray
         int _fastFails;           // 连续快速失败计数（进程存活 <10s 记一次）
         DateTime _startedAt;
 
+        string _adminToken = "";  // 管理 API 令牌（ReadAdminToken），/api/status 拉数据用
+
         public TrayApp()
         {
             _port = ReadPort();
+            _adminToken = ReadAdminToken();
             _mini = new MiniForm(this);
             var forceHandle = _mini.Handle; // 提前建句柄，后台线程 BeginInvoke 才可用
 
@@ -245,6 +260,51 @@ namespace MgTray
             return 8787;
         }
 
+        // 管理令牌获取链：config/admin.token（托盘专用导出文件）→ HKCU/进程 env → server.adminToken → keys.local.json 明文兜底
+        string ReadAdminToken()
+        {
+            try
+            {
+                var p = Path.Combine(_root, "config", "admin.token");
+                if (File.Exists(p))
+                {
+                    var v = File.ReadAllText(p).Trim();
+                    if (v.Length > 0 && !v.StartsWith("MG1:")) return v;
+                }
+            }
+            catch { }
+            try
+            {
+                var v = Registry.GetValue("HKEY_CURRENT_USER\\Environment", "MG_ADMIN_TOKEN", null) as string;
+                if (!string.IsNullOrEmpty(v)) return v.Trim();
+            }
+            catch { }
+            try
+            {
+                var v = Environment.GetEnvironmentVariable("MG_ADMIN_TOKEN");
+                if (!string.IsNullOrEmpty(v)) return v.Trim();
+            }
+            catch { }
+            try
+            {
+                var cfg = File.ReadAllText(Path.Combine(_root, "config", "gateway.json"));
+                var m = Regex.Match(cfg, "\"adminToken\"\\s*:\\s*\"([^\"]+)\"");
+                if (m.Success) return m.Groups[1].Value.Trim();
+            }
+            catch { }
+            try
+            {
+                var kf = File.ReadAllText(Path.Combine(_root, "config", "keys.local.json"));
+                if (!kf.TrimStart().StartsWith("MG1:"))
+                {
+                    var m2 = Regex.Match(kf, "\"__mg_admin\"\\s*:\\s*\"([^\"]+)\"");
+                    if (m2.Success) return m2.Groups[1].Value.Trim();
+                }
+            }
+            catch { }
+            return "";
+        }
+
         // ---------- 状态轮询 ----------
         void PollTick(object sender, EventArgs e)
         {
@@ -252,8 +312,15 @@ namespace MgTray
             Task.Factory.StartNew(delegate
             {
                 var st = PollOnce(port);
-                try { _mini.BeginInvoke((MethodInvoker)delegate { ApplyStatus(st); }); } catch { }
+                try { _mini.BeginInvoke((MethodInvoker)delegate { ApplyStatus(st); AutoGuard(st); }); } catch { }
             });
+        }
+
+        // 守护兜底：网关不在跑、也非人为停止、且无属主进程（孤儿死亡/开机未启动）→ 自动拉起，
+        // 任何情况下都不需要人手动点启动；只有用户点过「停止」（_stopping）才保持停止
+        void AutoGuard(StatusInfo st)
+        {
+            if (!st.Alive && !_stopping && _proc == null) StartGateway();
         }
 
         StatusInfo PollOnce(int port)
@@ -263,7 +330,7 @@ namespace MgTray
             try { st.Owned = st.Owned && _proc.HasExited == false; }
             catch { st.Owned = false; }
             string body;
-            int code = HttpGet("http://127.0.0.1:" + port + "/healthz", 1500, out body);
+            int code = HttpGet("http://127.0.0.1:" + port + "/healthz", 1500, null, out body);
             st.Alive = code == 200;
             if (!st.Alive)
             {
@@ -271,16 +338,26 @@ namespace MgTray
                 return st;
             }
             st.State = "running";
-            code = HttpGet("http://127.0.0.1:" + port + "/api/status", 1500, out body);
+            string auth = _adminToken.Length > 0 ? "Bearer " + _adminToken : null;
+            code = HttpGet("http://127.0.0.1:" + port + "/api/status", 1500, auth, out body);
             if (code == 401) { st.NeedAuth = true; return st; }
             if (code == 200 && body != null)
             {
                 st.StatsOk = true;
                 st.UptimeMs = Num(Regex.Match(body, "\"uptimeMs\":(\\d+)"));
                 st.TodayTokens = Num(Regex.Match(body, "\"todayTokens\":(\\d+)"));
-                // 当前使用的模型：网关记录最近一次成功服务的 serving（index.js 数据面回写）
-                var msrv = Regex.Match(body, "\"lastServing\":\\{\"model\":\"([^\"]*)\"");
-                if (msrv.Success) st.CurModel = msrv.Groups[1].Value;
+                // 当前使用的模型/上游：网关记录最近一次成功服务的 serving（index.js 数据面回写）
+                var msrv = Regex.Match(body, "\"lastServing\":\\{\"model\":\"([^\"]*)\",\"provider\":\"([^\"]*)\"");
+                if (msrv.Success)
+                {
+                    st.CurModel = msrv.Groups[1].Value;
+                    st.Upstream = msrv.Groups[2].Value;
+                }
+                else
+                {
+                    msrv = Regex.Match(body, "\"lastServing\":\\{\"model\":\"([^\"]*)\"");
+                    if (msrv.Success) st.CurModel = msrv.Groups[1].Value;
+                }
                 // global 对象里 requests/errors 位于嵌套 latTrend 之前，截到第一个 } 前已含所需字段
                 var g = Regex.Match(body, "\"global\":\\{([^}]*)\\}");
                 if (g.Success)
@@ -294,7 +371,7 @@ namespace MgTray
 
         static long Num(Match m) { return m.Success ? Convert.ToInt64(m.Groups[1].Value) : 0; }
 
-        static int HttpGet(string url, int timeoutMs, out string body)
+        static int HttpGet(string url, int timeoutMs, string auth, out string body)
         {
             body = null;
             try
@@ -304,6 +381,7 @@ namespace MgTray
                 req.Timeout = timeoutMs;
                 req.ReadWriteTimeout = timeoutMs;
                 req.Proxy = null;
+                if (!string.IsNullOrEmpty(auth)) req.Headers[HttpRequestHeader.Authorization] = auth;
                 using (var resp = (HttpWebResponse)req.GetResponse())
                 using (var rs = resp.GetResponseStream())
                 using (var sr = new StreamReader(rs, Encoding.UTF8))
@@ -415,6 +493,7 @@ namespace MgTray
         {
             StopGateway();
             _stopping = false;
+            _mini.ShowRestarting();   // 即时反馈：重启进行中，下一轮 poll（≤2s）刷新为实际状态
             StartGateway();
         }
 
@@ -576,38 +655,46 @@ namespace MgTray
                 using (var g = Graphics.FromImage(bmp))
                 {
                     g.SmoothingMode = SmoothingMode.AntiAlias;
-                    g.Clear(Theme.TermBg);
-                    using (var b = new SolidBrush(dot)) g.FillEllipse(b, 4, 4, 8, 8);
+                    g.Clear(Color.Transparent);
+                    // 赛璐璐小卡：钴蓝圆角底 + 描边，中央状态点
+                    using (var p = Mg.RoundRect(new Rectangle(0, 0, 14, 14), 4))
+                    {
+                        using (var b = new SolidBrush(Theme.Card)) g.FillPath(b, p);
+                        using (var pen = new Pen(Theme.Edge)) g.DrawPath(pen, p);
+                    }
+                    using (var b = new SolidBrush(dot)) g.FillEllipse(b, 5, 5, 6, 6);
                 }
                 return Icon.FromHandle(bmp.GetHicon());
             }
         }
     }
 
-    // 悬浮小窗 = 面板同款「卡片」：外圈 sink 底 + 硬偏移阴影 + 2px 描边圆角卡；
-    // 标题（Bahnschrift，GATE 走 accent）+ 健康徽章（dot+chip）+ gem 菱形 kv 行 + 胶囊按钮排。
-    // ✕ 缩托盘；右键菜单切置顶/退出。数据更新仅改字段 + Invalidate，全部内容在 OnPaint 绘制。
-    // 悬浮小窗（极简三数据版）：运行状态(运行中/重连中/已停止) + 当前使用的模型 + 今日 token 总量。
-    // 布局按 DPI 缩放（Mg.X），文字原生渲染不发虚；✕ 缩托盘；右键菜单切置顶/退出。
+    // 悬浮小窗（赛璐璐半透明）：状态词即标题（呼吸点；有流量点亮「传输中」accent）
+    // + 副标题（model-gateway :端口 · 守护中/未接管）+ 两列数据卡（当前模型｜今日 TOKENS）
+    // + 主次分组按钮排（进程组｜跳转组，primary 随运行态在 启动/停止 间切换）。
+    // 透明：Form.Opacity 整体半透明（0.9，WinForms 自动套 layered+LWA_ALPHA）+ Win11 DWM 圆角，
+    // 桌面背景透出；按钮为窗口内虚拟绘制 + 鼠标命中检测。
+    // 中文萝莉体、西文/数字 Cascadia Mono；✕ 缩托盘；右键菜单切置顶/退出。
     internal class MiniForm : Form
     {
         readonly TrayApp _app;
         public bool ForceClose;
-        bool _dragging;
-        Point _dragOff;
         ContextMenuStrip _ctx;
+        List<MgButton> _btns;
+        MgButton _bStart, _bStop;
 
         string _stateText = "连接中…";
         Color _stateDot = Theme.Ink3;
-        bool _alive, _statsOk, _needAuth, _owned;
+        bool _alive, _statsOk;
         long _todayTokens;
+        long _lastTok = -1;       // 上轮 todayTokens（传输中检测）
+        long _lastReq = -1;       // 上轮 requests
         string _curModel;
+        string _curUpstream;
 
-        readonly Font _fState = new Font("Segoe UI", 12.5f, FontStyle.Bold);
-        readonly Font _fVal = MgFonts.Mono(11.5f);
-        readonly Font _fLab = MgFonts.Mono(9.5f);
-        readonly Font _fSub = MgFonts.Mono(8.5f);
-        readonly Font _fMark = MgFonts.Mark(11.5f);
+        readonly Font _fState = MgFonts.CnBold(12f);
+        readonly Font _fLab = MgFonts.Cn(10f);      // 卡内标签：与数值同字体同字号（10pt），基线天然对齐
+        readonly Font _fVal = MgFonts.Cn(10f);      // 卡内数值：同一只字体，杜绝大小不一
 
         public MiniForm(TrayApp app)
         {
@@ -616,20 +703,28 @@ namespace MgTray
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
             var wa = Screen.PrimaryScreen.WorkingArea;
-            Location = new Point(wa.Right - Mg.X(330), wa.Bottom - Mg.X(194));
-            Size = new Size(Mg.X(304), Mg.X(164));
-            BackColor = Theme.Card;
-            DoubleBuffered = true;
+            // 两列严格对齐：顶线 y=16（运行中=启动按钮顶），底线 y=220（词元卡底=日志按钮底），
+            // 窗高 236 = 16 + 204 + 16；默认出现在屏幕右下角
+            Location = new Point(wa.Right - Mg.X(340), wa.Bottom - Mg.X(256));
+            Size = new Size(Mg.X(320), Mg.X(236));
             TopMost = true;
-            Font = MgFonts.Mono(9.5f);
+            DoubleBuffered = true;
+            Opacity = 0.8;   // 整体半透明：Form.Opacity，WinForms 自动套 WS_EX_LAYERED+LWA_ALPHA
+            // 窗口图标与 exe/托盘同款（赛璐璐 ico 嵌在 exe 资源里）
+            try { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+            Font = MgFonts.Cn(10f);
 
-            var bStart = new MgButton("启动", Mg.X(14), Mg.X(120), Mg.X(52), Mg.X(28), 0); bStart.Click += delegate { _app.StartGateway(); };
-            var bStop = new MgButton("停止", Mg.X(70), Mg.X(120), Mg.X(52), Mg.X(28), 1); bStop.Click += delegate { _app.StopGateway(); };
-            var bRestart = new MgButton("重启", Mg.X(126), Mg.X(120), Mg.X(52), Mg.X(28), 1); bRestart.Click += delegate { _app.RestartGateway(); };
-            var bPanel = new MgButton("面板", Mg.X(182), Mg.X(120), Mg.X(52), Mg.X(28), 0); bPanel.Click += delegate { _app.OpenPanel(); };
-            var bLogs = new MgButton("日志", Mg.X(238), Mg.X(120), Mg.X(52), Mg.X(28), 1); bLogs.Click += delegate { _app.OpenLogs(); };
-            var bClose = new MgButton("✕", Mg.X(274), Mg.X(8), Mg.X(24), Mg.X(24), 2); bClose.Click += delegate { Hide(); };
-            Controls.AddRange(new Control[] { bStart, bStop, bRestart, bPanel, bLogs, bClose });
+            // 窗控（右上角）：最小到托盘 / 关闭，32×32 与左列按钮同高（两者都缩托盘，网关不受影响）
+            var bMin = new MgButton("—", Mg.X(236), Mg.X(16), Mg.X(32), Mg.X(32), 2); bMin.Click += delegate { Hide(); };
+            var bClose = new MgButton("×", Mg.X(272), Mg.X(16), Mg.X(32), Mg.X(32), 2); bClose.Click += delegate { Hide(); };
+
+            // 左列：等宽等高按钮 y=16/59/102/145/188（步长 43），日志底 220 与词元卡底严格对齐
+            _bStart = new MgButton("启动", Mg.X(16), Mg.X(16), Mg.X(64), Mg.X(32), 0); _bStart.Click += delegate { _app.StartGateway(); };
+            _bStop = new MgButton("停止", Mg.X(16), Mg.X(59), Mg.X(64), Mg.X(32), 1); _bStop.Click += delegate { _app.StopGateway(); };
+            var bRestart = new MgButton("重启", Mg.X(16), Mg.X(102), Mg.X(64), Mg.X(32), 1); bRestart.Click += delegate { _app.RestartGateway(); };
+            var bPanel = new MgButton("面板", Mg.X(16), Mg.X(145), Mg.X(64), Mg.X(32), 1); bPanel.Click += delegate { _app.OpenPanel(); };
+            var bLogs = new MgButton("日志", Mg.X(16), Mg.X(188), Mg.X(64), Mg.X(32), 1); bLogs.Click += delegate { _app.OpenLogs(); };
+            _btns = new List<MgButton>(new MgButton[] { bMin, bClose, _bStart, _bStop, bRestart, bPanel, bLogs });
 
             _ctx = new ContextMenuStrip();
             var miTop = new ToolStripMenuItem("置顶显示");
@@ -648,11 +743,11 @@ namespace MgTray
             _ctx.Items.AddRange(new ToolStripItem[] { miTop, new ToolStripSeparator(), miPanel, miHide, new ToolStripSeparator(), miExit });
             ContextMenuStrip = _ctx;
 
-            // 无边框拖动：空白区按住即可拖（按钮控件自行处理点击，不参与）
-            MouseDown += DragStart; MouseMove += DragMove; MouseUp += DragEnd;
+            // 无边框拖动：空白区按住即可拖；按钮区域走虚拟按钮命中
+            MouseDown += FormMouseDown; MouseMove += FormMouseMove; MouseUp += FormMouseUp; MouseLeave += FormMouseLeave;
 
             // 状态点呼吸重绘
-            var pulse = new System.Windows.Forms.Timer { Interval = 500 };
+            var pulse = new System.Windows.Forms.Timer { Interval = 300 };
             pulse.Tick += delegate { if (_alive && Visible) Invalidate(); };
             pulse.Start();
         }
@@ -660,101 +755,151 @@ namespace MgTray
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            // Win11 系统圆角 + 阴影；Win10 无此属性时回退 Region 硬圆角
             try
             {
-                int pref = 2; // DWMWCP_ROUND
-                int hr = Mg.DwmSetWindowAttribute(Handle, 33, ref pref, 4);
-                if (hr != 0) Region = new Region(Mg.RoundRect(new Rectangle(Point.Empty, Size), Mg.X(12)));
+                int pref = 2; // DWMWCP_ROUND：Win11 圆角
+                Mg.DwmSetWindowAttribute(Handle, 33, ref pref, 4);
+                int none = unchecked((int)0xFFFFFFFE); // DWMWA_COLOR_NONE
+                Mg.DwmSetWindowAttribute(Handle, 34, ref none, 4);
             }
-            catch { Region = new Region(Mg.RoundRect(new Rectangle(Point.Empty, Size), Mg.X(12))); }
+            catch { }
         }
 
-        void Put(Graphics g, ref int cx, int y, string s, Color c, Font f)
+        protected override void OnPaintBackground(PaintEventArgs e)
         {
-            TextRenderer.DrawText(g, s, f, new Point(cx, y), c, TextFormatFlags.NoPadding);
-            cx += TextRenderer.MeasureText(g, s, f).Width;
-        }
-
-        // 模型名可能超宽：按可用宽度截断加 …
-        string Truncate(Graphics g, string s, Font f, int maxW)
-        {
-            if (TextRenderer.MeasureText(g, s, f).Width <= maxW) return s;
-            while (s.Length > 1 && TextRenderer.MeasureText(g, s + "…", f).Width > maxW) s = s.Substring(0, s.Length - 1);
-            return s + "…";
+            e.Graphics.Clear(Theme.Sink);   // 窗底：admin.html --sink 同源，随 Opacity 整体半透明
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            base.OnPaint(e);
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (var pen = new Pen(Theme.Edge))
-            using (var p = Mg.RoundRect(new Rectangle(0, 0, Width - 1, Height - 1), Mg.X(12)))
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+            DrawUi(g);
+        }
+
+        static readonly StringFormat Sf = (StringFormat)StringFormat.GenericTypographic.Clone();
+
+        void DrawStr(Graphics g, string s, Font f, Color c, int x, int y)
+        {
+            using (var b = new SolidBrush(c)) g.DrawString(s, f, b, x, y, Sf);
+        }
+
+        int StrW(Graphics g, string s, Font f) { return (int)Math.Ceiling(g.MeasureString(s, f, int.MaxValue, Sf).Width); }
+
+        // 模型名/上游名可能超宽：按可用宽度截断加 …
+        string Truncate(Graphics g, string s, Font f, int maxW)
+        {
+            if (StrW(g, s, f) <= maxW) return s;
+            while (s.Length > 1 && StrW(g, s + "…", f) > maxW) s = s.Substring(0, s.Length - 1);
+            return s + "…";
+        }
+
+        // 信息卡：card2 半透明底 + edge 细边 + 圆角（admin.html 同款）
+        void DrawCard(Graphics g, Rectangle r)
+        {
+            using (var p = Mg.RoundRect(r, Mg.X(12)))
             {
-                g.DrawPath(pen, p);
+                using (var b = new SolidBrush(Color.FromArgb(160, Theme.Card2))) g.FillPath(b, p);
+                using (var pen = new Pen(Theme.Edge)) g.DrawPath(pen, p);
             }
+        }
 
-            // 标题：MODEL·(ink) GATE(accent)
-            int tx = Mg.X(14);
-            Put(g, ref tx, Mg.X(8), "MODEL·", Theme.Ink, _fMark);
-            Put(g, ref tx, Mg.X(8), "GATE", Theme.Accent, _fMark);
+        void DrawUi(Graphics g)
+        {
+            // 窗底由 OnPaintBackground 填 Theme.Sink；状态词下垫半透明胶囊
 
-            // hero：呼吸状态点 + 状态词；右侧 守护/未接管
-            int hy = Mg.X(34);
-            int dcx = Mg.X(22), dcy = Mg.X(42);
+            // 运行中：右列最顶（y=16，与左列启动按钮同顶线）
+            using (var p = Mg.RoundRect(new Rectangle(Mg.X(94), Mg.X(14), Mg.X(112), Mg.X(28)), Mg.X(9)))
+            using (var b = new SolidBrush(Color.FromArgb(140, Theme.Card2)))
+            {
+                g.FillPath(b, p);
+            }
+            int dcx = Mg.X(106), dcy = Mg.X(28);
             if (_alive)
             {
-                int pr = Mg.X(4) + ((Environment.TickCount / 500) % 2) * Mg.X(2);
-                using (var b = new SolidBrush(Color.FromArgb(70, _stateDot)))
+                // 呼吸：外圈半透明光晕脉动 + 实心点
+                int pr = ((Environment.TickCount / 300) % 2) == 0 ? Mg.X(3) : Mg.X(4);
+                using (var b = new SolidBrush(Color.FromArgb(80, _stateDot)))
                 {
                     g.FillEllipse(b, dcx - pr, dcy - pr, pr * 2, pr * 2);
                 }
             }
             using (var b = new SolidBrush(_stateDot))
             {
-                g.FillEllipse(b, dcx - Mg.X(4), dcy - Mg.X(4), Mg.X(8), Mg.X(8));
+                g.FillEllipse(b, dcx - Mg.X(3), dcy - Mg.X(3), Mg.X(6), Mg.X(6));
             }
-            TextRenderer.DrawText(g, _stateText, _fState, new Point(Mg.X(34), Mg.X(32)), Theme.Ink);
-            string mode = _owned ? "守护中" : "未接管";
-            var mw = TextRenderer.MeasureText(g, mode, _fSub).Width;
-            TextRenderer.DrawText(g, mode, _fSub, new Point(Width - Mg.X(14) - mw, Mg.X(38)), Theme.Ink3);
-            if (_needAuth)
+            DrawStr(g, _stateText, _fState, Theme.Ink, Mg.X(118), Mg.X(19));
+
+            bool hasStats = _alive && _statsOk;
+
+            // 三卡：x=96 w=208 h=32（与左列按钮同高），y=68/128/188（卡距 28），词元卡底 220=日志按钮底；
+            // 卡内左右排布——标签 x=110、数值 x=154，同字号，垂直居中
+            // 上游卡
+            DrawCard(g, new Rectangle(Mg.X(96), Mg.X(68), Mg.X(208), Mg.X(32)));
+            DrawStr(g, "上游", _fLab, Theme.Ink3, Mg.X(110), Mg.X(74));
+            if (hasStats && !string.IsNullOrEmpty(_curUpstream))
             {
-                var nw = TextRenderer.MeasureText(g, "需令牌", _fSub).Width;
-                TextRenderer.DrawText(g, "需令牌", _fSub, new Point(Width - Mg.X(14) - mw - nw - Mg.X(8), Mg.X(38)), Theme.Warn);
+                DrawStr(g, Truncate(g, _curUpstream, _fVal, Mg.X(132)), _fVal, Theme.Accent, Mg.X(154), Mg.X(74));
+            }
+            else
+            {
+                DrawStr(g, "待命中", _fLab, Theme.Ink3, Mg.X(154), Mg.X(74));
             }
 
-            // 三数据卡：当前模型 / 今日 token（card2 底分层，无描边）
-            var card = new Rectangle(Mg.X(14), Mg.X(60), Width - Mg.X(28), Mg.X(52));
-            using (var b = new SolidBrush(Theme.Card2))
-            using (var p = Mg.RoundRect(card, Mg.X(8)))
+            // 模型卡
+            DrawCard(g, new Rectangle(Mg.X(96), Mg.X(128), Mg.X(208), Mg.X(32)));
+            DrawStr(g, "模型", _fLab, Theme.Ink3, Mg.X(110), Mg.X(134));
+            if (hasStats && !string.IsNullOrEmpty(_curModel))
             {
-                g.FillPath(b, p);
+                DrawStr(g, Truncate(g, _curModel, _fVal, Mg.X(132)), _fVal, Theme.Accent, Mg.X(154), Mg.X(134));
             }
-            bool hasStats = _alive && _statsOk;
-            int lx = Mg.X(26), vx = Mg.X(110);
-            int avail = Width - vx - Mg.X(16);
-            TextRenderer.DrawText(g, "当前模型", _fLab, new Point(lx, Mg.X(68)), Theme.Ink3, TextFormatFlags.NoPadding);
-            string model = hasStats ? (string.IsNullOrEmpty(_curModel) ? "—" : _curModel) : "—";
-            TextRenderer.DrawText(g, Truncate(g, model, _fVal, avail), _fVal, new Point(vx, Mg.X(66)), Theme.Accent, TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(g, "今日", _fLab, new Point(lx, Mg.X(88)), Theme.Ink3, TextFormatFlags.NoPadding);
-            string tokStr = hasStats ? FmtTok(_todayTokens) : "—";
-            TextRenderer.DrawText(g, tokStr, _fVal, new Point(vx, Mg.X(86)), Theme.Ink, TextFormatFlags.NoPadding);
-            var tw2 = TextRenderer.MeasureText(g, tokStr, _fVal).Width;
-            TextRenderer.DrawText(g, "TOKENS", _fSub, new Point(vx + tw2 + Mg.X(6), Mg.X(90)), Theme.Ink3, TextFormatFlags.NoPadding);
+            else
+            {
+                DrawStr(g, "未在服务", _fLab, Theme.Ink3, Mg.X(154), Mg.X(134));
+            }
+
+            // 词元卡（今日 token 消耗）
+            DrawCard(g, new Rectangle(Mg.X(96), Mg.X(188), Mg.X(208), Mg.X(32)));
+            DrawStr(g, "词元", _fLab, Theme.Ink3, Mg.X(110), Mg.X(194));
+            string tokStr = hasStats ? FmtTok(_todayTokens) : "0";
+            DrawStr(g, tokStr, _fVal, hasStats ? Theme.Accent : Theme.Ink3, Mg.X(154), Mg.X(194));
+
+            foreach (var b in _btns) b.Paint(g);
+            g.ResetClip();
+        }
+
+        // 重启点击后的即时视觉反馈：状态词切「重连中」，等首轮健康轮询接管
+        public void ShowRestarting()
+        {
+            _stateText = "重连中";
+            _stateDot = Theme.Warn;
+            _alive = false;
+            Invalidate();
         }
 
         public void ApplyStatus(StatusInfo st, string stateText, Color stateDot)
         {
-            _stateText = (st.Alive && st.NeedAuth) ? "运行中" : stateText;
+            // 传输中：两次轮询间 requests / todayTokens 有变化即视为有流量（首轮不判）
+            bool active = st.Alive && st.StatsOk && (_lastReq >= 0 || _lastTok >= 0)
+                && (st.Requests != _lastReq || st.TodayTokens != _lastTok);
+            _lastReq = st.Requests;
+            _lastTok = st.TodayTokens;
+            _stateText = st.Alive ? "运行中" : stateText;
             _stateDot = stateDot;
+            if (active)
+            {
+                _stateText = "传输中";
+                _stateDot = Theme.Accent;
+            }
             _alive = st.Alive;
             _statsOk = st.StatsOk;
-            _needAuth = st.NeedAuth;
-            _owned = st.Owned;
             _todayTokens = st.TodayTokens;
             _curModel = st.CurModel;
+            _curUpstream = st.Upstream;
+            // primary 跟随状态：停止态主推「启动」，运行态主推「停止」
+            _bStart.SetKind(st.Alive ? 1 : 0);
+            _bStop.SetKind(st.Alive ? 0 : 1);
             Invalidate();
         }
 
@@ -765,17 +910,57 @@ namespace MgTray
             return n.ToString();
         }
 
-        void DragStart(object sender, MouseEventArgs e)
+        MgButton HitBtn(int x, int y)
         {
-            if (e.Button == MouseButtons.Left) { _dragging = true; _dragOff = e.Location; }
+            foreach (var b in _btns) if (b.Rect.Contains(x, y)) return b;
+            return null;
         }
-        void DragMove(object sender, MouseEventArgs e)
+
+        void FormMouseDown(object sender, MouseEventArgs e)
         {
-            if (!_dragging) return;
-            var p = PointToScreen(e.Location);
-            Location = new Point(p.X - _dragOff.X, p.Y - _dragOff.Y);
+            var b = HitBtn(e.X, e.Y);
+            if (b != null) { b.Down = true; Invalidate(); return; }
+            // 原生标题栏拖动：系统接管整个按下-拖动-释放流程，杜绝拖动状态卡死
+            if (e.Button == MouseButtons.Left)
+            {
+                Mg.ReleaseCapture();
+                Mg.SendMessage(Handle, 0xA1 /*WM_NCLBUTTONDOWN*/, (IntPtr)2 /*HTCAPTION*/, IntPtr.Zero);
+            }
         }
-        void DragEnd(object sender, MouseEventArgs e) { _dragging = false; }
+
+        void FormMouseMove(object sender, MouseEventArgs e)
+        {
+            bool dirty = false;
+            foreach (var b in _btns)
+            {
+                bool hot = b.Rect.Contains(e.X, e.Y);
+                if (b.Hot != hot) { b.Hot = hot; dirty = true; }
+            }
+            Cursor = HitBtn(e.X, e.Y) != null ? Cursors.Hand : Cursors.Default;
+            if (dirty) Invalidate();
+        }
+
+        void FormMouseUp(object sender, MouseEventArgs e)
+        {
+            var b = HitBtn(e.X, e.Y);
+            MgButton fired = null;
+            foreach (var x in _btns)
+            {
+                if (x.Down) { x.Down = false; if (x == b) fired = x; }
+            }
+            Invalidate();
+            if (fired != null && fired.Click != null) fired.Click(this, EventArgs.Empty);
+        }
+
+        void FormMouseLeave(object sender, EventArgs e)
+        {
+            bool dirty = false;
+            foreach (var x in _btns)
+            {
+                if (x.Hot || x.Down) { x.Hot = false; x.Down = false; dirty = true; }
+            }
+            if (dirty) Invalidate();
+        }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
@@ -798,6 +983,7 @@ namespace MgTray
             if (Bottom > wa.Bottom) Top = wa.Bottom - Height;
             if (Left < wa.Left) Left = wa.Left;
             if (Top < wa.Top) Top = wa.Top;
+            Invalidate();
         }
     }
 }
