@@ -1,0 +1,29 @@
+schema_version: 1
+type: project
+project: model-gateway
+prefix: mg
+category: 基础设施
+lifecycle: active
+description: 本地 OpenAI 兼容 LLM 网关（重试/熔断/故障转移/路由），多 Agent 复用
+templates:
+  - id: T-mg-llm-access
+    kind: capability
+    scenario: 为任何工作流提供统一 LLM 接入（重试/熔断/故障转移/多上游路由）
+    anti_scenario: 单项目内网直连已稳定、无需多上游时
+    params:
+      - { name: models, required: true, desc: 接入模型清单与 provider 路由 }
+      - { name: client_key, required: false, desc: 数据面鉴权 Key }
+  - id: T-mg-routing-perclient
+    kind: mode
+    scenario: 按客户端/工作流定制模型路由、额度与超时
+    anti_scenario: 全客户端共享同一默认路由时
+contracts:
+  - id: C-mg-openai-http
+    iface: http
+    signature: "POST /v1/chat/completions（OpenAI 兼容）"
+    version: "0.1"
+    compatibility: backward
+depends: []
+
+
+
