@@ -11,8 +11,8 @@
 | 重试 | 指数退避自动重试（仅网络错与可重试状态码；业务 4xx 不重试） |
 | 超时 | 分层：连接 connectMs · 首字节 firstByteMs · 流式空闲 idleMs · 整体预算 overallMs（0=不限） |
 | 流式 | SSE 断流自动重连 + 内容去重；断流显式收尾；多协议重建为 OpenAI delta |
-| 故障转移 | 模型内 `fallbacks` 备用上游链；`defaults.directory` 跨模型兜底；命中率/亲和择优 |
-| 熔断 | `provider.circuit{maxFailures, openDurationMs}`；open→half→ok |
+| 故障转移 | 模型内 `fallbacks` 备用上游链；`defaults.directory` 跨模型兜底；命中率/亲和择优（亲和带 `affinityTtlMs` 有效期）· **主上游回切探活 `failbackProbe`（降级中主动探活，主上游恢复即自动切回）** |
+| 熔断 | `provider.circuit{maxFailures, openDurationMs}`；open→half→ok（冷却结束自动半开、放行一次探测，成功即恢复） |
 | 并发/限流 | 每 provider 并发 · 每 model 并发 `maxConcurrent` · 每 model QPS `qps` |
 | 限速 | 429 尊重 `Retry-After` 排队 · 请求体超限 413 |
 | 额度/上下文 | 每模型日额度 `dailyQuota` · 总额度 `quota`（已持久化，重启不失效）· 最大上下文 `maxContext`（中文按 1 字≈1 token 估算）· 超限自动切下一模型 |
@@ -55,7 +55,9 @@
     "directory": [                          // 跨模型兜底路由：按序尝试，某模型不可用则切下一个
       { "model": "deepseek-chat", "providers": ["deepseek-official"], "mode": "afterAll" }
     ],
-    "preheat": []                           // 主动缓存预热：[{ "model": "xx", "system": "<长 system 前缀>", "everyMs": 300000 }]
+    "preheat": [],                          // 主动缓存预热：[{ "model": "xx", "system": "<长 system 前缀>", "everyMs": 300000 }]
+    "affinityTtlMs": 300000,                // 缓存亲和有效期：超时后主上游可被重新试用（0=不过期，亲和永不失效）
+    "failbackProbe": { "enabled": true, "everyMs": 30000, "successStreak": 2, "system": "ping" }  // 主上游回切探活
   },
   "providers": {
     "deepseek-official": { "baseUrl": "https://api.deepseek.com", "apiKeyEnv": "DEEPSEEK_API_KEY", "api": "openai", "extraHeaders": {} },
@@ -79,6 +81,10 @@
 - `models.<名>.effortOptions`：允许的思考强度档位（客户端传的档位不在列表 → 本地 400）。`reasoning`：客户端未指定时注入的默认档位。`effortFormat`（可选）：思考强度参数格式——`reasoning_effort`（默认，OpenAI 风格字符串，DeepSeek/OpenAI 系）；`thinking`（MiniMax 风格对象，如 `MiniMax-M3` 认 `thinking:{"type":"adaptive"}`）。客户端入口统一传 `reasoning_effort`，网关按 `effortFormat` 转换注入；虚拟共用名/虚拟模型入口透传链首真实模型的格式。
 - `models.<名>.dailyQuota/quota/maxContext`：0=不限；超限的模型在路由中被自动跳过并切到目录中的下一模型。`quota` 已持久化到 `stats.json`，重启不失效。
 - `defaults.preheat`：主动缓存预热，默认空（关闭）。配置后按 `everyMs` 周期性向该模型上游发 `max_tokens:1` 的带长 `system` 请求，保持厂商 prefix cache 存活。
+- `defaults.affinityTtlMs`：**缓存亲和有效期**（默认 `300000` = 5 分钟，0 = 不过期）。请求成功后会记住「该模型最近一次成功用的上游」，后续请求优先复用它（保持厂商缓存亲和、降碎片化）。有效期过后亲和失效，请求回到配置里的**主上游**（`models.<名>.provider`）——避免「上游恢复后因亲和粘性永不回流」。TTL 内不会来回抖动。
+- `defaults.failbackProbe`：**主上游回切探活**（默认开启，仅降级中工作）。当某模型当前由**备用上游**（`fallbacks`）服务时，按 `everyMs`（默认 30s）向主上游发最小探活请求（真实 chat、`max_tokens:1`、**不计额度**、10s 超时），连续 `successStreak`（默认 2）次成功后清除亲和，下一个请求即回到主上游。这样**回切前已验证可用**，真实请求不会踩到"刚恢复又挂"的雷；正常态（用主上游时）**零开销、不发探活**。主上游处于熔断中时跳过探活（交给熔断的半开机制，避免打架）。`system` 为探活用的极短前缀（默认 `ping`，省 token）。
+  - 与 `affinityTtlMs` 的关系：探活是**主动**回切（30s 粒度、验证后切），TTL 是**被动**兜底（过期后下一个请求试水）；二者互补，探活为主。
+  - 探活**刻意不用** `/v1/models`：聚合平台常见「models 通、chat 挂」（平台健康、推理层过载），用 models 探活会误判为已恢复，切过去反而卡住。
 - `gateway.local.json`（已 gitignore）：真实 baseUrl / Key 名 / 私有覆盖放这里，浅合并覆盖 `gateway.json` 的 providers/models/defaults；`server` 段始终取自 `gateway.json`。`MG_CONFIG=/path/config.json` 可指定别处配置。
 - **上游 HTTP 代理 `proxy`**：默认不配置＝直连。字段可放 `defaults.proxy`（全局）或 `providers.<名>.proxy`（单上游覆盖）；形如 `"http://user:pass@127.0.0.1:7890"`。也可不写配置、直接给网关进程设系统级 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。**优先级**：`providers.<名>.proxy` > `defaults.proxy` > 环境变量。**按上游定名单**（auto 模式生效）：单上游 `proxy` 留空/缺省 = 继承全局；填 `http(s)://...` = 强制走该代理；填 `direct`（或 `false`）= 强制直连、无视全局。**全局 `defaults.proxy` 可在面板「默认上游」卡「网络代理」输入框配置，单上游名单在「上游服务」编辑弹窗「代理」字段配置（均持久化，不再丢）**。网关用 Node 内置 `https` 的 **CONNECT 隧道**实现，零依赖；`proxy.proxy` 指向 Clash/mihomo 等本地混合端口即可让上游请求走代理出口（**注意**：网关的转发、探活、模型测试、预热一律经代理；本机回环上游如 `127.0.0.1:3050` 自动跳过代理直连）。
 - **代理模式 `proxyMode`**（`auto` 默认 / `direct` / `global`，面板「代理模式」下拉或配置 `defaults.proxyMode`）：
@@ -190,3 +196,9 @@ model-gateway/
 - 流式中断（未正常收到 `[DONE]` 即终止）会计入全局 `interrupts` 中断计数并打 `sse 流中断` 日志；断流前已产生的 token 仍按内容累计，但因拿不到上游 `usage`，无法补记 prompt token。
 - 流式"续传仍失败"的中断会被当作该上游的一次**连续中断信号**（`streamDrops`，不受 `markOk` 重置）：计入该上游 `errors` 与模型错误；当**同一上游连续流中断 ≥ `STREAM_DROP_THRESHOLD`(默认3)** 时，后续请求的路由会**绕开该上游**，切换到其他上游/模型，避免反复硬撞。正常完成一次流会将连续计数清零，使上游有机会恢复。已在流中回传的内容无法切模型重发（会重复/冲突），因此该机制对"后续请求"生效而非原响应。
 - 客户端大体积流式上传目前先整体缓冲再转发以支持重试；对常规对话已足够。
+- **「上游没被使用」不等于「上游挂了」**：这是两套独立机制，排查时别混淆——
+  - **熔断**（`providers.<名>.circuit`）：故障驱动。连续失败达 `maxFailures` 后拉闸 `openDurationMs`，期间**跳过该上游不发请求**，冷却结束自动半开放行一次探测，成功即恢复。
+  - **亲和粘性**（`affinityTtlMs` / `failbackProbe`）：缓存驱动。上游**健康也可能被排在后面**——只要上次成功用的是备用上游，它就会被优先复用（为了复用厂商 prefix cache）。此时上游既没熔断也没故障，只是"被冷落"。
+  - 判断依据：熔断看 `/api/status` 里 provider 的 `st.state`（`ok`/`half`/`open`）；被冷落则 `state` 仍为 `ok`，只是 `models[].affinity` 指向了别的上游。
+- **熔断冷却应大于单次失败耗时**，否则体感接近无效：单次失败耗时 ≈ `retry.maxAttempts` × 单次超时（如 3 次重试 × 60s 上游 504 ≈ 180s）。若冷却仅 120s，冷却一过第一个请求又卡满 3 分钟。对**持续性 5xx（过载型）**，降低重试次数的收益通常大于调熔断阈值。
+- **间歇性成功会重置熔断计数**：上游只要偶尔成功一次，连续失败计数即清零，阈值可能长期达不到——此时熔断形同虚设，要靠回切探活与重试策略治理，而非一味调低阈值。
