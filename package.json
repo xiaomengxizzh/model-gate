@@ -1,6 +1,6 @@
 {
   "name": "model-gateway",
-  "version": "0.1.0",
+  "version": "0.2.3",
   "description": "Local OpenAI-compatible API gateway: retry / layered timeout / SSE resilience / health check / model routing, reusable by multiple agents (zcode/trae/dsh) across multiple model backends",
   "type": "module",
   "main": "src/index.js",

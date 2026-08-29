@@ -1,11 +1,22 @@
 # Changelog
 
-本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 当前 0.1.0，建议随下次发布同步至 0.2.0）。
+本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
+
+## [0.2.3] · 2026-08-29 —— 测试套件修正与文档口径同步
+
+### Fixed
+- **`rate429.mjs` 断言过时**：0.2.0 循环兜底后 429 排队对客户端透明——首请求在网关内按 `Retry-After` 等待并重发上游，最终 200；旧断言仍期待「首请求 502/429 + 次请求排队」的 0.2.0 前语义。现改为：首请求内部排队（耗时 ≥ Retry-After、上游恰 2 次命中）后成功，次请求冷却已过不再等待。
+- **`acl.mjs` 崩溃修复**：`st` 是已解析的 status 对象却被当函数调用（`(await st())` → TypeError），deepseek-official 存在时整个文件 ERROR——改为重新拉取 status 并对字段缺失败的容错取值。
+- **测试子结果计数隔离**：`results` 为套件级共享数组，virtual-models 结尾的子结果统计会把其它文件的失败算进自己头上误报 ERROR——改为按进入时基线取增量。
+
+### Changed
+- README/CHANGELOG 口径同步：探活超时实为 `defaults.timeout.connectMs`（模板 15s，并非固定 10s）；分层超时表更新（转发建连阶段对齐 firstByteMs，connectMs 仅用于预热/探活）；0.2.1 补记同窗口的 TD1 测试沉淀 / TD2+TD3 重构条目。
+- `package.json` 版本同步 0.2.3（此前长期停留在 0.1.0）。
 
 ## [0.2.2] · 2026-08-29 —— 主上游回切探活 + 缓存亲和有效期
 
 ### Added
-- **主上游回切探活 `defaults.failbackProbe`**（默认开启 `{ everyMs: 30000, successStreak: 2, system: "ping" }`，仅降级中工作）：某模型当前由**备用上游**（`fallbacks`）服务时，按 `everyMs` 向主上游发最小探活请求（真实 chat、`max_tokens:1`、**不计额度**、10s 超时），连续 `successStreak` 次成功后清除缓存亲和，下一个请求即回到主上游。解决「主上游恢复后无法及时回流」——此前只能等亲和过期、并靠下一个真实请求去试水（试水请求可能卡满整轮重试）。回切前**已验证可用**，真实请求不会踩到"刚恢复又挂"的雷；正常态（用主上游时）零开销、不发探活；主上游熔断中时跳过探活（交给熔断半开，避免打架）。
+- **主上游回切探活 `defaults.failbackProbe`**（默认开启 `{ everyMs: 30000, successStreak: 2, system: "ping" }`，仅降级中工作）：某模型当前由**备用上游**（`fallbacks`）服务时，按 `everyMs` 向主上游发最小探活请求（真实 chat、`max_tokens:1`、**不计额度**、超时取 `defaults.timeout.connectMs`），连续 `successStreak` 次成功后清除缓存亲和，下一个请求即回到主上游。解决「主上游恢复后无法及时回流」——此前只能等亲和过期、并靠下一个真实请求去试水（试水请求可能卡满整轮重试）。回切前**已验证可用**，真实请求不会踩到"刚恢复又挂"的雷；正常态（用主上游时）零开销、不发探活；主上游熔断中时跳过探活（交给熔断半开，避免打架）。
   - 探活**刻意不用** `/v1/models`：聚合平台常见「models 通、chat 挂」（平台健康、推理层过载），用 models 探活会误判为已恢复。
 - **缓存亲和有效期 `defaults.affinityTtlMs`**（默认 `300000`，0 = 不过期）：请求成功后记住该模型最近一次成功用的上游并优先复用（保持厂商 prefix cache、降碎片化），超时应期后亲和失效、请求回到配置里的主上游，TTL 内不抖动。与回切探活互补——探活是主动回切（30s 粒度、验证后切），TTL 是被动兜底。
 - 测试 `scripts/test/affinity.mjs`（亲和有效期 4 项）、`scripts/test/failback.mjs`（回切探活 4 项；把 `affinityTtlMs` 设为 1 小时以排除 TTL 干扰，确保验证的是探活本身）。
@@ -25,11 +36,16 @@
 - **代理模式 `proxyMode`**（`auto` 默认 / `direct` / `global`，面板「代理模式」下拉）：auto=按配置（provider 级 > 全局 > 环境变量，显式关闭生效）；direct=全部上游强制直连；global=非回环上游全部强制走全局代理（回环豁免）。保存即热生效，不重启。
 - **按上游代理名单**（面板「上游服务」编辑弹窗新增「代理」字段）：单上游 `proxy` 留空=继承全局；填 `http(s)://...`=强制走该代理；填 `direct`=强制直连（替代原 `""` 语义，空串现改为继承全局）。`/api/status` 回显 provider 级 proxy；保存校验（非法地址 400）。
 - **思考强度参数格式可选 `effortFormat`**（面板模型弹窗「思考强度·参数格式」下拉）：`reasoning_effort`（默认，OpenAI 风格）/ `thinking`（MiniMax 风格对象）。客户端入口统一 `reasoning_effort`，网关按模型配置转换注入（thinking 格式转 `thinking:{"type":...}` 并删除 reasoning_effort）；虚拟共用名/虚拟模型入口透传链首真实模型格式。解决「MiniMax-M3 填 adaptive 不生效」——其官方认 `thinking` 对象而非 `reasoning_effort`。
+- **Phase 1 验证矩阵沉淀为常驻 mock 集成测试**（`scripts/test/virtual-models.mjs`，18 项断言）：自起隔离实例 + mock 上游，零外部依赖、零真实上游消耗，纳入 `npm test`。
 
 ### Fixed
 - 上游代理特性完整接通（代码 + 配置持久化 + 面板置项三件套齐备）：`src/router.js` 的 proxy 解析（provider 级 > defaults > 环境变量，回环直连）、`src/request.js` 的 CONNECT 隧道（零依赖）此前为半成品，仅实现了转发层读取；本次补齐 `saveConfig` 持久化与面板配置入口，消除「改配置生效、面板保存丢失」的分裂。
 - **兜底被 403/404 截断**：此前目录链中某模型返回 403/404 会直接中断整个请求（不试后续模型），导致「MiniMax-M3 限流 429 → muse-spark 被 opencode 403 拒绝 → mimo-v2.5 根本没机会」——现改为 403/404（模型/资源级拒绝）记录后继续尝试下一模型；整条链都被拒绝时回最后一个上游原始响应（保留真实错误）且不进入循环兜底空转。400/401/422 等请求/鉴权类错误仍直接返回不兜底。
 - **曲线 tooltip 显示 缓存命中/未命中/输出**：统计新增输入（inTokens）与输出（outTokens）单独记账（`usage.prompt_tokens`/`completion_tokens`，流式末帧无明细则记 0 不臆造），daily/hourly 桶与 byModel 持久化扩展；`/api/model-stats` 每个数据点返回 `inTokens/outTokens/hit/miss`；曲线图 tooltip 在模型名下方显示「缓存命中 · 未命中 · 输出」三个具体数字（命中+未命中=输入，满足恒等式）。模型统计面板不加字段。
+- **分层超时语义修正**：响应头到达后由 connect 静默检测转 idleMs 空闲检测，建连阶段静默上限对齐 firstByteMs——思考型上游首 token 前长静默不再被更短的 connect 定时器误杀（mock 三场景验证）。
+
+### Changed
+- **forwardChain 域拆分至 `src/forward.js`**（deps 注入共享辅助，`todayKey` 入 `shared.js`），index.js 963→672 行；stats 历史保留窗口 90 天（daily/hourly 落盘时清理超窗键，防 stats.json 无界膨胀）。
 
 ## [0.2.0] · 2026-08-25 —— 韧性加固 + Phase 1 多虚拟模型
 
