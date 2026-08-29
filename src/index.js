@@ -163,7 +163,9 @@ function buildStatus(state) {
     dialogues: Object.values(state.dialogue).filter(d => d.requests > 0).sort((a, b) => b.lastAt - a.lastAt).slice(0, 30).map(d => ({ id: d.id, named: d.named, requests: d.requests, tokens: d.tokens, hit: d.hit, miss: d.miss, hitRate: (d.hit + d.miss) > 0 ? Math.round(d.hit / (d.hit + d.miss) * 1000) / 10 : null, startAt: d.startAt, lastAt: d.lastAt })),
     providers,
     models,
-    defaults: { provider: defaults.provider || null, model: defaults.model || '', clientKey: currentClientKey(state) ? '********' : '', directory: defaults.directory || [], preheat: defaults.preheat || [], retry: defaults.retry || {}, timeout: defaults.timeout || {}, concurrency: defaults.concurrency || {}, extraHeaders: defaults.extraHeaders || {}, proxy: defaults.proxy || '', proxyMode: defaults.proxyMode || 'auto' },
+    // defaults 原样返回（仅 clientKey 掩码）：否则自定义字段（affinityTtlMs / failbackProbe 等）
+    // 会在任意一次配置保存后被静默丢弃（与 circuit 同源的问题）
+    defaults: Object.assign({ directory: [], preheat: [], retry: {}, timeout: {}, concurrency: {}, extraHeaders: {}, proxy: '', proxyMode: 'auto' }, defaults, { clientKey: currentClientKey(state) ? '********' : '' }),
   }
 }
 
@@ -645,6 +647,39 @@ export function start(opts = {}) {
       log && (r.ok ? log.info('preheat ok', e.model, 'status ' + r.status) : log.warn('preheat fail', e.model, r.status || r.err || '-'))
     }
   }, 15000).unref() })()
+  // 主上游回切探活（failback）：模型当前由备用上游服务时，周期性向主上游发最小请求；
+  // 连续 successStreak 次成功后清除亲和，让下一个请求回到主上游——上游恢复即自动回流，不必等亲和 TTL 过期。
+  // 只在"降级中"才探活（affinity 指向非主上游），正常态零开销；探活走 warm（真实 chat、max_tokens=1、不计额度）。
+  ;(() => {
+    const streak = {}   // 模型 → 连续探活成功次数
+    const lastAt = {}   // 模型 → 上次探活时间
+    setInterval(async () => {
+      const fb = (state.cfg.defaults && state.cfg.defaults.failbackProbe) || {}
+      if (fb.enabled === false) return
+      const everyMs = Number(fb.everyMs) > 0 ? Number(fb.everyMs) : 30000
+      const need = Number(fb.successStreak) > 0 ? Number(fb.successStreak) : 2
+      const sys = typeof fb.system === 'string' && fb.system ? fb.system : 'ping'
+      const now = Date.now()
+      for (const [name, md] of Object.entries(state.cfg.models || {})) {
+        const primary = md && md.provider
+        const cur = state.affinity && state.affinity[name]
+        if (!primary || !cur || cur === primary) continue            // 正用主上游：无需探活
+        if (now - (lastAt[name] || 0) < everyMs) continue
+        lastAt[name] = now
+        let prov; try { prov = buildProvider(state.cfg, primary) } catch { continue }
+        if (prov._def.apiKeyEnv && !prov.keyOk) continue
+        if (!healthy(ensureHst(state, primary), now)) continue       // 主上游熔断中：交给熔断半开处理，避免打架
+        const r = await warm(prov, name, sys, state.cfg.defaults || {}, log)
+        if (r.ok) {
+          streak[name] = (streak[name] || 0) + 1
+          if (streak[name] >= need) {
+            delete state.affinity[name]; delete state.affinityAt[name]; streak[name] = 0
+            log && log.info('failback 主上游已恢复，清除亲和', name, '→', primary)
+          }
+        } else if (streak[name]) streak[name] = 0
+      }
+    }, 5000).unref()   // 扫描粒度 5s：让 everyMs 可配到秒级（实际间隔取 everyMs 与本粒度较大者）
+  })()
   // B5 缓存命中率趋势 + 骤降告警：近期命中率相对基线明显下滑时告警（通常因模型/上游切换导致缓存碎片化）
   ;(() => { setInterval(() => {
     let tHit = 0, tMiss = 0
