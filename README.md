@@ -9,8 +9,8 @@
 | 类别 | 能力 |
 |---|---|
 | 重试 | 指数退避自动重试（仅网络错与可重试状态码；业务 4xx 不重试） |
-| 超时 | 分层：建连+首字节 firstByteMs（墙钟兜底，响应头到达后转 idleMs 空闲检测）· 流式空闲 idleMs · 整体预算 overallMs（0=不限）；connectMs 仅用于预热/探活 |
-| 流式 | SSE 断流自动重连 + 内容去重；断流显式收尾；多协议重建为 OpenAI delta |
+| 超时 | 分层：建连+首字节 firstByteMs（墙钟兜底，响应头到达后转 idleMs 空闲检测）· 流式空闲 idleMs（字节级）· **事件级看门狗 2×idleMs**（无任何 `data` 事件即判死走续传/报错，防「上游用 SSE 注释心跳续命的半死流」无限悬挂）· 整体预算 overallMs（0=不限）；connectMs 仅用于预热/探活 |
+| 流式 | SSE 断流自动重连 + 内容去重；断流显式收尾（向客户端发 OpenAI 兼容错误事件）；多协议重建为 OpenAI delta |
 | 故障转移 | 模型内 `fallbacks` 备用上游链；`defaults.directory` 跨模型兜底；命中率/亲和择优（亲和带 `affinityTtlMs` 有效期）· **主上游回切探活 `failbackProbe`（降级中主动探活，主上游恢复即自动切回）** |
 | 熔断 | `provider.circuit{maxFailures, openDurationMs}`；open→half→ok（冷却结束自动半开、放行一次探测，成功即恢复） |
 | 并发/限流 | 每 provider 并发 · 每 model 并发 `maxConcurrent` · 每 model QPS `qps` |

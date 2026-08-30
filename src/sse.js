@@ -54,6 +54,7 @@ export async function relayStream(client, firstUpstream, opts) {
   let lastUsage = null
   const clientGoneAt = { t: null }   // 下游客户端断线标记（何时检测到，null 表示仍在线）
   let curStream = firstUpstream      // 当前正读取的上游流（首次或续传之后）
+  let gen = 0                        // 泵代数：每次换流递增，被换掉的旧泵醒来即静默退场（防旧 iterator 复活双写客户端）
   function destroyUpstream() { try { if (curStream && typeof curStream.destroy === 'function') curStream.destroy() } catch {} }
 
   function sendRaw(txt) { if (!client.destroyed) client.write(txt) }
@@ -62,6 +63,9 @@ export async function relayStream(client, firstUpstream, opts) {
   function sendDone() { sendRaw('data: [DONE]\n\n') }
   function keepalive() { if (!client.destroyed) client.write(': mg-keepalive\n') }
   function finalize(note) {
+    clearIdle(); clearNoEv()
+    // 终态落日志：此前「续传用尽」只对客户端发错误事件、日志无痕，无法事后核查
+    log && log.warn('sse 流式中断终态：' + note + '（重连 ' + retries + ' 次）' + (client.destroyed ? '，客户端已断开，未发送错误事件' : '，已向客户端发送错误事件'))
     if (client.destroyed) return
     try {
       // 中断时先给客户端明确交代（OpenAI 兼容错误事件），再 [DONE] 正常结束——
@@ -74,6 +78,7 @@ export async function relayStream(client, firstUpstream, opts) {
   }
 
   async function handleEvent(ev, dataStr) {
+    if (dataStr !== '') { lastDataEventAt = Date.now(); armNoEv() } // 数据事件重置事件看门狗；注释/空事件不重置（半死流判据）
     if (protocol === 'openai' && dataStr === '[DONE]') { sendRaw(ev + '\n\n'); done = true; return }
     const ct = extract(dataStr)
     if (phaseAsync === 'resume' && !resolved && ct !== '') {
@@ -101,18 +106,33 @@ export async function relayStream(client, firstUpstream, opts) {
   // —— 下游客户端断线处理：一旦 ''close'' 就标记 + 销毁上游流 + 停 idle 定时器，杜绝死等上游/连接泄漏/续传浪费 ——
   let idleT = null
   const clearIdle = () => { if (idleT) { clearTimeout(idleT); idleT = null } }
+  // 事件级看门狗：字节级 idle 只认「上游没字节」；上游若用 SSE 注释/垃圾字节续命却从不发 data 事件（半死流），
+  // 字节计时被反复喂活，客户端只收到 keepalive 注释、既无内容也无错误（生产 08-30 09:43-09:48 实录，悬挂 3 分多钟）。
+  // 本看门狗只在收到含 data: 的完整事件时重置，noEventMs（默认 idleMs 两倍）内无任何数据事件即判死。
+  const noEventMs = opts.noEventMs != null ? opts.noEventMs : (idleMs ? idleMs * 2 : 0)
+  let noEvT = null
+  let lastDataEventAt = Date.now()
+  let pendReason = null   // 定时器判死原因；定时器只「判死+掐流」，由被掐断的泵在收尾/catch 里带内续传（不脱离 await 链，保证 onEnd 单一出口）
+  const clearNoEv = () => { if (noEvT) { clearTimeout(noEvT); noEvT = null } }
+  const judgeDead = (reason) => { if (!done && clientGoneAt.t == null) { pendReason = reason; destroyUpstream() } }
+  const armNoEv = () => {
+    clearNoEv()
+    if (noEventMs) noEvT = setTimeout(() => judgeDead('no-data-event ' + Math.round((Date.now() - lastDataEventAt) / 1000) + 's'), noEventMs)
+  }
   const markGone = () => {
     if (clientGoneAt.t != null) return
     clientGoneAt.t = Date.now()
-    clearIdle()
+    clearIdle(); clearNoEv()
     destroyUpstream()
     log && log.warn('sse 下游客户端已断开，中止中继并销毁上游连接')
   }
   if (typeof client.on === 'function') { try { client.on('close', markGone); client.on('error', markGone) } catch {} }
 
   async function pump(stream) {
+    const myGen = ++gen
     let buf = ''
-    const arm = () => { clearIdle(); if (idleMs) idleT = setTimeout(() => { if (!done && clientGoneAt.t == null) resume('idle-timeout') }, idleMs) }
+    const arm = () => { clearIdle(); if (idleMs) idleT = setTimeout(() => judgeDead('idle-timeout'), idleMs) }
+    lastDataEventAt = Date.now(); armNoEv()
     arm()
     try {
       let pendingError = null
@@ -132,20 +152,25 @@ export async function relayStream(client, firstUpstream, opts) {
         if (done) break
         keepalive()
       }
-      clearIdle()
+      clearIdle(); clearNoEv()
       if (done || clientGoneAt.t != null) return
-      if (protocol === 'openai') return resume(pendingError ? ('error:' + (pendingError.code || pendingError.message)) : 'end') // 必须 await/return 续传链：否则 main 在续传完成前就继续并 end() 掐断
+      if (myGen !== gen) { pendReason = null; return } // 已被更代（重连换流掐掉了本流）：续传链由现役泵负责
+      const reason = pendReason; pendReason = null
+      if (protocol === 'openai') return resume(reason || (pendingError ? ('error:' + (pendingError.code || pendingError.message)) : 'end')) // 必须 await/return 续传链：否则 main 在续传完成前就继续并 end() 掐断
       else { sendDone(); done = true } // 非 openai 协议无 [DONE] 结束标记：上游流自然结束即正常完成
     } catch (e) {
-      clearIdle()
+      clearIdle(); clearNoEv()
       if (done || clientGoneAt.t != null) return
-      return resume('error:' + (e.code || e.message))
+      if (myGen !== gen) { pendReason = null; return }
+      const reason = pendReason; pendReason = null
+      return resume(reason || ('error:' + (e.code || e.message)))
     }
   }
 
   async function resume(reason) {
     if (done || clientGoneAt.t != null || client.destroyed || retries >= maxReconnects) { if (!done) finalize('断流续传' + (maxReconnects ? '用尽' : '失败') + '，结束'); return }
     retries++
+    clearIdle(); clearNoEv(); pendReason = null   // 重连窗口内停掉所有计时器：判死定时器不得在重连期间触发
     phaseAsync = 'resume'; resolved = false; acc = ''
     log && log.warn('sse 断流(' + reason + ')，第 ' + retries + '/' + maxReconnects + ' 次续传重连')
     keepalive()
@@ -155,6 +180,8 @@ export async function relayStream(client, firstUpstream, opts) {
     // 续传必须拿到真正的流式响应：上游若以 JSON/非 SSE 应答（如降级返回错误体），直接判续传失败，
     // 不再消耗时间去读垃圾字节——避免「断流后重连 2 次都拿到非流式体」白白耗尽续传额度
     if (st.headers && !isStreamResponse(st)) return resume('reconnect-not-stream:' + String(st.headers['content-type'] || '').split(';')[0])
+    gen++                    // 先更代再掐旧流：旧泵醒来必见代数已变，静默退场（防双泵写客户端）
+    destroyUpstream()
     curStream = st
     await pump(st)
   }

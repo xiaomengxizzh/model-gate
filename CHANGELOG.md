@@ -2,14 +2,23 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
-## [Unreleased] —— 托盘小窗管理器 + 日志按天分文件与 7 天保留
+## [Unreleased] —— 托盘小窗管理器 + 日志按天分文件与 7 天保留 + 交接问题修复批次
 
 ### Added
 - **mg-tray 托盘小窗管理器**（`scripts/tray/mg-tray.cs`，Windows 自带 .NET Framework csc 编译为 ~24KB `mg-tray.exe`，零第三方依赖）：无边框置顶悬浮小窗（状态/uptime/今日 token/请求错误 + 启动/停止/重启/面板/日志按钮，可拖动、右键切置顶、✕ 缩托盘）+ 托盘常驻（双击唤出、菜单全套操作、崩溃 5s 退避自动拉活、连续快速失败 ≥5 次熔断）+「开机自启」开关（HKCU Run 键，免管理员）+ 启动前清端口残留 node（同 start.bat 语义，只杀 node.exe）；检测到端口已有 node 实例显示「外部实例/未接管」不重复拉起；数据面轮询 `/healthz` + `/api/status`（401 自动降级）。
 - `scripts/tray/build.cmd`：一键编译（系统自带 csc.exe；ASCII-only 规避批处理 GBK 解析坑）。
+- `scripts/test/z-defaults-merge.mjs`：defaults 合并保存契约回归（完整/面板式/无键/显式覆盖，7 断言）。
+- `scripts/test/z2-noevent.mjs`：半死流看门狗回归（纯注释心跳流判死并回错误事件；注释+data 交替的健康流不误杀）。
 
 ### Changed
 - **日志按天分文件 + 7 天保留**：`logs/gateway.log` 改为落盘 `logs/gateway-YYYY-MM-DD.log`（配置 `logFile` 仅指定前缀/目录），启动/跨天清理 7 天前旧文件（含 `.old` 轮转件；历史无日期旧版按 mtime 判断）；单文件超 5MB 轮转 `.old`；`/api/logs` 改读当前天文件（logger 暴露 `file()`）；`start.bat` 前台调试用法不变。
+- **defaults 合并保存（交接问题 2 根治）**：`saveConfig` 此前把 `body.defaults` 整体替换现有配置，而面板只回传 9 个白名单字段——面板每次保存都会冲掉 `affinityTtlMs`/`failbackProbe` 等自定义字段（生产 configVersion 78→89 实录丢失）。现改为合并：提交的字段覆盖、未回传字段保留；面板 `extraHeaders` 从 status 回写。代价：字段无法经保存接口删除（需要时直接编辑 gateway.local.json）。
+
+### Fixed
+- **SSE 流中断计入熔断（交接问题 1）**：流式响应此前在响应头 2xx 阶段即 `markOk` 并记亲和，「头 2xx + 流中断」的故障上游被间歇性成功反复洗白，熔断计数永远攒不齐——生产 08-29 15:00-15:10 UTC 七请求钉死 jiyuan、备用零接管即此。现 markOk/亲和延后到流完整结束，流中断按上游失败同口径 `markFail`（客户端主动断开不计）；回切探活改 `stream:true` 按首条 SSE 数据判定恢复；续传重连校验必须 event-stream。
+- **半死流事件级看门狗**：字节级 idle 只认「上游没字节」——上游用 SSE 注释/垃圾字节续命却从不发 `data` 事件时，字节计时被反复喂活、网关 keepalive 注释又喂活客户端空闲检测，客户端既无内容也无错误地无限悬挂（生产 08-30 09:43-09:48 实录，悬挂 3 分多钟后客户端自行放弃）。新增事件级看门狗（默认 2×idleMs）：收到含 `data:` 的完整事件才重置，超时判死走续传/报错，客户端最终收到 `stream_interrupted` 错误事件。
+- **判死定时器改「掐流+带内续传」**：idle/看门狗定时器此前直接 fire-and-forget 调 `resume`，续传链脱离 await 链——顶层 `pump(firstUpstream)` 可能永不返回（onEnd 不触发、成败记账丢失），旧泵 iterator 复活还会与新泵双写客户端。现定时器只判死+掐流，由被掐断的泵在 catch 里带内续传；引入泵代数（gen），被换掉的旧泵醒来即静默退场。
+- **流式中断终态落日志**：`finalize` 此前只对客户端发错误事件、日志无痕；现记录终态（含「客户端已断开，未发送错误事件」分支），事后可查。
 
 ## [0.2.3] · 2026-08-29 —— 测试套件修正与文档口径同步
 
