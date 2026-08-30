@@ -530,11 +530,32 @@ function makeHandler(state) {
       // 入口路径别名：把不带 /v1 的 Chat 兼容路径规范化为 /v1/chat/completions，使 base URL 填 http://127.0.0.1:8787 也被正确代理
       const fPath = (isChat && path !== '/v1/chat/completions') ? '/v1/chat/completions' : path
       const fUrl = (fPath === path) ? url : (fPath + url.slice(path.length))
-      const out = await forwardChain(FWD_DEPS, state, req, fUrl, fPath, req.method, bodyBuf, body, log)
+      // 流式中继注入：forward.js 在模型链循环内等待 relay 结局，未回传内容的断流可继续切下一上游/模型
+      const streamRelay = async (result, meta) => {
+        const m = meta || {}
+        writeUpstreamHeaders(res, result)
+        const r = await relayStream(res, result.stream, {
+          idleMs: (state.cfg.defaults && state.cfg.defaults.timeout && state.cfg.defaults.timeout.idleMs) || 0,
+          maxReconnects: 2, log, reconnect: m.reconnect,
+          protocol: m.api || 'openai', extract: (m.api && m.api !== 'openai') ? adapterFor(m.api).extractStreamContent : undefined,
+          rewriteModel: m.rewriteModel || null, // 「名字没对上」：响应 model 回写为客户端请求名
+          onTokens: (n, usage) => {
+            const total = (usage && typeof usage.total_tokens === 'number' && usage.total_tokens > 0) ? usage.total_tokens : n
+            // 输入/输出 token：流末 usage 有则取（多数 OpenAI 兼容上游流末帧带），无则记 0（不臆造）；命中+未命中=输入
+            const inTk = (usage && typeof usage.prompt_tokens === 'number' && usage.prompt_tokens > 0) ? usage.prompt_tokens : 0
+            const outTk = (usage && typeof usage.completion_tokens === 'number' && usage.completion_tokens > 0) ? usage.completion_tokens : 0
+            if (total > 0) { agg(state, m.pid, 'tokens', total); const sm = m.serving || m.modelName; const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }; sg.tokens = (sg.tokens || 0) + total; sg.inTokens = (sg.inTokens || 0) + inTk; sg.outTokens = (sg.outTokens || 0) + outTk; tallyDaily(state, sm, total, 0, 0, inTk, outTk); tallyVirtual(state, m.modelName, m.serving, total, inTk, outTk); tallyDialogue(state, m.dialogueId, total, 0, 0) }
+          },
+          onUsage: (u) => { const c = cacheHitMiss(m.api, u); if (c.hit > 0 || c.miss > 0) { const sm = m.serving || m.modelName; noteCacheStat(state, sm, m.pid, c.hit, c.miss); tallyDaily(state, sm, 0, c.hit, c.miss); tallyDialogue(state, m.dialogueId, 0, c.hit, c.miss) } },
+          // onEnd 的 markOk/markFail/streamDrops/中断统计已移入 forward.js 流式分支（按 relay 结局决策是否切下一上游/模型）
+        })
+        return r // { completed, contentSent, interrupted, reconnects, clientGone }
+      }
+      const out = await forwardChain(FWD_DEPS, state, req, fUrl, fPath, req.method, bodyBuf, body, log, streamRelay)
       // 请求级日志：记录每次数据面请求的请求模型/实际服务模型/上游与结果，便于定位空响应与连接问题（不含消息正文/密钥）
       const reqModel = (body && body.model) || '-'
       const _chain = (n) => n || ''
-      if (out.kind === 'stream') {
+      if (out.kind === 'stream-done' || out.kind === 'stream-interrupted' || out.kind === 'stream') {
         log.info('data ' + req.method + ' ' + fPath + ' model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-') + ' chain=' + _chain(out.chain) + ' stream')
         state.st.lastServing = { model: out.serving || out.modelName || '-', provider: out.pid || '-', at: Date.now() }
       } else {
@@ -587,6 +608,9 @@ function makeHandler(state) {
           },
         })
         return
+      }
+      if (out.kind === 'stream-done' || out.kind === 'stream-interrupted') {
+        return // 流已由 forward 内部 relay 完成（响应头 + 流/中断错误已写入客户端），无需再处理
       }
       if (out.kind === 'json' && out.asSSE) {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'transfer-encoding': 'chunked', 'cache-control': 'no-cache' })

@@ -134,7 +134,7 @@ function resolveDialogue(state, req, body) {
   return id
 }
 
-export async function forwardChain(deps, state, req, url, path, method, bodyBuf, body, log) {
+export async function forwardChain(deps, state, req, url, path, method, bodyBuf, body, log, streamRelay) {
   const { ensureHst, markFail, markOk, healthy, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tryParse, collectBody } = deps
   const cfg = state.cfg
   let routes = []
@@ -291,7 +291,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       agg(state, pid, 'retries', result.retries || 0)
       if (result.ok) {
         if (isStreamResponse(result)) {
-          // 流式：成败延后到流结束统一判定（index.js relayStream onEnd 里 markOk/markFail/noteAffinity）。
+          // 流式：成败延后到流结束统一判定（streamRelay 内 relay，返回流结局）。
           // 不能在响应头阶段 markOk——头 2xx 不代表流能走完，故障上游「头 2xx + 流中断」若在此刻被洗白，
           // 熔断计数永远攒不齐，后续请求被亲和钉在故障主上游，「切备用/切下一模型」形同虚设。
           const reconnector = async () => {
@@ -299,7 +299,35 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
             if (!again.ok) throw new Error('reconnect status ' + again.status)
             return again.stream
           }
-          return { kind: 'stream', res: result, pid, modelName, serving, api, reconnect: reconnector, dialogueId, chain: chainModels.join('>') }
+          if (typeof streamRelay !== 'function') {
+            // 兼容兜底：未注入 relay（异常路径）按旧行为直接交付，由调用方处理
+            return { kind: 'stream', res: result, pid, modelName, serving, api, reconnect: reconnector, dialogueId, chain: chainModels.join('>') }
+          }
+          const relay = await streamRelay(result, {
+            pid, modelName, serving: serving || modelName, api, dialogueId, reconnect: reconnector,
+            rewriteModel: (body && body.model) || null, chain: chainModels.join('>'),
+          })
+          const sm = serving || modelName
+          const h = ensureHst(state, pid)
+          if (relay.completed) {
+            // 流完整结束（含续传成功）：正常计成功
+            h.streamDrops = 0
+            markOk(state, pid)
+            noteAffinity(state, sm, pid)
+            return { kind: 'stream-done', pid, modelName, serving, api, dialogueId, chain: chainModels.join('>') }
+          }
+          // 流中断：计入中断 + 错误统计 + 连续中断计数
+          state.st.counters.interrupts += 1; state.stats.global.interrupts += 1
+          agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+          const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }
+          sg.errors = (sg.errors || 0) + 1
+          h.streamDrops = (h.streamDrops || 0) + 1
+          if (!relay.clientGone) markFail(state, pid, prov.circuit) // 客户端主动断开不算上游失败，不熔断
+          log && log.warn('sse 流中断(续传' + (relay.reconnects || 0) + '次仍失败)' + (relay.contentSent ? '，已回传内容无法重发' : '，未回传内容切下一上游'), 'model=' + sm + ' provider=' + pid, 'chain=' + chainModels.join('>'))
+          if (relay.clientGone) return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, chain: chainModels.join('>') } // 客户端已断：无人收，不重试
+          if (relay.contentSent) return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, chain: chainModels.join('>') } // 已回传内容：重发会重复，按中断结束
+          // 未回传任何内容：该上游「头 2xx + 立刻断流」= 假成功，视为失败，继续模型链（下一 provider / 下一模型）
+          continue
         }
         markOk(state, pid)
         noteAffinity(state, serving || route.model, pid) // 非流式响应已完整收到：记录本次成功上游，供后续请求保持亲和、复用其缓存

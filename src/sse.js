@@ -191,4 +191,6 @@ export async function relayStream(client, firstUpstream, opts) {
   if (opts.onEnd) { try { opts.onEnd({ interrupted: !done, reconnects: retries, clientGone: clientGoneAt.t != null }) } catch {} }
   if (typeof client.removeListener === 'function') { try { client.removeListener('close', markGone); client.removeListener('error', markGone) } catch {} }
   if (!client.destroyed) try { client.end() } catch { }
+  // 返回流结局：completed=正常结束；contentSent=是否已向客户端回传过内容（false 且中断 → 调用方可安全换上游/模型重发，无重复风险）
+  return { completed: done, contentSent: contentChars > 0, interrupted: !done, reconnects: retries, clientGone: clientGoneAt.t != null }
 }
