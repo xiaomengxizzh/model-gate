@@ -179,7 +179,6 @@ namespace MgTray
         public string State;      // running / stopped / starting
         public string CurModel;   // 最近一次成功服务的模型（/api/status lastServing）
         public string Upstream;   // 最近一次成功服务的上游 provider（lastServing.provider）
-        public string DirModel;   // defaults.directory 首个模型（当前模型不在价表时的兜底取价对象）
     }
 
     internal class TrayApp : ApplicationContext
@@ -201,17 +200,21 @@ namespace MgTray
 
         string _adminToken = "";  // 管理 API 令牌（ReadAdminToken），/api/status 拉数据用
 
-        // ---------- 价格卡数据（上游定价表，10 分钟刷新）----------
-        // 模型 id -> [生效输入价, 生效输出价, 生效缓存读价]（元/M）。后台线程写、UI 线程读：
-        // 引用赋值原子，string 不可变，读侧无需加锁。null=尚未取到/取不到（无 key、网络失败）
+        // ---------- 价格卡数据（上游定价表 10min 刷新 + 今日计费 30s 重算）----------
+        // 模型 id -> [币种, 原价输入, 原价输出, 原价缓存读]（per 1M tokens，取 pricing.* 标价而非折扣生效价）。
+        // 后台线程写、UI 线程读：引用赋值原子，string 不可变，读侧无需加锁。null=尚未取到/取不到（无 key、网络失败）
         public volatile System.Collections.Generic.Dictionary<string, string[]> PriceTable;
+        public volatile string BillText = "…";   // 今日计费（原价、按币种汇总：¥..元 / $..美元 / ¥..+$..）
+        public volatile bool BillOk = false;
         readonly System.Threading.Timer _priceTimer;
+        readonly System.Threading.Timer _billTimer;
 
         public TrayApp()
         {
             _port = ReadPort();
             _adminToken = ReadAdminToken();
             _priceTimer = new System.Threading.Timer(delegate { FetchPrices(); }, null, 3000, 600000);
+            _billTimer = new System.Threading.Timer(delegate { FetchTodayUsage(); }, null, 5000, 30000);
             _mini = new MiniForm(this);
             var forceHandle = _mini.Handle; // 提前建句柄，后台线程 BeginInvoke 才可用
 
@@ -340,12 +343,12 @@ namespace MgTray
                     int start = ids[i].Index + ids[i].Length;
                     int end = i + 1 < ids.Count ? ids[i + 1].Index : body.Length;
                     string chunk = body.Substring(start, end - start);
-                    // 生效价（折扣后）只出现在模型对象顶层，嵌套 pricing 子对象键名不同，不会误取
-                    string fi = Regex.Match(chunk, "\"effective_input_price_per_million\"\\s*:\\s*\"([^\"]+)\"").Groups[1].Value;
-                    string fo = Regex.Match(chunk, "\"effective_output_price_per_million\"\\s*:\\s*\"([^\"]+)\"").Groups[1].Value;
-                    string fc = Regex.Match(chunk, "\"effective_cache_read_price_per_million\"\\s*:\\s*\"([^\"]+)\"").Groups[1].Value;
-                    if (fi != "" && fo != "")
-                        table[ids[i].Groups[1].Value] = new string[] { TrimZ(fi), TrimZ(fo), fc == "" ? "—" : TrimZ(fc) };
+                    // 计费价取 effective_pricing（折扣后实付，与平台账单一致），无折扣模型回落 pricing 标价
+                    var mp = Regex.Match(chunk, "\"effective_pricing\"\\s*:\\s*\\{\\s*\"currency\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"unit\"\\s*:\\s*\"[^\"]*\"\\s*,\\s*\"prompt\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"completion\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"cache_read\"\\s*:\\s*\"([^\"]+)\"");
+                    if (!mp.Success)
+                        mp = Regex.Match(chunk, "\"pricing\"\\s*:\\s*\\{\\s*\"currency\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"unit\"\\s*:\\s*\"[^\"]*\"\\s*,\\s*\"prompt\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"completion\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"cache_read\"\\s*:\\s*\"([^\"]+)\"");
+                    if (mp.Success)
+                        table[ids[i].Groups[1].Value] = new string[] { mp.Groups[1].Value, TrimZ(mp.Groups[2].Value), TrimZ(mp.Groups[3].Value), TrimZ(mp.Groups[4].Value) };
                 }
                 if (table.Count > 0) PriceTable = table;
             }
@@ -356,6 +359,73 @@ namespace MgTray
         {
             try { return decimal.Parse(v, System.Globalization.CultureInfo.InvariantCulture).ToString("0.############", System.Globalization.CultureInfo.InvariantCulture); }
             catch { return v; }
+        }
+
+        // ---------- 今日计费（读 config/stats.json 按模型日桶 × 上游实付价，按币种汇总）----------
+        // stats.json 由网关每 30s 原子落盘（tmp+rename），读取侧只会见到完整旧版或完整新版。
+        // 计费口径：未命中提示词×输入价 + 缓存命中×缓存读价 + 输出×输出价（hit/miss 均为提示词侧 token）。
+        // 只统计价表内的模型——天然排除 VM 入口账本（避免与真实模型双计）与无价数据的上游（如 opencodego）。
+        // 跨天模型的日桶对象里旧日期在前、今日桶不在首位，不能单正则直取——先括号配平截出 daily 段再按模型分块扫
+        void FetchTodayUsage()
+        {
+            try
+            {
+                var t = PriceTable;
+                if (t == null) return;
+                string date = DateTime.Now.ToString("yyyy-MM-dd");
+                var cfg = File.ReadAllText(Path.Combine(_root, "config", "stats.json"));
+                string daily = ExtractBlock(cfg, "\"daily\"");
+                if (daily == null) return;
+                double cny = 0, usd = 0;
+                var mb = Regex.Matches(daily, "\"([^\"{]+)\"\\s*:\\s*\\{");
+                for (int i = 0; i < mb.Count; i++)
+                {
+                    string[] pr;
+                    if (!t.TryGetValue(mb[i].Groups[1].Value, out pr)) continue;
+                    int start = mb[i].Index + mb[i].Length;
+                    int end = i + 1 < mb.Count ? mb[i + 1].Index : daily.Length;
+                    var db = Regex.Match(daily.Substring(start, end - start), "\"" + date + "\"\\s*:\\s*\\{([^{}]*)\\}");
+                    if (!db.Success) continue;
+                    var inner = db.Groups[1].Value;
+                    double hit = D(Regex.Match(inner, "\"hit\"\\s*:\\s*([\\d.]+)").Groups[1].Value);
+                    double miss = D(Regex.Match(inner, "\"miss\"\\s*:\\s*([\\d.]+)").Groups[1].Value);
+                    double ot = D(Regex.Match(inner, "\"outTokens\"\\s*:\\s*([\\d.]+)").Groups[1].Value);
+                    double cost = miss * D(pr[1]) + hit * D(pr[3]) + ot * D(pr[2]);
+                    if (pr[0] == "USD") usd += cost; else if (pr[0] == "CNY") cny += cost;
+                }
+                string s = "";
+                if (cny > 0) s = "¥" + cny.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+                if (usd > 0) s += (s == "" ? "" : "+") + "$" + usd.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+                BillText = s == "" ? "¥0.00" : s;
+                BillOk = true;
+            }
+            catch { }
+        }
+
+        // 取 "key":{ ... } 的完整对象体（括号配平；daily 段内值均为数字/键名，无含花括号的字符串字面量）
+        static string ExtractBlock(string text, string key)
+        {
+            int k = text.IndexOf(key);
+            while (k >= 0)
+            {
+                int p = text.IndexOf('{', k + key.Length);
+                if (p < 0) return null;
+                int depth = 0;
+                for (int i = p; i < text.Length; i++)
+                {
+                    char c = text[i];
+                    if (c == '{') depth++;
+                    else if (c == '}') { depth--; if (depth == 0) return text.Substring(p, i - p + 1); }
+                }
+                k = text.IndexOf(key, k + 1);
+            }
+            return null;
+        }
+
+        static double D(string v)
+        {
+            double d;
+            return double.TryParse(v, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out d) ? d : 0;
         }
 
         // 直连优先（国内可达），失败走本机 Clash 代理重试
@@ -444,9 +514,6 @@ namespace MgTray
                     st.Requests = Num(Regex.Match(g.Groups[1].Value, "\"requests\":(\\d+)"));
                     st.Errors = Num(Regex.Match(g.Groups[1].Value, "\"errors\":(\\d+)"));
                 }
-                // defaults.directory 首个模型（buildStatus 里 defaults 内 directory 是首键）——价格卡的兜底取价对象
-                var dm = Regex.Match(body, "\"defaults\":\\{\"directory\":\\[\\{\"model\":\"([^\"]+)\"");
-                if (dm.Success) st.DirModel = dm.Groups[1].Value;
             }
             return st;
         }
@@ -773,7 +840,6 @@ namespace MgTray
         long _lastReq = -1;       // 上轮 requests
         string _curModel;
         string _curUpstream;
-        string _dirModel;         // defaults.directory 首个模型（价格卡兜底取价对象）
 
         readonly Font _fState = MgFonts.CnBold(12f);
         readonly Font _fLab = MgFonts.Cn(8.5f);     // 卡内标签：四卡共享三卡空间后字号缩小
@@ -797,9 +863,9 @@ namespace MgTray
             try { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             Font = MgFonts.Cn(10f);
 
-            // 窗控（右上角）：最小到托盘 / 关闭，32×32 与左列按钮同高（两者都缩托盘，网关不受影响）
-            var bMin = new MgButton("—", Mg.X(236), Mg.X(16), Mg.X(32), Mg.X(32), 2); bMin.Click += delegate { Hide(); };
-            var bClose = new MgButton("×", Mg.X(272), Mg.X(16), Mg.X(32), Mg.X(32), 2); bClose.Click += delegate { Hide(); };
+            // 窗控（右上角）：最小到托盘 / 关闭，28×28（右缘 304 与卡片右缘对齐；两者都缩托盘，网关不受影响）
+            var bMin = new MgButton("—", Mg.X(248), Mg.X(16), Mg.X(28), Mg.X(28), 2); bMin.Click += delegate { Hide(); };
+            var bClose = new MgButton("×", Mg.X(276), Mg.X(16), Mg.X(28), Mg.X(28), 2); bClose.Click += delegate { Hide(); };
 
             // 左列：等宽等高按钮 y=16/59/102/145/188（步长 43），日志底 220 与词元卡底严格对齐
             _bStart = new MgButton("启动", Mg.X(16), Mg.X(16), Mg.X(64), Mg.X(32), 0); _bStart.Click += delegate { _app.StartGateway(); };
@@ -949,28 +1015,13 @@ namespace MgTray
             string tokStr = hasStats ? FmtTok(_todayTokens) : "0";
             DrawStr(g, tokStr, _fVal, hasStats ? Theme.Accent : Theme.Ink3, Mg.X(154), Mg.X(156));
 
-            // 价格卡（当前模型在 jiyuan 上游的生效价：入/出/缓存读 元/M；当前模型不在价表时退目录首模型）
+            // 价格卡（今日计费：当日全部使用模型按上游原价折算，按币种汇总——¥人民币 / $美元，多币种用 + 间隔）
             DrawCard(g, new Rectangle(Mg.X(96), Mg.X(191), Mg.X(208), Mg.X(29)));
             DrawStr(g, "价格", _fLab, Theme.Ink3, Mg.X(110), Mg.X(197));
-            string priceStr; bool hasPrice = PriceValue(out priceStr);
-            DrawStr(g, Truncate(g, priceStr, _fVal, Mg.X(118)), _fVal, hasPrice ? Theme.Accent : Theme.Ink3, Mg.X(154), Mg.X(197));
+            DrawStr(g, Truncate(g, _app.BillText, _fVal, Mg.X(118)), _fVal, _app.BillOk ? Theme.Accent : Theme.Ink3, Mg.X(154), Mg.X(197));
 
             foreach (var b in _btns) b.Paint(g);
             g.ResetClip();
-        }
-
-        // 价格卡取值：当前 serving 模型 → 目录首模型，命中价表即返回「入/出/缓存读 元/M」。
-        // 价表未取到=「…」（拉取中/失败），模型未匹配=「—」（如 opencodego 系模型不在 jiyuan 价表）
-        bool PriceValue(out string display)
-        {
-            var t = _app.PriceTable;
-            if (t == null) { display = "…"; return false; }
-            string m = (_curModel != null && t.ContainsKey(_curModel)) ? _curModel
-                : (_dirModel != null && t.ContainsKey(_dirModel)) ? _dirModel : null;
-            if (m == null) { display = "—"; return false; }
-            string[] p = t[m];
-            display = p[0] + "/" + p[1] + "/" + p[2] + " 元/M";
-            return true;
         }
 
         // 重启点击后的即时视觉反馈：状态词切「重连中」，等首轮健康轮询接管
@@ -1001,7 +1052,6 @@ namespace MgTray
             _todayTokens = st.TodayTokens;
             _curModel = st.CurModel;
             _curUpstream = st.Upstream;
-            _dirModel = st.DirModel;
             // primary 跟随状态：停止态主推「启动」，运行态主推「停止」
             _bStart.SetKind(st.Alive ? 1 : 0);
             _bStop.SetKind(st.Alive ? 0 : 1);
