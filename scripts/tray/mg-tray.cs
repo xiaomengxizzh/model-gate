@@ -26,6 +26,19 @@ namespace MgTray
 {
     static class Program
     {
+        // 单实例互斥体须持静态根引用：局部变量在 Release JIT 下会被 GC 回收→互斥名消失→可同时起多个实例（生产实测发生过）
+        static Mutex _mutexKeep;
+
+        // 互斥/唤起事件名按 exe 目录派生：同目录仍单实例；不同目录副本（dev 沙箱）可与生产实例共存
+        public static readonly string Tag = BuildTag();
+        static string BuildTag()
+        {
+            string p = AppDomain.CurrentDomain.BaseDirectory.ToUpperInvariant();
+            int h = 0;
+            foreach (char c in p) h = h * 31 + c;
+            return (h & 0x7FFFFFFF).ToString("X8");
+        }
+
         [DllImport("user32.dll")]
         static extern bool SetProcessDPIAware();
         [DllImport("user32.dll")]
@@ -35,12 +48,12 @@ namespace MgTray
         static void Main()
         {
             bool created;
-            var mutex = new Mutex(true, "model-gateway-tray-mutex", out created);
+            _mutexKeep = new Mutex(true, "model-gateway-tray-mutex-" + Tag, out created);
             if (!created)
             {
                 // 已有实例：发信号让托盘弹出小窗，本进程退出
                 EventWaitHandle existing;
-                if (EventWaitHandle.TryOpenExisting("model-gateway-tray-show", out existing)) existing.Set();
+                if (EventWaitHandle.TryOpenExisting("model-gateway-tray-show-" + Tag, out existing)) existing.Set();
                 return;
             }
             // DPI 感知：PerMonitorV2 文字原生渲染不发虚；老系统回退 SetProcessDPIAware
@@ -156,6 +169,29 @@ namespace MgTray
                 ? Color.White
                 : (Kind == 2 ? (Hot ? Theme.Err : Theme.Ink2)
                               : (Hot ? Theme.Ink : Theme.Ink2));
+            // 窗控标记（—/×）用矢量线而非字形：U+2014/U+00D7 在萝莉体 cmap 中存在（GetGlyphIndices 实测），
+            // 但 9.5pt DrawString 实测整字仅 14/18 个抗锯齿像素（10×1px 发丝线），叠加窗口半透明后视觉不可见；
+            // 换字体无解（雅黑/Arial 同字号更细），线宽随 DPI 缩放保证常态可见，悬停转红逻辑不变
+            if (Kind == 2)
+            {
+                int cx = Rect.X + Rect.Width / 2, cy = Rect.Y + Rect.Height / 2;
+                using (var pen = new Pen(txt, 1.8f * Mg.Scale))
+                {
+                    pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round;
+                    if (Text == "×")
+                    {
+                        int d = Mg.X(4);
+                        g.DrawLine(pen, cx - d, cy - d, cx + d, cy + d);
+                        g.DrawLine(pen, cx - d, cy + d, cx + d, cy - d);
+                    }
+                    else
+                    {
+                        int h = Mg.X(5);
+                        g.DrawLine(pen, cx - h, cy, cx + h, cy);
+                    }
+                }
+                return;
+            }
             using (var b = new SolidBrush(txt))
             using (var sf = (StringFormat)StringFormat.GenericTypographic.Clone())
             {
@@ -230,8 +266,8 @@ namespace MgTray
             _tray.MouseClick += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Left) ShowMini(); };
             _tray.ContextMenuStrip = BuildMenu();
 
-            // 第二实例唤起小窗
-            _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "model-gateway-tray-show");
+            // 第二实例唤起小窗（事件名带目录派生 Tag，见 Program.BuildTag）
+            _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "model-gateway-tray-show-" + Program.Tag);
             ThreadPool.QueueUserWorkItem(delegate {
                 while (_showEvent.WaitOne())
                 {
@@ -319,6 +355,7 @@ namespace MgTray
         // ---------- 价格表拉取（上游 /v1/models；失败静默保旧值，不打扰 UI）----------
         void FetchPrices()
         {
+            string diag = "price: pending";
             try
             {
                 // baseUrl/apiKeyEnv 从 gateway.local.json 的 jiyuan 段读（baseUrl 在该对象首个 } 之前），缺省走 tokenrhythm/JIYUAN_API_KEY
@@ -333,9 +370,9 @@ namespace MgTray
                 }
                 catch { }
                 var key = Environment.GetEnvironmentVariable(keyEnv);
-                if (string.IsNullOrEmpty(key)) return;
+                if (string.IsNullOrEmpty(key)) { diag = "price: no key env=" + keyEnv + " baseUrl=" + baseUrl; return; }
                 string body = HttpGetBody(baseUrl + "/v1/models", key);
-                if (body == null) return;
+                if (body == null) { diag = "price: http fail (direct+proxy) baseUrl=" + baseUrl; return; }
                 var table = new System.Collections.Generic.Dictionary<string, string[]>();
                 var ids = Regex.Matches(body, "\"id\"\\s*:\\s*\"([^\"]+)\"");
                 for (int i = 0; i < ids.Count; i++)
@@ -350,9 +387,15 @@ namespace MgTray
                     if (mp.Success)
                         table[ids[i].Groups[1].Value] = new string[] { mp.Groups[1].Value, TrimZ(mp.Groups[2].Value), TrimZ(mp.Groups[3].Value), TrimZ(mp.Groups[4].Value) };
                 }
+                diag = "price: entries=" + table.Count + " baseUrl=" + baseUrl + " keyEnv=" + keyEnv + " bytes=" + body.Length;
                 if (table.Count > 0) PriceTable = table;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                diag = "price: exception " + ex.Message;
+                NoteError("FetchPrices", ex);
+            }
+            finally { _diagPrice = diag; DiagDump(); }
         }
 
         static string TrimZ(string v)
@@ -365,39 +408,99 @@ namespace MgTray
         // stats.json 由网关每 30s 原子落盘（tmp+rename），读取侧只会见到完整旧版或完整新版。
         // 计费口径：未命中提示词×输入价 + 缓存命中×缓存读价 + 输出×输出价（hit/miss 均为提示词侧 token）。
         // 只统计价表内的模型——天然排除 VM 入口账本（避免与真实模型双计）与无价数据的上游（如 opencodego）。
-        // 跨天模型的日桶对象里旧日期在前、今日桶不在首位，不能单正则直取——先括号配平截出 daily 段再按模型分块扫
+        // 模型日桶对象须从模型名后的 '{' 括号配平整体取出（ObjAt）：桶内日期键同样匹配模型键正则，
+        // 若按"下一个匹配"切块会被第一个日期键截成空块→今日桶永远找不到（¥0.00 根因之一）。
+        // 价目为上游 unit=per_1m_tokens，token 数必须 ÷1e6（根因之二：原先未除，修好分块后会显示放大百万倍的值）。
         void FetchTodayUsage()
         {
+            string diag = "bill: pending";
             try
             {
                 var t = PriceTable;
-                if (t == null) return;
+                if (t == null) { diag = "bill: skip (price table empty)"; return; }
                 string date = DateTime.Now.ToString("yyyy-MM-dd");
                 var cfg = File.ReadAllText(Path.Combine(_root, "config", "stats.json"));
                 string daily = ExtractBlock(cfg, "\"daily\"");
-                if (daily == null) return;
+                if (daily == null) { diag = "bill: skip (no daily block)"; return; }
                 double cny = 0, usd = 0;
+                int billed = 0;
+                var names = new StringBuilder();
                 var mb = Regex.Matches(daily, "\"([^\"{]+)\"\\s*:\\s*\\{");
                 for (int i = 0; i < mb.Count; i++)
                 {
                     string[] pr;
-                    if (!t.TryGetValue(mb[i].Groups[1].Value, out pr)) continue;
-                    int start = mb[i].Index + mb[i].Length;
-                    int end = i + 1 < mb.Count ? mb[i + 1].Index : daily.Length;
-                    var db = Regex.Match(daily.Substring(start, end - start), "\"" + date + "\"\\s*:\\s*\\{([^{}]*)\\}");
+                    if (!t.TryGetValue(mb[i].Groups[1].Value, out pr)) continue;  // 日期键/价表外模型在此滤除
+                    string bucket = ObjAt(daily, mb[i].Index + mb[i].Length - 1);
+                    if (bucket == null) continue;
+                    var db = Regex.Match(bucket, "\"" + date + "\"\\s*:\\s*\\{([^{}]*)\\}");
                     if (!db.Success) continue;
                     var inner = db.Groups[1].Value;
                     double hit = D(Regex.Match(inner, "\"hit\"\\s*:\\s*([\\d.]+)").Groups[1].Value);
                     double miss = D(Regex.Match(inner, "\"miss\"\\s*:\\s*([\\d.]+)").Groups[1].Value);
                     double ot = D(Regex.Match(inner, "\"outTokens\"\\s*:\\s*([\\d.]+)").Groups[1].Value);
-                    double cost = miss * D(pr[1]) + hit * D(pr[3]) + ot * D(pr[2]);
+                    double cost = (miss * D(pr[1]) + hit * D(pr[3]) + ot * D(pr[2])) / 1000000.0;
                     if (pr[0] == "USD") usd += cost; else if (pr[0] == "CNY") cny += cost;
+                    billed++;
+                    if (names.Length > 0) names.Append(",");
+                    names.Append(mb[i].Groups[1].Value);
                 }
                 string s = "";
                 if (cny > 0) s = "¥" + cny.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
                 if (usd > 0) s += (s == "" ? "" : "+") + "$" + usd.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
                 BillText = s == "" ? "¥0.00" : s;
                 BillOk = true;
+                diag = "bill: date=" + date + " billedModels=" + billed + " models=" + names
+                     + " cny=" + cny.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture)
+                     + " usd=" + usd.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture)
+                     + " billText=" + BillText;
+            }
+            catch (Exception ex)
+            {
+                diag = "bill: exception " + ex.Message;
+                NoteError("FetchTodayUsage", ex);
+            }
+            finally { _diagBill = diag; DiagDump(); }
+        }
+
+        // 从 openBrace 处的 '{' 起括号配平取完整对象体（daily 段内值均为数字/键名，无含花括号的字符串字面量）
+        static string ObjAt(string text, int openBrace)
+        {
+            int depth = 0;
+            for (int i = openBrace; i < text.Length; i++)
+            {
+                char c = text[i];
+                if (c == '{') depth++;
+                else if (c == '}') { depth--; if (depth == 0) return text.Substring(openBrace, i - openBrace + 1); }
+            }
+            return null;
+        }
+
+        // ---------- 长期诊断：每轮覆盖写 <托盘根>\logs\tray-debug.txt（价表/计费两个定时器共用一锁）----------
+        string _diagPrice = "price: pending";
+        string _diagBill = "bill: pending";
+        string _lastError = "none";
+        readonly object _diagLock = new object();
+
+        void NoteError(string where, Exception ex)
+        {
+            _lastError = where + ": " + ex.GetType().Name + ": " + ex.Message;
+        }
+
+        void DiagDump()
+        {
+            try
+            {
+                lock (_diagLock)
+                {
+                    var dir = Path.Combine(_root, "logs");
+                    if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                    var sb = new StringBuilder();
+                    sb.Append("time=").AppendLine(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                    sb.AppendLine(_diagPrice);
+                    sb.AppendLine(_diagBill);
+                    sb.Append("lastError=").AppendLine(_lastError);
+                    File.WriteAllText(Path.Combine(dir, "tray-debug.txt"), sb.ToString());
+                }
             }
             catch { }
         }
