@@ -9,6 +9,14 @@
 - `scripts/tray/build.cmd`：一键编译（系统自带 csc.exe；ASCII-only 规避批处理 GBK 解析坑）。
 - `scripts/test/z-defaults-merge.mjs`：defaults 合并保存契约回归（完整/面板式/无键/显式覆盖，7 断言）。
 - `scripts/test/z2-noevent.mjs`：半死流看门狗回归（纯注释心跳流判死并回错误事件；注释+data 交替的健康流不误杀）。
+- **悬浮窗四卡改版**（`8b32f36`）：右列三卡扩为四卡（上游/模型/词元/价格），卡内文字 10pt→8.5pt；**价格卡=当日全部使用模型的计费**——每 30s 读 `stats.json` 按模型日桶（in/hit/miss/out）× 上游实付价（`effective_pricing`，与平台账单一致；无折扣回落标价）按币种汇总（¥人民币/$美元，多币种 + 间隔），只计价表内模型（天然排除 VM 入口双计与无价上游）；每 10min 拉上游 `/v1/models` 价表（直连失败走 Clash 代理重试）。
+- **托盘诊断文件**：每轮覆盖写 `logs/tray-debug.txt`（价表条目数/计费模型/cny/usd/BillText/最近异常），托盘问题无需截图即可核查。
+- `scripts/tray/swap.cmd`：托盘换装脚本（杀托盘→`mg-tray.new.exe`→`mg-tray.exe`→启动；托盘重启会短暂重启其守护的网关）。
+
+### Fixed
+- **今日计费恒为 ¥0.00**：模型日桶按「下一个引号键」切块时日期键同样命中模型键正则，块被截空 → 今日桶永远找不到；且金额公式漏 ÷1e6（修复后会显示约 ¥1976 万）。改为括号配平截取 `daily` 段 + 按模型分块扫描。
+- **窗控按钮只显示空心圆**：萝莉体 9.5pt 下「—」「×」笔画仅 10×1px 发丝线（叠加 Opacity 0.8 不可见）——改矢量线绘制（`Pen` 圆头线帽，悬停转红不变），字体无关。
+- **托盘单实例互斥偶发失效**：`Mutex` 局部变量无根引用被 GC 回收——改静态根引用持有；互斥/唤起事件名按 exe 目录哈希派生（多实例部署互不干扰）。
 
 ### Changed
 - **日志按天分文件 + 7 天保留**：`logs/gateway.log` 改为落盘 `logs/gateway-YYYY-MM-DD.log`（配置 `logFile` 仅指定前缀/目录），启动/跨天清理 7 天前旧文件（含 `.old` 轮转件；历史无日期旧版按 mtime 判断）；单文件超 5MB 轮转 `.old`；`/api/logs` 改读当前天文件（logger 暴露 `file()`）；`start.bat` 前台调试用法不变。

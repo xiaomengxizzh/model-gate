@@ -23,3 +23,4 @@ mg-tray.exe
 # WorkBuddy 工作区记忆（不入库）
 .workbuddy/
 config/admin.token
+mg-tray.new.exe
