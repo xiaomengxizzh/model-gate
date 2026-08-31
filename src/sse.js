@@ -62,20 +62,6 @@ export async function relayStream(client, firstUpstream, opts) {
   function sendDelta(t) { if (typeof t === 'string' && t !== '') sendDataJson({ choices: [{ delta: { content: t } }] }) }
   function sendDone() { sendRaw('data: [DONE]\n\n') }
   function keepalive() { if (!client.destroyed) client.write(': mg-keepalive\n') }
-  function finalize(note) {
-    clearIdle(); clearNoEv()
-    // 终态落日志：此前「续传用尽」只对客户端发错误事件、日志无痕，无法事后核查
-    log && log.warn('sse 流式中断终态：' + note + '（重连 ' + retries + ' 次）' + (client.destroyed ? '，客户端已断开，未发送错误事件' : '，已向客户端发送错误事件'))
-    if (client.destroyed) return
-    try {
-      // 中断时先给客户端明确交代（OpenAI 兼容错误事件），再 [DONE] 正常结束——
-      // 否则纯 [DONE] 会被客户端当「正常结束但无输出」处理（zcode 等直接静默结束对话，用户无感知）
-      sendDataJson({ error: { message: '上游流式响应中断：' + note + '，已重连 ' + retries + ' 次仍失败', type: 'stream_interrupted', code: 'STREAM_INTERRUPTED' } })
-      sendRaw('\n: [gateway] ' + note + '\n')
-      sendDone()
-    } catch { client.destroy() }
-    try { client.end() } catch { }
-  }
 
   async function handleEvent(ev, dataStr) {
     if (dataStr !== '') { lastDataEventAt = Date.now(); armNoEv() } // 数据事件重置事件看门狗；注释/空事件不重置（半死流判据）
@@ -168,7 +154,7 @@ export async function relayStream(client, firstUpstream, opts) {
   }
 
   async function resume(reason) {
-    if (done || clientGoneAt.t != null || client.destroyed || retries >= maxReconnects) { if (!done) finalize('断流续传' + (maxReconnects ? '用尽' : '失败') + '，结束'); return }
+    if (done || clientGoneAt.t != null || client.destroyed || retries >= maxReconnects) return // 续传用尽：不在此收尾客户端——切/不切由调用方（模型链循环）决定
     retries++
     clearIdle(); clearNoEv(); pendReason = null   // 重连窗口内停掉所有计时器：判死定时器不得在重连期间触发
     phaseAsync = 'resume'; resolved = false; acc = ''
@@ -190,7 +176,21 @@ export async function relayStream(client, firstUpstream, opts) {
   if (opts.onTokens) { try { opts.onTokens(contentChars, lastUsage) } catch {} }
   if (opts.onEnd) { try { opts.onEnd({ interrupted: !done, reconnects: retries, clientGone: clientGoneAt.t != null }) } catch {} }
   if (typeof client.removeListener === 'function') { try { client.removeListener('close', markGone); client.removeListener('error', markGone) } catch {} }
-  if (!client.destroyed) try { client.end() } catch { }
-  // 返回流结局：completed=正常结束；contentSent=是否已向客户端回传过内容（false 且中断 → 调用方可安全换上游/模型重发，无重复风险）
+  // 正常完成或客户端已断：收尾连接。上游中断时保持客户端连接开启——
+  // 切/不切由调用方（forward 模型链循环）决定：切则下一上游的流继续写同一连接，不切则调 endInterruptedStream 收尾
+  if (!client.destroyed && (done || clientGoneAt.t != null)) try { client.end() } catch { }
+  // 返回流结局：completed=正常结束；contentSent=是否已向客户端回传过正式回答内容（false 且中断 → 调用方可安全换上游/模型重发，无重复风险）
   return { completed: done, contentSent: contentChars > 0, interrupted: !done, reconnects: retries, clientGone: clientGoneAt.t != null }
+}
+
+// 流中断且调用方决定不切换时的收尾：发 OpenAI 兼容错误事件（客户端可感知，不再静默）+ [DONE] + end。
+// （relayStream 中断时保持客户端连接开启，切/不切由调用方决定——切则继续写流，不切则调用本函数收尾）
+export function endInterruptedStream(client, note, reconnects) {
+  if (!client || client.destroyed || client.writableEnded) return
+  try {
+    client.write('data: ' + JSON.stringify({ error: { message: '上游流式响应中断：' + note + '，已重连 ' + (reconnects || 0) + ' 次仍失败', type: 'stream_interrupted', code: 'STREAM_INTERRUPTED' } }) + '\n\n')
+    client.write('\n: [gateway] ' + note + '\n')
+    client.write('data: [DONE]\n\n')
+  } catch { try { client.destroy() } catch { } }
+  try { client.end() } catch { }
 }

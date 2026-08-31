@@ -245,6 +245,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   let last4xxPid = null       // last4xx 对应的上游（pid 是 for 循环块作用域，循环外取不到）
   let rejectedOnly = false    // 本轮是否只有模型级拒绝（无网络错/5xx/429）：是则不再循环重试（403 是确定性拒绝，循环无意义）
   let tried = false
+  let streamStarted = false   // 流式已开始（响应头已发给客户端）：此后不能再写 json 状态码，失败只能以流内错误事件收尾
   const loopMs = (cfg.defaults && cfg.defaults.timeout && cfg.defaults.timeout.loopMs) || 120000
   const loopDeadline = Date.now() + loopMs
   const _sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -291,6 +292,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       agg(state, pid, 'retries', result.retries || 0)
       if (result.ok) {
         if (isStreamResponse(result)) {
+          streamStarted = true
           // 流式：成败延后到流结束统一判定（streamRelay 内 relay，返回流结局）。
           // 不能在响应头阶段 markOk——头 2xx 不代表流能走完，故障上游「头 2xx + 流中断」若在此刻被洗白，
           // 熔断计数永远攒不齐，后续请求被亲和钉在故障主上游，「切备用/切下一模型」形同虚设。
@@ -323,10 +325,16 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           sg.errors = (sg.errors || 0) + 1
           h.streamDrops = (h.streamDrops || 0) + 1
           if (!relay.clientGone) markFail(state, pid, prov.circuit) // 客户端主动断开不算上游失败，不熔断
-          log && log.warn('sse 流中断(续传' + (relay.reconnects || 0) + '次仍失败)' + (relay.contentSent ? '，已回传内容无法重发' : '，未回传内容切下一上游'), 'model=' + sm + ' provider=' + pid, 'chain=' + chainModels.join('>'))
-          if (relay.clientGone) return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, chain: chainModels.join('>') } // 客户端已断：无人收，不重试
-          if (relay.contentSent) return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, chain: chainModels.join('>') } // 已回传内容：重发会重复，按中断结束
-          // 未回传任何内容：该上游「头 2xx + 立刻断流」= 假成功，视为失败，继续模型链（下一 provider / 下一模型）
+          if (relay.clientGone) return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, chain: chainModels.join('>') } // 客户端已断：连接已死，无需收尾
+          const _note = '断流续传' + (relay.reconnects || 0) + '次仍失败，结束'
+          if (relay.contentSent && (cfg.defaults && cfg.defaults.streamInterruptOnContent) !== true) {
+            // 正式回答（content）已回传后中断且未开「中断也切」：重发会让客户端收到「半截旧回答 + 新回答」拼接——发错误事件收尾（客户端可干净重试）
+            if (relay.finish) relay.finish(_note)
+            return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, chain: chainModels.join('>') }
+          }
+          // 未回传内容（「头 2xx + 立刻断流」= 假成功）或已回传但 streamInterruptOnContent=true（用户接受拼接重复）：
+          // 均视为该上游失败，继续模型链（下一 provider / 下一模型）——客户端连接保持，下一上游的流继续写同一连接
+          log && log.warn('sse 流中断(续传' + (relay.reconnects || 0) + '次仍失败)' + (relay.contentSent ? '，已回传内容按策略切换' : '，未回传内容切下一上游'), 'model=' + sm + ' provider=' + pid, 'chain=' + chainModels.join('>'))
           continue
         }
         markOk(state, pid)
@@ -398,8 +406,10 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   await _sleep(300)      // 一轮全败后回到队首前稍停，避免空转打爆上游
   } // while() 有界循环兜底：整条链(a→b→c)失败后回到 a 继续，直到成功 / 业务4xx / 整体超时 / 全部熔断
   // 整条链都是 403/404 模型级拒绝：回最后一个上游原始响应（比 502 更有信息量）
-  if (last4xx) return { kind: 'json', status: last4xx.status, contentType: 'application/json; charset=utf-8', body: last4xx.body, pid: last4xxPid, modelName, chain: chainModels.join('>') }
+  if (last4xx && !streamStarted) return { kind: 'json', status: last4xx.status, contentType: 'application/json; charset=utf-8', body: last4xx.body, pid: last4xxPid, modelName, chain: chainModels.join('>') }
   if (!tried) return { kind: 'json', status: 502, contentType: 'application/json', chain: chainModels.join('>'), body: Buffer.from(JSON.stringify({ error: { message: lastErr ? lastErr.message : 'no usable provider (无可用上游：可能未配 Key 或全部熔断)', type: 'no_provider' } })) }
+  // 流已开始（响应头已发）后的全链失败：不能再写 json 状态码，以流内错误事件收尾（index.js 对 stream-interrupted 兜底收尾）
+  if (streamStarted) return { kind: 'stream-interrupted', pid: last4xxPid, modelName, chain: chainModels.join('>'), note: lastErr && lastErr.message ? (lastErr.message + '（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）') : 'all providers failed（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）', reconnects: 0 }
   return { kind: 'json', status: 502, contentType: 'application/json', chain: chainModels.join('>'), body: Buffer.from(JSON.stringify({ error: { message: lastErr && lastErr.message ? (lastErr.message + '（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）') : 'all providers failed（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）', type: 'all_providers_failed' } })) }
   } finally {
     if (releaseModel) releaseModel()
