@@ -54,6 +54,8 @@ function orderCandidates(state, model, providers) {
 
 const DIALOGUE_GAP_MS = 300000 // 无会话 ID 时，间隔超过 5 分钟视为新对话
 const STREAM_DROP_THRESHOLD = 3 // 同一上游连续流式中断 >= 该值，后续请求绕开它（不被 markOk 重置）
+// 连续断流绕开的冷却时长：到点后放行一次半开探测，避免上游「一断流就永久出局」（可用 defaults.streamDropCooldownMs 覆盖）
+const STREAM_DROP_COOLDOWN_MS = 60000
 const AFFINITY_TTL_MS = 300000  // 缓存亲和有效期（可用 defaults.affinityTtlMs 覆盖）：过期后主上游可被重新试用
 
 function maxConcur(cfg) { return (cfg.defaults && cfg.defaults.concurrency && cfg.defaults.concurrency.maxPerProvider) || 8 }
@@ -265,7 +267,16 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     const prov = buildProvider(cfg, pid)
     const h = ensureHst(state, pid)
     if (!healthy(h, Date.now())) { markFail(state, pid, prov.circuit); continue } // 熔断中：跳过，视为失败推进
-    if ((h.streamDrops || 0) >= STREAM_DROP_THRESHOLD) { log && log.warn('skip provider (流中断过多，绕开)', pid); markFail(state, pid, prov.circuit); continue } // 连续流式中断过多：绕开该上游，走其他上游/模型
+    if ((h.streamDrops || 0) >= STREAM_DROP_THRESHOLD) {
+      // 连续流式中断过多：冷却期内绕开该上游（走其他上游/模型）；冷却到点后放行一次半开探测——
+      // 探测成功即解除（streamDrops 归零），再断流则重新计时。绕开时不再 markFail：否则熔断被反复续期，
+      // 上游既拿不到流量也永无翻身机会，整条兜底链会退化成单点（jiyuan 一挂，opencodego 早被钉死）。
+      const dropCd = Number(cfg.defaults && cfg.defaults.streamDropCooldownMs) > 0 ? Number(cfg.defaults.streamDropCooldownMs) : STREAM_DROP_COOLDOWN_MS
+      const since = Date.now() - (h.streamDropAt || 0)
+      if (since < dropCd) { log && log.warn('skip provider (流中断过多，绕开)', pid, '剩余冷却 ' + Math.ceil((dropCd - since) / 1000) + 's'); continue }
+      h.streamDrops = STREAM_DROP_THRESHOLD - 1 // 半开：本轮放行一次（再断流会 +1 回到阈值并重新计时）
+      log && log.warn('half-open 放行上游（连续断流冷却结束，探测一次）', pid)
+    }
     if (prov._def.apiKeyEnv && !prov.keyOk) { log && log.warn('skip provider (no key)', pid); continue }
     tried = true
     cycleTried = true
@@ -324,6 +335,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }
           sg.errors = (sg.errors || 0) + 1
           h.streamDrops = (h.streamDrops || 0) + 1
+          h.streamDropAt = Date.now() // 冷却计时起点：配合 half-open 让上游有机会自证恢复
           if (!relay.clientGone) markFail(state, pid, prov.circuit) // 客户端主动断开不算上游失败，不熔断
           if (relay.clientGone) return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, chain: chainModels.join('>') } // 客户端已断：连接已死，无需收尾
           const _note = '断流续传' + (relay.reconnects || 0) + '次仍失败，结束'
@@ -338,6 +350,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           continue
         }
         markOk(state, pid)
+        ensureHst(state, pid).streamDrops = 0 // 非流式请求完整成功同样代表上游健康：解除连续断流绕开
         noteAffinity(state, serving || route.model, pid) // 非流式响应已完整收到：记录本次成功上游，供后续请求保持亲和、复用其缓存
         let out = await collectBody(result.stream)
         out = maybeGunzip(out, result.headers && result.headers['content-encoding'])
@@ -369,8 +382,22 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       // 例外：403/404 属「模型/资源级拒绝」（如上游对该模型无权限/不存在），换下一模型可能成功，记录后继续尝试而非中断
       markOk(state, pid)
       // 3xx 重定向对 Chat 端点属于异常：不跟随、不裸透传，明确转 502，避免客户端误跟随或解析错乱
-      if (result.status >= 300 && result.status < 400) return { kind: 'json', status: 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'upstream returned unexpected redirect (' + result.status + ')', type: 'upstream_error', status: result.status } })), pid, modelName, chain: chainModels.join('>') }
+      if (result.status >= 300 && result.status < 400) {
+        // 流已开始：写不了 502 头，按上游失败继续链（不改 rejectedOnly——3xx/4xx 是确定性拒绝，重发同一请求无意义，轮末即收尾）
+        if (streamStarted) { lastErr = Object.assign(new Error('upstream redirect ' + result.status), { status: result.status }); continue }
+        return { kind: 'json', status: 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'upstream returned unexpected redirect (' + result.status + ')', type: 'upstream_error', status: result.status } })), pid, modelName, chain: chainModels.join('>') }
+      }
       const out = await collectBody(result.stream)
+      // 流已开始（响应头/部分内容已发给客户端）后，json 状态码再也写不回去：按上游失败继续切下一上游，
+      // 全链失败时由收尾逻辑以流内错误事件结束。此前此处直接 return json，index.js 二次 writeHead
+      // 抛 "Cannot write headers after they are sent"，客户端只拿到没有 [DONE] 的半截流。
+      if (streamStarted) {
+        // 不置 rejectedOnly=false：4xx 是确定性拒绝，链走完一轮即可收尾，不必重复空转到 loopMs
+        lastErr = Object.assign(new Error('upstream ' + result.status + ' ' + (serving || '')), { status: result.status })
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
+        log && log.warn('流已开始后上游返回 ' + result.status + '，按断流继续切下一上游', 'provider=' + pid, 'model=' + (serving || '-'))
+        continue
+      }
       if (result.status === 403 || result.status === 404) {
         // 模型级拒绝：记入错误统计（不熔断），保留原始响应供整链全拒时回显，继续尝试下一模型
         last4xx = { status: result.status, body: out }

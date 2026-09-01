@@ -595,6 +595,7 @@ function makeHandler(state) {
               sg.errors = (sg.errors || 0) + 1
               // 独立连续中断计数（markOk 不会重置它）：连续多次流中断让路由绕开该上游
               h.streamDrops = (h.streamDrops || 0) + 1
+              h.streamDropAt = Date.now() // 冷却计时起点（配合 forward.js 的 half-open 探测）
               // 流中断按上游失败计入熔断（与请求头阶段失败同口径）：连续 maxFailures 次中断即拉闸，
               // 后续请求切到备用上游/下一模型。markOk 已延后到流成功结束才调用，间歇性「头 2xx」不再清零失败计数
               const pdef = (state.cfg.providers && state.cfg.providers[out.pid]) || null
@@ -627,6 +628,13 @@ function makeHandler(state) {
         res.write('data: ' + JSON.stringify({ choices: [{ delta: {}, finish_reason: msg0.finish_reason || 'stop' }] }) + '\n\n')
         res.write('data: [DONE]\n\n')
         return res.end()
+      }
+      // 防御：响应头已发出（流式已开始/已收尾）时不能再 writeHead，否则抛 ERR_HTTP_HEADERS_SENT，
+      // 客户端只拿到半截流。此时只能以流内错误事件收尾（forward 正常路径已避免走到这里）。
+      if (res.headersSent || res.writableEnded) {
+        log && log.warn('json 响应无法回写（响应头已发出）status=' + out.status + ' kind=' + out.kind)
+        if (!res.writableEnded && !res.destroyed) endInterruptedStream(res, '上游响应中断（流已开始后无法回写状态码 ' + out.status + '）', 0)
+        return
       }
       res.writeHead(out.status, { 'content-type': out.contentType }); res.end(out.body)
     } catch (err) {

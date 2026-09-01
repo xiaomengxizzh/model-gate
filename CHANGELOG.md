@@ -29,6 +29,8 @@
 - **半死流事件级看门狗**：字节级 idle 只认「上游没字节」——上游用 SSE 注释/垃圾字节续命却从不发 `data` 事件时，字节计时被反复喂活、网关 keepalive 注释又喂活客户端空闲检测，客户端既无内容也无错误地无限悬挂（生产 08-30 09:43-09:48 实录，悬挂 3 分多钟后客户端自行放弃）。新增事件级看门狗（默认 2×idleMs）：收到含 `data:` 的完整事件才重置，超时判死走续传/报错，客户端最终收到 `stream_interrupted` 错误事件。
 - **判死定时器改「掐流+带内续传」**：idle/看门狗定时器此前直接 fire-and-forget 调 `resume`，续传链脱离 await 链——顶层 `pump(firstUpstream)` 可能永不返回（onEnd 不触发、成败记账丢失），旧泵 iterator 复活还会与新泵双写客户端。现定时器只判死+掐流，由被掐断的泵在 catch 里带内续传；引入泵代数（gen），被换掉的旧泵醒来即静默退场。
 - **流式中断终态落日志**：`finalize` 此前只对客户端发错误事件、日志无痕；现记录终态（含「客户端已断开，未发送错误事件」分支），事后可查。
+- **连续断流上游「一断流就永久出局」（半开恢复）**：`streamDrops >= 3` 后该上游被绕开，但绕开时还会再 `markFail`（熔断被反复续期），而 `streamDrops` 只在流完整结束时归零——被绕开的上游永远拿不到流量，永远无法自证恢复，整条兜底链退化成单点（生产 09-01 实录：jiyuan 504 抽风期 113 次重试、13 次 400 全部卡在「opencodego 早已被钉死」）。现改为：绕开仅限冷却期（`defaults.streamDropCooldownMs`，默认 60s）内，到点放行一次半开探测——成功即解除（归零），再断流则重新计时；绕开时不再 `markFail`；非流式请求完整成功同样解除绕开。回归测试 `scripts/test/stream-drop-halfopen.mjs`（绕开仍生效 + 冷却后复活）。
+- **流已开始后上游 4xx 二次写响应头崩溃**：首个上游流式响应头已发给客户端后，模型链切到的下一上游若返回非流式 4xx，`forward.js` 直接 `return json` → `index.js` 二次 `writeHead` 抛 "Cannot write headers after they are sent to the client"，客户端只拿到没有 `[DONE]` 的半截流（生产 09-01 日志 7 次实录）。现：流已开始后的 3xx/4xx 按上游失败继续切下一上游（4xx 为确定性拒绝，不计入可重试，轮末即收尾），全链失败以流内 `stream_interrupted` 错误事件 + `[DONE]` 收尾；`index.js` json 回写处加 `headersSent` 防御兜底。回归测试 `scripts/test/stream-started-4xx.mjs`。
 
 ## [0.2.3] · 2026-08-29 —— 测试套件修正与文档口径同步
 
