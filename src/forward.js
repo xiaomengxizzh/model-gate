@@ -10,6 +10,19 @@ import { todayKey } from './shared.js'
 const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-length','upgrade','keep-alive','te','trailer'])
 const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection'])
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b])
+
+// 模型级拒绝判定：403/404 恒真（上游对该模型无权限/不存在）；400 需响应体含「模型/上游不可用」语义
+// （如 opencodego 的 Provider rejected / Model not supported、jiyuan 的 MODEL_DISABLED / 模型已关闭）——
+// 这类换下一模型可能成功，应继续目录链而非直接抛错给客户端。真·参数错误（messages 格式/字段非法、
+// max_tokens 类型等）不在此列：换模型同样失败，直接返回保留原始错误。
+function isModelLevelRejection(status, out) {
+  if (status === 403 || status === 404) return true
+  if (status !== 400 || !out || !out.length) return false
+  let text = ''
+  try { text = out.toString('utf8').slice(0, 4000).toLowerCase() } catch { return false }
+  return /(provider|upstream|model)[^\n]{0,80}(reject|not support|disabled|not found|does not exist|unknown|不可用|已关闭|不存在)|MODEL_DISABLED|模型(已关闭|不存在|不可用)/i.test(text)
+}
+
 function maybeGunzip(buf, contentEncoding) {
   // 只要上游申报了 gzip 或魔数命中，就必须能解压成功；否则抛错让上层当作失败走 fallback，避免放行垃圾字节
   const wants = /gzip/i.test(contentEncoding || '') || (buf && buf.length >= 2 && buf[0] === GZIP_MAGIC[0] && buf[1] === GZIP_MAGIC[1])
@@ -398,16 +411,23 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         log && log.warn('流已开始后上游返回 ' + result.status + '，按断流继续切下一上游', 'provider=' + pid, 'model=' + (serving || '-'))
         continue
       }
-      if (result.status === 403 || result.status === 404) {
-        // 模型级拒绝：记入错误统计（不熔断），保留原始响应供整链全拒时回显，继续尝试下一模型
+      if (isModelLevelRejection(result.status, out)) {
+        // 模型级拒绝（403/404，或 400 且响应体含「模型/上游不可用」语义）：
+        // 记入错误统计（不熔断），保留原始响应供整链全拒时回显，继续尝试下一模型。
+        // 注：opencodego 等上游对「模型不可用」也返回 400（Provider rejected / Model not supported），
+        // 若按普通 4xx 直接返回，jiyuan 故障期间目录链会在 opencodego 处断掉，客户端只拿到 400 而非自动切到 MiniMax 等后续模型。
         last4xx = { status: result.status, body: out }
         last4xxPid = pid
         lastErr = Object.assign(new Error('upstream ' + result.status + ' ' + (serving || '')), { status: result.status })
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
-        log && log.warn('provider rejected', pid, 'status ' + result.status, '-> next model')
+        log && log.warn('provider rejected (model-level)', pid, 'status ' + result.status, '-> next model', out && out.length ? 'body=' + out.toString('utf8', 0, 300).replace(/\n/g, ' ') : '')
         continue
       }
-      if (out.length) return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: out, pid, modelName, chain: chainModels.join('>') }
+      if (out.length) {
+        // 其余 4xx（真·参数/请求错误）：直接返回保留原始错误，不再尝试下一模型（换模型同样会失败）
+        log && log.warn('upstream ' + result.status, 'provider=' + pid, 'model=' + (serving || '-'), 'body=' + out.toString('utf8', 0, 300).replace(/\n/g, ' '))
+        return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: out, pid, modelName, chain: chainModels.join('>') }
+      }
       return { kind: 'json', status: result.status || 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'gateway upstream error', type: 'upstream_error', status: result.status } })), pid, modelName }
     } catch (err) {
       const latency = Date.now() - attemptStart

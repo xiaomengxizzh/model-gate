@@ -31,6 +31,7 @@
 - **流式中断终态落日志**：`finalize` 此前只对客户端发错误事件、日志无痕；现记录终态（含「客户端已断开，未发送错误事件」分支），事后可查。
 - **连续断流上游「一断流就永久出局」（半开恢复）**：`streamDrops >= 3` 后该上游被绕开，但绕开时还会再 `markFail`（熔断被反复续期），而 `streamDrops` 只在流完整结束时归零——被绕开的上游永远拿不到流量，永远无法自证恢复，整条兜底链退化成单点（生产 09-01 实录：jiyuan 504 抽风期 113 次重试、13 次 400 全部卡在「opencodego 早已被钉死」）。现改为：绕开仅限冷却期（`defaults.streamDropCooldownMs`，默认 60s）内，到点放行一次半开探测——成功即解除（归零），再断流则重新计时；绕开时不再 `markFail`；非流式请求完整成功同样解除绕开。回归测试 `scripts/test/stream-drop-halfopen.mjs`（绕开仍生效 + 冷却后复活）。
 - **流已开始后上游 4xx 二次写响应头崩溃**：首个上游流式响应头已发给客户端后，模型链切到的下一上游若返回非流式 4xx，`forward.js` 直接 `return json` → `index.js` 二次 `writeHead` 抛 "Cannot write headers after they are sent to the client"，客户端只拿到没有 `[DONE]` 的半截流（生产 09-01 日志 7 次实录）。现：流已开始后的 3xx/4xx 按上游失败继续切下一上游（4xx 为确定性拒绝，不计入可重试，轮末即收尾），全链失败以流内 `stream_interrupted` 错误事件 + `[DONE]` 收尾；`index.js` json 回写处加 `headersSent` 防御兜底。回归测试 `scripts/test/stream-started-4xx.mjs`。
+- **上游「模型不可用」400 被当业务错误直接抛给客户端，目录链中断**：opencodego 等上游对「模型不可用」也返回 400（`Provider rejected the model request` / `Model not supported`，生产 09-03 08:13-08:21 UTC 实录：jiyuan 504 故障期目录链切到 opencodego 后 400 直接透传，zcode 断连、未继续尝试 MiniMax）。此前仅 403/404 视为模型级拒绝继续目录链，400 一律按「业务 4xx」直接返回。现新增 `isModelLevelRejection()`：403/404 恒真，400 需响应体含「模型/上游不可用」语义（reject/not support/disabled/MODEL_DISABLED/模型已关闭等）——这类**换下一模型可能成功，继续目录链**；真·参数错误 400（messages 格式/字段非法等）不误伤，仍直接返回保留原始错误。顺带：所有 4xx 现在把响应体前 300 字符写入日志（此前只记 status，排查 400 需靠直测猜 body）。回归测试 `scripts/test/model-reject-failover.mjs`（模型级拒绝切备用 + 参数错误不切不浪费）。
 
 ## [0.2.3] · 2026-08-29 —— 测试套件修正与文档口径同步
 
