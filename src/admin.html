@@ -406,7 +406,7 @@ function renderProviders(){
   const ids=Object.keys(C.providers);
   if(!ids.length){box.innerHTML='<div class="empty">暂无上游，点「＋ 新增」添加</div>';return}
   box.innerHTML=ids.map(id=>{const p=C.providers[id],st=ST.byP[id]||{};
-    const b=!p.keyOk?'<span class="badge off" data-act="key" data-id="'+esc(id)+'">设 Key</span>':'<span class="badge" data-act="key" data-id="'+esc(id)+'">Key·'+(p.keySource==='keys'?'存储':'环境')+'</span>';
+    const b=!p.keyOk?'<span class="badge off" data-act="key" data-id="'+esc(id)+'">设 Key</span>':'<span class="badge" data-act="key" data-id="'+esc(id)+'">Key·'+(p.keySource==='keys'?'存储':p.keySource==='env-registry'?'环境·注册表':'环境')+'</span>';
     const pfx=p.pathPrefix?'<span class="badge pfx">前缀 '+esc(p.pathPrefix)+'</span>':'';
     const src='';const apiTag=(p.api&&p.api!=='openai')?'<span class="tag">'+esc(p.api)+'</span>':'';
     let cb='';if(st.state==='open')cb='<span class="badge open">熔断</span>';else if(st.state==='half')cb='<span class="badge half">探测</span>';

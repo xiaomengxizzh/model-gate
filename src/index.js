@@ -3,7 +3,7 @@ import { readFileSync, chmodSync, existsSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
 import { gunzipSync } from 'node:zlib'
-import { loadConfig, createRouter, buildProvider, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh } from './router.js'
+import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh } from './router.js'
 import { createLogger } from './logger.js'
 import { forward, probe, probeModel, probeChat, warm } from './request.js'
 import { adapterFor, cacheHitMiss } from './format.js'
@@ -120,12 +120,15 @@ function buildStatus(state) {
   const now = Date.now()
   const s = state.stats
   const providers = Object.entries(state.cfg.providers || {}).map(([id, p]) => {
-    const keyOk = !!(state.cfg._keys && state.cfg._keys[id]) || !!(p.apiKeyEnv && process.env[p.apiKeyEnv])
+    // Key 判定必须与转发链同源（resolveKey：keys 存储 → 进程环境 → 注册表实时读取）。
+    // 此前这里独立只查 process.env——注册表 fallback 修复后面板仍显示「设 Key」，
+    // 而转发/探活实际已能取到 key（面板显示与真实能力不同步，用户误判未生效）。
+    const pk = resolveKey(state.cfg, p, id)
     const h = ensureHst(state, id)
     const o = s.byProvider[id] || { requests:0, errors:0, retries:0, latencySum:0, latencyCount:0, tokens:0 }
     return {
-      id, baseUrl: p.baseUrl, hasKey: keyOk,
-      keySource: (state.cfg._keys && state.cfg._keys[id]) ? 'keys' : (p.apiKeyEnv ? 'env' : null),
+      id, baseUrl: p.baseUrl, hasKey: !!pk.key,
+      keySource: pk.source,
       apiKeyEnv: p.apiKeyEnv || null, pathPrefix: p.pathPrefix || '', api: p.api || 'openai', extraHeaders: p.extraHeaders || {}, proxy: p.proxy || '', circuit: p.circuit || null,
       st: {
         requests: o.requests, errors: o.errors, retries: o.retries, tokens: o.tokens,
