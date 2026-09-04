@@ -68,9 +68,43 @@ export function loadConfig(opts = {}) {
 }
 
 // key 解析：面板 keys.local.json 优先，其次环境变量
+// 用户级环境变量实时读取（仅 Windows，绕过进程启动快照）：
+// 进程 env 是启动时的副本，用户之后新增的变量对已运行进程不可见；这里实时查注册表
+// HKCU\Environment 拿最新值。带 TTL 缓存——spawnSync 有毫秒级开销且 resolveKey 在每请求
+// 路径上，不能裸调；正负值都缓存（找不到也缓存，避免高频空查）。改完变量最多 ~60s 生效。
+const _userEnvCache = new Map() // name -> { value: string|null, at: number }
+const USER_ENV_TTL_MS = 60000
+function readUserEnv(name) {
+  if (process.platform !== 'win32') return null
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return null // 变量名白名单字符，防注入
+  const now = Date.now()
+  const cached = _userEnvCache.get(name)
+  if (cached && now - cached.at < USER_ENV_TTL_MS) return cached.value
+  let value = null
+  try {
+    const r = spawnSync('reg', ['query', 'HKCU\\Environment', '/v', name], { encoding: 'utf8', timeout: 3000 })
+    const line = (r.stdout || '').split(/\r?\n/).find((l) => l.includes('REG_SZ') || l.includes('REG_EXPAND_SZ'))
+    if (line) {
+      const idx = line.indexOf('REG_')
+      const raw = line.slice(line.indexOf('SZ', idx) + 2).trim()
+      if (raw) value = raw
+    }
+  } catch { value = null }
+  _userEnvCache.set(name, { value, at: now })
+  return value
+}
+
 export function resolveKey(cfg, def, id) {
   if (cfg._keys && cfg._keys[id]) return { key: cfg._keys[id], source: 'keys' }
-  if (def.apiKeyEnv && process.env[def.apiKeyEnv]) return { key: process.env[def.apiKeyEnv], source: 'env' }
+  if (def.apiKeyEnv) {
+    const envVal = process.env[def.apiKeyEnv]
+    if (envVal) return { key: envVal, source: 'env' }
+    // 进程环境没有 → fallback 实时读注册表用户级变量：进程 env 是启动快照，用户在系统里
+    // 新增的变量（如新接上游的 API key）对已运行进程不可见，此前只能重启网关（且须连托盘一起
+    // 重启，否则拉活的网关继承托盘旧环境）才能生效。实时查注册表让「配完 key 就能用」。
+    const regVal = readUserEnv(def.apiKeyEnv)
+    if (regVal) return { key: regVal, source: 'env-registry' }
+  }
   return { key: '', source: null }
 }
 

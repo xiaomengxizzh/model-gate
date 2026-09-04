@@ -5,6 +5,7 @@
 ## [Unreleased] —— 托盘小窗管理器 + 日志按天分文件与 7 天保留 + 交接问题修复批次
 
 ### Added
+- **apiKeyEnv 用户级环境变量实时读取（绕过进程快照）**：进程 env 是启动时的副本——用户在系统里新增的 API key 变量（如 `BAI_API_KEY`）对已运行网关不可见，此前必须重启网关才能生效，且须连托盘一起重启（拉活的网关继承托盘旧环境）。现 `resolveKey` 在进程环境找不到时 fallback **实时查注册表 `HKCU\Environment`**（带 60s TTL 缓存：spawnSync 有毫秒级开销且在每请求路径上；正负值都缓存防高频空查；变量名白名单校验防注入），改完变量**最多 ~60s 生效**，无需重启任何东西。仅 Windows 生效（其他平台维持进程环境行为）。回归测试 `scripts/test/user-env-fallback.mjs`（注册表写入临时变量 → 进程环境无此变量 → 请求验证 Authorization 取到注册表值 → 自动清理）。
 - **mg-tray 托盘小窗管理器**（`scripts/tray/mg-tray.cs`，Windows 自带 .NET Framework csc 编译为 ~24KB `mg-tray.exe`，零第三方依赖）：无边框置顶悬浮小窗（状态/uptime/今日 token/请求错误 + 启动/停止/重启/面板/日志按钮，可拖动、右键切置顶、✕ 缩托盘）+ 托盘常驻（双击唤出、菜单全套操作、崩溃 5s 退避自动拉活、连续快速失败 ≥5 次熔断）+「开机自启」开关（HKCU Run 键，免管理员）+ 启动前清端口残留 node（同 start.bat 语义，只杀 node.exe）；检测到端口已有 node 实例显示「外部实例/未接管」不重复拉起；数据面轮询 `/healthz` + `/api/status`（401 自动降级）。
 - `scripts/tray/build.cmd`：一键编译（系统自带 csc.exe；ASCII-only 规避批处理 GBK 解析坑）。
 - `scripts/test/z-defaults-merge.mjs`：defaults 合并保存契约回归（完整/面板式/无键/显式覆盖，7 断言）。
