@@ -15,6 +15,7 @@
 - `scripts/tray/swap.cmd`：托盘换装脚本（杀托盘→`mg-tray.new.exe`→`mg-tray.exe`→启动；托盘重启会短暂重启其守护的网关）。
 
 ### Fixed
+- **baseUrl 带 `/v1` 结尾时 URL 双拼 404**：`request.js` 拼 URL 为 `baseUrl + pathPrefix + /v1/chat/completions`，而大量 OpenAI 兼容服务的文档示例 baseUrl 自带 `/v1`（如 `https://kuaipao.pro/v1`）——照抄即拼出 `/v1/v1/chat/completions` 上游 404（生产 09-04 实录：kuaipaoai 全部请求 404 后被目录链切走，用户以为 key 未生效）。新增 `upstreamUrl()` 规范化：baseUrl 尾斜杠归一；base 以 `/v1` 结尾且 path 又以 `/v1/` 开头时去掉 base 的版本段。5 处拼接点（forward/probe/probeModel/探活）统一走该函数。
 - **今日计费恒为 ¥0.00**：模型日桶按「下一个引号键」切块时日期键同样命中模型键正则，块被截空 → 今日桶永远找不到；且金额公式漏 ÷1e6（修复后会显示约 ¥1976 万）。改为括号配平截取 `daily` 段 + 按模型分块扫描。
 - **回答（content）已回传后断流不再硬中断——新增 `streamInterruptOnContent` 策略**：上游在正式回答已回传后断流（续传 2 次失败），此前一律报错收尾。现支持两种策略：默认（`streamInterruptOnContent: false`）保持报错收尾（客户端干净重试）；开启后**同样切下一上游/模型**——客户端会收到「半截旧回答 + 新回答」拼接（已发出的字节无法撤回，接受重复呈现）。配套改动：`relayStream` 中断时**不再自动 end 客户端连接**（切/不切由模型链循环决定，切则下一上游的流继续写同一连接，不切则调 `endInterruptedStream` 发错误事件收尾）；流已开始后的全链失败以流内错误事件收尾（不再尝试写 json 状态码）；`streamRelay` 二次写入跳过响应头（`headersSent` 防护）。测试 `stream-failover.mjs` 扩展至 5 场景 10 断言：未回传断流切上游/切模型、已回传断流按配置切（拼接证据 half-+ok-B）、配置关时错误事件收尾不切。
 - **窗控按钮只显示空心圆**：萝莉体 9.5pt 下「—」「×」笔画仅 10×1px 发丝线（叠加 Opacity 0.8 不可见）——改矢量线绘制（`Pen` 圆头线帽，悬停转红不变），字体无关。
