@@ -285,7 +285,18 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     if (!pid || !cfg.providers[pid]) continue
     const prov = buildProvider(cfg, pid)
     const h = ensureHst(state, pid)
-    if (!healthy(h, Date.now())) { markFail(state, pid, prov.circuit); continue } // 熔断中：跳过，视为失败推进
+    if (!healthy(h, Date.now())) {
+      // 熔断中：跳过该上游并推进。此处**不得**调 markFail——markFail 在 fails>=th 时会执行
+      // openUntil = now + cd，而每个请求都会走到这里，等于把冷却窗口无限续期：只要流量不断，
+      // 上游永远等不到半开，整条兜底链退化成单点。
+      // 生产 09-11 实录：jiyuan 两次流中断熔断后剩余冷却被钉在 120s（实测 openDurationMs=1500
+      // 时 6s 内上游零次被重试），其承载的 qwen3.8-flash/glm-5.3-flash 被永久排除，
+      // 链上只剩 gmi 的 MiniMax-M3，gmi 一欠费整条链即断。
+      // 与下方 streamDrops 绕开分支同理（那里注释已点名 jiyuan）：healthy() 只要求 openUntil 过期，
+      // 不加 markFail 时冷却到点自然放行一次，收敛由真实探测结果决定。
+      log && log.warn('skip provider (熔断中)', pid, '剩余冷却 ' + Math.ceil((h.openUntil - Date.now()) / 1000) + 's')
+      continue
+    }
     if ((h.streamDrops || 0) >= STREAM_DROP_THRESHOLD) {
       // 连续流式中断过多：冷却期内绕开该上游（走其他上游/模型）；冷却到点后放行一次半开探测——
       // 探测成功即解除（streamDrops 归零），再断流则重新计时。绕开时不再 markFail：否则熔断被反复续期，
