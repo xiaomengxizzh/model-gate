@@ -11,12 +11,18 @@ const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-len
 const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection'])
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b])
 
-// 模型级拒绝判定：403/404 恒真（上游对该模型无权限/不存在）；400 需响应体含「模型/上游不可用」语义
+// 模型级拒绝判定：402/403/404 恒真（上游侧故障，与本次请求无关）；400 需响应体含「模型/上游不可用」语义
 // （如 opencodego 的 Provider rejected / Model not supported、jiyuan 的 MODEL_DISABLED / 模型已关闭）——
 // 这类换下一模型可能成功，应继续目录链而非直接抛错给客户端。真·参数错误（messages 格式/字段非法、
 // max_tokens 类型等）不在此列：换模型同样失败，直接返回保留原始错误。
+//
+// 402 Payment Required 与 429 同源，属「这个上游现在不能服务」（账户欠费/额度停服），换下一上游立刻可能成功，
+// 故视同模型级拒绝继续目录链。生产 09-11 实录：gmi 返回 {"error":"Insufficient balance","reason":"model_access_denied"}
+// 时 jiyuan 恰在熔断，兜底链只剩 gmi 一个候选，402 被当作「客户端请求错误」原样透传 → dsh 整轮 turn 失败。
+// 注意：402 不进 request.js 的 RETRYABLE_HTTP —— 余额不会在退避几百毫秒后回来，同上游重试纯属浪费；
+// 有意义的动作是换上游（此处 continue），而非重发同一请求。
 function isModelLevelRejection(status, out) {
-  if (status === 403 || status === 404) return true
+  if (status === 402 || status === 403 || status === 404) return true
   if (status !== 400 || !out || !out.length) return false
   let text = ''
   try { text = out.toString('utf8').slice(0, 4000).toLowerCase() } catch { return false }
