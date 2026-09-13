@@ -187,7 +187,11 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     const effVal = body.reasoning_effort
     if (effFmt === 'thinking') {
       const val = (effVal !== undefined && effVal !== null) ? String(effVal) : (hit.def.reasoning || '')
-      if (val) { body.thinking = { type: val }; delete body.reasoning_effort; injectedEffort = true }
+      // thinking.type 值映射:OpenAI 系档位词(off/low/high…)→ 上游 thinking.type 词表
+      // (开启/关闭/自动 = enabled/disabled/auto)。未命中映射的值原样透传(如 MiniMax 的 adaptive)。
+      const THINKING_TYPE_MAP = { off: 'disabled', minimal: 'enabled', low: 'enabled', medium: 'enabled', high: 'enabled', xhigh: 'enabled', disabled: 'disabled', enabled: 'enabled', auto: 'auto' }
+      const mapped = THINKING_TYPE_MAP[val] || val
+      if (mapped) { body.thinking = { type: mapped }; delete body.reasoning_effort; injectedEffort = true }
     } else if (hit.def.reasoning && effVal === undefined) {
       // 模型配置默认值，客户端未指定时才注入（客户端自带优先）
       body.reasoning_effort = hit.def.reasoning; injectedEffort = true
