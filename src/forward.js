@@ -317,7 +317,25 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     if (chainModels[chainModels.length - 1] !== serving) chainModels.push(serving)
     agg(state, pid, 'requests', 1); state.st.counters.requests += 1; bm.requests += 1
     // 跨模型兜底：把发给上游的 model 名改写为该兜底模型名
-    const routeBody = (route.model && body && route.model !== body.model) ? Object.assign({}, body, { model: route.model }) : body
+    let routeBody = (route.model && body && route.model !== body.model) ? Object.assign({}, body, { model: route.model }) : body
+    // max_tokens 归一化（按目标模型的输出上限收敛）：不同上游对取值范围的容忍度不同，网关原样透传会让
+    // 严格上游把整个请求判为参数非法，而 400 属请求参数类错误、换模型也一样失败——不清掉就会拖垮整条兜底链。
+    //   · 非正整数 / 非整数（如 0、负数）：删除该字段，交由上游取默认。多数上游把 0 当「不限」，
+    //     但 Atria 直接 400 "max_tokens must be an integer between 1 and 65536"。
+    //   · 超过 models.<模型名>.maxTokensMax（可选；缺省 / 0 = 不限制）：钳到该上限。
+    if (body && body.max_tokens !== undefined && body.max_tokens !== null) {
+      const _mt = Number(body.max_tokens)
+      const _mdef = (cfg.models && route.model && cfg.models[route.model]) || null
+      const _cap = Number((_mdef && _mdef.maxTokensMax) || 0) || 0
+      let _fix = null
+      if (!Number.isFinite(_mt) || !Number.isInteger(_mt) || _mt <= 0) _fix = 'drop'
+      else if (_cap > 0 && _mt > _cap) _fix = _cap
+      if (_fix !== null) {
+        if (routeBody === body) routeBody = Object.assign({}, body)
+        if (_fix === 'drop') { delete routeBody.max_tokens; log && log.warn('max_tokens 归一化(删除非法值)', pid, '原值=' + body.max_tokens + ' -> 交由上游取默认') }
+        else { routeBody.max_tokens = _fix; log && log.warn('max_tokens 归一化(钳制)', pid, _mt + ' -> ' + _fix + ' (模型上限)') }
+      }
+    }
     let turl = url, tbuf = bodyBuf, api = prov.api
     let degraded = false
     if (api !== 'openai' && routeBody) { const ad = adapterFor(api); const r = ad.build(routeBody); if ((routeBody.tools || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true } turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body)) }
