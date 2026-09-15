@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, chmodSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, chmodSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
@@ -68,26 +68,65 @@ export function loadConfig(opts = {}) {
 }
 
 // key 解析：面板 keys.local.json 优先，其次环境变量
-// 用户级环境变量实时读取（仅 Windows，绕过进程启动快照）：
-// 进程 env 是启动时的副本，用户之后新增的变量对已运行进程不可见；这里实时查注册表
-// HKCU\Environment 拿最新值。带 TTL 缓存——spawnSync 有毫秒级开销且 resolveKey 在每请求
-// 路径上，不能裸调；正负值都缓存（找不到也缓存，避免高频空查）。改完变量最多 ~60s 生效。
+// 用户级环境变量实时读取（绕过进程启动快照）：
+// 进程 env 是启动时的副本，用户之后新增的变量对已运行进程不可见；这里实时查用户级环境拿最新值。
+//  - Windows：查注册表 HKCU\Environment（reg query）
+//  - Linux/POSIX：先查 systemd 用户管理器环境（systemctl --user show-environment，其中已含
+//    ~/.config/environment.d/*.conf 的内容）；未命中再直接解析 environment.d 文件，使
+//    「改完配置文件即生效」不必依赖 daemon-reload 或重启网关。
+// 带 TTL 缓存——spawnSync/读盘有毫秒级开销且 resolveKey 在每请求路径上，不能裸调；正负值都缓存
+// （找不到也缓存，避免高频空查）。改完变量最多 ~60s 生效。
 const _userEnvCache = new Map() // name -> { value: string|null, at: number }
 const USER_ENV_TTL_MS = 60000
+// systemd show-environment 对环境值做 shell 兼容转义（含空格/引号时包双引号并转义内部字符），此处还原
+function unquoteEnvValue(raw) {
+  const s = String(raw).trim()
+  if (s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"') return s.slice(1, -1).replace(/\\(["\\$`])/g, '$1')
+  return s
+}
+// 直接解析 ~/.config/environment.d/*.conf（按文件名排序，后者覆盖前者），作为 user manager 未刷新的兜底
+function readEnvironmentDir(name) {
+  const dir = join(homedir(), '.config', 'environment.d')
+  let files
+  try { files = readdirSync(dir).filter((f) => f.endsWith('.conf')).sort() } catch { return null }
+  let value = null
+  for (const f of files) {
+    let text
+    try { text = readFileSync(join(dir, f), 'utf8') } catch { continue }
+    for (const line of text.split(/\r?\n/)) {
+      const t = line.trim()
+      if (!t || t.startsWith('#')) continue
+      const eq = t.indexOf('=')
+      if (eq <= 0 || t.slice(0, eq).trim() !== name) continue
+      const v = unquoteEnvValue(t.slice(eq + 1))
+      if (v) value = v
+    }
+  }
+  return value
+}
 function readUserEnv(name) {
-  if (process.platform !== 'win32') return null
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return null // 变量名白名单字符，防注入
   const now = Date.now()
   const cached = _userEnvCache.get(name)
   if (cached && now - cached.at < USER_ENV_TTL_MS) return cached.value
   let value = null
   try {
-    const r = spawnSync('reg', ['query', 'HKCU\\Environment', '/v', name], { encoding: 'utf8', timeout: 3000 })
-    const line = (r.stdout || '').split(/\r?\n/).find((l) => l.includes('REG_SZ') || l.includes('REG_EXPAND_SZ'))
-    if (line) {
-      const idx = line.indexOf('REG_')
-      const raw = line.slice(line.indexOf('SZ', idx) + 2).trim()
-      if (raw) value = raw
+    if (process.platform === 'win32') {
+      const r = spawnSync('reg', ['query', 'HKCU\\Environment', '/v', name], { encoding: 'utf8', timeout: 3000 })
+      const line = (r.stdout || '').split(/\r?\n/).find((l) => l.includes('REG_SZ') || l.includes('REG_EXPAND_SZ'))
+      if (line) {
+        const idx = line.indexOf('REG_')
+        const raw = line.slice(line.indexOf('SZ', idx) + 2).trim()
+        if (raw) value = raw
+      }
+    } else {
+      const r = spawnSync('systemctl', ['--user', 'show-environment'], { encoding: 'utf8', timeout: 3000 })
+      if (r.status === 0 && r.stdout) {
+        const pfx = name + '='
+        const line = r.stdout.split('\n').find((l) => l.startsWith(pfx))
+        if (line) value = unquoteEnvValue(line.slice(pfx.length))
+      }
+      if (!value) value = readEnvironmentDir(name)
     }
   } catch { value = null }
   _userEnvCache.set(name, { value, at: now })
