@@ -37,7 +37,7 @@ function maybeGunzip(buf, contentEncoding) {
 }
 
 // 转发头：剥离客户端授权/敏感头，统一由网关注入鉴权，防止绕过
-function buildHeaders(req, provider, bodyBuf, cfg) {
+function buildHeaders(req, provider, bodyBuf, cfg, api) {
   const headers = {}
   for (const [k, v] of Object.entries(req.headers)) {
     const lk = k.toLowerCase()
@@ -50,6 +50,15 @@ function buildHeaders(req, provider, bodyBuf, cfg) {
   if (provider.apiKey) headers['authorization'] = 'Bearer ' + provider.apiKey
   const extra = Object.assign({}, (cfg.defaults || {}).extraHeaders, provider.extraHeaders)
   for (const [k, v] of Object.entries(extra)) headers[k.toLowerCase()] = v
+  // 协议专属头（per-model protocol 改革的下游：协议换掉后鉴权头也得跟着换）。
+  // Anthropic Messages API 认 x-api-key 且强制 anthropic-version（多数 OpenAI 兼容中转也接受 Bearer，
+  // 但官方端点缺 version 直接 400 "anthropic-version is required"）。这里两者都给，兼容性最大。
+  if (api === 'anthropic') {
+    if (!headers['anthropic-version']) headers['anthropic-version'] = '2023-06-01'
+    if (provider.apiKey && !headers['x-api-key']) headers['x-api-key'] = provider.apiKey
+  } else if (api === 'gemini') {
+    if (provider.apiKey && !headers['x-goog-api-key']) headers['x-goog-api-key'] = provider.apiKey
+  }
   if (bodyBuf && bodyBuf.length) headers['content-length'] = bodyBuf.length
   return headers
 }
@@ -316,8 +325,16 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     cycleTried = true
     if (chainModels[chainModels.length - 1] !== serving) chainModels.push(serving)
     agg(state, pid, 'requests', 1); state.st.counters.requests += 1; bm.requests += 1
-    // 跨模型兜底：把发给上游的 model 名改写为该兜底模型名
-    let routeBody = (route.model && body && route.model !== body.model) ? Object.assign({}, body, { model: route.model }) : body
+    // 跨模型兜底：把发给上游的 model 名改写为该兜底模型名。
+    // 改革（protocol-per-model）：同一上游的不同模型可以各走不同协议（如 OpenCode Zen 的 union-alpha
+    // 只接受 Anthropic /v1/messages，同上游其它模型走 OpenAI /v1/chat/completions），因此协议的落点从
+    // 「上游」下沉到「模型」：models.<名>.api > providers.<pid>.api > openai（缺省仍走上游级设置，向后兼容）。
+    const _md = (cfg.models && route.model && cfg.models[route.model]) || null
+    // per-上游模型名覆盖（可选）：同一模型在不同上游叫不同名字（如 union-alpha 在 OpenRouter 侧为
+    // stealth/union-alpha），跨上游兜底时不映射会拿到 404，备用等于没有。
+    const _ovr = (_md && _md.providerModels) || null
+    const servingName = (_ovr && _ovr[pid]) || route.model
+    let routeBody = (servingName && body && servingName !== body.model) ? Object.assign({}, body, { model: servingName }) : body
     // max_tokens 归一化（按目标模型的输出上限收敛）：不同上游对取值范围的容忍度不同，网关原样透传会让
     // 严格上游把整个请求判为参数非法，而 400 属请求参数类错误、换模型也一样失败——不清掉就会拖垮整条兜底链。
     //   · 非正整数 / 非整数（如 0、负数）：删除该字段，交由上游取默认。多数上游把 0 当「不限」，
@@ -325,8 +342,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     //   · 超过 models.<模型名>.maxTokensMax（可选；缺省 / 0 = 不限制）：钳到该上限。
     if (body && body.max_tokens !== undefined && body.max_tokens !== null) {
       const _mt = Number(body.max_tokens)
-      const _mdef = (cfg.models && route.model && cfg.models[route.model]) || null
-      const _cap = Number((_mdef && _mdef.maxTokensMax) || 0) || 0
+      const _cap = Number((_md && _md.maxTokensMax) || 0) || 0
       let _fix = null
       if (!Number.isFinite(_mt) || !Number.isInteger(_mt) || _mt <= 0) _fix = 'drop'
       else if (_cap > 0 && _mt > _cap) _fix = _cap
@@ -336,11 +352,23 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         else { routeBody.max_tokens = _fix; log && log.warn('max_tokens 归一化(钳制)', pid, _mt + ' -> ' + _fix + ' (模型上限)') }
       }
     }
-    let turl = url, tbuf = bodyBuf, api = prov.api
+    let turl = url, tbuf = bodyBuf
+    const api = (_md && _md.api) || prov.api
     let degraded = false
+    // 上游不给流时的降级（可选 models.<名>.forceNoStream）：
+    // 实测 OpenCode Zen 的 union-alpha —— 流式请求返回 200 + content-type: text/event-stream，
+    // 但整个 SSE 体零字节随即关闭。客户端是 OpenCode 等原生客户端时看得懂；通用 OpenAI 客户端只会
+    // 「头 2xx + 立刻断流」，被网关判成假成功去切下一上游，白等一个首字节周期。
+    // 开了本开关：网关改为非流式向上游取完整结果，再借 asSSE 通道以单帧 SSE + [DONE] 交付。
+    if ((_md && _md.forceNoStream) && routeBody && routeBody.stream) {
+      if (routeBody === body) routeBody = Object.assign({}, body)
+      routeBody.stream = false
+      degraded = true
+      log && log.warn('流式降级(forceNoStream)', pid, 'model=' + (serving || '-') + ' -> 非流式拉取后以 SSE 交付')
+    }
     if (api !== 'openai' && routeBody) { const ad = adapterFor(api); const r = ad.build(routeBody); if ((routeBody.tools || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true } turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body)) }
     else if ((injectedEffort || routeBody !== body) && routeBody) tbuf = Buffer.from(JSON.stringify(routeBody))
-    const headers = buildHeaders(req, prov, tbuf, cfg)
+    const headers = buildHeaders(req, prov, tbuf, cfg, api)
     const release = await acquireProvider(state, pid, cfg)
     const attemptStart = Date.now()
     try {
@@ -424,7 +452,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         }
         if (api !== 'openai') { const p = tryParse(out); if (p) { let nb; try { nb = Buffer.from(JSON.stringify(adapterFor(api).fromUpstream(p))) } catch { nb = null } if (nb) out = nb } }
         // 「名字没对上」加固：跨模型兜底改写请求 model 后，响应 model 回写为客户端请求名，避免客户端续写/统计错位
-        if (body && body.model && route.model && route.model !== body.model) {
+        if (body && body.model && servingName && servingName !== body.model) {
           const p2 = tryParse(out)
           if (p2 && p2.model) { p2.model = body.model; out = Buffer.from(JSON.stringify(p2)) }
         }
