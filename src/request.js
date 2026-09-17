@@ -285,22 +285,32 @@ export function probeModel(provider, model) {
   const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
   return new Promise((resolve) => {
     const started = Date.now()
+    let settled = false
+    const done = (o) => { if (!settled) { settled = true; resolve(o) } }
     const req = mod.request(reqOpts, (res) => {
       res.setTimeout(20000, () => res.destroy())
       const c = []
-      res.on('data', (d) => c.push(d))
+      let total = 0
+      res.on('data', (d) => {
+        // 探测响应体上限：上游（尤其不可信中转站）可返回超大 body 打爆内存；超限即判失败并释放连接
+        total += d.length
+        if (total > 8 * 1024 * 1024) { try { res.destroy() } catch { } ; done({ ok: false, code: res.statusCode, ms: Date.now() - started, err: 'probe response body too large (>8MB)' }); return }
+        c.push(d)
+      })
       res.on('end', () => {
         const raw = Buffer.concat(c)
-        // 兼容上游缺 content-encoding 头但仍返回 gzip：按魔数 1f 8b 尝试解压，避免 JSON 解析/统计断链
-        const buf = (raw.length >= 2 && raw[0] === 0x1f && raw[1] === 0x8b) ? (() => { try { return gunzipSync(raw) } catch { return raw } })() : raw
+        // 兼容上游缺 content-encoding 头但仍返回 gzip：按魔数 1f 8b 尝试解压，避免 JSON 解析/统计断链。
+        // 解压同样要带上限，否则探测路径也会被 gzip 炸弹打成 OOM（与 forward.js 的 maybeGunzip 同源风险）。
+        const buf = (raw.length >= 2 && raw[0] === 0x1f && raw[1] === 0x8b) ? (() => { try { return gunzipSync(raw, { maxOutputLength: 8 * 1024 * 1024 }) } catch { return raw } })() : raw
         const text = buf.toString('utf8').trim()
         const ok = res.statusCode >= 200 && res.statusCode < 300
-        resolve({ ok, code: res.statusCode, ms: Date.now() - started, err: ok ? null : (text.slice(0, 120) || ('HTTP ' + res.statusCode)) })
+        done({ ok, code: res.statusCode, ms: Date.now() - started, err: ok ? null : (text.slice(0, 120) || ('HTTP ' + res.statusCode)) })
       })
+      res.on('error', (e) => done({ ok: false, code: res.statusCode, ms: Date.now() - started, err: (e && e.code) || (e && e.message) || 'response error' }))
     })
     // 90s：思考型模型（如 stealth/ox-alpha）响应 5s~90s+ 波动，且上游代理内部重试期间不发字节；30s 会把可用模型误报成 ETIMEDOUT
     req.setTimeout(90000, () => req.destroy(Object.assign(new Error('probe timeout'), { code: 'ETIMEDOUT' })))
-    req.on('error', (err) => resolve({ ok: false, code: null, ms: Date.now() - started, err: err.code || err.message }))
+    req.on('error', (err) => done({ ok: false, code: null, ms: Date.now() - started, err: err.code || err.message }))
     req.write(payload)
     req.end()
   })

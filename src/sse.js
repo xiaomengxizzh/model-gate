@@ -4,11 +4,22 @@ export function isStreamResponse(res) {
   return STREAM_CT.test(ct)
 }
 
+// 不透传给客户端的上游响应头（流式路径是逐头透传的，必须显式挡掉两类）：
+//  ① hop-by-hop / 传输层：剥离后由网关自己以 chunked 重发，否则客户端解析错乱；
+//  ② 面向浏览器的状态与安全头：对 API 客户端无意义，且**恶意上游可借此污染调用方**——
+//     set-cookie 给调用方种 cookie、CSP/HSTS 干扰其页面、location 引导跳转（3xx 已被拦，2xx 带 location 属异常）。
+// 用黑名单而非白名单：白名单会把各家有用的 rate-limit / request-id 头一并丢掉。
+const STRIP_OUT = new Set([
+  'transfer-encoding', 'content-length', 'connection', 'keep-alive',
+  'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'upgrade',
+  'set-cookie', 'set-cookie2', 'location',
+  'content-security-policy', 'content-security-policy-report-only',
+  'x-frame-options', 'strict-transport-security', 'public-key-pins', 'expect-ct',
+])
 export function writeUpstreamHeaders(client, upstream, extra) {
   const h = {}
   for (const [k, v] of Object.entries(upstream.headers)) {
-    const lk = k.toLowerCase()
-    if (lk === 'transfer-encoding' || lk === 'content-length' || lk === 'connection' || lk === 'keep-alive') continue
+    if (STRIP_OUT.has(k.toLowerCase())) continue
     h[k] = v
   }
   h['transfer-encoding'] = 'chunked'
@@ -46,6 +57,11 @@ export async function relayStream(client, firstUpstream, opts) {
   const protocol = opts.protocol || 'openai'
   const extract = opts.extract || extractOpenAIContent
   let sent = ''
+  // 已发送内容的比对窗口上限：sent 用于断流续传时判断「上游是否重放了已发内容」，比对是从头做
+  // startsWith / 前缀切片，无法只保留尾部。超窗后放弃去重（置 sentOverflow）以避免超长流式响应
+  // 把内存吃光；代价仅是极端情况下续传可能重复一小段内容，绝不会丢内容。
+  const MAX_SENT_TRACK = 4 * 1024 * 1024
+  let sentOverflow = false
   let done = false
   let retries = 0
   let resolved = true
@@ -68,8 +84,10 @@ export async function relayStream(client, firstUpstream, opts) {
     if (dataStr !== '') { lastDataEventAt = Date.now(); armNoEv() } // 数据事件重置事件看门狗；注释/空事件不重置（半死流判据）
     if (protocol === 'openai' && dataStr === '[DONE]') { sendRaw(ev + '\n\n'); done = true; return }
     const ct = extract(dataStr)
-    if (phaseAsync === 'resume' && !resolved && ct !== '') {
+    if (phaseAsync === 'resume' && !resolved && ct !== '' && !sentOverflow) {
       acc += ct
+
+      if (acc.length > MAX_SENT_TRACK) { acc = acc.slice(acc.length - MAX_SENT_TRACK) }
       if (sent.startsWith(acc)) return
       if (acc.length > sent.length && sent === acc.slice(0, sent.length)) { const extra = acc.slice(sent.length); sendDelta(extra); sent = acc; resolved = true; log && log.warn('sse 续传：跳过重放 ' + sent.length + ' 字符，续发 ' + extra.length); return }
       sendDataJson({ choices: [{ delta: { content: acc } }] }); sent = acc; resolved = true; log && log.warn('sse 续传：上游重放内容偏移，可能存在少量重复'); return
@@ -81,6 +99,8 @@ export async function relayStream(client, firstUpstream, opts) {
       const reb = maybeRewriteModel(dataStr, opts.rewriteModel)
       sendRaw((reb != null ? 'data: ' + reb : ev) + '\n\n')
       sent += ct; contentChars += ct.length
+
+      if (sent.length > MAX_SENT_TRACK) { sent = ''; sentOverflow = true; log && log.warn('已发送内容超出续传比对窗口(' + MAX_SENT_TRACK + ' 字符)，后续断流不再做前缀去重') }
       return
     }
     if (ct === '') {
@@ -101,6 +121,8 @@ export async function relayStream(client, firstUpstream, opts) {
     }
     sendDelta(ct)
     sent += ct; contentChars += ct.length
+
+    if (sent.length > MAX_SENT_TRACK) { sent = ''; sentOverflow = true; log && log.warn('已发送内容超出续传比对窗口(' + MAX_SENT_TRACK + ' 字符)，后续断流不再做前缀去重') }
   }
 
   let phaseAsync = 'first'

@@ -29,10 +29,14 @@ function isModelLevelRejection(status, out) {
   return /(provider|upstream|model)[^\n]{0,80}(reject|not support|disabled|not found|does not exist|unknown|不可用|已关闭|不存在)|MODEL_DISABLED|模型(已关闭|不存在|不可用)/i.test(text)
 }
 
+// 解压输出上限（防 gzip 炸弹）：collectBody 的 64MB 上限管的是**压缩后**大小，而实测 gzip 压缩比
+// 可达 1:1028（50MB 全同字节 → 49.8KB），不设上限最坏能解压出几十 GB；且 gunzipSync 是**同步**的，
+// 会同时打爆内存并阻塞事件循环（整个网关假死）。超限时 gunzipSync 直接抛错 → 按上游失败走 fallback，不放行。
+const MAX_GUNZIP_BYTES = 32 * 1024 * 1024
 function maybeGunzip(buf, contentEncoding) {
   // 只要上游申报了 gzip 或魔数命中，就必须能解压成功；否则抛错让上层当作失败走 fallback，避免放行垃圾字节
   const wants = /gzip/i.test(contentEncoding || '') || (buf && buf.length >= 2 && buf[0] === GZIP_MAGIC[0] && buf[1] === GZIP_MAGIC[1])
-  if (wants) return gunzipSync(buf)
+  if (wants) return gunzipSync(buf, { maxOutputLength: MAX_GUNZIP_BYTES })
   return buf
 }
 
