@@ -4,6 +4,15 @@
 
 ## [Unreleased] —— 托盘小窗管理器 + 日志按天分文件与 7 天保留 + 交接问题修复批次
 
+- **运维(2026-09-07)**:keys.local.json 明文 key 清空转环境变量解析(resolveKey source=env 实测:mimo-v2.5/glm-5.3-flash 200,gmi 到达上游仅账户余额不足);本机 master.key(自动生成的加密主密钥,keys 库空后无物可守)已删,后续写入 keys 时会按需重建;keys.local.json.enc-backup(Windows 加密旧备份)留存待用户定夺
+
+### Fixed
+- **未知请求字段 `reasoning.effort`（客户端违约 + 网关零归一化，2026-09-17 生产实录 20 次）**：ZCode CLI 按 OpenRouter 惯例发**嵌套** `reasoning:{effort}`；网关此前既无入站字段归一化、也无出站白名单，未知字段一律原样透传——而 OpenRouter 认得该字段，所以打主上游的 685 次请求全部 200、把问题完全掩盖；一旦主上游 429/熔断、目录链兜底到**严格上游**（jiyuan/tokenrhythm，LiteLLM 内核按白名单校验字段）就 400 `{"code":"UNKNOWN_FIELD","message":"未知请求字段：reasoning.effort"}`。症状是「平时不报、只在兜底时炸」，且网关日志只记上游返回体、不记出站体，归因极难。现 `src/forward.js` 新增 `normalizeEffortInput()`：入站把 `reasoning.effort` 并入平面 `reasoning_effort`（客户端已显式给出平面字段时以平面字段为准），嵌套 `reasoning` 对象**一律剔除**（含 `summary`——OpenAI chat 协议无该字段位置，且它正是严格上游的拒绝点），"关闭思考"的同义拼写（`none`/`disabled`/`false`）统一归一到 `off`（`canonEffort`，白名单比较两侧同源归一，避免换个拼写就报「档位不支持」）。归一事件落 `[warn] 思考强度入站归一化` 日志留痕。
+- **潜伏项：思考强度字段形态只按链首模型决定，兜底换模型即形态错配（P1 实测项）**：`body` 是各路由共享的，此前在入口按「请求模型 / 链首模型」的 effortFormat 转换一次就定死——链首 `reasoning_effort`、兜底 `thinking`（`union-alpha → qwen3.8-flash`）时后者拿不到自己认的字段；反向（链首 thinking、兜底 reasoning_effort）则多送一个它不认的对象。当时未爆是因为平面 `reasoning_effort` 恰好被 openrouter / jiyuan 双方接受（直连实测两个上游对 qwen3.8-flash 均 200），属"配置没生效也不报错"的静默错配。现**字段形态下沉到每条路由**按目标模型自身 `effortFormat` 整形（取值不变：客户端显式档位 > 入口默认档位；两字段互斥，不共存于同一 body）。既有语义保持：虚拟模型 / 虚拟共用名入口仍"客户端没给档位就不注入"，真实模型入口仍注入配置默认档位。
+- 回归测试 `scripts/test/effort-normalize.mjs`（18 断言，自包含 mock 上游 + 隔离实例）：嵌套归一为平面且出站无 `reasoning` 键、平面优先、仅 summary 剔除、三种关闭拼写归一、双向跨 effortFormat 兜底形态正确、虚拟入口不注入 / 真实入口注入 / 白名单本地拦截 / 客户端显式优先。
+- **opencodego provider 注入 `x-session-id`（Linux 迁移后 zen/go 上游 400 MissingSessionID）**：opencode zen/go 上游对无会话头的 chat/completions 一律 400 `{type: MissingSessionID}`（Windows 时代直连也如此，dsh 走 /responses 不受影响；ownrag KB 网关经网关的 gatemodel 通道则必挂）。在 `gateway.local.json` providers.opencodego.extraHeaders 注入静态 `x-session-id: mg-opencodego-bridge`（buildHeaders 对 extraHeaders 的合并优先于客户端头，forward.js:45-46；静态会话仅影响上游按会话的路由亲和）。configVersion 112→113，重启生效；直连网关 mimo-v2.5 chat/completions 实测 200。备份 `gateway.local.json.bak-20260907-*`。
+
+
 ### Added
 - **apiKeyEnv 用户级环境变量实时读取（绕过进程快照）**：进程 env 是启动时的副本——用户在系统里新增的 API key 变量（如 `BAI_API_KEY`）对已运行网关不可见，此前必须重启网关才能生效，且须连托盘一起重启（拉活的网关继承托盘旧环境）。现 `resolveKey` 在进程环境找不到时 fallback **实时查注册表 `HKCU\Environment`**（带 60s TTL 缓存：spawnSync 有毫秒级开销且在每请求路径上；正负值都缓存防高频空查；变量名白名单校验防注入），改完变量**最多 ~60s 生效**，无需重启任何东西。仅 Windows 生效（其他平台维持进程环境行为）。回归测试 `scripts/test/user-env-fallback.mjs`（注册表写入临时变量 → 进程环境无此变量 → 请求验证 Authorization 取到注册表值 → 自动清理）。
 - **mg-tray 托盘小窗管理器**（`scripts/tray/mg-tray.cs`，Windows 自带 .NET Framework csc 编译为 ~24KB `mg-tray.exe`，零第三方依赖）：无边框置顶悬浮小窗（状态/uptime/今日 token/请求错误 + 启动/停止/重启/面板/日志按钮，可拖动、右键切置顶、✕ 缩托盘）+ 托盘常驻（双击唤出、菜单全套操作、崩溃 5s 退避自动拉活、连续快速失败 ≥5 次熔断）+「开机自启」开关（HKCU Run 键，免管理员）+ 启动前清端口残留 node（同 start.bat 语义，只杀 node.exe）；检测到端口已有 node 实例显示「外部实例/未接管」不重复拉起；数据面轮询 `/healthz` + `/api/status`（401 自动降级）。

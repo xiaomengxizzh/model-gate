@@ -100,6 +100,7 @@ docs/          # 规划与交接文档
 - `gateway.local.json` / `keys.local.json` / `stats.json` / `logs/` / `*.bak` 备份 **永不提交**（gitignore 已覆盖）。
 - 虚拟名/响应 model 名：兜底改写后响应 model 要**回写为客户端请求名**（防「名字没对上」）。
 - Mode BaseURL 不含 `/v1`；模型思考强度由 `effortOptions`/`reasoning` 控制。
+- **思考强度字段契约（2026-09-17 收紧，三处别再搞混）**：①**入口形态唯一** —— 客户端只该发平面 `reasoning_effort`；OpenRouter 系客户端爱发的嵌套 `reasoning:{effort}` 由 `forward.js` 的 `normalizeEffortInput()` 在入口归一（并入平面、剔除嵌套对象、`none`/`disabled`/`false` 归一为 `off`）；②**档位白名单**只认 `models.<名>.effortOptions`（比较两侧同过 `canonEffort`），命中即本地 400、不消耗上游调用；③**字段形态 per-route** —— 每条路由按**目标模型自身** `models.<名>.effortFormat` 整形（`reasoning_effort` 平面串 / `thinking:{type}` 对象），**不再**按链首模型定死；虚拟模型 / 虚拟共用名入口保持「客户端没给档位就不注入」，真实模型入口才注入配置默认。回归测试 `scripts/test/effort-normalize.mjs`。
 - `commit` 时留意 `.gitignore`/`package.json` 常因 CRLF/LF 显示为 modified 而实为噪音，别误提交（按实际内容 diff 判断）。
 - 面板 admin.html 是**每请求 readFileSync 读盘**，改完刷新浏览器即生效（无需重启网关）；但浏览器可能缓存旧页，验证用 Ctrl+F5。
 

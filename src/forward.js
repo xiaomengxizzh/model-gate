@@ -90,6 +90,43 @@ const STREAM_DROP_THRESHOLD = 3 // 同一上游连续流式中断 >= 该值，�
 const STREAM_DROP_COOLDOWN_MS = 60000
 const AFFINITY_TTL_MS = 300000  // 缓存亲和有效期（可用 defaults.affinityTtlMs 覆盖）：过期后主上游可被重新试用
 
+// ===== 思考强度（effort）：入站归一化 + 出口 per-route 整形 =====
+// thinking.type 值映射：OpenAI 系档位词（off/low/high…）→ 上游 thinking.type 词表
+// （开启/关闭/自动 = enabled/disabled/auto）。未命中映射的值原样透传（如 MiniMax 的 adaptive）。
+const THINKING_TYPE_MAP = { off: 'disabled', minimal: 'enabled', low: 'enabled', medium: 'enabled', high: 'enabled', xhigh: 'enabled', disabled: 'disabled', enabled: 'enabled', auto: 'auto' }
+// 「关闭思考」的等价拼写：各家客户端用词不一（OpenRouter 系 reasoning.effort:"none"、MiniMax 系 thinking.type:"disabled"、
+// OpenAI 系 reasoning_effort:"off"）。统一归一到 'off'——它已在既有 THINKING_TYPE_MAP 与各模型 effortOptions 里承担
+// 「关闭」语义，收敛后白名单校验与下游 thinking 映射都能命中，避免同一语义换客户端就报「档位不支持」。
+const EFFORT_OFF_ALIAS = new Set(['none', 'disabled', 'false'])
+export function canonEffort(v) { const s = String(v == null ? '' : v).trim().toLowerCase(); return EFFORT_OFF_ALIAS.has(s) ? 'off' : s }
+
+// 入站归一化：把客户端带来的思考强度收拢成网关唯一入口形态（平面 reasoning_effort）。
+// 背景（生产 2026-09-17 实录）：ZCode CLI 按 OpenRouter 惯例发**嵌套** `reasoning:{effort}`，网关此前没有任何
+// 入站字段处理、也无出站白名单，于是原样透传——OpenRouter 认得该字段所以打主上游一切正常，一旦 429 兜底到
+// 严格上游（jiyuan/tokenrhythm，LiteLLM 内核字段白名单校验）就 400 `UNKNOWN_FIELD 未知请求字段：reasoning.effort`，
+// 症状是「平时不报、只在兜底时炸」，极难归因。
+// 处理：effort 取值并入 reasoning_effort（客户端已显式给出平面字段时以平面字段为准），嵌套 reasoning 对象一律剔除
+// （含 summary——OpenAI chat 协议无对应位置，且它正是严格上游的拒绝点）；关闭类拼写归一为 off。
+export function normalizeEffortInput(body) {
+  if (!body || typeof body !== 'object') return null
+  const notes = []
+  const r = body.reasoning
+  if (r && typeof r === 'object' && !Array.isArray(r)) {
+    const raw = r.effort
+    const eff = (raw === undefined || raw === null || String(raw).trim() === '') ? null : String(raw).trim()
+    const flat = (body.reasoning_effort === undefined || body.reasoning_effort === null || String(body.reasoning_effort).trim() === '') ? null : String(body.reasoning_effort).trim()
+    if (eff !== null && flat === null) { body.reasoning_effort = eff; notes.push('reasoning.effort=' + eff + ' -> reasoning_effort=' + eff) }
+    else notes.push('剔除嵌套 reasoning 对象' + (eff !== null ? '（保留客户端显式 reasoning_effort=' + flat + '）' : ''))
+    delete body.reasoning
+  }
+  const cur = (body.reasoning_effort === undefined || body.reasoning_effort === null) ? null : String(body.reasoning_effort).trim()
+  if (cur !== null) {
+    const c = canonEffort(cur)
+    if (c !== cur) { body.reasoning_effort = c; notes.push('reasoning_effort ' + cur + ' -> ' + c + '（关闭思考的同义拼写归一）') }
+  }
+  return notes.length ? notes.join('；') : null
+}
+
 function maxConcur(cfg) { return (cfg.defaults && cfg.defaults.concurrency && cfg.defaults.concurrency.maxPerProvider) || 8 }
 function throttleOf(state, pid) {
   if (!state.throttle[pid]) state.throttle[pid] = { max: maxConcur(state.cfg), inFlight: 0, wait: [], rateUntil: 0 }
@@ -174,9 +211,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   let routes = []
   let maxModel = 0
   let qps = 0
-  let injectedEffort = false
+  let bodyDirty = false        // body 已被网关改写（入站归一化 / 思考强度整形 / 跨模型兜底）：tbuf 必须重新序列化，不能沿用客户端原缓冲
+  let entryDefaultEffort = null // 入口模型（虚拟入口取链首）配置的默认思考档位：客户端没给档位时才启用
   let requestModel = null
   const dir = (cfg.defaults && cfg.defaults.directory) || []
+  // 入站归一化：嵌套 reasoning:{effort} → 平面 reasoning_effort（严格上游不认嵌套对象，见 normalizeEffortInput 注释）
+  const effNote = normalizeEffortInput(body)
+  if (effNote && log) log.warn('思考强度入站归一化', effNote)
+  if (effNote) bodyDirty = true
   const dialogueId = resolveDialogue(state, req, body)
   if (body && body.model) {
     const hit = state.router.resolve(body.model)
@@ -187,27 +229,13 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     requestModel = hit.canonicalName
     maxModel = hit.def.maxConcurrent || 0
     qps = hit.def.qps || 0
-    // 思考强度（LiteLLM 风格）：每个模型可配允许档位列表，客户端传的档位不在列表内则本地直接拒绝，不放给上游
+    // 思考强度（LiteLLM 风格）：每个模型可配允许档位列表，客户端传的档位不在列表内则本地直接拒绝，不放给上游。
+    // 白名单两侧都过 canonEffort 归一后比较（off/none/disabled/false 同义），避免「关闭思考」换个拼写就判非法。
+    // 注意：这里只做**取值**校验（档位是否存在）；字段**形态**（平面 reasoning_effort 还是 thinking 对象）
+    // 下沉到每条路由按目标模型自身 effortFormat 决定（见 for(route) 内「思考强度 per-route 整形」）。
     const opts = hit.def.effortOptions
-    if (opts && opts.length && body.reasoning_effort !== undefined && body.reasoning_effort !== null && !opts.includes(String(body.reasoning_effort))) {
+    if (opts && opts.length && body.reasoning_effort !== undefined && body.reasoning_effort !== null && !opts.some((o) => canonEffort(o) === canonEffort(body.reasoning_effort))) {
       return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'reasoning_effort 不支持 ' + body.reasoning_effort + '（该模型允许：' + hit.def.effortOptions.join(', ') + '）', type: 'UnsupportedParamsError' } })) }
-    }
-    // 思考强度参数格式（可选，models.<名>.effortFormat）：
-    //   reasoning_effort（默认）：OpenAI 风格字符串，DeepSeek/OpenAI 系；
-    //   thinking：MiniMax 风格对象 { type }，如 MiniMax-M3 的 thinking:{"type":"adaptive"}。
-    // 客户端入口统一为 reasoning_effort，网关按格式转换；thinking 格式下删除 reasoning_effort 避免上游混淆。
-    const effFmt = hit.def.effortFormat || 'reasoning_effort'
-    const effVal = body.reasoning_effort
-    if (effFmt === 'thinking') {
-      const val = (effVal !== undefined && effVal !== null) ? String(effVal) : (hit.def.reasoning || '')
-      // thinking.type 值映射:OpenAI 系档位词(off/low/high…)→ 上游 thinking.type 词表
-      // (开启/关闭/自动 = enabled/disabled/auto)。未命中映射的值原样透传(如 MiniMax 的 adaptive)。
-      const THINKING_TYPE_MAP = { off: 'disabled', minimal: 'enabled', low: 'enabled', medium: 'enabled', high: 'enabled', xhigh: 'enabled', disabled: 'disabled', enabled: 'enabled', auto: 'auto' }
-      const mapped = THINKING_TYPE_MAP[val] || val
-      if (mapped) { body.thinking = { type: mapped }; delete body.reasoning_effort; injectedEffort = true }
-    } else if (hit.def.reasoning && effVal === undefined) {
-      // 模型配置默认值，客户端未指定时才注入（客户端自带优先）
-      body.reasoning_effort = hit.def.reasoning; injectedEffort = true
     }
     if (hit.def.isVirtualModel) {
       // 用自身 directory 快照建 routes（providers 空时回退模型默认上游+fallbacks，与 defaults 分支同构）
@@ -219,14 +247,12 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       if (!routes.length) return { kind: 'json', status: 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '虚拟模型 ' + hit.def.name + ' 的目录无可路由模型', type: 'no_route' } })) }
       // 决策 3 连锁：虚拟模型透传思考强度，但用链首真实模型自身的 effortOptions 补本地校验（廉价参数检查先行于额度判断）
       const d0vm = routes[0] && cfg.models && cfg.models[routes[0].model]
-      if (d0vm && d0vm.effortOptions && d0vm.effortOptions.length && body.reasoning_effort !== undefined && body.reasoning_effort !== null && !d0vm.effortOptions.includes(String(body.reasoning_effort))) {
+      if (d0vm && d0vm.effortOptions && d0vm.effortOptions.length && body.reasoning_effort !== undefined && body.reasoning_effort !== null && !d0vm.effortOptions.some((o) => canonEffort(o) === canonEffort(body.reasoning_effort))) {
         return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'reasoning_effort 不支持 ' + body.reasoning_effort + '（' + routes[0].model + ' 允许：' + d0vm.effortOptions.join(', ') + '）', type: 'UnsupportedParamsError' } })) }
       }
-      // 思考强度格式透传链首真实模型：链首是 thinking 格式（如 MiniMax-M3）时，把 reasoning_effort 入口转为 thinking 对象注入
-      if (d0vm && (d0vm.effortFormat || '') === 'thinking') {
-        const vmVal = (body.reasoning_effort !== undefined && body.reasoning_effort !== null) ? String(body.reasoning_effort) : (d0vm.reasoning || '')
-        if (vmVal) { body.thinking = { type: vmVal }; delete body.reasoning_effort; injectedEffort = true }
-      }
+      // 思考强度格式不再在此处按链首转换：改为每条路由按目标模型自身 effortFormat 整形（见 for(route) 内）。
+      // 链首形态只用于决定「客户端没给档位时是否注入链首的配置默认」，保持既有语义不变。
+      if (d0vm && (d0vm.effortFormat || '') === 'thinking' && d0vm.reasoning) entryDefaultEffort = d0vm.reasoning
       // 入口上下文约束（虚拟模型自身的 maxContext，区别于目录内各模型自己的限制）
       if (hit.def.maxContext > 0 && body.messages && estPromptTokens(body) >= hit.def.maxContext) {
         return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '超出虚拟模型 ' + hit.def.name + ' 的上下文上限 (' + hit.def.maxContext + ')', type: 'context_limit' } })) }
@@ -241,17 +267,16 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         for (const e of dir) { if (e && typeof e.model === 'string' && e.model) { const _m = cfg.models && cfg.models[e.model]; routes.push({ model: e.model, mode: (e.mode === 'onFail' ? 'onFail' : 'afterAll'), providers: (e.providers && e.providers.length ? e.providers.filter(Boolean) : (_m ? [ _m.provider, ...(_m.fallbacks || []) ].filter(Boolean) : [])) }) } }
         const d0 = routes[0] && cfg.models && cfg.models[routes[0].model]
         if (d0) { maxModel = d0.maxConcurrent || 0; qps = d0.qps || 0 }
-        // 虚拟共用名入口透传链首真实模型的思考强度格式（链首 thinking 格式时转 thinking 对象）
-        if (d0 && (d0.effortFormat || '') === 'thinking') {
-          const vmVal = (body.reasoning_effort !== undefined && body.reasoning_effort !== null) ? String(body.reasoning_effort) : (d0.reasoning || '')
-          if (vmVal) { body.thinking = { type: vmVal }; delete body.reasoning_effort; injectedEffort = true }
-        }
+        // 思考强度格式同样下沉到 per-route 整形；此处仅沿用既有语义：链首是 thinking 形态且有配置默认时才注入默认档位
+        if (d0 && (d0.effortFormat || '') === 'thinking' && d0.reasoning) entryDefaultEffort = d0.reasoning
       } else {
         routes.push({ model: null, providers: [hit.def.provider].filter(Boolean) })
         if (!(cfg.defaults && cfg.defaults.provider)) return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '未指定默认上游（请配置 defaults.provider 或 defaults.directory）', type: 'missing_model' } })) }
       }
     } else {
       // 路由序列：先本模型自身上游，再按 defaults.directory 顺序做跨模型兜底（首个为默认）
+      // 真实模型入口：客户端没给档位时，用本模型配置的 reasoning 默认值（客户端自带优先）
+      entryDefaultEffort = hit.def.reasoning || null
       routes.push({ model: requestModel, mode: 'afterAll', providers: [hit.def.provider, ...(hit.def.fallbacks || [])].filter(Boolean) })
       for (const e of dir) {
         if (!e || typeof e.model !== 'string' || !e.model || e.model === requestModel) continue
@@ -271,6 +296,10 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       if (!(cfg.defaults && cfg.defaults.provider)) return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '\u672a\u6307\u5b9a model\uff0c\u4e14\u672a\u8bbe\u7f6e\u9ed8\u8ba4\u4e0a\u6e38\uff08\u8bf7\u5728\u9762\u677f\u300c\u9ed8\u8ba4\u4e0a\u6e38\u300d\u4e2d\u9009\u62e9\uff09', type: 'missing_model' } })) }
     }
   }
+  // 思考强度取值（单一真源）：客户端显式档位 > 入口模型（虚拟入口即链首）的配置默认值。
+  // 字段**形态**不在此处决定——每条路由按目标模型自身 effortFormat 整形，见下方 for(route) 内。
+  const _clientEff = (body && body.reasoning_effort !== undefined && body.reasoning_effort !== null && String(body.reasoning_effort).trim() !== '') ? canonEffort(body.reasoning_effort) : null
+  const gwEffort = _clientEff !== null ? _clientEff : (entryDefaultEffort ? canonEffort(entryDefaultEffort) : null)
   const started = Date.now()
   const modelName = (body && body.model) || (routes[0] && routes[0].model) || (cfg.defaults && cfg.defaults.provider) || (routes[0] && routes[0].providers && routes[0].providers[0]) || null
   const bm = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
@@ -356,6 +385,32 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         else { routeBody.max_tokens = _fix; log && log.warn('max_tokens 归一化(钳制)', pid, _mt + ' -> ' + _fix + ' (模型上限)') }
       }
     }
+    // 思考强度 per-route 整形（潜伏项修复）：字段**形态**由本路由模型自身的 effortFormat 决定。
+    // 此前只在入口按「请求模型 / 链首模型」的形态注入一次，而 body 是各路由共享的——一旦兜底切到
+    // effortFormat 不同的模型就形态错配：链首 reasoning_effort、兜底模型 thinking（union-alpha → qwen3.8-flash）
+    // 时后者拿不到自己认的字段；反向（链首 thinking、兜底 reasoning_effort）则多送一个它不认的对象。
+    // 取值不动（客户端显式档位 > 入口默认档位），只换形态；两字段互斥，避免同一个 body 同时带两者。
+    if (gwEffort) {
+      const _fmt = (_md && _md.effortFormat) || 'reasoning_effort'
+      if (_fmt === 'thinking') {
+        const _mapped = THINKING_TYPE_MAP[gwEffort] || gwEffort
+        const _curType = (routeBody.thinking && typeof routeBody.thinking === 'object') ? String(routeBody.thinking.type == null ? '' : routeBody.thinking.type) : null
+        if (_curType !== _mapped || routeBody.reasoning_effort !== undefined) {
+          if (routeBody === body) routeBody = Object.assign({}, body)
+          routeBody.thinking = Object.assign({}, (routeBody.thinking && typeof routeBody.thinking === 'object') ? routeBody.thinking : {}, { type: _mapped })
+          delete routeBody.reasoning_effort
+          bodyDirty = true
+        }
+      } else {
+        const _curFlat = (routeBody.reasoning_effort === undefined || routeBody.reasoning_effort === null) ? null : String(routeBody.reasoning_effort)
+        if (_curFlat !== gwEffort || routeBody.thinking !== undefined) {
+          if (routeBody === body) routeBody = Object.assign({}, body)
+          routeBody.reasoning_effort = gwEffort
+          delete routeBody.thinking
+          bodyDirty = true
+        }
+      }
+    }
     let turl = url, tbuf = bodyBuf
     const api = (_md && _md.api) || prov.api
     let degraded = false
@@ -371,7 +426,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       log && log.warn('流式降级(forceNoStream)', pid, 'model=' + (serving || '-') + ' -> 非流式拉取后以 SSE 交付')
     }
     if (api !== 'openai' && routeBody) { const ad = adapterFor(api); const r = ad.build(routeBody); if ((routeBody.tools || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true } turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body)) }
-    else if ((injectedEffort || routeBody !== body) && routeBody) tbuf = Buffer.from(JSON.stringify(routeBody))
+    else if ((bodyDirty || routeBody !== body) && routeBody) tbuf = Buffer.from(JSON.stringify(routeBody))
     const headers = buildHeaders(req, prov, tbuf, cfg, api)
     const release = await acquireProvider(state, pid, cfg)
     const attemptStart = Date.now()
