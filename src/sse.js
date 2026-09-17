@@ -84,6 +84,12 @@ export async function relayStream(client, firstUpstream, opts) {
       return
     }
     if (ct === '') {
+      // 累积 usage：openai 协议的 usage 集中在一帧（上面的分支已上报），而 Anthropic 把它拆开——
+      // message_start 带 input_tokens、message_delta 带 output_tokens，**都没有** total_tokens。
+      // 不累积的话流式 token 记账只能退化成「内容字符数」，思考(thinking)开销完全丢失。
+      // 此处只累积、不上报（多次上报会让缓存命中统计翻倍），收尾时统一处理。
+      const u = maybeExtractUsage(dataStr)
+      if (u) lastUsage = Object.assign({}, lastUsage || {}, u)
       // 非 openai 协议的空内容事件里可能藏着「结束原因」（Anthropic 的 message_delta.stop_reason：
       // content 为空但带 stop_reason）。抽出来补一帧 OpenAI 风格的 finish_reason——
       // 否则客户端只收到 [DONE] 而从不收到 finish_reason，部分 harness 会一直不结束 loading。
@@ -183,6 +189,9 @@ export async function relayStream(client, firstUpstream, opts) {
   }
 
   await pump(firstUpstream)
+  // 非 openai 协议：usage 已在流内累积完毕（openai 协议在 handleEvent 里即时上报过，靠 usageReported 去重）。
+  // 这里补一次缓存命中统计，否则 anthropic/gemini 流式下命中率与 token 记账全都是空的。
+  if (!usageReported && lastUsage && opts.onUsage) { usageReported = true; try { opts.onUsage(lastUsage) } catch {} }
   if (opts.onTokens) { try { opts.onTokens(contentChars, lastUsage) } catch {} }
   if (opts.onEnd) { try { opts.onEnd({ interrupted: !done, reconnects: retries, clientGone: clientGoneAt.t != null }) } catch {} }
   if (typeof client.removeListener === 'function') { try { client.removeListener('close', markGone); client.removeListener('error', markGone) } catch {} }

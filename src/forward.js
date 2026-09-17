@@ -437,18 +437,29 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         const parsed = tryParse(out)
         const usage = parsed && parsed.usage
         if (usage) {
+          // usage 字段归一化：此处拿到的是**上游原始响应**（非 openai 协议的转换在下面才做），
+          // 字段名随协议而异 —— Anthropic 用 input_tokens / output_tokens（**没有** total_tokens），
+          // Gemini 用 usageMetadata.promptTokenCount / candidatesTokenCount。
+          // 不归一化则 token 记账全部落到 `usage.total_tokens || 0` = 0：
+          // 表现是面板与托盘的 token 数纹丝不动、只有 requests 在涨（2026-09-17 union-alpha 实测）。
+          // 注意 cacheHitMiss 仍要吃**原始** usage（它内部按协议取缓存字段），故原始对象不动、只改取数。
+          const _n = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0) ? v : 0
+          const _um = usage.usageMetadata || {}
+          const _in = _n(usage.prompt_tokens) || _n(usage.input_tokens) || _n(_um.promptTokenCount)
+          const _out = _n(usage.completion_tokens) || _n(usage.output_tokens) || _n(_um.candidatesTokenCount)
+          const _tot = _n(usage.total_tokens) || _n(_um.totalTokenCount) || (_in + _out)
           const c = cacheHitMiss(api, usage)
           const hit = c.hit, miss = c.miss
           noteCacheStat(state, serving || modelName, pid, hit, miss) // 按(模型,上游)记录缓存命中，供命中率路由与趋势告警使用
-          agg(state, pid, 'tokens', usage.total_tokens || 0); state.stats.global.tokens += usage.total_tokens || 0
+          agg(state, pid, 'tokens', _tot); state.stats.global.tokens += _tot
           // 按"实际响应的模型"累计其额度用量（日额度 + 累计额度）；输入/输出单独记（命中+未命中=输入）
           const sg = state.stats.byModel[serving || modelName] = state.stats.byModel[serving || modelName] || { requests: 0, errors: 0 }
-          sg.tokens = (sg.tokens || 0) + (usage.total_tokens || 0)
-          sg.inTokens = (sg.inTokens || 0) + (usage.prompt_tokens || 0)
-          sg.outTokens = (sg.outTokens || 0) + (usage.completion_tokens || 0)
-          tallyDaily(state, serving || modelName, usage.total_tokens || 0, hit, miss, usage.prompt_tokens || 0, usage.completion_tokens || 0)
-          tallyVirtual(state, modelName, serving, usage.total_tokens || 0, usage.prompt_tokens || 0, usage.completion_tokens || 0)
-          tallyDialogue(state, dialogueId, usage.total_tokens || 0, hit, miss)
+          sg.tokens = (sg.tokens || 0) + _tot
+          sg.inTokens = (sg.inTokens || 0) + _in
+          sg.outTokens = (sg.outTokens || 0) + _out
+          tallyDaily(state, serving || modelName, _tot, hit, miss, _in, _out)
+          tallyVirtual(state, modelName, serving, _tot, _in, _out)
+          tallyDialogue(state, dialogueId, _tot, hit, miss)
         }
         if (api !== 'openai') { const p = tryParse(out); if (p) { let nb; try { nb = Buffer.from(JSON.stringify(adapterFor(api).fromUpstream(p))) } catch { nb = null } if (nb) out = nb } }
         // 「名字没对上」加固：跨模型兜底改写请求 model 后，响应 model 回写为客户端请求名，避免客户端续写/统计错位
