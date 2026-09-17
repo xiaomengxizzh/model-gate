@@ -52,6 +52,7 @@ export async function relayStream(client, firstUpstream, opts) {
   let contentChars = 0
   let usageReported = false
   let lastUsage = null
+  let finishSent = false   // 非 openai 协议：finish_reason 是否已补发（message_delta 只应转一次）
   const clientGoneAt = { t: null }   // 下游客户端断线标记（何时检测到，null 表示仍在线）
   let curStream = firstUpstream      // 当前正读取的上游流（首次或续传之后）
   let gen = 0                        // 泵代数：每次换流递增，被换掉的旧泵醒来即静默退场（防旧 iterator 复活双写客户端）
@@ -82,7 +83,16 @@ export async function relayStream(client, firstUpstream, opts) {
       sent += ct; contentChars += ct.length
       return
     }
-    if (ct === '') return // 非 openai 空内容事件丢弃（不产生 delta）
+    if (ct === '') {
+      // 非 openai 协议的空内容事件里可能藏着「结束原因」（Anthropic 的 message_delta.stop_reason：
+      // content 为空但带 stop_reason）。抽出来补一帧 OpenAI 风格的 finish_reason——
+      // 否则客户端只收到 [DONE] 而从不收到 finish_reason，部分 harness 会一直不结束 loading。
+      if (!finishSent && opts.extractFinish) {
+        const fr = opts.extractFinish(dataStr)
+        if (fr) { finishSent = true; sendDataJson({ choices: [{ delta: {}, finish_reason: fr }] }) }
+      }
+      return // 非 openai 空内容事件丢弃（不产生 delta）
+    }
     sendDelta(ct)
     sent += ct; contentChars += ct.length
   }

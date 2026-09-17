@@ -12,6 +12,13 @@ function makeOA(model, text, finish, extra) {
 }
 function hasTools(b) { return !!(b && (b.tools || b.tool_choice)) }
 
+// Anthropic stop_reason → OpenAI finish_reason。
+// OpenAI 客户端的合法取值只有 stop / length / tool_calls / content_filter 四个，
+// Anthropic 的 end_turn / max_tokens / tool_use / stop_sequence 直接透传属非标值，
+// 严格 harness（按 finish_reason 分支的）会走进未知分支。流式与非流式共用此表，保证两条路径一致。
+const STOP_MAP = { end_turn: 'stop', max_tokens: 'length', tool_use: 'tool_calls', stop_sequence: 'stop', pause_turn: 'stop', refusal: 'stop', model_context_window_exceeded: 'length' }
+function mapStop(sr) { return (sr && STOP_MAP[sr]) || 'stop' }
+
 // ================= Anthropic =================
 const anthropic = {
   build(openaiBody) {
@@ -58,7 +65,7 @@ const anthropic = {
       if (p.type === 'text') text += p.text || ''
       if (p.type === 'tool_use') toolCalls.push({ id: p.id || '', type: 'function', function: { name: p.name || '', arguments: JSON.stringify(p.input || {}) } })
     }
-    const finish = toolCalls.length ? 'tool_calls' : ((o && o.stop_reason) || 'stop')
+    const finish = toolCalls.length ? 'tool_calls' : mapStop(o && o.stop_reason)
     // usage：Anthropic 原生字段（input/output_tokens、cache_read_input_tokens）必须带上——
     // 网关的缓存命中统计 cacheHitMiss('anthropic') 直接读这几个字段；只给 OpenAI 风格三件套会让计费/命中率全变 0。
     const au = (o && o.usage) || {}
@@ -67,6 +74,16 @@ const anthropic = {
     return makeOA((o && o.model) || '', text, finish, { toolCalls, usage })
   },
   extractStreamContent(dataStr) { try { const j = JSON.parse(dataStr); const d = j && j.delta; return (d && typeof d.text === 'string') ? d.text : '' } catch { return '' } },
+  // 流式结束原因：Anthropic 把 stop_reason 放在 message_delta 事件里（不是 content_block_delta），
+  // 由本函数抽出来映射成 OpenAI 的 finish_reason。不做这步，客户端永远收不到 finish_reason，
+  // 严格实现（等 finish_reason 才收尾的 harness）会一直挂在 loading 态。
+  extractStreamFinish(dataStr) {
+    try {
+      const j = JSON.parse(dataStr)
+      const sr = j && j.delta && j.delta.stop_reason
+      return sr ? mapStop(sr) : ''
+    } catch { return '' }
+  },
 }
 function mapChoice(c) {
   if (c === 'none') return { type: 'none' }
