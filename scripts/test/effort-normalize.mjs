@@ -30,10 +30,22 @@ function mockUpstream(name, mode) {
       let body = null; try { body = JSON.parse(b) } catch {}
       seen[name] = body
       if (mode === 'fail') { res.writeHead(429, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'rate limited' } })); return }
-      if (mode === 'strict' && body && Object.prototype.hasOwnProperty.call(body, 'reasoning')) {
-        res.writeHead(400, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ code: 'UNKNOWN_FIELD', message: '未知请求字段：reasoning.effort', data: { field: 'reasoning.effort' } }))
-        return
+      if (mode === 'strict') {
+        // 严格上游：①见到嵌套 reasoning 对象即 400（jiyuan/LiteLLM 语义）②按 OpenRouter 的
+        // reasoning_effort 词表校验取值——这条词表里**没有 off、只有 none**，正是 2026-09-17 首版
+        // 归一方向搞反时被打回的那条（openrouter 400 Invalid option）。词表必须进 mock，否则
+        // 「归一成上游不认的拼写」这类回归测不出来。
+        const VOCAB = ['max', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none']
+        if (body && Object.prototype.hasOwnProperty.call(body, 'reasoning')) {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ code: 'UNKNOWN_FIELD', message: '未知请求字段：reasoning.effort', data: { field: 'reasoning.effort' } }))
+          return
+        }
+        if (body && body.reasoning_effort !== undefined && !VOCAB.includes(String(body.reasoning_effort))) {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: { message: 'reasoning_effort: Invalid option: expected one of "max"|"xhigh"|"high"|"medium"|"low"|"minimal"|"none"', code: 400 } }))
+          return
+        }
       }
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ id: 'm1', object: 'chat.completion', model: body && body.model, choices: [{ index: 0, message: { role: 'assistant', content: 'pong' }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } }))
@@ -112,11 +124,17 @@ if (!ready) {
   check('仅 summary 的 reasoning 对象被剔除且不注入档位', r.code === 200 && !has(seen['p-strict'], 'reasoning') && !has(seen['p-strict'], 'reasoning_effort'), 'code=' + r.code)
 
   // —— ②关闭思考的同义拼写归一 ——
-  for (const v of ['none', 'disabled', 'false']) {
+  // 目标拼写是 'none'（OpenAI/Responses/OpenRouter 词表里的关闭档，且这些上游**不认 off**）；
+  // 本地 effortOptions 里惯用的 'off' 与之等价（白名单两侧同过 canonEffort），故 off 也要折成 none。
+  for (const v of ['none', 'off', 'disabled', 'false']) {
     seen['p-strict'] = null
     r = await chat('m-strict', { reasoning: { effort: v } })
-    check('关闭拼写 ' + v + ' 归一为 off', r.code === 200 && seen['p-strict'] && seen['p-strict'].reasoning_effort === 'off', 'code=' + r.code + ' got=' + (seen['p-strict'] && seen['p-strict'].reasoning_effort))
+    check('关闭拼写 ' + v + ' 归一为 none 且被上游接受', r.code === 200 && seen['p-strict'] && seen['p-strict'].reasoning_effort === 'none', 'code=' + r.code + ' got=' + (seen['p-strict'] && seen['p-strict'].reasoning_effort))
   }
+  // 客户端同时发嵌套 + 平面（ZCode 实测形态）：平面优先，且取值仍落在上游词表内
+  seen['p-strict'] = null
+  r = await chat('m-strict', { reasoning_effort: 'none', reasoning: { effort: 'none' } })
+  check('平面 none + 嵌套 none：上游词表内且不被拒', r.code === 200 && seen['p-strict'].reasoning_effort === 'none' && !has(seen['p-strict'], 'reasoning'), 'code=' + r.code)
 
   // —— ③潜伏项：per-route 形态随目标模型变化 ——
   // 链首平面格式恒 429 -> 兜底 thinking 格式：兜底必须收到 thinking 对象（且严格上游不该见到 reasoning_effort）

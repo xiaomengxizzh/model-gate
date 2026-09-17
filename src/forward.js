@@ -93,12 +93,17 @@ const AFFINITY_TTL_MS = 300000  // 缓存亲和有效期（可用 defaults.affin
 // ===== 思考强度（effort）：入站归一化 + 出口 per-route 整形 =====
 // thinking.type 值映射：OpenAI 系档位词（off/low/high…）→ 上游 thinking.type 词表
 // （开启/关闭/自动 = enabled/disabled/auto）。未命中映射的值原样透传（如 MiniMax 的 adaptive）。
-const THINKING_TYPE_MAP = { off: 'disabled', minimal: 'enabled', low: 'enabled', medium: 'enabled', high: 'enabled', xhigh: 'enabled', disabled: 'disabled', enabled: 'enabled', auto: 'auto' }
-// 「关闭思考」的等价拼写：各家客户端用词不一（OpenRouter 系 reasoning.effort:"none"、MiniMax 系 thinking.type:"disabled"、
-// OpenAI 系 reasoning_effort:"off"）。统一归一到 'off'——它已在既有 THINKING_TYPE_MAP 与各模型 effortOptions 里承担
-// 「关闭」语义，收敛后白名单校验与下游 thinking 映射都能命中，避免同一语义换客户端就报「档位不支持」。
-const EFFORT_OFF_ALIAS = new Set(['none', 'disabled', 'false'])
-export function canonEffort(v) { const s = String(v == null ? '' : v).trim().toLowerCase(); return EFFORT_OFF_ALIAS.has(s) ? 'off' : s }
+const THINKING_TYPE_MAP = { none: 'disabled', off: 'disabled', minimal: 'enabled', low: 'enabled', medium: 'enabled', high: 'enabled', xhigh: 'enabled', disabled: 'disabled', enabled: 'enabled', auto: 'auto' }
+// 「关闭思考」的等价拼写：各家客户端用词不一（OpenRouter/OpenAI Responses 系 `reasoning_effort:"none"`、
+// ZCode 内置模板 `{"reasoning":{"effort":"none"}}`、MiniMax 系 `thinking.type:"disabled"`、
+// 本地 models.<名>.effortOptions 里惯用 `"off"`）。统一归一到 **'none'**——这是 OpenAI/Responses/OpenRouter
+// 的官方档位词，也是这些上游唯一认的关闭拼写。
+// 方向别搞反（2026-09-17 纠错）：首版归一到 'off' 后 openrouter 回 400
+// `reasoning_effort: Invalid option: expected one of "max"|"xhigh"|"high"|"medium"|"low"|"minimal"|"none"`
+// ——该词表里**没有 off、只有 none**。本地 effortOptions 里写 'off' 不影响：白名单比较两侧同过 canonEffort，
+// 'off' 与 'none' 视为同一档；出口 thinking 形态再经 THINKING_TYPE_MAP 转 'disabled'。
+const EFFORT_NONE_ALIAS = new Set(['off', 'disabled', 'false'])
+export function canonEffort(v) { const s = String(v == null ? '' : v).trim().toLowerCase(); return EFFORT_NONE_ALIAS.has(s) ? 'none' : s }
 
 // 入站归一化：把客户端带来的思考强度收拢成网关唯一入口形态（平面 reasoning_effort）。
 // 背景（生产 2026-09-17 实录）：ZCode CLI 按 OpenRouter 惯例发**嵌套** `reasoning:{effort}`，网关此前没有任何
