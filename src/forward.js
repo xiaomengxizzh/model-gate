@@ -29,6 +29,27 @@ function isModelLevelRejection(status, out) {
   return /(provider|upstream|model)[^\n]{0,80}(reject|not support|disabled|not found|does not exist|unknown|不可用|已关闭|不存在)|MODEL_DISABLED|模型(已关闭|不存在|不可用)/i.test(text)
 }
 
+// 上游侧故障判定（在 isModelLevelRejection 之前调用）：状态码落在 4xx（request.js 的 RETRYABLE_HTTP 管不到、
+// forward() 不会重试），但**响应体自己在说「我这边或我的下游出错了」**——这类错误换上游/换模型立刻可能成功，
+// 绝不能当「客户端请求错误」原样抛回去。
+// 生产 2026-09-18 实录：atria 返回 422 `{"error":{"message":"Inference request failed.","type":"atria_api_error",
+// "code":"upstream_error"}}`，网关按普通 4xx 直接抛给客户端，而目录链上还排着 qwen3.8-flash / glm-5.3-flash
+// 两个健康模型没用上 → 用户那一轮 turn 直接失败（ZCode: reason=invalid_request status=422 retryable=false）。
+// 与 402 属同类问题（0.5f99b4c 的修法同源）：上游侧故障不应由客户端承担。
+// 刻意收窄（防过宽）：只在响应体显式含「上游出错」语义时命中；识别不出该语义的 4xx 仍按客户端错误直接返回
+// ——例如 atria 自己的 400 `invalid_request "max_tokens must be an integer between 1 and 65536."` 是确定性参数错误，
+// 换模型一样失败，拿去空跑整条兜底链只是浪费上游调用。
+const UPSTREAM_FAULT_RE = /upstream[_\s-]?error|inference request failed|internal (server )?error|service unavailable|temporarily unavailable|overloaded|bad gateway|gateway time-?out|try again later|请稍后重试|服务(临时)?不可用/i
+function isUpstreamSideFailure(status, out) {
+  if (!(status >= 400 && status < 500)) return false
+  // 401 鉴权（本网关自己的 key 问题）、402/403/404 模型级拒绝、429 限流：各有专道，不在此重复处理
+  if (status === 401 || status === 402 || status === 403 || status === 404 || status === 429) return false
+  if (!out || !out.length) return false
+  let text = ''
+  try { text = out.toString('utf8').slice(0, 4000) } catch { return false }
+  return UPSTREAM_FAULT_RE.test(text)
+}
+
 // 解压输出上限（防 gzip 炸弹）：collectBody 的 64MB 上限管的是**压缩后**大小，而实测 gzip 压缩比
 // 可达 1:1028（50MB 全同字节 → 49.8KB），不设上限最坏能解压出几十 GB；且 gunzipSync 是**同步**的，
 // 会同时打爆内存并阻塞事件循环（整个网关假死）。超限时 gunzipSync 直接抛错 → 按上游失败走 fallback，不放行。
@@ -551,6 +572,19 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         lastErr = Object.assign(new Error('upstream ' + result.status + ' ' + (serving || '')), { status: result.status })
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
         log && log.warn('流已开始后上游返回 ' + result.status + '，按断流继续切下一上游', 'provider=' + pid, 'model=' + (serving || '-'))
+        continue
+      }
+      if (isUpstreamSideFailure(result.status, out)) {
+        // 上游侧故障（4xx 但语义是「我/我的下游出错了」，见 isUpstreamSideFailure 注释）：
+        // 计为**真·失败**（进熔断计数——反复这么报的上游该被冷却，而不是每笔请求都白撞一次），
+        // 保留原始响应供整链全败时回显真实错误，继续目录链下一上游/模型。
+        // 不改 rejectedOnly：一轮走完即收尾，不必空转到 loopMs（与 403/404 的取舍一致）。
+        last4xx = { status: result.status, body: out }
+        last4xxPid = pid
+        lastErr = Object.assign(new Error('upstream-side ' + result.status + ' ' + (serving || '')), { status: result.status })
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
+        markFail(state, pid, prov.circuit)
+        log && log.warn('上游侧故障(4xx 语义为上游出错)', 'provider=' + pid, 'status ' + result.status, '-> next provider/model', out.length ? 'body=' + out.toString('utf8', 0, 300).replace(/\n/g, ' ') : '')
         continue
       }
       if (isModelLevelRejection(result.status, out)) {
