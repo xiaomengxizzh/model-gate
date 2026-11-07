@@ -156,7 +156,7 @@ export async function forward(provider, path, method, headers, bodyBuf, opts = {
     if (overallMs && Date.now() - t0 > overallMs) { const e = new Error('overall timeout (' + overallMs + 'ms)'); e.status = 408; e.retries = attempt - 1; e.providerFail = true; throw e }
     try {
       const result = await single(provider, url, method, headers, bodyBuf, timeout)
-      if (result.ok || !isRetryableCode(result.status)) { result.retries = attempt - 1; return result }
+      if (result.ok || !isRetryableCode(result.status) || (opts.noRetry429 === true && result.status === 429)) { result.retries = attempt - 1; return result }
       last = result
       log && log.warn('upstream retryable status', result.status, 'attempt', attempt, '/', retry.maxAttempts)
     } catch (err) {
