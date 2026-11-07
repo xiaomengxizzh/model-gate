@@ -122,6 +122,15 @@ npm run test:offline          # 82 断言，0 失败
 5. G3 按实际需求再做 Embedding/Rerank/Audio/Image/Video，每能力独立 PR + mock。
 6. G4 冻结 v1 前补：`/api/metrics` 趋势、成本来源字段（有可靠定价才展示）、弃用窗口。
 
+## 7.1 PR 状态（平台限制）
+
+- 分支已推送：`dev/gateway-g0-g4-20261107`（`git ls-remote` 可核对 SHA）。
+- **PR 未能程序化创建**：`gh` 未安装；本环境无 GitHub API token；GitHub MCP `create_pull_request` 持续 `fetch failed`（api.github.com 从 shell 可达，故障在 MCP 进程侧）；`git push -o pull_request.create` 被远端静默忽略（`refs/pull/*` 仅 1/2/3）。
+- 已提供可直接开 PR 的描述文件与本分支 compare 链接：
+  - 描述：`docs/roadmap/2026-11-07-pr-description.md`
+  - 链接：https://github.com/xiaomengxizzh/model-gate/pull/new/dev/gateway-g0-g4-20261107
+- 需 owner 一次点击创建；创建后本报告即可补齐 PR 号。
+
 ## 8. 并行开发边界（实测）
 
 - 本轮开始时 `git worktree list` 只有主 worktree；开发中检测到前端轨道新增
