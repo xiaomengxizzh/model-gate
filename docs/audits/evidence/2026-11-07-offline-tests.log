@@ -1,0 +1,100 @@
+(node:4) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+=== 00-baseline.test.mjs ===
+PASS  管理面无令牌 401 :: {"status":401}
+PASS  管理面带令牌 200 且含 configVersion :: {"cv":0}
+PASS  数据面错误 Key 401 :: {"status":401}
+PASS  /v1/models 暴露 capabilities/wire :: {"ids":["m-good","m-bad"]}
+PASS  Chat 非流式 200 + usage :: {"status":200}
+PASS  Chat 响应带 x-mg-trace-id :: {"trace":"46a721e2-9c03-4877-90fe-cb0843b2e761"}
+PASS  Chat 流式 200 + 内容 delta + [DONE] :: {"deltas":2}
+PASS  未知模型且无默认上游 → 400（非 5xx） :: {"status":400}
+PASS  Responses 非 POST → 405 :: {"status":405,"allow":"POST"}
+PASS  上游只收到合法请求 2 次（未知模型未转发） :: {"hits":2}
+
+=== 10-budget-429.test.mjs ===
+PASS  持续 429 → 客户端收到 429（不吞成 502） :: {"status":429}
+PASS  429 保留 Retry-After 响应头 :: {"ra":"1"}
+PASS  429 归因为 rate_limit :: {"code":"MG_429_RATE_LIMIT","attribution":"rate_limit"}
+PASS  429 响应含 trace_id 与 attempts :: {"trace":"c556e985-cf63-4670-bb6c-acdfc0f1a6e0","attempts":3}
+PASS  重试被预算封顶（上游总命中 <= 3） :: {"primaryHits":3,"fallbackHits":0}
+PASS  预算内不空转（< 4s） :: {"secs1":0.345}
+PASS  单次 429 后恢复 → 200 :: {"status":200}
+PASS  400 只命中上游 1 次（不重试） :: {"primaryHits":1,"fallbackHits":0}
+PASS  400 原样回显上游错误 :: {"status":400}
+PASS  401 只命中 1 次且不 fallback :: {"status":401,"primaryHits":1,"fallbackHits":0}
+PASS  5xx 仍可切换备用上游 :: {"status":200,"primaryHits":2,"fallbackHits":1}
+PASS  tool 请求 5xx 不重放（上游仅 1 次，不切备用） :: {"status":502,"primaryHits":1,"fallbackHits":0}
+PASS  tool 请求 429 不重放（上游仅 1 次） :: {"status":429,"primaryHits":1}
+PASS  额度类 429 归因为 platform_quota :: {"status":429,"attribution":"platform_quota"}
+PASS  Retry-After 超上限 → 不等待直接 429 :: {"status":429,"ms9":304}
+
+=== 15-status-matrix.test.mjs ===
+PASS  404 模型级拒绝继续目录链并成功 :: {"status":200,"model":"m-bad"}
+PASS  408 超时有界重试后回 408 :: {"status":408,"hits":3}
+PASS  409 冲突重试后成功 :: {"status":200,"hits":2}
+PASS  422 参数错误不重试且原样回显 :: {"status":422,"hits":1}
+
+=== 20-redaction-config.test.mjs ===
+PASS  status 不含明文密钥 :: {"leaked":false}
+PASS  status 不含代理密码 :: {"leaked":false}
+PASS  敏感头值掩码为 **** :: {"v":"****"}
+PASS  非敏感头保留原值 :: {"v":"plainvalue"}
+PASS  代理 userinfo 掩码、host:port 保留 :: {"proxy":"http://****:****@127.0.0.1:7890"}
+PASS  apiKeyEnv 仅暴露变量名 :: {"v":"MOCK_ENV_NAME"}
+PASS  掩码保存成功并推进版本 :: {"status":200,"cv":1}
+PASS  掩码未被写成真实配置值 :: {"v":"Bearer sk-offline-supersecret-123456"}
+PASS  代理密码未被掩码覆盖 :: {"v":"http://proxyuser:proxy-pass-should-not-leak@127.0.0.1:7890"}
+PASS  并发同版本保存：一个 200 + 一个 409 :: {"codes":[200,409]}
+PASS  409 返回 currentVersion 供自愈 :: {"conflict":{"error":"配置版本已过期（他处已保存过新版本），请刷新后重试","currentVersion":2}}
+PASS  错误体回显已脱敏 :: {"status":400,"hasSecret":false,"body":"{\"error\":{\"message\":\"bad credentials ****\"}}"}
+PASS  /api/keys 保存成功且 status 无明文 :: {"status":200}
+PASS  keys.local.json 加密落盘（MG1:） :: {"prefix":"MG1:"}
+PASS  日志中无明文密钥 :: {"lines":4}
+
+=== 30-responses.test.mjs ===
+PASS  Responses 无客户端 Key → 401 :: {"status":401}
+PASS  Responses 非流式 200 + output_text :: {"status":200,"text":"普通回答"}
+PASS  Responses 非流式 usage 映射 :: {"usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}
+PASS  instructions → system，max_output_tokens → max_tokens :: {"messages":[{"role":"system","content":"be nice"},{"role":"user","content":"hi"}],"max":32}
+PASS  Responses 流式 200 且首事件 response.created :: {"first":["response.created","response.in_progress"]}
+PASS  事件顺序：output_item.added → content_part.added → output_text.delta :: {"iAdded":2,"iPart":3,"iDelta":4}
+PASS  流式 response.completed 输出 message + function_call :: {"output":["message","function_call"]}
+PASS  工具 call_id 原样保留 + 参数拼接完整 :: {"fc":{"id":"fc_7f9f26e3-3174-4b5e-a3b9-fbce74d0fb44","type":"function_call","status":"completed","call_id":"call_abc","name":"shell","arguments":"{\"cmd\":\"ls\"}"}}
+PASS  流式 usage 映射（input/output/total） :: {"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}
+PASS  响应 model 回写为客户端请求名 :: {"model":"m-chat"}
+PASS  流式上游收到 stream_options.include_usage :: {"so":{"include_usage":true}}
+PASS  Responses 流带 x-mg-attempts 响应头 :: {"attempts":"1"}
+PASS  previous_response_id → 422 且不转发 :: {"status":422,"code":"unsupported_previous_response"}
+PASS  input_file → 422（不静默丢字段） :: {"status":422}
+PASS  custom tool 入站映射为 function(input) 参数 :: {"tools":[{"type":"function","function":{"name":"apply_patch","description":"apply a patch","parameters":{"type":"object","properties":{"input":{"type":"string","description":"apply a patch"}},"required":["input"]}}}]}
+PASS  custom tool 出站还原 custom_tool_call + call_id :: {"custom":{"id":"ctc_079339f5-4c7e-4dbe-9002-9331919b1129","type":"custom_tool_call","status":"completed","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch"}}
+PASS  models.upstreamModel 生效（上游收到真实 id） :: {"upstream":"real-model-9","client":"m-upstream-id"}
+PASS  native responses 直通 SSE（保留 response.completed） :: {"nativeHits":1}
+PASS  wire_mismatch → 422 :: {"status":422,"code":"wire_mismatch"}
+PASS  Responses 429 → HTTP 429 + retry-after + 归因 :: {"status":429,"ra":"1","attribution":"rate_limit"}
+PASS  Responses + tools 429 不重放（上游仅 1 次） :: {"status":429,"hits":1}
+
+=== 40-failover-stream.test.mjs ===
+PASS  403 模型级拒绝继续目录链并成功 :: {"status":200,"model":"m-a","hits":2}
+PASS  5xx 达阈值后熔断打开 :: {"state":"open","fails":2}
+PASS  熔断期间跳过故障上游直接走备用 :: {"status":200,"delta":1}
+PASS  冷却后半开探测成功并恢复 :: {"state":"ok"}
+PASS  Chat 断流 → 客户端收到 stream_interrupted + [DONE] :: {"tail":"data: {\"error\":{\"message\":\"上游流式响应中断：断流续传2次仍失败，结束，已重连 2 次仍失败\",\"type\":\"stream_interrupted\",\"code\":\"STREAM_INTERRUPTED\"}}\n\n\n: [gateway] 断流续传2次仍失败，结束\ndata: [DONE]\n\n"}
+PASS  Responses 断流 → response.failed（无 response.completed） :: {"hasFailed":true,"hasCompleted":false}
+PASS  客户端取消后网关健康且后续请求正常 :: {"health":200,"status":200}
+PASS  取消后管理面仍可读 :: {"status":200}
+
+=== 50-governance.test.mjs ===
+PASS  虚拟模型 Key 写入成功 :: {"status":200}
+PASS  虚拟模型错误 Key → 401 :: {"status":401}
+PASS  虚拟模型独立 Key 路由成功 :: {"status":200}
+PASS  全局 clientKey 对真实模型仍可用 :: {"status":200}
+PASS  虚拟模型额度耗尽 → 429 quota_exceeded :: {"status":429,"body":{"error":{"message":"虚拟模型 gate-a 总额度已用尽","type":"quota_exceeded"}}}
+PASS  /v1/models 列出虚拟模型且含 capabilities :: {"vm":{"id":"gate-a","object":"model","owned_by":"model-gateway","capabilities":{"chat":true,"responses":true,"native_responses":false,"streaming":true,"tools":true,"reasoning":false},"wire":"chat"}}
+PASS  /api/capabilities 返回契约版本与入口 :: {"contract":"management-api-v1"}
+PASS  /api/capabilities 不含任何密钥字段 :: {}
+PASS  defaults 未回传字段（customFlag）保存后保留 :: {"saved":200,"customFlag":true,"proxyMode":"direct"}
+
+=== 离线结果: 82 通过, 0 失败 ===

@@ -1,6 +1,42 @@
 # Changelog
 
-本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
+本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.3.0 同步）。
+
+## [0.3.0] · 2026-11-07 —— Responses 统一入口 + 尝试预算 + 429 归因 + 脱敏
+
+> 基于 `main@6bc6441` 的独立分支 `dev/gateway-g0-g4-20261107`。实机验收（Codex/DSH/OpenCode Go）为 `NOT_RUN_LIVE`，离线 mock 82 断言通过。
+
+### Added
+- **`/v1/responses` 一等入口**（别名 `/responses`，`src/responses.js`）：与 Chat 共用鉴权、虚拟模型 Key、额度、目录/fallback、熔断、并发与记账，消除「Responses 旁路」。
+  - `responsesWire="chat"`（默认）：Responses→Chat 转换，支持 `input` 消息/工具调用/工具结果、`instructions`、`tools`（function/custom）、`tool_choice`、`max_output_tokens`、`temperature/top_p`、`reasoning.effort`、`text.format`。
+  - `responsesWire="native"` + `provider.api="responses"`：原生 Responses SSE 字节直通；声明不一致回 `422 wire_mismatch`。
+  - Codex 事件顺序契约：`output_item.added → content_part.added → output_text.delta → ... → response.completed`；`call_id` 原样保留；`custom_tool_call` 双向还原；断流一律 `response.failed`。
+  - `models.<名>.upstreamModel` 分离网关暴露名与上游真实 model id；会话头白名单透传（`passthroughSession`/`opencodeSession`）。
+  - 无法保真输入（`previous_response_id`/`input_file`/`item_reference`/`local_shell`）明确 `422`，不静默丢字段。
+- **单请求尝试预算**（`src/budget.js`、`defaults.budget`）：`maxAttempts`/`maxMs`/`maxWaitMs` 统一约束 request 重试 × provider fallback × 跨模型 while 循环，从根上封住 429/5xx 重试放大。
+- **429 语义分层**：`rate_limit` / `platform_quota` / `model_capacity` / `cooldown` / `unknown`；保留上游 `status` 与 `Retry-After`，回 `429 MG_429_<ATTRIBUTION>` 而非 `502`；429 不再计入熔断。
+- **非幂等请求不重放**：含 `tools`/工具结果的请求默认只允许一次上游尝试（`retry.toolRequests=false`），避免重复执行 `shell`/`apply_patch`。
+- **脱敏**（`src/redact.js`）：`/api/status` 的 `extraHeaders`/`proxy` 掩码；保存回传 `"****"` 还原现值；上游 4xx/5xx 回显与日志按密钥/裸 token 脱敏。
+- **诊断字段**：`x-mg-trace-id`、`x-mg-attempts`、错误体 `trace_id/attempts/attribution`；`/api/status.budget/wires`；`GET /api/capabilities`；`/v1/models` 增加 `capabilities/wire`。
+- **契约与运维文档**：`docs/contracts/management-api-v1.md`、协议兼容矩阵、11 份 fixture、3 份 runbook、G0 审计与验收报告。
+- **零依赖离线测试** `scripts/test/offline/`（`npm run test:offline`）：临时 `MG_CONFIG_DIR`、端口 0、本地 mock 上游，不碰 8787、不读生产配置、不产生真实费用。
+
+### Changed
+- `start()` 支持 `opts.port/opts.host`，显式 `port:0` 不再被 `|| 8787` 吞掉（多实例/测试隔离）。
+- 上游未知模型且无默认上游由 `502` 改为 `400 unknown_model`；上游超时回 `408 MG_UPSTREAM_TIMEOUT`。
+- 429 冷却等待受请求预算约束：等不起就跳过该上游，而不是把客户端挂住。
+
+### Fixed
+- 429 被 while 循环放大到数十次上游请求且最终吞成 502。
+- 含工具请求在失败后被自动重放/换上游，可能重复触发同一工具调用。
+- `/api/status` 明文回显 provider `extraHeaders`（可能含 Authorization）与代理 userinfo。
+- 上游错误体回显裸 key 并落日志。
+
+### Tests
+- `npm run check`：全部 `src/*.js` 语法检查通过。
+- `npm run test:offline`：**82 断言通过 / 0 失败**（Chat 基线、400/401/403/404/408/409/422/429/5xx、预算、非幂等、脱敏、configVersion 409、Responses 转换/事件顺序/call_id/custom tool/原生直通/断流、熔断半开、客户端取消）。
+- 既有 `scripts/test/*.mjs`（依赖真实网关 + live 配置）：`NOT_RUN`（本环境无 8787 实例，拒绝用生产配置跑）。
+- 真实 Codex/DSH/OpenCode Go 组合：`NOT_RUN_LIVE`（无凭据/成本授权）。
 
 ## [Unreleased] —— 托盘小窗管理器 + 日志按天分文件与 7 天保留 + 交接问题修复批次
 

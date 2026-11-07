@@ -1,0 +1,38 @@
+# 宿主与仓库探测证据（只读）
+# 采集时间：2026-11-07
+
+$ uname -r
+7.0.0-42-generic
+
+$ node -v
+v22.23.2
+
+$ nproc
+32
+
+$ free -g | head -2
+               total        used        free      shared  buff/cache   available
+内存：            15          11           0           1           4           3
+
+$ df -h /home
+/dev/nvme0n1p9   98G   78G   20G   80% /
+
+$ ss -ltn | grep -E ":(8787|8788)"
+(none listening)
+
+$ command -v gh
+(not installed)
+
+$ git rev-list --left-right --count main...origin/main
+17	2
+
+$ git rev-parse origin/main
+6bc6441fc7bf3e620b19af5af3b4d62543b31193
+
+$ git rev-parse origin/feature/codex-opencode-go-adapter-20261107
+9a0bfe3b7517068fb932dc4054c0192fee4e3791
+
+$ git worktree list
+/home/xiaomengxizi/ai/workplace/idproject/model-gateway       e746385 [main]
+/home/xiaomengxizi/ai/workplace/idproject/model-gate-frontend 6bc6441 [dev/frontend-console-rebuild-20261107]
+/home/xiaomengxizi/ai/workplace/idproject/model-gateway-dev   3da6a35 [dev/gateway-g0-g4-20261107]

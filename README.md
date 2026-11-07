@@ -14,13 +14,16 @@
 | 故障转移 | 模型内 `fallbacks` 备用上游链；`defaults.directory` 跨模型兜底；命中率/亲和择优（亲和带 `affinityTtlMs` 有效期）· **主上游回切探活 `failbackProbe`（降级中主动探活，主上游恢复即自动切回）** |
 | 熔断 | `provider.circuit{maxFailures, openDurationMs}`；open→half→ok（冷却结束自动半开、放行一次探测，成功即恢复） |
 | 并发/限流 | 每 provider 并发 · 每 model 并发 `maxConcurrent` · 每 model QPS `qps` |
-| 限速 | 429 尊重 `Retry-After` 排队 · 请求体超限 413 |
+| 限速 | 429 尊重 `Retry-After` 排队 · **单请求尝试预算 `defaults.budget`（次数+墙钟+等待上限），封住 client×retry×fallback 放大** · 429 按语义归因（`rate_limit/platform_quota/model_capacity/cooldown`）且不计熔断 · 请求体超限 413 |
+| 非幂等 | 含 `tools`/工具结果的请求**不自动重放**（只允许一次上游尝试），避免重复执行 shell/apply_patch |
 | 额度/上下文 | 每模型日额度 `dailyQuota` · 总额度 `quota`（已持久化，重启不失效）· 最大上下文 `maxContext`（中文按 1 字≈1 token 估算）· 超限自动切下一模型 |
 | 思考强度 | 每模型可配允许档位 `effortOptions`（本地校验，非法 400）与默认档位 `reasoning` |
 | 缓存 | keep-alive 连接复用 · **会话/上游亲和**（同前缀稳定同上游，降厂商缓存碎片化）· **主动预热 preheat** · **命中率路由 + 趋势骤降告警**；流式也解析 usage 计入命中；命中率按 hit/(hit+miss) 真实统计 |
-| 安全 | 管理令牌 `MG_ADMIN_TOKEN` · 数据面客户端 Key `MG_CLIENT_KEY`（加密存储）· Key 加密落盘 · 转发剥离客户端授权头 · 虚拟模型名 |
+| 安全 | 管理令牌 `MG_ADMIN_TOKEN` · 数据面客户端 Key `MG_CLIENT_KEY`（加密存储）· Key 加密落盘 · 转发剥离客户端授权头 · 虚拟模型名 · **管理面 extraHeaders/proxy 掩码 + `****` 回写保护 · 上游错误体/日志脱敏** |
 | 可观测 | provider/model 维度统计 · 模型级平均延迟 · p50/p95 · 延迟趋势 · 每模型天级 token/缓存命中率 · **按对话统计**（会话 ID 或时间切分）· 日志文件 |
 | 互转 | OpenAI ⇄ Anthropic ⇄ Gemini（含 function calling） |
+| Responses | **`/v1/responses` 一等入口**：Chat 桥接（工具/custom tool/usage/事件顺序）或原生 Responses 直通（`responsesWire:"native"`）；`upstreamModel` 分离网关名与上游 model id |
+| 诊断 | `x-mg-trace-id` / `x-mg-attempts` / `Retry-After` / 429 `attribution` · `/api/capabilities` 协议能力矩阵 |
 | 合规 | 空 model 且无默认 → 显式 400 |
 
 ## 快速开始
@@ -164,6 +167,20 @@
 
 `provider.api = anthropic | gemini` 时，网关在 `/v1/chat/completions` 内自动互转；非 tools 流式重建为 OpenAI delta；**带 tools 的流式自动转非流式、以一次性 SSE 输出**，保证 tool_calls 完整。
 
+## Responses API 与 Codex（`/v1/responses`）
+
+`POST /v1/responses`（别名 `/responses`）与 Chat 共用鉴权、虚拟模型 Key、额度、目录/fallback、熔断与统计，**不是旁路**。
+
+- 默认 `responsesWire="chat"`：Requests → Chat 转换，网关把 Chat SSE 重建为 Codex 需要的事件序列
+  （`response.created → in_progress → output_item.added → content_part.added → output_text.delta* → ... → response.completed`）。
+- `models.<名>.responsesWire="native"` 且 `providers.<id>.api="responses"`：原生 Responses 字节直通。
+  声明与上游不一致会 **422 `wire_mismatch`**，不静默降级。
+- `models.<名>.upstreamModel`：发给上游的真实 model id，客户端仍看到网关暴露名。
+- `call_id` 原样保留；`custom` 工具（如 `apply_patch`）在 Chat 侧映射为单 `input` 参数 function，回写还原 `custom_tool_call`。
+- 无法保真的输入（`previous_response_id`、`input_file`、`item_reference`、Chat 侧的 `local_shell`）**明确 422**，不静默丢字段。
+- 契约与事件样例：`docs/contracts/management-api-v1.md`、`docs/contracts/fixtures/responses.stream.events.jsonl`；
+  接入步骤：`docs/runbooks/opencode-go-codex.md`。
+
 ## 项目结构
 
 ```text
@@ -174,10 +191,14 @@ model-gateway/
   src/request.js         # 后端转发 + keep-alive + 分层/整体超时 + 退避重试 + 熔断计数 + 预热 warm
   src/sse.js             # SSE 断流续传 + 多协议流式重建 + 模型名回写 + usage/命中解析
   src/format.js          # 协议适配（含 per-api 缓存字段映射 cacheHitMiss）
+  src/responses.js       # Responses ⇄ Chat 转换 + Codex SSE 事件顺序 + 原生直通
+  src/budget.js          # 单请求尝试预算 + 429 归因（纯函数）
+  src/redact.js          # 管理面/错误体/日志脱敏
   src/logger.js          # 控制台 + 文件日志（密钥脱敏）
   src/admin.html         # 赛璐璐风格控制面板
   start.bat              # 健壮启动脚本（自动清理占用 8787 的残留进程）
-  scripts/test/          # 按主题拆分的集成测试 + 索引运行器
+  scripts/test/          # 按主题拆分的集成测试 + 索引运行器（依赖真实网关）
+  scripts/test/offline/  # 零依赖离线验收：临时配置 + mock 上游 + 随机端口（不碰 8787）
   scripts/tray/          # 托盘小窗管理器（mg-tray.cs 源码 + build.cmd 一键编译）
   logs/                  # 运行时日志（gitignore，按天分文件保留 7 天）
 ```
@@ -197,11 +218,14 @@ model-gateway/
 
 ## 测试（按主题拆分 + 索引运行器）
 
-`npm test` / `node scripts/test/run.mjs [关键词]`。套件是**依赖真实运行网关 + 上游配置 + 管理鉴权**的集成测试；运行器会对每个文件做错误隔离并预检网关状态，缺环境时相应用例 SKIP/报错而不中途崩溃。
+`npm test` / `node scripts/test/run.mjs [关键词]`：依赖真实运行网关 + 上游配置 + 管理鉴权的集成测试。
+
+**离线验收（推荐先跑）**：`npm run test:offline`（= `node scripts/test/offline/run.mjs`）。零第三方依赖、临时 `MG_CONFIG_DIR`、端口 0、本地 mock 上游，**不读取生产 config、不访问 8787、不产生真实 API 费用**。覆盖：Chat 基线回归、400/401/403/404/408/409/422/429/5xx、重试预算、非幂等不重放、脱敏、configVersion 409、Responses 转换/事件顺序/工具/call_id/原生直通/断流、熔断半开、客户端取消。
 
 ## 边界说明
 
 - 重试仅发生在尚未向客户端回 2xx 响应头之前；一旦开始回传不再整请求自动重试（避免重复内容），改为断流显式收尾。
+- **单请求尝试预算是硬上限**：`defaults.budget.{maxAttempts,maxMs,maxWaitMs}`；`Retry-After` 超过等待上限时不空等，直接换上游或回 429（带 `Retry-After`）。含工具语义的请求默认不重放（`retry.toolRequests=false`）。
 - **4xx 语义**：400/401/422 等请求/鉴权类错误视为确定性问题，直接返回不兜底（换模型无意义）；**403/404（模型/资源级拒绝，如上游对该模型无权限/不存在）会继续尝试目录中的下一模型**——换模型可能成功；整条链都被 403/404 拒绝时回最后一个上游的原始响应（保留真实错误，而非笼统 502），且不进入循环兜底空转。
 - 流式"断点续传"是重连重放 + 内容去重；OpenAI 协议无二进制断点，重放偏移会降级为"少量可能重复"并记日志。
 - 流式中断（未正常收到 `[DONE]` 即终止）会计入全局 `interrupts` 中断计数并打 `sse 流中断` 日志；断流前已产生的 token 仍按内容累计，但因拿不到上游 `usage`，无法补记 prompt token。
