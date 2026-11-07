@@ -10,9 +10,12 @@ import { adapterFor, cacheHitMiss } from './format.js'
 import { isStreamResponse, writeUpstreamHeaders, relayStream, endInterruptedStream } from './sse.js'
 import { forwardChain, routeLimit, virtualQuotaExceeded } from './forward.js'
 import { todayKey } from './shared.js'
+import { redactHeaders, redactProxy, redactBody, redactText, MASK } from './redact.js'
+import { randomUUID } from 'node:crypto'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
+const DATA_PATHS = CHAT_PATHS
 const ADMIN_PAGE = new URL('./admin.html', import.meta.url)
 
 const FAIL_OPEN_THRESHOLD = 5       // 连续失败熔断阈值（放宽：平台偶发慢/抖不轻易熔断）
@@ -126,7 +129,9 @@ function buildStatus(state) {
     return {
       id, baseUrl: p.baseUrl, hasKey: keyOk,
       keySource: (state.cfg._keys && state.cfg._keys[id]) ? 'keys' : (p.apiKeyEnv ? 'env' : null),
-      apiKeyEnv: p.apiKeyEnv || null, pathPrefix: p.pathPrefix || '', api: p.api || 'openai', extraHeaders: p.extraHeaders || {}, proxy: p.proxy || '', circuit: p.circuit || null,
+      apiKeyEnv: p.apiKeyEnv || null, pathPrefix: p.pathPrefix || '', api: p.api || 'openai',
+      // 管理面永不回显明文：extraHeaders 值按敏感键掩码、代理 userinfo 掩码；保存时 '****' 视为「未改动」
+      extraHeaders: redactHeaders(p.extraHeaders || {}), proxy: redactProxy(p.proxy || ''), circuit: p.circuit || null,
       st: {
         requests: o.requests, errors: o.errors, retries: o.retries, tokens: o.tokens,
         avgMs: o.latencyCount ? Math.round(o.latencySum / o.latencyCount) : null,
@@ -166,7 +171,10 @@ function buildStatus(state) {
     models,
     // defaults 原样返回（仅 clientKey 掩码）：否则自定义字段（affinityTtlMs / failbackProbe 等）
     // 会在任意一次配置保存后被静默丢弃（与 circuit 同源的问题）
-    defaults: Object.assign({ directory: [], preheat: [], retry: {}, timeout: {}, concurrency: {}, extraHeaders: {}, proxy: '', proxyMode: 'auto' }, defaults, { clientKey: currentClientKey(state) ? '********' : '' }),
+    defaults: Object.assign({ directory: [], preheat: [], retry: {}, timeout: {}, concurrency: {}, extraHeaders: {}, proxy: '', proxyMode: 'auto' }, defaults, { clientKey: currentClientKey(state) ? '********' : '', extraHeaders: redactHeaders(defaults.extraHeaders || {}), proxy: redactProxy(defaults.proxy || '') }),
+    // G1/G2 只读诊断：预算与协议能力（不含任何密钥）
+    budget: { maxAttempts: (defaults.budget && defaults.budget.maxAttempts) || 8, maxMs: (defaults.budget && defaults.budget.maxMs) || (defaults.timeout && defaults.timeout.loopMs) || 120000, maxWaitMs: (defaults.budget && defaults.budget.maxWaitMs) || 30000, retryToolRequests: !!(defaults.retry && defaults.retry.toolRequests) },
+    wires: { chat: DATA_PATHS.size ? ['/v1/chat/completions', '/chat/completions'] : [], responses: ['/v1/responses', '/responses'], nativeResponses: Object.entries(state.cfg.models || {}).filter(([, m]) => m && m.responsesWire === 'native').map(([n]) => n) },
   }
 }
 
@@ -178,10 +186,18 @@ function readLogTail(logFile, lines) {
   } catch { return [] }
 }
 function staticModels(cfg) {
-  const data = Object.keys(cfg.models || {}).map((id) => ({ id, object: 'model', owned_by: 'model-gateway' }))
+  const caps = (m) => ({
+    chat: true,
+    responses: true,                                  // 任意模型都可经 Responses→Chat 桥接
+    native_responses: !!(m && m.responsesWire === 'native'), // 原生 Responses 上游（无损）
+    streaming: true,
+    tools: true,
+    reasoning: !!(m && (m.reasoning || (m.effortOptions && m.effortOptions.length))),
+  })
+  const data = Object.keys(cfg.models || {}).map((id) => ({ id, object: 'model', owned_by: 'model-gateway', capabilities: caps((cfg.models || {})[id]), wire: ((cfg.models || {})[id] && cfg.models[id].responsesWire) || 'chat' }))
   const vm = (cfg.defaults && cfg.defaults.model) || ''
-  if (vm && !data.some((m) => m.id === vm)) data.push({ id: vm, object: 'model', owned_by: 'model-gateway' })
-  for (const v of cfg.virtualModels || []) if (!data.some((m) => m.id === v.name)) data.push({ id: v.name, object: 'model', owned_by: 'model-gateway' })
+  if (vm && !data.some((m) => m.id === vm)) data.push({ id: vm, object: 'model', owned_by: 'model-gateway', capabilities: { chat: true, responses: true, native_responses: false, streaming: true, tools: true, reasoning: false }, wire: 'chat' })
+  for (const v of cfg.virtualModels || []) if (!data.some((m) => m.id === v.name)) data.push({ id: v.name, object: 'model', owned_by: 'model-gateway', capabilities: { chat: true, responses: true, native_responses: false, streaming: true, tools: true, reasoning: false }, wire: 'chat' })
   return { object: 'list', data }
 }
 
@@ -257,7 +273,25 @@ async function doSaveConfig(state, body) {
     return { error: 'defaults.proxyMode 仅支持 auto（按配置）/direct（全直连）/global（全走代理）' }
   }
   const clean = {}
-  for (const [id, p] of Object.entries(providers || {})) { const { keyOk, keySource, ...rest } = p || {}; clean[id] = rest }
+  for (const [id, p] of Object.entries(providers || {})) {
+    const { keyOk, keySource, ...rest } = p || {}
+    // 掩码回写保护：管理面读到的 '****' 是脱敏值，保存时还原为盘上现值，绝不把掩码写成真实密钥
+    const prev = (cur.providers && cur.providers[id]) || {}
+    if (rest.extraHeaders && typeof rest.extraHeaders === 'object') {
+      const restored = Object.assign({}, rest.extraHeaders)
+      for (const k of Object.keys(restored)) if (restored[k] === MASK) restored[k] = (prev.extraHeaders && prev.extraHeaders[k] != null) ? prev.extraHeaders[k] : MASK
+      rest.extraHeaders = restored
+    }
+    if (typeof rest.proxy === 'string' && rest.proxy.includes(MASK)) rest.proxy = prev.proxy || ''
+    clean[id] = rest
+  }
+  // defaults.extraHeaders / proxy 同样做掩码还原
+  if (defaults.extraHeaders && typeof defaults.extraHeaders === 'object') {
+    const restored = Object.assign({}, defaults.extraHeaders)
+    for (const k of Object.keys(restored)) if (restored[k] === MASK) restored[k] = ((cur.defaults && cur.defaults.extraHeaders && cur.defaults.extraHeaders[k]) != null) ? cur.defaults.extraHeaders[k] : MASK
+    defaults.extraHeaders = restored
+  }
+  if (typeof defaults.proxy === 'string' && defaults.proxy.includes(MASK)) { const _pd = cur.defaults || {}; defaults.proxy = _pd.proxy || ''; defaults.proxyMode = _pd.proxyMode || defaults.proxyMode }
   // —— virtualModels 强校验（面板保存路径；loadConfig 另有容错规范化，手改坏配置不宕机）——
   const vmsIn = body.virtualModels !== undefined ? body.virtualModels : (cur.virtualModels || [])
   const vmNames = new Set()
@@ -398,7 +432,9 @@ function makeHandler(state) {
   return async function handler(req, res) {
     const path = (req.url || '/').split('?')[0]
     const url = req.url || '/'
+    const traceId = randomUUID()
     try {
+      if (path.startsWith('/v1') || DATA_PATHS.has(path)) res.setHeader('x-mg-trace-id', traceId)
       if ((req.method === 'GET' || req.method === 'HEAD') && path === '/healthz') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok'); return }
       if (req.method === 'GET' && path === '/favicon.ico') { res.writeHead(204); res.end(); return }
       if (req.method === 'GET' && (path === '/' || path === '/admin' || path === '/admin.html')) {
@@ -427,6 +463,29 @@ function makeHandler(state) {
       }
 
       if (path === '/api/status' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; sendJson(res, 200, buildStatus(state)); return }
+      // G2/G3 只读协议能力矩阵：前端据此渲染「模型支持哪些入口/协议」，不含任何密钥
+      if (path === '/api/capabilities' && req.method === 'GET') {
+        if (!await requireAdmin(req, res)) return
+        const models = Object.entries(state.cfg.models || {}).map(([name, m]) => ({
+          name,
+          provider: m.provider,
+          wire: m.responsesWire === 'native' ? 'native-responses' : 'chat',
+          responses: true,
+          streaming: true,
+          tools: true,
+          reasoning: !!(m.reasoning || (m.effortOptions && m.effortOptions.length)),
+          upstreamModel: m.upstreamModel || null,
+          fallbacks: m.fallbacks || [],
+        }))
+        const providers = Object.entries(state.cfg.providers || {}).map(([id, p]) => ({ id, api: p.api || 'openai', sessionPassthrough: !!(p.passthroughSession || p.opencodeSession), nativeResponses: (p.api === 'responses') }))
+        sendJson(res, 200, {
+          contract: 'management-api-v1',
+          endpoints: { chat: ['/v1/chat/completions', '/chat/completions'], responses: ['/v1/responses', '/responses'], models: ['/v1/models', '/models'] },
+          budget: { maxAttempts: (state.cfg.defaults && state.cfg.defaults.budget && state.cfg.defaults.budget.maxAttempts) || 8, maxMs: (state.cfg.defaults && state.cfg.defaults.budget && state.cfg.defaults.budget.maxMs) || 120000 },
+          providers, models,
+        })
+        return
+      }
       if (path === '/api/model-stats' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const days = Math.min(90, Math.max(1, parseInt(new URL(url, 'http://x').searchParams.get('days') || '7', 10) || 7)); const out = {}; const now = new Date(); const modelNames = Object.keys(state.cfg.models || {}); const pt = (c) => ({ tokens: c ? c.tokens : 0, inTokens: c ? (c.inTokens || 0) : 0, outTokens: c ? (c.outTokens || 0) : 0, hit: c ? (c.hit || 0) : 0, miss: c ? (c.miss || 0) : 0, hitRate: (c && (c.hit + c.miss) > 0) ? Math.round((c.hit / (c.hit + c.miss)) * 1000) / 10 : null }); if (days === 1) { for (const name of modelNames) { const mh = state.stats.hourly[name] || {}; const arr = []; for (let i2 = 23; i2 >= 0; i2--) { const hd = new Date(now.getTime() - i2 * 3600 * 1000); const hk = todayKey(hd) + ':' + String(hd.getHours()).padStart(2, '0'); arr.push(Object.assign({ date: String(hd.getHours()).padStart(2, '0') + ':00' }, pt(mh[hk]))) } out[name] = arr } } else { for (const name of modelNames) { const md = state.stats.daily[name] || {}; const arr = []; for (let i2 = days - 1; i2 >= 0; i2--) { const d = new Date(now); d.setDate(d.getDate() - i2); const k = todayKey(d); arr.push(Object.assign({ date: k }, pt(md[k]))) } out[name] = arr } } sendJson(res, 200, { days, mode: days === 1 ? 'hourly' : 'daily', models: out }); return }
       if (path === '/api/route-preview' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
@@ -496,7 +555,7 @@ function makeHandler(state) {
       if (clientKey && !clientAuthOk(req, clientKey)) {
         // 二阶段（仅当配置了虚拟模型）：解析 body.model 逐虚拟模型 key 校验；否则按旧口径 401
         const vms = state.cfg.virtualModels || []
-        if (vms.length && CHAT_PATHS.has(path) && (req.method === 'POST' || req.method === 'PUT')) {
+        if (vms.length && DATA_PATHS.has(path) && (req.method === 'POST' || req.method === 'PUT')) {
           const bodyBuf2 = await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
           const body2 = bodyBuf2 && bodyBuf2.length ? tryParse(bodyBuf2) : null
           const reqModel = body2 && typeof body2.model === 'string' ? body2.model.trim() : ''
@@ -551,7 +610,7 @@ function makeHandler(state) {
         })
         return Object.assign({}, r, { finish: (note) => endInterruptedStream(res, note, r ? r.reconnects : 0) })
       }
-      const out = await forwardChain(FWD_DEPS, state, req, fUrl, fPath, req.method, bodyBuf, body, log, streamRelay)
+      const out = await forwardChain(FWD_DEPS, state, req, fUrl, fPath, req.method, bodyBuf, body, log, streamRelay, { traceId })
       // 请求级日志：记录每次数据面请求的请求模型/实际服务模型/上游与结果，便于定位空响应与连接问题（不含消息正文/密钥）
       const reqModel = (body && body.model) || '-'
       const _chain = (n) => n || ''
@@ -636,11 +695,12 @@ function makeHandler(state) {
         if (!res.writableEnded && !res.destroyed) endInterruptedStream(res, '上游响应中断（流已开始后无法回写状态码 ' + out.status + '）', 0)
         return
       }
-      res.writeHead(out.status, { 'content-type': out.contentType }); res.end(out.body)
+      if (out.attempts != null && !res.headersSent) res.setHeader('x-mg-attempts', String(out.attempts))
+      res.writeHead(out.status, Object.assign({ 'content-type': out.contentType }, out.headers || {})); res.end(out.body)
     } catch (err) {
       state.st.counters.errors += 1
       log && log.error('route failed', path, '->', err.message)
-      if (!res.headersSent) { const tooBig = /too large/i.test(String(err.message || '')); sendJson(res, tooBig ? 413 : 502, { error: { message: err.message || String(err), type: tooBig ? 'payload_too_large' : 'gateway_error' } }) }
+      if (!res.headersSent) { const tooBig = /too large/i.test(String(err.message || '')); sendJson(res, tooBig ? 413 : 502, { error: { message: redactText(err.message || String(err)), type: tooBig ? 'payload_too_large' : 'gateway_error', code: tooBig ? 'payload_too_large' : 'MG_GATEWAY_ERROR', trace_id: traceId } }) }
       else if (!res.destroyed) { try { res.end() } catch {} }
     }
   }
@@ -652,17 +712,27 @@ export function start(opts = {}) {
   if (mb > 0) cfg.server = Object.assign({}, cfg.server || {}, { maxBodyBytes: mb })
   // 收集所有密钥值供日志脱敏：环境变量 Key + 面板 Key + extraHeaders 值 + 客户端/管理令牌，确保永不落日志
   const secretList = []
-  for (const d of Object.values(cfg.providers || {})) { if (d && d.apiKeyEnv && process.env[d.apiKeyEnv]) secretList.push(process.env[d.apiKeyEnv]) }
-  for (const d of Object.values(cfg.providers || {})) { for (const v of Object.values((d && d.extraHeaders) || {})) if (v && String(v).length >= 3) secretList.push(String(v)) }
-  for (const v of Object.values(cfg._keys || {})) { if (v) secretList.push(v) }
-  if (process.env.MG_CLIENT_KEY) secretList.push(process.env.MG_CLIENT_KEY)
-  if (process.env.MG_ADMIN_TOKEN) secretList.push(process.env.MG_ADMIN_TOKEN)
+  // 认证类头的值是 'Bearer <key>'：整串与裸 key 都要进脱敏表，否则上游错误体回显裸 key 时会漏
+  const pushSecret = (v) => {
+    if (v == null) return
+    const s = String(v)
+    if (s.length < 3) return
+    secretList.push(s)
+    const m = s.match(/^(?:Bearer|Basic)\s+(\S+)$/i)
+    if (m && m[1].length >= 3) secretList.push(m[1])
+  }
+  for (const d of Object.values(cfg.providers || {})) { if (d && d.apiKeyEnv && process.env[d.apiKeyEnv]) pushSecret(process.env[d.apiKeyEnv]) }
+  for (const d of Object.values(cfg.providers || {})) { for (const v of Object.values((d && d.extraHeaders) || {})) pushSecret(v) }
+  for (const v of Object.values(cfg._keys || {})) { if (typeof v === 'string') pushSecret(v) }
+  if (process.env.MG_CLIENT_KEY) pushSecret(process.env.MG_CLIENT_KEY)
+  if (process.env.MG_ADMIN_TOKEN) pushSecret(process.env.MG_ADMIN_TOKEN)
   const log = createLogger({ logFile: cfg.server && cfg.server.logFile, silent: opts.silent, secrets: secretList })
   const pids = (() => { const o = {}; for (const id of Object.keys(cfg.providers || {})) o[id] = { requests:0, errors:0, retries:0, latencySum:0, latencyCount:0, tokens:0 }; return o })()
   const state = {
     cfg, log, router: createRouter(cfg),
     adminToken: process.env.MG_ADMIN_TOKEN || (cfg.server && cfg.server.adminToken) || (cfg._keys && cfg._keys.__mg_admin) || '',
     paths: cfg._paths || configPaths(),
+    secrets: secretList,
     st: { startedAt: Date.now(), uses: {}, counters: { requests: 0, errors: 0, retries: 0, interrupts: 0 } },
     health: {},
     throttle: {},
@@ -756,13 +826,14 @@ export function start(opts = {}) {
   else log.warn('未设置 MG_ADMIN_TOKEN：管理 API(/api/*)无鉴权裸露，仅建议绑定回环地址使用')
   hardenKeyFile(state.paths.keys)
   const server = opts.server || http.createServer(makeHandler(state))
-  const host = (cfg.server && cfg.server.host) || '127.0.0.1'
-  const port = (cfg.server && cfg.server.port) || 8787
+  const host = opts.host || (cfg.server && cfg.server.host) || '127.0.0.1'
+  // port 0 = 交给内核分配（离线测试/多实例隔离）；显式 0 不能被 || 吞成默认 8787
+  const port = opts.port != null ? opts.port : ((cfg.server && cfg.server.port != null) ? cfg.server.port : 8787)
   server.on('error', (err) => { log.error('server error', err.message); process.exitCode = 1 })
   return new Promise((resolve) => {
     server.listen(port, host, () => {
       log.info('model-gateway 已启动: http://' + host + ':' + port + '  (健康检查 /healthz, 控制面板 /)')
-      resolve({ cfg, log, server, router: state.router, st: state.st })
+      resolve({ cfg, log, server, router: state.router, st: state.st, state, port: server.address() && server.address().port })
     })
   })
 }

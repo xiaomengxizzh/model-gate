@@ -4,6 +4,7 @@ import net from 'node:net'
 import tls from 'node:tls'
 import { URL } from 'node:url'
 import { gunzipSync } from 'node:zlib'
+import { classify429, parseRetryAfterMs, budgetError } from './budget.js'
 
 // 上游连接复用（keep-alive）：减少每次 TLS/TCP 握手，改善连接体验与延迟
 const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 64 })
@@ -90,15 +91,8 @@ function isRetryableNetErr(err) {
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)) }
 
-function parseRetryAfter(headers) {
-  const ra = headers && (headers['retry-after'])
-  if (ra == null) return null
-  const n = parseInt(String(ra), 10)
-  if (!isNaN(n) && n >= 0) return n * 1000
-  const dt = Date.parse(String(ra))
-  if (!isNaN(dt)) return Math.max(0, dt - Date.now())
-  return null
-}
+// Retry-After 解析统一在 budget.js（G1：429 归因与重试预算同源）
+function parseRetryAfter(headers) { return parseRetryAfterMs(headers) }
 
 // 单次转发（全双工，流式）。resolve: 收到上游响应头即返回 stream
 function single(provider, url, method, headers, bodyBuf, timeout) {
@@ -130,11 +124,28 @@ function single(provider, url, method, headers, bodyBuf, timeout) {
 
 async function settle(attempt, cfg, last) {
   const ra = last && last.retryAfter
-  if (ra != null) await sleep(ra + Math.random() * 40)
+  const cap = Number(cfg.maxRetryAfterMs) > 0 ? Number(cfg.maxRetryAfterMs) : Infinity
+  if (ra != null) await sleep(Math.min(ra, cap) + Math.random() * 40)
   else {
     const base = Math.min(cfg.maxDelayMs, cfg.initialDelayMs * Math.pow(2, attempt - 1))
     await sleep(base + base * (cfg.jitter || 0) * Math.random())
   }
+}
+
+// 读取一小段错误体用于 429 归因（限 8KB，读完即销毁，不把整段错误体留在内存）
+async function readSmall(stream, limit = 8192) {
+  if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return ''
+  const chunks = []
+  let n = 0
+  try {
+    for await (const c of stream) {
+      chunks.push(c)
+      n += c.length
+      if (n >= limit) break
+    }
+  } catch { /* 半截错误体不影响状态码语义 */ }
+  try { stream.destroy && stream.destroy() } catch {}
+  return Buffer.concat(chunks).toString('utf8').slice(0, limit)
 }
 
 /**
@@ -142,36 +153,56 @@ async function settle(attempt, cfg, last) {
  *  - resolve { ok:true }         → 2xx，可直接透传
  *  - resolve { ok:false }        → 非重试错误码（业务 4xx）：外层直接返回、不熔断、不 fallback
  *  - reject(err)                 → 网络错或 5xx/429 重试耗尽：视为 provider 不可用（err.status 表示状态码）
- * 重试次数附在结果/错误 .retries。
+ * 重试次数附在结果/错误 .retries；429 额外带 .attribution / .retryAfter / .bodyText。
+ *
+ * opts.budget（G1）：单请求尝试预算；每次真正发出上游请求前 consume()，用尽即抛 budgetError，
+ *                    从根上封住 client × request × forward × while 的指数放大。
+ * opts.noRetry：非幂等（tool）请求，禁止同上游自动重放。
  */
 export async function forward(provider, path, method, headers, bodyBuf, opts = {}, log) {
   const url = new URL(provider.baseUrl + (provider.pathPrefix || '') + path)
   const retry = Object.assign({ maxAttempts: 1, initialDelayMs: 500, maxDelayMs: 8000, jitter: 0.2 }, opts.retry)
   const timeout = Object.assign({ connectMs: 10000, firstByteMs: 60000, idleMs: 60000 }, opts.timeout)
   const overallMs = timeout.overallMs || 0
+  const budget = opts.budget || null
+  const maxWaitMs = Number(opts.maxRetryAfterMs) > 0 ? Number(opts.maxRetryAfterMs) : ((budget && budget.maxWaitMs) || 30000)
+  const noRetry = opts.noRetry === true || !!(budget && budget.noReplay)
+  const maxAttempts = noRetry ? 1 : Math.max(1, retry.maxAttempts)
   const t0 = Date.now()
 
   let last
-  for (let attempt = 1; attempt <= retry.maxAttempts; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (budget && !budget.consume()) throw budgetError(budget, last || {})
     if (overallMs && Date.now() - t0 > overallMs) { const e = new Error('overall timeout (' + overallMs + 'ms)'); e.status = 408; e.retries = attempt - 1; e.providerFail = true; throw e }
     try {
       const result = await single(provider, url, method, headers, bodyBuf, timeout)
       if (result.ok || !isRetryableCode(result.status)) { result.retries = attempt - 1; return result }
-      last = result
-      log && log.warn('upstream retryable status', result.status, 'attempt', attempt, '/', retry.maxAttempts)
+      // 可重试状态：读一小段错误体用于归因（429 平台额度 / 速率 / 容量）
+      const bodyText = await readSmall(result.stream)
+      const cls = classify429(bodyText, result.headers)
+      last = Object.assign({ status: result.status, retryAfter: result.retryAfter, attribution: result.status === 429 ? cls.attribution : null, bodyText, headers: result.headers }, {})
+      log && log.warn('upstream retryable status', result.status, 'attempt', attempt, '/', maxAttempts, last.attribution ? 'attribution=' + last.attribution : '')
     } catch (err) {
       last = err
       if (!isRetryableNetErr(err)) throw err            // 非网络类致命错，直接抛
-      if (attempt >= retry.maxAttempts) throw err        // 重试耗尽 → provider 失败
-      log && log.warn('upstream error', err.code || err.message, 'attempt', attempt, '/', retry.maxAttempts)
+      if (attempt >= maxAttempts) throw err              // 重试耗尽 → provider 失败
+      log && log.warn('upstream error', err.code || err.message, 'attempt', attempt, '/', maxAttempts)
     }
-    if (attempt < retry.maxAttempts) await settle(attempt, retry, last)
+    if (attempt < maxAttempts) {
+      // Retry-After 超过预算可承受范围时不再空等：立即上抛，让外层换上游或把 429 回给客户端
+      if (last && last.retryAfter != null && last.retryAfter > maxWaitMs) break
+      if (budget && last && last.retryAfter != null && !budget.canWait(Math.min(last.retryAfter, maxWaitMs))) break
+      await settle(attempt, Object.assign({}, retry, { maxRetryAfterMs: maxWaitMs }), last)
+    }
   }
-  // 可重试状态码耗尽 → 抛 provider 失败
+  // 可重试状态码耗尽 → 抛 provider 失败（保留 429 归因，供 forwardChain 映射 HTTP 429 + Retry-After）
   const fail = new Error('upstream failed: ' + (last && last.status))
-  fail.status = last.status
-  fail.retries = retry.maxAttempts - 1
-  fail.retryAfter = (last && last.retryAfter) || null
+  fail.status = last && last.status
+  fail.retries = Math.max(0, (last && last.status ? maxAttempts - 1 : 0))
+  fail.retryAfter = (last && last.retryAfter != null) ? last.retryAfter : null
+  fail.attribution = (last && last.attribution) || null
+  fail.bodyText = (last && last.bodyText) || ''
+  fail.upstreamHeaders = (last && last.headers) || null
   fail.providerFail = true
   throw fail
 }

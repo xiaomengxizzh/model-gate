@@ -6,6 +6,8 @@ import { buildProvider } from './router.js'
 import { isStreamResponse } from './sse.js'
 import { forward } from './request.js'
 import { todayKey } from './shared.js'
+import { createBudget, isToolBearingBody } from './budget.js'
+import { redactBody, redactText } from './redact.js'
 
 const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-length','upgrade','keep-alive','te','trailer'])
 const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection'])
@@ -149,9 +151,14 @@ function resolveDialogue(state, req, body) {
   return id
 }
 
-export async function forwardChain(deps, state, req, url, path, method, bodyBuf, body, log, streamRelay) {
+export async function forwardChain(deps, state, req, url, path, method, bodyBuf, body, log, streamRelay, opts = {}) {
   const { ensureHst, markFail, markOk, healthy, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tryParse, collectBody } = deps
   const cfg = state.cfg
+  // G1：单请求预算（总尝试次数 + 墙钟上限）。tool 请求（非幂等）只允许一次上游尝试，禁止自动重放。
+  const noReplay = opts.noReplay != null ? !!opts.noReplay : isToolBearingBody(body)
+  const budget = opts.budget || createBudget(cfg.defaults || {}, { traceId: opts.traceId || '', noReplay })
+  const traceId = budget.traceId || opts.traceId || ''
+  const wire = opts.wire || 'chat'
   let routes = []
   let maxModel = 0
   let qps = 0
@@ -160,7 +167,11 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   const dir = (cfg.defaults && cfg.defaults.directory) || []
   const dialogueId = resolveDialogue(state, req, body)
   if (body && body.model) {
-    const hit = state.router.resolve(body.model)
+    let hit
+    try { hit = state.router.resolve(body.model) } catch (e) {
+      // 未知模型且无默认上游：这是客户端请求错误（400），不是网关 5xx
+      return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: e.message, type: 'unknown_model', code: 'unknown_model', trace_id: traceId } })), traceId }
+    }
     // 决策 1：已配置虚拟模型后，未知名不再静默走 defaults 链（防 key 隔离被无感绕过），明确 404
     if (!hit.known && (state.cfg.virtualModels || []).length) {
       return { kind: 'json', status: 404, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '未知模型名: ' + body.model + '。可用虚拟模型见 GET /v1/models', type: 'unknown_model' } })) }
@@ -259,6 +270,8 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   let last4xx = null          // 模型级拒绝（403/404）的最后一次响应：整条链全被拒绝时回它（保留上游原始错误）
   let last4xxPid = null       // last4xx 对应的上游（pid 是 for 循环块作用域，循环外取不到）
   let rejectedOnly = false    // 本轮是否只有模型级拒绝（无网络错/5xx/429）：是则不再循环重试（403 是确定性拒绝，循环无意义）
+  let last429 = null          // 最后一次 429 归因（预算耗尽时回给客户端，不再吞成 502）
+  let cycles = 0
   let tried = false
   let streamStarted = false   // 流式已开始（响应头已发给客户端）：此后不能再写 json 状态码，失败只能以流内错误事件收尾
   const loopMs = (cfg.defaults && cfg.defaults.timeout && cfg.defaults.timeout.loopMs) || 120000
@@ -267,11 +280,17 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   const chainModels = []            // 实际尝试过的 serving 模型链（跨模型兜底/循环标记，供日志/面板查看）
   try {
   // 循环兜底：整条路由链(a→b→c)一轮失败后回到队首反复尝试，直到成功 / 业务4xx / 整体超时(loopMs)
-  while (Date.now() < loopDeadline) {
+  while (Date.now() < loopDeadline && !budget.exhausted) {
+    cycles += 1
     let cycleTried = false
     rejectedOnly = true // 每轮重置：遇到可重试类失败（catch）即置 false；整轮只有 403/404 则维持 true → 轮末 break
     for (const route of routes) {
       const serving = route.model
+    // 协议维度：native Responses 请求不得静默落到 Chat 上游，Chat 请求也不得落到 native-only 模型
+    const smd = serving ? (cfg.models || {})[serving] : null
+    const mwire = (smd && smd.responsesWire) || 'chat'
+    if (wire === 'native' && mwire !== 'native') { log && log.warn('skip model (wire mismatch: native required)', serving || '-'); continue }
+    if (wire === 'chat' && mwire === 'native') { log && log.warn('skip model (wire mismatch: native-only)', serving || '-'); continue }
     const lim = routeLimit(state, cfg, serving, body)
     if (lim) { log && log.warn('skip model (' + lim + ')', serving || '-', '-> next'); continue } // 额度/上下文超限：自动断连并按目录切换到下一模型
     const provs = (route.mode === 'onFail') ? route.providers.slice(0, 1) : orderCandidates(state, route.model, route.providers)
@@ -280,6 +299,18 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     const prov = buildProvider(cfg, pid)
     const h = ensureHst(state, pid)
     if (!healthy(h, Date.now())) { markFail(state, pid, prov.circuit); continue } // 熔断中：跳过，视为失败推进
+    // 429 冷却：只在本请求预算可承受时等待，否则跳过该上游（绝不为了等冷却把客户端挂死）
+    if (state.throttle[pid] && state.throttle[pid].rateUntil > Date.now()) {
+      const waitMs = state.throttle[pid].rateUntil - Date.now()
+      const capMs = Math.min(budget.remainingMs(), budget.maxWaitMs || 30000)
+      if (waitMs > capMs) {
+        log && log.warn('skip provider (429 冷却超出请求预算)', pid, Math.ceil(waitMs / 1000) + 's')
+        // 全部上游都在冷却时不能回 502：这是限流语义，回 429 + 剩余冷却时间
+        if (!last429) last429 = { pid, status: 429, retryAfter: waitMs, attribution: 'cooldown', bodyText: '' }
+        continue
+      }
+      await _sleep(waitMs); state.throttle[pid].rateUntil = 0
+    }
     if ((h.streamDrops || 0) >= STREAM_DROP_THRESHOLD) {
       // 连续流式中断过多：冷却期内绕开该上游（走其他上游/模型）；冷却到点后放行一次半开探测——
       // 探测成功即解除（streamDrops 归零），再断流则重新计时。绕开时不再 markFail：否则熔断被反复续期，
@@ -296,16 +327,26 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     if (chainModels[chainModels.length - 1] !== serving) chainModels.push(serving)
     agg(state, pid, 'requests', 1); state.st.counters.requests += 1; bm.requests += 1
     // 跨模型兜底：把发给上游的 model 名改写为该兜底模型名
-    const routeBody = (route.model && body && route.model !== body.model) ? Object.assign({}, body, { model: route.model }) : body
+    // 模型名与上游 model id 分离：models.<name>.upstreamModel 优先
+    const upModel = (smd && smd.upstreamModel) || route.model
+    const routeBody = (route.model && body && upModel !== body.model) ? Object.assign({}, body, { model: upModel }) : body
     let turl = url, tbuf = bodyBuf, api = prov.api
+    // 上游 wire：provider.api 声明协议；Responses 原生上游必须显式 api=responses
+    if (wire === 'native' && api !== 'responses') { log && log.warn('skip provider (not a responses upstream)', pid); continue }
     let degraded = false
-    if (api !== 'openai' && routeBody) { const ad = adapterFor(api); const r = ad.build(routeBody); if ((routeBody.tools || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true } turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body)) }
+    if (api !== 'openai' && api !== 'responses' && routeBody) { const ad = adapterFor(api); if (!ad) { log && log.warn('skip provider (unsupported api)', pid, api); continue } const r = ad.build(routeBody); if ((routeBody.tools || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true } turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body)) }
     else if ((injectedEffort || routeBody !== body) && routeBody) tbuf = Buffer.from(JSON.stringify(routeBody))
     const headers = buildHeaders(req, prov, tbuf, cfg)
+    // 会话头透传（OpenCode Go / DSH 等按会话粘性路由的上游）；只透传白名单，不转发 Cookie/鉴权
+    if (prov._def && (prov._def.passthroughSession || prov._def.opencodeSession)) {
+      for (const h of ['session-id', 'session_id', 'thread-id', 'thread_id', 'x-codex-session-id', 'x-session-id', 'x-conversation-id']) {
+        if (typeof req.headers[h] === 'string') headers[h] = req.headers[h]
+      }
+    }
     const release = await acquireProvider(state, pid, cfg)
     const attemptStart = Date.now()
     try {
-      const result = await forward(prov, turl, req.method, headers, tbuf, cfg.defaults || {}, log)
+      const result = await forward(prov, turl, req.method, headers, tbuf, Object.assign({}, cfg.defaults || {}, { budget, noRetry: noReplay }), log)
       const latency = Date.now() - attemptStart
       const o = ensureSt(state, pid)
       o.latencySum += latency; o.latencyCount += 1
@@ -331,7 +372,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           }
           const relay = await streamRelay(result, {
             pid, modelName, serving: serving || modelName, api, dialogueId, reconnect: reconnector,
-            rewriteModel: (body && body.model) || null, chain: chainModels.join('>'),
+            rewriteModel: (body && body.model) || null, chain: chainModels.join('>'), traceId, attempts: budget.attempts,
           })
           const sm = serving || modelName
           const h = ensureHst(state, pid)
@@ -389,7 +430,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           const p2 = tryParse(out)
           if (p2 && p2.model) { p2.model = body.model; out = Buffer.from(JSON.stringify(p2)) }
         }
-        return { kind: 'json', status: result.status, contentType: 'application/json', body: out, pid, modelName, serving, asSSE: degraded || undefined, dialogueId, chain: chainModels.join('>') }
+        return { kind: 'json', status: result.status, contentType: 'application/json', body: out, pid, modelName, serving, asSSE: degraded || undefined, dialogueId, chain: chainModels.join('>'), traceId, attempts: budget.attempts }
       }
       // 非重试错误码（4xx）：业务问题，不熔断、不 fallback，直接返回；
       // 例外：403/404 属「模型/资源级拒绝」（如上游对该模型无权限/不存在），换下一模型可能成功，记录后继续尝试而非中断
@@ -420,13 +461,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         last4xxPid = pid
         lastErr = Object.assign(new Error('upstream ' + result.status + ' ' + (serving || '')), { status: result.status })
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
-        log && log.warn('provider rejected (model-level)', pid, 'status ' + result.status, '-> next model', out && out.length ? 'body=' + out.toString('utf8', 0, 300).replace(/\n/g, ' ') : '')
+        log && log.warn('provider rejected (model-level)', pid, 'status ' + result.status, '-> next model', out && out.length ? 'body=' + redactText(out.toString('utf8', 0, 300).replace(/\n/g, ' '), (state.secrets || [])) : '')
         continue
       }
       if (out.length) {
         // 其余 4xx（真·参数/请求错误）：直接返回保留原始错误，不再尝试下一模型（换模型同样会失败）
-        log && log.warn('upstream ' + result.status, 'provider=' + pid, 'model=' + (serving || '-'), 'body=' + out.toString('utf8', 0, 300).replace(/\n/g, ' '))
-        return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: out, pid, modelName, chain: chainModels.join('>') }
+        log && log.warn('upstream ' + result.status, 'provider=' + pid, 'model=' + (serving || '-'), 'body=' + redactText(out.toString('utf8', 0, 300).replace(/\n/g, ' '), (state.secrets || [])))
+        // 回显上游 4xx 前脱敏（部分上游会回显 Authorization/端点中的 key）
+        return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: redactBody(out), pid, modelName, chain: chainModels.join('>'), traceId, attempts: budget.attempts }
       }
       return { kind: 'json', status: result.status || 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'gateway upstream error', type: 'upstream_error', status: result.status } })), pid, modelName }
     } catch (err) {
@@ -439,25 +481,64 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       bm.latencySum = (bm.latencySum || 0) + latency; bm.latencyCount = (bm.latencyCount || 0) + 1
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
       agg(state, pid, 'retries', err.retries || 0)
-      if (err.status === 429) { const th = throttleOf(state, pid); th.rateUntil = Date.now() + (err.retryAfter || 3000) }
-      markFail(state, pid, prov && prov.circuit)
+      budget.noteFailure(pid, err.status, err.attribution)
+      if (err.status === 429) {
+        // 429 不是故障熔断：只做上游级冷却（Retry-After），保留原始归因，预算耗尽时把 429 回给客户端。
+        const th = throttleOf(state, pid)
+        const raMs = err.retryAfter != null ? err.retryAfter : (last429 && last429.retryAfter != null ? last429.retryAfter : 1000)
+        th.rateUntil = Date.now() + Math.min(raMs, 60000)
+        const prev = last429 || {}
+        last429 = {
+          pid,
+          status: 429,
+          retryAfter: err.retryAfter != null ? err.retryAfter : (prev.retryAfter != null ? prev.retryAfter : null),
+          attribution: err.attribution || prev.attribution || 'unknown',
+          bodyText: err.bodyText || prev.bodyText || '',
+          attempts: budget.attempts,
+        }
+      } else {
+        // 5xx / 网络错 / 408 才计入熔断；400/401/422 等确定性错误不走这里（request.js 直接返回）
+        markFail(state, pid, prov && prov.circuit)
+      }
       lastErr = err
-      rejectedOnly = false // 网络错/5xx/429：可重试类失败，允许回到队首循环
+      rejectedOnly = false // 网络错/5xx/429：可重试类失败，允许回到队首循环（受 budget 上限约束）
       log && log.warn('provider failed', pid, err.message, '-> next fallback')
+      if (err.code === 'MG_BUDGET_EXHAUSTED') break
+      // 非幂等（tool）请求：首次上游失败即止，绝不换上游重放（可能重复触发 shell_command/apply_patch）
+      if (budget.noReplay) { budget.exhausted = 'no_replay'; break }
     } finally {
       release()
     }
+    if (budget.exhausted) break
     } // for pid
+    if (budget.exhausted) break
   } // for route
+  if (budget.exhausted) break
+  if (noReplay) break   // 非幂等请求：一轮即止，不回到队首重放
   if (!cycleTried || rejectedOnly) break // 无上游被尝试，或整轮只有 403/404 模型级拒绝（确定性失败）：再循环无意义，直接收尾
   await _sleep(300)      // 一轮全败后回到队首前稍停，避免空转打爆上游
   } // while() 有界循环兜底：整条链(a→b→c)失败后回到 a 继续，直到成功 / 业务4xx / 整体超时 / 全部熔断
+  // 429 收尾：保留原始 status + Retry-After + 归因（绝不吞成 502）
+  if (last429 && !streamStarted) {
+    const raSec = last429.retryAfter != null ? Math.max(1, Math.ceil(last429.retryAfter / 1000)) : 1
+    return {
+      kind: 'json', status: 429, contentType: 'application/json; charset=utf-8',
+      headers: { 'retry-after': String(raSec) },
+      pid: last429.pid, modelName,
+      traceId, attempts: budget.attempts, budget: budget.snapshot(),
+      body: Buffer.from(JSON.stringify({ error: { message: '上游限流（429）：' + last429.attribution + '，已按单请求预算停止重试', type: 'rate_limited', code: 'MG_429_' + String(last429.attribution).toUpperCase(), attribution: last429.attribution, upstream_status: 429, retry_after_ms: last429.retryAfter, attempts: budget.attempts, trace_id: traceId } })),
+    }
+  }
+  // 上游/网关超时（408）：回 408 而非 502，客户端可据此重试
+  if (lastErr && lastErr.status === 408 && !streamStarted) {
+    return { kind: 'json', status: 408, contentType: 'application/json; charset=utf-8', traceId, attempts: budget.attempts, body: Buffer.from(JSON.stringify({ error: { message: 'upstream/gateway timeout: ' + redactText(lastErr.message || 'timeout'), type: 'timeout', code: 'MG_UPSTREAM_TIMEOUT', trace_id: traceId, attempts: budget.attempts } })) }
+  }
   // 整条链都是 403/404 模型级拒绝：回最后一个上游原始响应（比 502 更有信息量）
-  if (last4xx && !streamStarted) return { kind: 'json', status: last4xx.status, contentType: 'application/json; charset=utf-8', body: last4xx.body, pid: last4xxPid, modelName, chain: chainModels.join('>') }
+  if (last4xx && !streamStarted) return { kind: 'json', status: last4xx.status, contentType: 'application/json; charset=utf-8', body: redactBody(last4xx.body), pid: last4xxPid, modelName, chain: chainModels.join('>'), traceId, attempts: budget.attempts }
   if (!tried) return { kind: 'json', status: 502, contentType: 'application/json', chain: chainModels.join('>'), body: Buffer.from(JSON.stringify({ error: { message: lastErr ? lastErr.message : 'no usable provider (无可用上游：可能未配 Key 或全部熔断)', type: 'no_provider' } })) }
   // 流已开始（响应头已发）后的全链失败：不能再写 json 状态码，以流内错误事件收尾（index.js 对 stream-interrupted 兜底收尾）
   if (streamStarted) return { kind: 'stream-interrupted', pid: last4xxPid, modelName, chain: chainModels.join('>'), note: lastErr && lastErr.message ? (lastErr.message + '（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）') : 'all providers failed（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）', reconnects: 0 }
-  return { kind: 'json', status: 502, contentType: 'application/json', chain: chainModels.join('>'), body: Buffer.from(JSON.stringify({ error: { message: lastErr && lastErr.message ? (lastErr.message + '（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）') : 'all providers failed（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）', type: 'all_providers_failed' } })) }
+  return { kind: 'json', status: 502, contentType: 'application/json', chain: chainModels.join('>'), traceId, attempts: budget.attempts, body: Buffer.from(JSON.stringify({ error: { message: lastErr && lastErr.message ? (redactText(lastErr.message) + '（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）') : 'all providers failed（已循环兜底约 ' + Math.max(1, Math.round(loopMs / 1000)) + 's）', type: 'all_providers_failed', code: 'MG_ALL_PROVIDERS_FAILED', trace_id: traceId, attempts: budget.attempts } })) }
   } finally {
     if (releaseModel) releaseModel()
   }
