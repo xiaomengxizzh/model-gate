@@ -1,0 +1,40 @@
+{
+  "needAuth": true,
+  "configVersion": 7,
+  "virtualModels": [
+    { "name": "gate-a", "directory": [{ "model": "deepseek-chat", "mode": "afterAll", "providers": [] }], "quota": 0, "dailyQuota": 0, "maxContext": 0, "maxConcurrent": 0, "qps": 0, "keySet": true, "expiresAt": "", "note": "", "requests": 12, "errors": 0, "tokens": 4321, "today": 1200, "hitRate": 41.2 }
+  ],
+  "server": { "maxBodyBytes": 33554432, "keyEncrypted": true, "host": "127.0.0.1", "port": 8787 },
+  "startedAt": 1794000000000,
+  "uptimeMs": 3600000,
+  "counters": { "requests": 42, "errors": 1, "retries": 3, "interrupts": 0 },
+  "lastServing": { "model": "deepseek-chat", "provider": "deepseek-official", "at": 1794003600000 },
+  "global": { "requests": 42, "errors": 1, "retries": 3, "interrupts": 0, "tokenCount": 12345, "todayTokens": 4321, "avgMs": 812, "p50": 700, "p95": 2100, "latTrend": [{ "t": 1794003000000, "v": 812 }] },
+  "cache": { "trend": [], "alert": null },
+  "dialogues": [{ "id": "sess-1", "named": true, "requests": 3, "tokens": 900, "hit": 120, "miss": 300, "hitRate": 28.6, "startAt": 1794000000000, "lastAt": 1794003000000 }],
+  "providers": [
+    {
+      "id": "deepseek-official",
+      "baseUrl": "https://api.deepseek.com",
+      "hasKey": true,
+      "keySource": "env",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "pathPrefix": "",
+      "api": "openai",
+      "extraHeaders": { "authorization": "****", "x-request-source": "model-gateway" },
+      "proxy": "http://****:****@127.0.0.1:7890",
+      "circuit": null,
+      "st": { "requests": 42, "errors": 1, "retries": 3, "tokens": 12345, "avgMs": 812, "p50": 700, "p95": 2100, "state": "ok", "openUntilMs": 0, "probe": null }
+    }
+  ],
+  "models": [
+    { "name": "deepseek-chat", "provider": "deepseek-official", "alias": [], "fallbacks": [], "maxConcurrent": 0, "qps": 0, "reasoning": "", "effortOptions": [], "effortFormat": "", "dailyQuota": 0, "quota": 0, "maxContext": 0, "probe": null, "requests": 42, "errors": 1, "tokens": 12345, "today": 4321, "hitRate": 41.2, "affinity": "deepseek-official", "avgMs": 812 }
+  ],
+  "defaults": {
+    "directory": [], "preheat": [], "retry": { "maxAttempts": 3, "initialDelayMs": 500, "maxDelayMs": 8000, "jitter": 0.2 },
+    "timeout": { "connectMs": 15000, "firstByteMs": 90000, "idleMs": 60000, "overallMs": 0, "loopMs": 120000 },
+    "concurrency": {}, "extraHeaders": {}, "proxy": "", "proxyMode": "auto", "clientKey": "********"
+  },
+  "budget": { "maxAttempts": 8, "maxMs": 120000, "maxWaitMs": 30000, "retryToolRequests": false },
+  "wires": { "chat": ["/v1/chat/completions", "/chat/completions"], "responses": ["/v1/responses", "/responses"], "nativeResponses": [] }
+}

@@ -1,0 +1,12 @@
+{
+  "error": {
+    "message": "上游限流（429）：rate_limit，已按单请求预算停止重试",
+    "type": "rate_limited",
+    "code": "MG_429_RATE_LIMIT",
+    "attribution": "rate_limit",
+    "upstream_status": 429,
+    "retry_after_ms": 2000,
+    "attempts": 3,
+    "trace_id": "3f6c2e1a-0f8b-4a1e-9b7e-7a1f0d2c9b11"
+  }
+}

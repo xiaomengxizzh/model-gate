@@ -1,0 +1,1 @@
+{ "error": { "message": "未知模型名: nope。可用虚拟模型见 GET /v1/models", "type": "unknown_model", "code": "unknown_model", "trace_id": "3f6c2e1a-0f8b-4a1e-9b7e-7a1f0d2c9b11" } }

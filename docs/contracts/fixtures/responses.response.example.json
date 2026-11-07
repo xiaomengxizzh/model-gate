@@ -1,0 +1,15 @@
+{
+  "id": "resp_6b6e2b2e-3f5e-4b36-9d4b-6f0f2f4d3b21",
+  "object": "response",
+  "created_at": 1794003600,
+  "status": "completed",
+  "model": "deepseek-chat",
+  "output": [
+    { "id": "msg_1", "type": "message", "status": "completed", "role": "assistant", "content": [{ "type": "output_text", "text": "Done.", "annotations": [] }] },
+    { "id": "fc_1", "type": "function_call", "status": "completed", "call_id": "call_1", "name": "shell", "arguments": "{\"cmd\":\"ls\"}" }
+  ],
+  "output_text": "Done.",
+  "usage": { "input_tokens": 120, "output_tokens": 18, "total_tokens": 138 },
+  "error": null,
+  "incomplete_details": null
+}

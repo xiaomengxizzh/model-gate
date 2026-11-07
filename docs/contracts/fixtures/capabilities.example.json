@@ -1,0 +1,16 @@
+{
+  "contract": "management-api-v1",
+  "endpoints": {
+    "chat": ["/v1/chat/completions", "/chat/completions"],
+    "responses": ["/v1/responses", "/responses"],
+    "models": ["/v1/models", "/models"]
+  },
+  "budget": { "maxAttempts": 8, "maxMs": 120000 },
+  "providers": [
+    { "id": "deepseek-official", "api": "openai", "sessionPassthrough": false, "nativeResponses": false },
+    { "id": "opencode-go", "api": "openai", "sessionPassthrough": true, "nativeResponses": false }
+  ],
+  "models": [
+    { "name": "deepseek-chat", "provider": "deepseek-official", "wire": "chat", "responses": true, "streaming": true, "tools": true, "reasoning": false, "upstreamModel": null, "fallbacks": [] }
+  ]
+}

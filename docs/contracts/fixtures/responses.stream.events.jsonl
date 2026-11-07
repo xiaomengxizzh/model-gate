@@ -1,0 +1,13 @@
+{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","status":"in_progress","output":[]}}
+{"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_1","status":"in_progress","output":[]}}
+{"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"msg_1","type":"message","status":"in_progress","role":"assistant","content":[]}}
+{"type":"response.content_part.added","sequence_number":3,"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}
+{"type":"response.output_text.delta","sequence_number":4,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"Done"}
+{"type":"response.output_text.done","sequence_number":5,"item_id":"msg_1","output_index":0,"content_index":0,"text":"Done"}
+{"type":"response.content_part.done","sequence_number":6,"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"Done","annotations":[]}}
+{"type":"response.output_item.done","sequence_number":7,"output_index":0,"item":{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Done","annotations":[]}]}}
+{"type":"response.output_item.added","sequence_number":8,"output_index":1,"item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":"call_1","name":"shell","arguments":""}}
+{"type":"response.function_call_arguments.delta","sequence_number":9,"item_id":"fc_1","output_index":1,"delta":"{\"cmd\":\"ls\"}"}
+{"type":"response.function_call_arguments.done","sequence_number":10,"item_id":"fc_1","output_index":1,"arguments":"{\"cmd\":\"ls\"}"}
+{"type":"response.output_item.done","sequence_number":11,"output_index":1,"item":{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"shell","arguments":"{\"cmd\":\"ls\"}"}}
+{"type":"response.completed","sequence_number":12,"response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":120,"output_tokens":18,"total_tokens":138}}}

@@ -1,0 +1,23 @@
+{
+  "version": 7,
+  "providers": {
+    "deepseek-official": {
+      "baseUrl": "https://api.deepseek.com",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "api": "openai",
+      "extraHeaders": { "authorization": "****" },
+      "proxy": "http://****:****@127.0.0.1:7890"
+    }
+  },
+  "models": {
+    "deepseek-chat": { "provider": "deepseek-official", "alias": ["ds-chat"], "fallbacks": [], "maxConcurrent": 0 }
+  },
+  "defaults": {
+    "directory": [{ "model": "deepseek-chat", "mode": "afterAll", "providers": [] }],
+    "retry": { "maxAttempts": 3, "initialDelayMs": 500, "maxDelayMs": 8000, "jitter": 0.2 },
+    "timeout": { "connectMs": 15000, "firstByteMs": 90000, "idleMs": 60000, "loopMs": 120000 },
+    "budget": { "maxAttempts": 8, "maxMs": 120000, "maxWaitMs": 30000 },
+    "proxyMode": "auto"
+  },
+  "virtualModels": []
+}

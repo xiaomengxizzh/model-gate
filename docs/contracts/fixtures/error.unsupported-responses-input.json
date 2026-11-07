@@ -1,0 +1,9 @@
+{
+  "error": {
+    "message": "previous_response_id is unsupported by the stateless Chat bridge; send the full input history",
+    "type": "invalid_request_error",
+    "code": "unsupported_previous_response",
+    "param": null,
+    "trace_id": "3f6c2e1a-0f8b-4a1e-9b7e-7a1f0d2c9b11"
+  }
+}

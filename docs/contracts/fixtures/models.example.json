@@ -1,0 +1,19 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "deepseek-chat",
+      "object": "model",
+      "owned_by": "model-gateway",
+      "capabilities": { "chat": true, "responses": true, "native_responses": false, "streaming": true, "tools": true, "reasoning": false },
+      "wire": "chat"
+    },
+    {
+      "id": "gpt-5.6-codex",
+      "object": "model",
+      "owned_by": "model-gateway",
+      "capabilities": { "chat": true, "responses": true, "native_responses": true, "streaming": true, "tools": true, "reasoning": true },
+      "wire": "native"
+    }
+  ]
+}
