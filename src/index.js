@@ -6,6 +6,7 @@ import { gunzipSync } from 'node:zlib'
 import { loadConfig, createRouter, buildProvider, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh } from './router.js'
 import { createLogger } from './logger.js'
 import { forward, probe, probeModel, probeChat, warm } from './request.js'
+import { handleCodexResponses } from './codex-handler.js'
 import { adapterFor, cacheHitMiss } from './format.js'
 import { isStreamResponse, writeUpstreamHeaders, relayStream, endInterruptedStream } from './sse.js'
 import { forwardChain, routeLimit, virtualQuotaExceeded } from './forward.js'
@@ -496,7 +497,7 @@ function makeHandler(state) {
       if (clientKey && !clientAuthOk(req, clientKey)) {
         // 二阶段（仅当配置了虚拟模型）：解析 body.model 逐虚拟模型 key 校验；否则按旧口径 401
         const vms = state.cfg.virtualModels || []
-        if (vms.length && CHAT_PATHS.has(path) && (req.method === 'POST' || req.method === 'PUT')) {
+        if (vms.length && (CHAT_PATHS.has(path) || path === '/responses' || path === '/v1/responses') && (req.method === 'POST' || req.method === 'PUT')) {
           const bodyBuf2 = await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
           const body2 = bodyBuf2 && bodyBuf2.length ? tryParse(bodyBuf2) : null
           const reqModel = body2 && typeof body2.model === 'string' ? body2.model.trim() : ''
@@ -521,12 +522,19 @@ function makeHandler(state) {
 
       if (req.method === 'GET' && (path === '/v1/models' || path === '/models')) { sendJson(res, 200, staticModels(state.cfg)); return }
       const isChat = CHAT_PATHS.has(path)
-      if (!path.startsWith('/v1') && !isChat) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
+      const isResponses = (path === '/v1/responses' || path === '/responses')
+      if (!path.startsWith('/v1') && !isChat && !isResponses) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
 
       // —— 数据面转发（二阶段鉴权已收集 body 时直接复用，流不可二次读取） ——
       let bodyBuf = req.__mgBodyBuf || null
       if (!bodyBuf && (req.method === 'POST' || req.method === 'PUT')) bodyBuf = await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
       const body = req.__mgBody || (bodyBuf && bodyBuf.length ? tryParse(bodyBuf) : null)
+      // Codex Responses bridge is opt-in, isolated from the legacy Chat data-plane.
+      if (isResponses) {
+        if (req.method !== 'POST') { sendJson(res, 405, { error: { type: 'method_not_allowed', message: 'Responses endpoint requires POST' } }); return }
+        await handleCodexResponses({ req, res, body, state, forward, buildProvider })
+        return
+      }
       // 入口路径别名：把不带 /v1 的 Chat 兼容路径规范化为 /v1/chat/completions，使 base URL 填 http://127.0.0.1:8787 也被正确代理
       const fPath = (isChat && path !== '/v1/chat/completions') ? '/v1/chat/completions' : path
       const fUrl = (fPath === path) ? url : (fPath + url.slice(path.length))
