@@ -13,27 +13,58 @@ const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-len
 const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection'])
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b])
 
-// 模型级拒绝判定：403/404 恒真（上游对该模型无权限/不存在）；400 需响应体含「模型/上游不可用」语义
+// 模型级拒绝判定：402/403/404 恒真（上游侧故障，与本次请求无关）；400 需响应体含「模型/上游不可用」语义
 // （如 opencodego 的 Provider rejected / Model not supported、jiyuan 的 MODEL_DISABLED / 模型已关闭）——
 // 这类换下一模型可能成功，应继续目录链而非直接抛错给客户端。真·参数错误（messages 格式/字段非法、
 // max_tokens 类型等）不在此列：换模型同样失败，直接返回保留原始错误。
+//
+// 402 Payment Required 与 429 同源，属「这个上游现在不能服务」（账户欠费/额度停服），换下一上游立刻可能成功，
+// 故视同模型级拒绝继续目录链。生产 09-11 实录：gmi 返回 {"error":"Insufficient balance","reason":"model_access_denied"}
+// 时 jiyuan 恰在熔断，兜底链只剩 gmi 一个候选，402 被当作「客户端请求错误」原样透传 → dsh 整轮 turn 失败。
+// 注意：402 不进 request.js 的 RETRYABLE_HTTP —— 余额不会在退避几百毫秒后回来，同上游重试纯属浪费；
+// 有意义的动作是换上游（此处 continue），而非重发同一请求。
 function isModelLevelRejection(status, out) {
-  if (status === 403 || status === 404) return true
+  if (status === 402 || status === 403 || status === 404) return true
   if (status !== 400 || !out || !out.length) return false
   let text = ''
   try { text = out.toString('utf8').slice(0, 4000).toLowerCase() } catch { return false }
   return /(provider|upstream|model)[^\n]{0,80}(reject|not support|disabled|not found|does not exist|unknown|不可用|已关闭|不存在)|MODEL_DISABLED|模型(已关闭|不存在|不可用)/i.test(text)
 }
 
+// 上游侧故障判定（在 isModelLevelRejection 之前调用）：状态码落在 4xx（request.js 的 RETRYABLE_HTTP 管不到、
+// forward() 不会重试），但**响应体自己在说「我这边或我的下游出错了」**——这类错误换上游/换模型立刻可能成功，
+// 绝不能当「客户端请求错误」原样抛回去。
+// 生产 2026-09-18 实录：atria 返回 422 `{"error":{"message":"Inference request failed.","type":"atria_api_error",
+// "code":"upstream_error"}}`，网关按普通 4xx 直接抛给客户端，而目录链上还排着 qwen3.8-flash / glm-5.3-flash
+// 两个健康模型没用上 → 用户那一轮 turn 直接失败（ZCode: reason=invalid_request status=422 retryable=false）。
+// 与 402 属同类问题（0.5f99b4c 的修法同源）：上游侧故障不应由客户端承担。
+// 刻意收窄（防过宽）：只在响应体显式含「上游出错」语义时命中；识别不出该语义的 4xx 仍按客户端错误直接返回
+// ——例如 atria 自己的 400 `invalid_request "max_tokens must be an integer between 1 and 65536."` 是确定性参数错误，
+// 换模型一样失败，拿去空跑整条兜底链只是浪费上游调用。
+const UPSTREAM_FAULT_RE = /upstream[_\s-]?error|inference request failed|internal (server )?error|service unavailable|temporarily unavailable|overloaded|bad gateway|gateway time-?out|try again later|请稍后重试|服务(临时)?不可用/i
+function isUpstreamSideFailure(status, out) {
+  if (!(status >= 400 && status < 500)) return false
+  // 401 鉴权（本网关自己的 key 问题）、402/403/404 模型级拒绝、429 限流：各有专道，不在此重复处理
+  if (status === 401 || status === 402 || status === 403 || status === 404 || status === 429) return false
+  if (!out || !out.length) return false
+  let text = ''
+  try { text = out.toString('utf8').slice(0, 4000) } catch { return false }
+  return UPSTREAM_FAULT_RE.test(text)
+}
+
+// 解压输出上限（防 gzip 炸弹）：collectBody 的 64MB 上限管的是**压缩后**大小，而实测 gzip 压缩比
+// 可达 1:1028（50MB 全同字节 → 49.8KB），不设上限最坏能解压出几十 GB；且 gunzipSync 是**同步**的，
+// 会同时打爆内存并阻塞事件循环（整个网关假死）。超限时 gunzipSync 直接抛错 → 按上游失败走 fallback，不放行。
+const MAX_GUNZIP_BYTES = 32 * 1024 * 1024
 function maybeGunzip(buf, contentEncoding) {
   // 只要上游申报了 gzip 或魔数命中，就必须能解压成功；否则抛错让上层当作失败走 fallback，避免放行垃圾字节
   const wants = /gzip/i.test(contentEncoding || '') || (buf && buf.length >= 2 && buf[0] === GZIP_MAGIC[0] && buf[1] === GZIP_MAGIC[1])
-  if (wants) return gunzipSync(buf)
+  if (wants) return gunzipSync(buf, { maxOutputLength: MAX_GUNZIP_BYTES })
   return buf
 }
 
 // 转发头：剥离客户端授权/敏感头，统一由网关注入鉴权，防止绕过
-function buildHeaders(req, provider, bodyBuf, cfg) {
+function buildHeaders(req, provider, bodyBuf, cfg, api) {
   const headers = {}
   for (const [k, v] of Object.entries(req.headers)) {
     const lk = k.toLowerCase()
@@ -46,6 +77,15 @@ function buildHeaders(req, provider, bodyBuf, cfg) {
   if (provider.apiKey) headers['authorization'] = 'Bearer ' + provider.apiKey
   const extra = Object.assign({}, (cfg.defaults || {}).extraHeaders, provider.extraHeaders)
   for (const [k, v] of Object.entries(extra)) headers[k.toLowerCase()] = v
+  // 协议专属头（per-model protocol 改革的下游：协议换掉后鉴权头也得跟着换）。
+  // Anthropic Messages API 认 x-api-key 且强制 anthropic-version（多数 OpenAI 兼容中转也接受 Bearer，
+  // 但官方端点缺 version 直接 400 "anthropic-version is required"）。这里两者都给，兼容性最大。
+  if (api === 'anthropic') {
+    if (!headers['anthropic-version']) headers['anthropic-version'] = '2023-06-01'
+    if (provider.apiKey && !headers['x-api-key']) headers['x-api-key'] = provider.apiKey
+  } else if (api === 'gemini') {
+    if (provider.apiKey && !headers['x-goog-api-key']) headers['x-goog-api-key'] = provider.apiKey
+  }
   if (bodyBuf && bodyBuf.length) headers['content-length'] = bodyBuf.length
   return headers
 }
@@ -72,6 +112,48 @@ const STREAM_DROP_THRESHOLD = 3 // 同一上游连续流式中断 >= 该值，�
 // 连续断流绕开的冷却时长：到点后放行一次半开探测，避免上游「一断流就永久出局」（可用 defaults.streamDropCooldownMs 覆盖）
 const STREAM_DROP_COOLDOWN_MS = 60000
 const AFFINITY_TTL_MS = 300000  // 缓存亲和有效期（可用 defaults.affinityTtlMs 覆盖）：过期后主上游可被重新试用
+
+// ===== 思考强度（effort）：入站归一化 + 出口 per-route 整形 =====
+// thinking.type 值映射：OpenAI 系档位词（off/low/high…）→ 上游 thinking.type 词表
+// （开启/关闭/自动 = enabled/disabled/auto）。未命中映射的值原样透传（如 MiniMax 的 adaptive）。
+const THINKING_TYPE_MAP = { none: 'disabled', off: 'disabled', minimal: 'enabled', low: 'enabled', medium: 'enabled', high: 'enabled', xhigh: 'enabled', disabled: 'disabled', enabled: 'enabled', auto: 'auto' }
+// 「关闭思考」的等价拼写：各家客户端用词不一（OpenRouter/OpenAI Responses 系 `reasoning_effort:"none"`、
+// ZCode 内置模板 `{"reasoning":{"effort":"none"}}`、MiniMax 系 `thinking.type:"disabled"`、
+// 本地 models.<名>.effortOptions 里惯用 `"off"`）。统一归一到 **'none'**——这是 OpenAI/Responses/OpenRouter
+// 的官方档位词，也是这些上游唯一认的关闭拼写。
+// 方向别搞反（2026-09-17 纠错）：首版归一到 'off' 后 openrouter 回 400
+// `reasoning_effort: Invalid option: expected one of "max"|"xhigh"|"high"|"medium"|"low"|"minimal"|"none"`
+// ——该词表里**没有 off、只有 none**。本地 effortOptions 里写 'off' 不影响：白名单比较两侧同过 canonEffort，
+// 'off' 与 'none' 视为同一档；出口 thinking 形态再经 THINKING_TYPE_MAP 转 'disabled'。
+const EFFORT_NONE_ALIAS = new Set(['off', 'disabled', 'false'])
+export function canonEffort(v) { const s = String(v == null ? '' : v).trim().toLowerCase(); return EFFORT_NONE_ALIAS.has(s) ? 'none' : s }
+
+// 入站归一化：把客户端带来的思考强度收拢成网关唯一入口形态（平面 reasoning_effort）。
+// 背景（生产 2026-09-17 实录）：ZCode CLI 按 OpenRouter 惯例发**嵌套** `reasoning:{effort}`，网关此前没有任何
+// 入站字段处理、也无出站白名单，于是原样透传——OpenRouter 认得该字段所以打主上游一切正常，一旦 429 兜底到
+// 严格上游（jiyuan/tokenrhythm，LiteLLM 内核字段白名单校验）就 400 `UNKNOWN_FIELD 未知请求字段：reasoning.effort`，
+// 症状是「平时不报、只在兜底时炸」，极难归因。
+// 处理：effort 取值并入 reasoning_effort（客户端已显式给出平面字段时以平面字段为准），嵌套 reasoning 对象一律剔除
+// （含 summary——OpenAI chat 协议无对应位置，且它正是严格上游的拒绝点）；关闭类拼写归一为 off。
+export function normalizeEffortInput(body) {
+  if (!body || typeof body !== 'object') return null
+  const notes = []
+  const r = body.reasoning
+  if (r && typeof r === 'object' && !Array.isArray(r)) {
+    const raw = r.effort
+    const eff = (raw === undefined || raw === null || String(raw).trim() === '') ? null : String(raw).trim()
+    const flat = (body.reasoning_effort === undefined || body.reasoning_effort === null || String(body.reasoning_effort).trim() === '') ? null : String(body.reasoning_effort).trim()
+    if (eff !== null && flat === null) { body.reasoning_effort = eff; notes.push('reasoning.effort=' + eff + ' -> reasoning_effort=' + eff) }
+    else notes.push('剔除嵌套 reasoning 对象' + (eff !== null ? '（保留客户端显式 reasoning_effort=' + flat + '）' : ''))
+    delete body.reasoning
+  }
+  const cur = (body.reasoning_effort === undefined || body.reasoning_effort === null) ? null : String(body.reasoning_effort).trim()
+  if (cur !== null) {
+    const c = canonEffort(cur)
+    if (c !== cur) { body.reasoning_effort = c; notes.push('reasoning_effort ' + cur + ' -> ' + c + '（关闭思考的同义拼写归一）') }
+  }
+  return notes.length ? notes.join('；') : null
+}
 
 function maxConcur(cfg) { return (cfg.defaults && cfg.defaults.concurrency && cfg.defaults.concurrency.maxPerProvider) || 8 }
 function throttleOf(state, pid) {
@@ -162,9 +244,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   let routes = []
   let maxModel = 0
   let qps = 0
-  let injectedEffort = false
+  let bodyDirty = false        // body 已被网关改写（入站归一化 / 思考强度整形 / 跨模型兜底）：tbuf 必须重新序列化，不能沿用客户端原缓冲
+  let entryDefaultEffort = null // 入口模型（虚拟入口取链首）配置的默认思考档位：客户端没给档位时才启用
   let requestModel = null
   const dir = (cfg.defaults && cfg.defaults.directory) || []
+  // 入站归一化：嵌套 reasoning:{effort} → 平面 reasoning_effort（严格上游不认嵌套对象，见 normalizeEffortInput 注释）
+  const effNote = normalizeEffortInput(body)
+  if (effNote && log) log.warn('思考强度入站归一化', effNote)
+  if (effNote) bodyDirty = true
   const dialogueId = resolveDialogue(state, req, body)
   if (body && body.model) {
     let hit
@@ -179,23 +266,13 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     requestModel = hit.canonicalName
     maxModel = hit.def.maxConcurrent || 0
     qps = hit.def.qps || 0
-    // 思考强度（LiteLLM 风格）：每个模型可配允许档位列表，客户端传的档位不在列表内则本地直接拒绝，不放给上游
+    // 思考强度（LiteLLM 风格）：每个模型可配允许档位列表，客户端传的档位不在列表内则本地直接拒绝，不放给上游。
+    // 白名单两侧都过 canonEffort 归一后比较（off/none/disabled/false 同义），避免「关闭思考」换个拼写就判非法。
+    // 注意：这里只做**取值**校验（档位是否存在）；字段**形态**（平面 reasoning_effort 还是 thinking 对象）
+    // 下沉到每条路由按目标模型自身 effortFormat 决定（见 for(route) 内「思考强度 per-route 整形」）。
     const opts = hit.def.effortOptions
-    if (opts && opts.length && body.reasoning_effort !== undefined && body.reasoning_effort !== null && !opts.includes(String(body.reasoning_effort))) {
+    if (opts && opts.length && body.reasoning_effort !== undefined && body.reasoning_effort !== null && !opts.some((o) => canonEffort(o) === canonEffort(body.reasoning_effort))) {
       return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'reasoning_effort 不支持 ' + body.reasoning_effort + '（该模型允许：' + hit.def.effortOptions.join(', ') + '）', type: 'UnsupportedParamsError' } })) }
-    }
-    // 思考强度参数格式（可选，models.<名>.effortFormat）：
-    //   reasoning_effort（默认）：OpenAI 风格字符串，DeepSeek/OpenAI 系；
-    //   thinking：MiniMax 风格对象 { type }，如 MiniMax-M3 的 thinking:{"type":"adaptive"}。
-    // 客户端入口统一为 reasoning_effort，网关按格式转换；thinking 格式下删除 reasoning_effort 避免上游混淆。
-    const effFmt = hit.def.effortFormat || 'reasoning_effort'
-    const effVal = body.reasoning_effort
-    if (effFmt === 'thinking') {
-      const val = (effVal !== undefined && effVal !== null) ? String(effVal) : (hit.def.reasoning || '')
-      if (val) { body.thinking = { type: val }; delete body.reasoning_effort; injectedEffort = true }
-    } else if (hit.def.reasoning && effVal === undefined) {
-      // 模型配置默认值，客户端未指定时才注入（客户端自带优先）
-      body.reasoning_effort = hit.def.reasoning; injectedEffort = true
     }
     if (hit.def.isVirtualModel) {
       // 用自身 directory 快照建 routes（providers 空时回退模型默认上游+fallbacks，与 defaults 分支同构）
@@ -207,14 +284,12 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       if (!routes.length) return { kind: 'json', status: 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '虚拟模型 ' + hit.def.name + ' 的目录无可路由模型', type: 'no_route' } })) }
       // 决策 3 连锁：虚拟模型透传思考强度，但用链首真实模型自身的 effortOptions 补本地校验（廉价参数检查先行于额度判断）
       const d0vm = routes[0] && cfg.models && cfg.models[routes[0].model]
-      if (d0vm && d0vm.effortOptions && d0vm.effortOptions.length && body.reasoning_effort !== undefined && body.reasoning_effort !== null && !d0vm.effortOptions.includes(String(body.reasoning_effort))) {
+      if (d0vm && d0vm.effortOptions && d0vm.effortOptions.length && body.reasoning_effort !== undefined && body.reasoning_effort !== null && !d0vm.effortOptions.some((o) => canonEffort(o) === canonEffort(body.reasoning_effort))) {
         return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'reasoning_effort 不支持 ' + body.reasoning_effort + '（' + routes[0].model + ' 允许：' + d0vm.effortOptions.join(', ') + '）', type: 'UnsupportedParamsError' } })) }
       }
-      // 思考强度格式透传链首真实模型：链首是 thinking 格式（如 MiniMax-M3）时，把 reasoning_effort 入口转为 thinking 对象注入
-      if (d0vm && (d0vm.effortFormat || '') === 'thinking') {
-        const vmVal = (body.reasoning_effort !== undefined && body.reasoning_effort !== null) ? String(body.reasoning_effort) : (d0vm.reasoning || '')
-        if (vmVal) { body.thinking = { type: vmVal }; delete body.reasoning_effort; injectedEffort = true }
-      }
+      // 思考强度格式不再在此处按链首转换：改为每条路由按目标模型自身 effortFormat 整形（见 for(route) 内）。
+      // 链首形态只用于决定「客户端没给档位时是否注入链首的配置默认」，保持既有语义不变。
+      if (d0vm && (d0vm.effortFormat || '') === 'thinking' && d0vm.reasoning) entryDefaultEffort = d0vm.reasoning
       // 入口上下文约束（虚拟模型自身的 maxContext，区别于目录内各模型自己的限制）
       if (hit.def.maxContext > 0 && body.messages && estPromptTokens(body) >= hit.def.maxContext) {
         return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '超出虚拟模型 ' + hit.def.name + ' 的上下文上限 (' + hit.def.maxContext + ')', type: 'context_limit' } })) }
@@ -229,17 +304,16 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         for (const e of dir) { if (e && typeof e.model === 'string' && e.model) { const _m = cfg.models && cfg.models[e.model]; routes.push({ model: e.model, mode: (e.mode === 'onFail' ? 'onFail' : 'afterAll'), providers: (e.providers && e.providers.length ? e.providers.filter(Boolean) : (_m ? [ _m.provider, ...(_m.fallbacks || []) ].filter(Boolean) : [])) }) } }
         const d0 = routes[0] && cfg.models && cfg.models[routes[0].model]
         if (d0) { maxModel = d0.maxConcurrent || 0; qps = d0.qps || 0 }
-        // 虚拟共用名入口透传链首真实模型的思考强度格式（链首 thinking 格式时转 thinking 对象）
-        if (d0 && (d0.effortFormat || '') === 'thinking') {
-          const vmVal = (body.reasoning_effort !== undefined && body.reasoning_effort !== null) ? String(body.reasoning_effort) : (d0.reasoning || '')
-          if (vmVal) { body.thinking = { type: vmVal }; delete body.reasoning_effort; injectedEffort = true }
-        }
+        // 思考强度格式同样下沉到 per-route 整形；此处仅沿用既有语义：链首是 thinking 形态且有配置默认时才注入默认档位
+        if (d0 && (d0.effortFormat || '') === 'thinking' && d0.reasoning) entryDefaultEffort = d0.reasoning
       } else {
         routes.push({ model: null, providers: [hit.def.provider].filter(Boolean) })
         if (!(cfg.defaults && cfg.defaults.provider)) return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '未指定默认上游（请配置 defaults.provider 或 defaults.directory）', type: 'missing_model' } })) }
       }
     } else {
       // 路由序列：先本模型自身上游，再按 defaults.directory 顺序做跨模型兜底（首个为默认）
+      // 真实模型入口：客户端没给档位时，用本模型配置的 reasoning 默认值（客户端自带优先）
+      entryDefaultEffort = hit.def.reasoning || null
       routes.push({ model: requestModel, mode: 'afterAll', providers: [hit.def.provider, ...(hit.def.fallbacks || [])].filter(Boolean) })
       for (const e of dir) {
         if (!e || typeof e.model !== 'string' || !e.model || e.model === requestModel) continue
@@ -259,6 +333,10 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       if (!(cfg.defaults && cfg.defaults.provider)) return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '\u672a\u6307\u5b9a model\uff0c\u4e14\u672a\u8bbe\u7f6e\u9ed8\u8ba4\u4e0a\u6e38\uff08\u8bf7\u5728\u9762\u677f\u300c\u9ed8\u8ba4\u4e0a\u6e38\u300d\u4e2d\u9009\u62e9\uff09', type: 'missing_model' } })) }
     }
   }
+  // 思考强度取值（单一真源）：客户端显式档位 > 入口模型（虚拟入口即链首）的配置默认值。
+  // 字段**形态**不在此处决定——每条路由按目标模型自身 effortFormat 整形，见下方 for(route) 内。
+  const _clientEff = (body && body.reasoning_effort !== undefined && body.reasoning_effort !== null && String(body.reasoning_effort).trim() !== '') ? canonEffort(body.reasoning_effort) : null
+  const gwEffort = _clientEff !== null ? _clientEff : (entryDefaultEffort ? canonEffort(entryDefaultEffort) : null)
   const started = Date.now()
   const modelName = (body && body.model) || (routes[0] && routes[0].model) || (cfg.defaults && cfg.defaults.provider) || (routes[0] && routes[0].providers && routes[0].providers[0]) || null
   const bm = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
@@ -298,7 +376,18 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     if (!pid || !cfg.providers[pid]) continue
     const prov = buildProvider(cfg, pid)
     const h = ensureHst(state, pid)
-    if (!healthy(h, Date.now())) { markFail(state, pid, prov.circuit); continue } // 熔断中：跳过，视为失败推进
+    if (!healthy(h, Date.now())) {
+      // 熔断中：跳过该上游并推进。此处**不得**调 markFail——markFail 在 fails>=th 时会执行
+      // openUntil = now + cd，而每个请求都会走到这里，等于把冷却窗口无限续期：只要流量不断，
+      // 上游永远等不到半开，整条兜底链退化成单点。
+      // 生产 09-11 实录：jiyuan 两次流中断熔断后剩余冷却被钉在 120s（实测 openDurationMs=1500
+      // 时 6s 内上游零次被重试），其承载的 qwen3.8-flash/glm-5.3-flash 被永久排除，
+      // 链上只剩 gmi 的 MiniMax-M3，gmi 一欠费整条链即断。
+      // 与下方 streamDrops 绕开分支同理（那里注释已点名 jiyuan）：healthy() 只要求 openUntil 过期，
+      // 不加 markFail 时冷却到点自然放行一次，收敛由真实探测结果决定。
+      log && log.warn('skip provider (熔断中)', pid, '剩余冷却 ' + Math.ceil((h.openUntil - Date.now()) / 1000) + 's')
+      continue
+    }
     // 429 冷却：只在本请求预算可承受时等待，否则跳过该上游（绝不为了等冷却把客户端挂死）
     if (state.throttle[pid] && state.throttle[pid].rateUntil > Date.now()) {
       const waitMs = state.throttle[pid].rateUntil - Date.now()
@@ -326,17 +415,85 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     cycleTried = true
     if (chainModels[chainModels.length - 1] !== serving) chainModels.push(serving)
     agg(state, pid, 'requests', 1); state.st.counters.requests += 1; bm.requests += 1
-    // 跨模型兜底：把发给上游的 model 名改写为该兜底模型名
-    // 模型名与上游 model id 分离：models.<name>.upstreamModel 优先
-    const upModel = (smd && smd.upstreamModel) || route.model
-    const routeBody = (route.model && body && upModel !== body.model) ? Object.assign({}, body, { model: upModel }) : body
-    let turl = url, tbuf = bodyBuf, api = prov.api
-    // 上游 wire：provider.api 声明协议；Responses 原生上游必须显式 api=responses
+    // 跨模型兜底：把发给上游的 model 名改写为该兜底模型名。
+    // 改革（protocol-per-model）：同一上游的不同模型可以各走不同协议（如 OpenCode Zen 的 union-alpha
+    // 只接受 Anthropic /v1/messages，同上游其它模型走 OpenAI /v1/chat/completions），因此协议的落点从
+    // 「上游」下沉到「模型」：models.<名>.api > providers.<pid>.api > openai（缺省仍走上游级设置，向后兼容）。
+    const _md = (cfg.models && route.model && cfg.models[route.model]) || null
+    // per-上游模型名覆盖（可选）：同一模型在不同上游叫不同名字（如 union-alpha 在 OpenRouter 侧为
+    // stealth/union-alpha），跨上游兜底时不映射会拿到 404，备用等于没有。
+    const _ovr = (_md && _md.providerModels) || null
+    // G2：网关暴露名与上游 model id 分离（providerModels[pid] > upstreamModel > route.model）
+    const servingName = (_ovr && _ovr[pid]) || (_md && _md.upstreamModel) || route.model
+    let routeBody = (servingName && body && servingName !== body.model) ? Object.assign({}, body, { model: servingName }) : body
+    // max_tokens 归一化（按目标模型的输出上限收敛）：不同上游对取值范围的容忍度不同，网关原样透传会让
+    // 严格上游把整个请求判为参数非法，而 400 属请求参数类错误、换模型也一样失败——不清掉就会拖垮整条兜底链。
+    //   · 非正整数 / 非整数（如 0、负数）：删除该字段，交由上游取默认。多数上游把 0 当「不限」，
+    //     但 Atria 直接 400 "max_tokens must be an integer between 1 and 65536"。
+    //   · 超过 models.<模型名>.maxTokensMax（可选；缺省 / 0 = 不限制）：钳到该上限。
+    if (body && body.max_tokens !== undefined && body.max_tokens !== null) {
+      const _mt = Number(body.max_tokens)
+      const _cap = Number((_md && _md.maxTokensMax) || 0) || 0
+      let _fix = null
+      if (!Number.isFinite(_mt) || !Number.isInteger(_mt) || _mt <= 0) _fix = 'drop'
+      else if (_cap > 0 && _mt > _cap) _fix = _cap
+      if (_fix !== null) {
+        if (routeBody === body) routeBody = Object.assign({}, body)
+        if (_fix === 'drop') { delete routeBody.max_tokens; log && log.warn('max_tokens 归一化(删除非法值)', pid, '原值=' + body.max_tokens + ' -> 交由上游取默认') }
+        else { routeBody.max_tokens = _fix; log && log.warn('max_tokens 归一化(钳制)', pid, _mt + ' -> ' + _fix + ' (模型上限)') }
+      }
+    }
+    // 思考强度 per-route 整形（潜伏项修复）：字段**形态**由本路由模型自身的 effortFormat 决定。
+    // 此前只在入口按「请求模型 / 链首模型」的形态注入一次，而 body 是各路由共享的——一旦兜底切到
+    // effortFormat 不同的模型就形态错配：链首 reasoning_effort、兜底模型 thinking（union-alpha → qwen3.8-flash）
+    // 时后者拿不到自己认的字段；反向（链首 thinking、兜底 reasoning_effort）则多送一个它不认的对象。
+    // 取值不动（客户端显式档位 > 入口默认档位），只换形态；两字段互斥，避免同一个 body 同时带两者。
+    if (gwEffort) {
+      const _fmt = (_md && _md.effortFormat) || 'reasoning_effort'
+      if (_fmt === 'thinking') {
+        const _mapped = THINKING_TYPE_MAP[gwEffort] || gwEffort
+        const _curType = (routeBody.thinking && typeof routeBody.thinking === 'object') ? String(routeBody.thinking.type == null ? '' : routeBody.thinking.type) : null
+        if (_curType !== _mapped || routeBody.reasoning_effort !== undefined) {
+          if (routeBody === body) routeBody = Object.assign({}, body)
+          routeBody.thinking = Object.assign({}, (routeBody.thinking && typeof routeBody.thinking === 'object') ? routeBody.thinking : {}, { type: _mapped })
+          delete routeBody.reasoning_effort
+          bodyDirty = true
+        }
+      } else {
+        const _curFlat = (routeBody.reasoning_effort === undefined || routeBody.reasoning_effort === null) ? null : String(routeBody.reasoning_effort)
+        if (_curFlat !== gwEffort || routeBody.thinking !== undefined) {
+          if (routeBody === body) routeBody = Object.assign({}, body)
+          routeBody.reasoning_effort = gwEffort
+          delete routeBody.thinking
+          bodyDirty = true
+        }
+      }
+    }
+    let turl = url, tbuf = bodyBuf
+    const api = (_md && _md.api) || prov.api
+    // G2 协议维度：native Responses 必须落到 responses 上游；chat 请求不得落到 responses 上游
     if (wire === 'native' && api !== 'responses') { log && log.warn('skip provider (not a responses upstream)', pid); continue }
+    if (wire === 'chat' && api === 'responses') { log && log.warn('skip provider (native responses upstream, chat wire)', pid); continue }
     let degraded = false
-    if (api !== 'openai' && api !== 'responses' && routeBody) { const ad = adapterFor(api); if (!ad) { log && log.warn('skip provider (unsupported api)', pid, api); continue } const r = ad.build(routeBody); if ((routeBody.tools || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true } turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body)) }
-    else if ((injectedEffort || routeBody !== body) && routeBody) tbuf = Buffer.from(JSON.stringify(routeBody))
-    const headers = buildHeaders(req, prov, tbuf, cfg)
+    // 上游不给流时的降级（可选 models.<名>.forceNoStream）：
+    // 实测 OpenCode Zen 的 union-alpha —— 流式请求返回 200 + content-type: text/event-stream，
+    // 但整个 SSE 体零字节随即关闭。客户端是 OpenCode 等原生客户端时看得懂；通用 OpenAI 客户端只会
+    // 「头 2xx + 立刻断流」，被网关判成假成功去切下一上游，白等一个首字节周期。
+    // 开了本开关：网关改为非流式向上游取完整结果，再借 asSSE 通道以单帧 SSE + [DONE] 交付。
+    if ((_md && _md.forceNoStream) && routeBody && routeBody.stream) {
+      if (routeBody === body) routeBody = Object.assign({}, body)
+      routeBody.stream = false
+      degraded = true
+      log && log.warn('流式降级(forceNoStream)', pid, 'model=' + (serving || '-') + ' -> 非流式拉取后以 SSE 交付')
+    }
+    if (api !== 'openai' && api !== 'responses' && routeBody) {
+      const ad = adapterFor(api)
+      if (!ad) { log && log.warn('skip provider (unsupported api)', pid, api); continue }
+      const r = ad.build(routeBody)
+      if ((routeBody.tools || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true }
+      turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body))
+    } else if ((bodyDirty || routeBody !== body) && routeBody) tbuf = Buffer.from(JSON.stringify(routeBody))
+    const headers = buildHeaders(req, prov, tbuf, cfg, api)
     // 会话头透传（OpenCode Go / DSH 等按会话粘性路由的上游）；只透传白名单，不转发 Cookie/鉴权
     if (prov._def && (prov._def.passthroughSession || prov._def.opencodeSession)) {
       for (const h of ['session-id', 'session_id', 'thread-id', 'thread_id', 'x-codex-session-id', 'x-session-id', 'x-conversation-id']) {
@@ -411,22 +568,33 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         const parsed = tryParse(out)
         const usage = parsed && parsed.usage
         if (usage) {
+          // usage 字段归一化：此处拿到的是**上游原始响应**（非 openai 协议的转换在下面才做），
+          // 字段名随协议而异 —— Anthropic 用 input_tokens / output_tokens（**没有** total_tokens），
+          // Gemini 用 usageMetadata.promptTokenCount / candidatesTokenCount。
+          // 不归一化则 token 记账全部落到 `usage.total_tokens || 0` = 0：
+          // 表现是面板与托盘的 token 数纹丝不动、只有 requests 在涨（2026-09-17 union-alpha 实测）。
+          // 注意 cacheHitMiss 仍要吃**原始** usage（它内部按协议取缓存字段），故原始对象不动、只改取数。
+          const _n = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0) ? v : 0
+          const _um = usage.usageMetadata || {}
+          const _in = _n(usage.prompt_tokens) || _n(usage.input_tokens) || _n(_um.promptTokenCount)
+          const _out = _n(usage.completion_tokens) || _n(usage.output_tokens) || _n(_um.candidatesTokenCount)
+          const _tot = _n(usage.total_tokens) || _n(_um.totalTokenCount) || (_in + _out)
           const c = cacheHitMiss(api, usage)
           const hit = c.hit, miss = c.miss
           noteCacheStat(state, serving || modelName, pid, hit, miss) // 按(模型,上游)记录缓存命中，供命中率路由与趋势告警使用
-          agg(state, pid, 'tokens', usage.total_tokens || 0); state.stats.global.tokens += usage.total_tokens || 0
+          agg(state, pid, 'tokens', _tot); state.stats.global.tokens += _tot
           // 按"实际响应的模型"累计其额度用量（日额度 + 累计额度）；输入/输出单独记（命中+未命中=输入）
           const sg = state.stats.byModel[serving || modelName] = state.stats.byModel[serving || modelName] || { requests: 0, errors: 0 }
-          sg.tokens = (sg.tokens || 0) + (usage.total_tokens || 0)
-          sg.inTokens = (sg.inTokens || 0) + (usage.prompt_tokens || 0)
-          sg.outTokens = (sg.outTokens || 0) + (usage.completion_tokens || 0)
-          tallyDaily(state, serving || modelName, usage.total_tokens || 0, hit, miss, usage.prompt_tokens || 0, usage.completion_tokens || 0)
-          tallyVirtual(state, modelName, serving, usage.total_tokens || 0, usage.prompt_tokens || 0, usage.completion_tokens || 0)
-          tallyDialogue(state, dialogueId, usage.total_tokens || 0, hit, miss)
+          sg.tokens = (sg.tokens || 0) + _tot
+          sg.inTokens = (sg.inTokens || 0) + _in
+          sg.outTokens = (sg.outTokens || 0) + _out
+          tallyDaily(state, serving || modelName, _tot, hit, miss, _in, _out)
+          tallyVirtual(state, modelName, serving, _tot, _in, _out)
+          tallyDialogue(state, dialogueId, _tot, hit, miss)
         }
         if (api !== 'openai') { const p = tryParse(out); if (p) { let nb; try { nb = Buffer.from(JSON.stringify(adapterFor(api).fromUpstream(p))) } catch { nb = null } if (nb) out = nb } }
         // 「名字没对上」加固：跨模型兜底改写请求 model 后，响应 model 回写为客户端请求名，避免客户端续写/统计错位
-        if (body && body.model && route.model && route.model !== body.model) {
+        if (body && body.model && servingName && servingName !== body.model) {
           const p2 = tryParse(out)
           if (p2 && p2.model) { p2.model = body.model; out = Buffer.from(JSON.stringify(p2)) }
         }
@@ -450,6 +618,19 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         lastErr = Object.assign(new Error('upstream ' + result.status + ' ' + (serving || '')), { status: result.status })
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
         log && log.warn('流已开始后上游返回 ' + result.status + '，按断流继续切下一上游', 'provider=' + pid, 'model=' + (serving || '-'))
+        continue
+      }
+      if (isUpstreamSideFailure(result.status, out)) {
+        // 上游侧故障（4xx 但语义是「我/我的下游出错了」，见 isUpstreamSideFailure 注释）：
+        // 计为**真·失败**（进熔断计数——反复这么报的上游该被冷却，而不是每笔请求都白撞一次），
+        // 保留原始响应供整链全败时回显真实错误，继续目录链下一上游/模型。
+        // 不改 rejectedOnly：一轮走完即收尾，不必空转到 loopMs（与 403/404 的取舍一致）。
+        last4xx = { status: result.status, body: out }
+        last4xxPid = pid
+        lastErr = Object.assign(new Error('upstream-side ' + result.status + ' ' + (serving || '')), { status: result.status })
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
+        markFail(state, pid, prov.circuit)
+        log && log.warn('上游侧故障(4xx 语义为上游出错)', 'provider=' + pid, 'status ' + result.status, '-> next provider/model', out.length ? 'body=' + out.toString('utf8', 0, 300).replace(/\n/g, ' ') : '')
         continue
       }
       if (isModelLevelRejection(result.status, out)) {

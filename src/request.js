@@ -148,6 +148,17 @@ async function readSmall(stream, limit = 8192) {
   return Buffer.concat(chunks).toString('utf8').slice(0, limit)
 }
 
+// 上游 URL 拼接（规范化）：baseUrl 约定不带版本段（网关自动拼 /v1/...），但大量 OpenAI 兼容
+// 服务的文档示例是带 /v1 的（如 https://api.openai.com/v1），用户照抄即踩 /v1/v1/ 双拼 404
+// （生产 09-04 实录：kuaipao.pro/v1 → Invalid URL (POST /v1/v1/chat/completions)）。
+// 此处容错：baseUrl 尾斜杠归一；base 已以 /v1 结尾且 path 又以 /v1/ 开头时去掉 base 的版本段。
+export function upstreamUrl(provider, path) {
+  let base = String(provider.baseUrl || '').replace(/\/+$/, '')
+  const p = String(path || '')
+  if (/^\/v1\//.test(p) && /\/v1$/.test(base)) base = base.replace(/\/v1$/, '')
+  return new URL(base + (provider.pathPrefix || '') + p)
+}
+
 /**
  * 转发 + 指数退避重试。契约（供外层 fallback/熔断）：
  *  - resolve { ok:true }         → 2xx，可直接透传
@@ -160,7 +171,7 @@ async function readSmall(stream, limit = 8192) {
  * opts.noRetry：非幂等（tool）请求，禁止同上游自动重放。
  */
 export async function forward(provider, path, method, headers, bodyBuf, opts = {}, log) {
-  const url = new URL(provider.baseUrl + (provider.pathPrefix || '') + path)
+  const url = upstreamUrl(provider, path)
   const retry = Object.assign({ maxAttempts: 1, initialDelayMs: 500, maxDelayMs: 8000, jitter: 0.2 }, opts.retry)
   const timeout = Object.assign({ connectMs: 10000, firstByteMs: 60000, idleMs: 60000 }, opts.timeout)
   const overallMs = timeout.overallMs || 0
@@ -209,7 +220,7 @@ export async function forward(provider, path, method, headers, bodyBuf, opts = {
 
 // 探测上游可用性（在线检活）：GET {base}{prefix}/v1/models，单次不重试
 export function probe(provider) {
-  const url = new URL(provider.baseUrl + (provider.pathPrefix || '') + '/v1/models')
+  const url = upstreamUrl(provider, '/v1/models')
   const { mod, reqOpts } = ctxFor(provider, url, 'GET', {})
   return new Promise((resolve) => {
     const headers = { 'user-agent': 'model-gateway/0.1', accept: 'application/json' }
@@ -231,7 +242,7 @@ export function probe(provider) {
 // 缓存预热：向模型上游发送一个携带长 system 前缀的最小请求（max_tokens=1），保持厂商侧 prefix cache 存活。
 // 在「预热」语义下只关心能否成功送达（拿到 2xx 响应头），不读响应体、不累计额度，避免污染配额统计。
 export function warm(provider, model, systemPrompt, opts = {}, log) {
-  const url = new URL(provider.baseUrl + (provider.pathPrefix || '') + '/v1/chat/completions')
+  const url = upstreamUrl(provider, '/v1/chat/completions')
   const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json' }
   if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
   const payload = Buffer.from(JSON.stringify({ model: model, messages: [{ role: 'system', content: systemPrompt }], max_tokens: 1, stream: false }))
@@ -259,7 +270,7 @@ export function warm(provider, model, systemPrompt, opts = {}, log) {
 // 否则间歇性「头 2xx + 流中断」的上游会被探活误判为已恢复、亲和被切回故障主上游（回切后又立刻断流）。
 // 兼容返回 JSON 的上游（非 event-stream 的 2xx 直接视为恢复）。
 export function probeChat(provider, model, message, opts = {}, log) {
-  const url = new URL(provider.baseUrl + (provider.pathPrefix || '') + '/v1/chat/completions')
+  const url = upstreamUrl(provider, '/v1/chat/completions')
   const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'text/event-stream' }
   if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
   const payload = Buffer.from(JSON.stringify({ model: model, messages: [{ role: 'user', content: message || 'ping' }], max_tokens: 1, stream: true }))
@@ -297,7 +308,7 @@ export function probeChat(provider, model, message, opts = {}, log) {
 // 模型连通测试：向该模型所属上游发一个极小量的真实 chat 请求（max_tokens=1），验证"这个模型名能真正被调用"
 // 返回 { ok, code, ms, err, body }，body 为响应首片段用于展示后端告警。
 export function probeModel(provider, model) {
-  const url = new URL(provider.baseUrl + (provider.pathPrefix || '') + '/v1/chat/completions')
+  const url = upstreamUrl(provider, '/v1/chat/completions')
   const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }
   if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
   const payload = Buffer.from(JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false }))
@@ -305,22 +316,32 @@ export function probeModel(provider, model) {
   const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
   return new Promise((resolve) => {
     const started = Date.now()
+    let settled = false
+    const done = (o) => { if (!settled) { settled = true; resolve(o) } }
     const req = mod.request(reqOpts, (res) => {
       res.setTimeout(20000, () => res.destroy())
       const c = []
-      res.on('data', (d) => c.push(d))
+      let total = 0
+      res.on('data', (d) => {
+        // 探测响应体上限：上游（尤其不可信中转站）可返回超大 body 打爆内存；超限即判失败并释放连接
+        total += d.length
+        if (total > 8 * 1024 * 1024) { try { res.destroy() } catch { } ; done({ ok: false, code: res.statusCode, ms: Date.now() - started, err: 'probe response body too large (>8MB)' }); return }
+        c.push(d)
+      })
       res.on('end', () => {
         const raw = Buffer.concat(c)
-        // 兼容上游缺 content-encoding 头但仍返回 gzip：按魔数 1f 8b 尝试解压，避免 JSON 解析/统计断链
-        const buf = (raw.length >= 2 && raw[0] === 0x1f && raw[1] === 0x8b) ? (() => { try { return gunzipSync(raw) } catch { return raw } })() : raw
+        // 兼容上游缺 content-encoding 头但仍返回 gzip：按魔数 1f 8b 尝试解压，避免 JSON 解析/统计断链。
+        // 解压同样要带上限，否则探测路径也会被 gzip 炸弹打成 OOM（与 forward.js 的 maybeGunzip 同源风险）。
+        const buf = (raw.length >= 2 && raw[0] === 0x1f && raw[1] === 0x8b) ? (() => { try { return gunzipSync(raw, { maxOutputLength: 8 * 1024 * 1024 }) } catch { return raw } })() : raw
         const text = buf.toString('utf8').trim()
         const ok = res.statusCode >= 200 && res.statusCode < 300
-        resolve({ ok, code: res.statusCode, ms: Date.now() - started, err: ok ? null : (text.slice(0, 120) || ('HTTP ' + res.statusCode)) })
+        done({ ok, code: res.statusCode, ms: Date.now() - started, err: ok ? null : (text.slice(0, 120) || ('HTTP ' + res.statusCode)) })
       })
+      res.on('error', (e) => done({ ok: false, code: res.statusCode, ms: Date.now() - started, err: (e && e.code) || (e && e.message) || 'response error' }))
     })
     // 90s：思考型模型（如 stealth/ox-alpha）响应 5s~90s+ 波动，且上游代理内部重试期间不发字节；30s 会把可用模型误报成 ETIMEDOUT
     req.setTimeout(90000, () => req.destroy(Object.assign(new Error('probe timeout'), { code: 'ETIMEDOUT' })))
-    req.on('error', (err) => resolve({ ok: false, code: null, ms: Date.now() - started, err: err.code || err.message }))
+    req.on('error', (err) => done({ ok: false, code: null, ms: Date.now() - started, err: err.code || err.message }))
     req.write(payload)
     req.end()
   })

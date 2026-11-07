@@ -44,8 +44,9 @@ export function createBudget(cfg = {}, opts = {}) {
   const retry = (cfg && cfg.retry) || {}
   const timeout = (cfg && cfg.timeout) || {}
   const configured = Number(b.maxAttempts) > 0 ? Number(b.maxAttempts) : 0
-  const maxAttempts = opts.noReplay ? 1
-    : (configured || Math.max(1, Number(retry.maxAttempts) || 0) || DEFAULT_MAX_ATTEMPTS)
+  // 预算是「整请求总尝试数」，不能被 retry.maxAttempts（单上游重试数）压低：
+  // 否则 retry.maxAttempts=1 时第一个上游就耗尽预算，目录 fallback 一个都走不到。
+  const maxAttempts = opts.noReplay ? 1 : (configured || DEFAULT_MAX_ATTEMPTS)
   const maxMs = Number(b.maxMs) > 0 ? Number(b.maxMs) : (Number(timeout.loopMs) > 0 ? Number(timeout.loopMs) : DEFAULT_MAX_MS)
   return {
     traceId: opts.traceId || '',
@@ -72,8 +73,10 @@ export function createBudget(cfg = {}, opts = {}) {
       if (!(ms > 0)) return true
       return (Date.now() + ms) < (this.startedAt + this.maxMs)
     },
+    lastFailure: null,
     noteFailure(pid, status, attribution) {
-      this.failures.push({ pid: pid || null, status: status || null, attribution: attribution || null, at: Date.now() })
+      this.lastFailure = { pid: pid || null, status: status || null, attribution: attribution || null, at: Date.now() }
+      this.failures.push(this.lastFailure)
       if (this.failures.length > 20) this.failures.shift()
     },
     snapshot() {
@@ -94,13 +97,16 @@ export function isToolBearingBody(body) {
 
 // 预算耗尽时的统一错误：保留最后一次上游状态与 429 归因，供 forwardChain 映射为 HTTP 响应。
 export function budgetError(budget, last = {}) {
+  // 用最近一次真实上游失败的状态收尾（402/400 等），只有完全没有上游失败时才退化为 429/408
+  const lf = budget && budget.lastFailure ? budget.lastFailure : {}
+  const src = (last && last.status) ? last : lf
   const e = new Error('request attempt budget exhausted')
   e.code = 'MG_BUDGET_EXHAUSTED'
-  e.status = last.status || (budget.exhausted === 'time' ? 408 : 429)
+  e.status = src.status || (budget.exhausted === 'time' ? 408 : 500)
   e.retries = Math.max(0, budget.attempts - 1)
   e.providerFail = true
   e.budget = budget.snapshot()
-  e.retryAfter = (last.retryAfter != null) ? last.retryAfter : null
-  e.attribution = last.attribution || null
+  e.retryAfter = (src && src.retryAfter != null) ? src.retryAfter : null
+  e.attribution = (src && src.attribution) || null
   return e
 }

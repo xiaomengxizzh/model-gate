@@ -12,6 +12,13 @@ function makeOA(model, text, finish, extra) {
 }
 function hasTools(b) { return !!(b && (b.tools || b.tool_choice)) }
 
+// Anthropic stop_reason → OpenAI finish_reason。
+// OpenAI 客户端的合法取值只有 stop / length / tool_calls / content_filter 四个，
+// Anthropic 的 end_turn / max_tokens / tool_use / stop_sequence 直接透传属非标值，
+// 严格 harness（按 finish_reason 分支的）会走进未知分支。流式与非流式共用此表，保证两条路径一致。
+const STOP_MAP = { end_turn: 'stop', max_tokens: 'length', tool_use: 'tool_calls', stop_sequence: 'stop', pause_turn: 'stop', refusal: 'stop', model_context_window_exceeded: 'length' }
+function mapStop(sr) { return (sr && STOP_MAP[sr]) || 'stop' }
+
 // ================= Anthropic =================
 const anthropic = {
   build(openaiBody) {
@@ -31,8 +38,21 @@ const anthropic = {
     }
     const out = { model: openaiBody.model, max_tokens: openaiBody.max_tokens || openaiBody.max_completion_tokens || 4096, messages }
     if (system) out.system = system
+    const _th = thinkingSpec(openaiBody)
     if (openaiBody.temperature != null) out.temperature = openaiBody.temperature
     if (openaiBody.top_p != null) out.top_p = openaiBody.top_p
+    if (_th) {
+      // Anthropic extended thinking 硬约束：
+      //  · temperature / top_p 必须为 1 或整个省略（开了思考再传其它值，官方报错；
+      //    OpenCode Zen 类中转容忍度高，但网关侧统一按官方口径剔除以保证跨上游一致）；
+      //  · max_tokens 必须严格大于 budget_tokens，否则 Anthropic 报 "budget_tokens must be less than max_tokens"。
+      // 注意：思考 token 计入输出计费，但**不占用** max_tokens 的回答预算——Anthropic 的 max_tokens 是回答上限。
+      delete out.temperature
+      delete out.top_p
+      if (!(Number(out.max_tokens) > _th.budget_tokens)) out.max_tokens = _th.budget_tokens + 1024
+      out.thinking = _th
+    }
+    if (openaiBody.stop != null) out.stop_sequences = Array.isArray(openaiBody.stop) ? openaiBody.stop : [openaiBody.stop]
     if (Array.isArray(openaiBody.tools) && openaiBody.tools.length) out.tools = openaiBody.tools.map((t) => ({ name: t.function.name, description: (t.function.description || '') + '', input_schema: t.function.parameters || { type: 'object', properties: {} } }))
     if (openaiBody.tool_choice) out.tool_choice = mapChoice(openaiBody.tool_choice)
     if (openaiBody.stream != null) out.stream = openaiBody.stream
@@ -45,10 +65,25 @@ const anthropic = {
       if (p.type === 'text') text += p.text || ''
       if (p.type === 'tool_use') toolCalls.push({ id: p.id || '', type: 'function', function: { name: p.name || '', arguments: JSON.stringify(p.input || {}) } })
     }
-    const finish = toolCalls.length ? 'tool_calls' : ((o && o.stop_reason) || 'stop')
-    return makeOA((o && o.model) || '', text, finish, { toolCalls })
+    const finish = toolCalls.length ? 'tool_calls' : mapStop(o && o.stop_reason)
+    // usage：Anthropic 原生字段（input/output_tokens、cache_read_input_tokens）必须带上——
+    // 网关的缓存命中统计 cacheHitMiss('anthropic') 直接读这几个字段；只给 OpenAI 风格三件套会让计费/命中率全变 0。
+    const au = (o && o.usage) || {}
+    const inT = Number(au.input_tokens) || 0, outT = Number(au.output_tokens) || 0
+    const usage = Object.assign({}, au, { prompt_tokens: inT, completion_tokens: outT, total_tokens: inT + outT })
+    return makeOA((o && o.model) || '', text, finish, { toolCalls, usage })
   },
   extractStreamContent(dataStr) { try { const j = JSON.parse(dataStr); const d = j && j.delta; return (d && typeof d.text === 'string') ? d.text : '' } catch { return '' } },
+  // 流式结束原因：Anthropic 把 stop_reason 放在 message_delta 事件里（不是 content_block_delta），
+  // 由本函数抽出来映射成 OpenAI 的 finish_reason。不做这步，客户端永远收不到 finish_reason，
+  // 严格实现（等 finish_reason 才收尾的 harness）会一直挂在 loading 态。
+  extractStreamFinish(dataStr) {
+    try {
+      const j = JSON.parse(dataStr)
+      const sr = j && j.delta && j.delta.stop_reason
+      return sr ? mapStop(sr) : ''
+    } catch { return '' }
+  },
 }
 function mapChoice(c) {
   if (c === 'none') return { type: 'none' }
@@ -57,6 +92,27 @@ function mapChoice(c) {
   return { type: 'auto' }
 }
 function safeJSON(s) { if (s == null) return {}; try { return typeof s === 'string' ? JSON.parse(s) : s } catch { return {} } }
+
+// 思考强度 → Anthropic extended thinking 的 token 预算档位表。
+// Anthropic 侧 thinking 只有一个可调旋钮 budget_tokens（思考专用预算，独立于 max_tokens 之外，
+// 但必须 < max_tokens）。客户端统一入口仍是 OpenAI 风格的 reasoning_effort，网关在此做档位→预算映射。
+const THINK_BUDGET = { minimal: 1024, low: 2048, medium: 8192, high: 16384, xhigh: 32768, enabled: 8192, on: 8192, adaptive: 8192 }
+const THINK_OFF = ['off', 'none', 'disabled', 'false']
+function thinkingSpec(openaiBody) {
+  const thIn = openaiBody && openaiBody.thinking
+  if (thIn && typeof thIn === 'object') {
+    const t = String(thIn.type || 'enabled')
+    if (THINK_OFF.includes(t)) return null
+    const budget = Number(thIn.budget_tokens) > 0 ? Number(thIn.budget_tokens) : (THINK_BUDGET[t] || THINK_BUDGET.enabled)
+    return { type: 'enabled', budget_tokens: budget }
+  }
+  if (thIn === true) return { type: 'enabled', budget_tokens: THINK_BUDGET.enabled }
+  const eff = openaiBody && openaiBody.reasoning_effort
+  if (eff == null) return null
+  const lvl = String(eff)
+  if (THINK_OFF.includes(lvl)) return null
+  return { type: 'enabled', budget_tokens: THINK_BUDGET[lvl] || THINK_BUDGET.enabled }
+}
 
 // ================= Gemini =================
 const gemini = {
