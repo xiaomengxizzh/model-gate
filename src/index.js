@@ -11,11 +11,14 @@ import { isStreamResponse, writeUpstreamHeaders, relayStream, endInterruptedStre
 import { forwardChain, routeLimit, virtualQuotaExceeded } from './forward.js'
 import { todayKey } from './shared.js'
 import { redactHeaders, redactProxy, redactBody, redactText, MASK } from './redact.js'
+import { isToolBearingBody } from './budget.js'
+import { responsesToChat, chatToResponses, relayChatAsResponses, relayNativeResponses, UnsupportedResponsesInput } from './responses.js'
 import { randomUUID } from 'node:crypto'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
-const DATA_PATHS = CHAT_PATHS
+const RESPONSES_PATHS = new Set(['/v1/responses', '/responses'])
+const DATA_PATHS = new Set([...CHAT_PATHS, ...RESPONSES_PATHS])
 const ADMIN_PAGE = new URL('./admin.html', import.meta.url)
 
 const FAIL_OPEN_THRESHOLD = 5       // 连续失败熔断阈值（放宽：平台偶发慢/抖不轻易熔断）
@@ -429,6 +432,94 @@ function makeHandler(state) {
     sendJson(res, 401, { error: '未授权：请在控制面板设置管理令牌（MG_ADMIN_TOKEN）' })
     return false
   }
+  function sendJsonWith(res, status, obj, extraHeaders) {
+    if (res.headersSent || res.destroyed) return
+    const body = JSON.stringify(obj)
+    res.writeHead(status, Object.assign({ 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) }, extraHeaders || {}))
+    res.end(body)
+  }
+  function endResponsesStream(res, note) {
+    if (!res || res.destroyed || res.writableEnded) return
+    try {
+      res.write('event: response.failed\ndata: ' + JSON.stringify({ type: 'response.failed', sequence_number: 0, response: { status: 'failed', error: { code: 'stream_interrupted', message: note || '上游流式响应中断' } } }) + '\n\n')
+    } catch {}
+    try { res.end() } catch {}
+  }
+  // G2：/v1/responses 一等入口——鉴权/额度/路由/熔断/记账全部复用 forwardChain，不做旁路。
+  async function handleResponses(req, res, body, traceId) {
+    const model = body && typeof body.model === 'string' ? body.model.trim() : ''
+    if (!model) return sendJson(res, 400, { error: { message: 'Responses 请求缺少 model', type: 'invalid_request_error', code: 'missing_model', trace_id: traceId } })
+    let hit
+    try { hit = state.router.resolve(model) } catch (e) { return sendJson(res, 404, { error: { message: e.message, type: 'unknown_model', code: 'unknown_model', trace_id: traceId } }) }
+    if (!hit.known && (state.cfg.virtualModels || []).length) return sendJson(res, 404, { error: { message: '未知模型名: ' + model + '。可用虚拟模型见 GET /v1/models', type: 'unknown_model', code: 'unknown_model', trace_id: traceId } })
+    const md = hit.known ? ((state.cfg.models || {})[hit.canonicalName] || null) : null
+    const wire = (md && md.responsesWire === 'native') ? 'native' : 'chat'
+    let fBody = body
+    let customTools = new Set()
+    if (wire === 'chat') {
+      try { const conv = responsesToChat(body); fBody = conv.body; customTools = conv.customTools } catch (e) {
+        if (e instanceof UnsupportedResponsesInput) return sendJson(res, 422, { error: { message: e.message, type: 'invalid_request_error', code: e.code || 'unsupported_responses_input', param: null, trace_id: traceId } })
+        throw e
+      }
+    } else {
+      if (!md || !md.provider) return sendJson(res, 422, { error: { message: 'native Responses 模型必须显式配置 provider', type: 'invalid_request_error', code: 'no_provider', trace_id: traceId } })
+      const pdef = (state.cfg.providers || {})[md.provider]
+      if (!pdef || pdef.api !== 'responses') return sendJson(res, 422, { error: { message: '模型声明 responsesWire="native"，但上游 provider.api 不是 "responses"；请改 provider.api 或把模型改回 chat 桥接', type: 'invalid_request_error', code: 'wire_mismatch', trace_id: traceId } })
+    }
+    const idleMs = (state.cfg.defaults && state.cfg.defaults.timeout && state.cfg.defaults.timeout.idleMs) || 60000
+    const responsesRelay = async (result, meta) => {
+      if (!res.headersSent) res.setHeader('x-mg-attempts', String((meta && meta.attempts) || 0))
+      const r = wire === 'native'
+        ? await relayNativeResponses(res, result.stream, { idleMs, log })
+        : await relayChatAsResponses(res, result.stream, { model, customTools, idleMs, log })
+      return Object.assign({}, r, { finish: (note) => endResponsesStream(res, note) })
+    }
+    const fPath = wire === 'native' ? '/v1/responses' : '/v1/chat/completions'
+    const fBuf = Buffer.from(JSON.stringify(fBody))
+    const out = await forwardChain(FWD_DEPS, state, req, fPath, fPath, 'POST', fBuf, fBody, log, responsesRelay, {
+      traceId, wire, noReplay: isToolBearingBody(wire === 'native' ? body : fBody),
+    })
+    if (out.kind === 'stream-done') return
+    if (out.kind === 'stream-interrupted') { endResponsesStream(res, out.note || '上游流式响应中断'); return }
+    if (out.kind === 'stream') { // 未注入 relay 的异常路径
+      return endResponsesStream(res, 'responses relay unavailable')
+    }
+    if (out.kind !== 'json') return endResponsesStream(res, 'unexpected upstream outcome')
+    if (out.status >= 200 && out.status < 300) {
+      if (!res.headersSent) res.setHeader('x-mg-attempts', String(out.attempts || 0))
+      if (wire === 'native') {
+        if (body.stream) {
+          // 上游忽略 stream=true 返回 JSON：发一个完整的 response.completed 事件，而不是伪造 Chat SSE
+          const j = tryParse(out.body) || {}
+          res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' })
+          res.write('event: response.completed\ndata: ' + JSON.stringify({ type: 'response.completed', sequence_number: 0, response: j }) + '\n\n')
+          return res.end()
+        }
+        return sendJson(res, 200, tryParse(out.body) || {})
+      }
+      const j = tryParse(out.body)
+      let resp
+      try { resp = chatToResponses(j, model, customTools) } catch (e) {
+        return sendJson(res, 502, { error: { message: '上游 Chat 响应无法转换为 Responses：' + e.message, type: 'bad_upstream', code: 'bad_upstream', trace_id: traceId } })
+      }
+      if (body.stream) {
+        res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' })
+        res.write('event: response.created\ndata: ' + JSON.stringify({ type: 'response.created', sequence_number: 0, response: Object.assign({}, resp, { status: 'in_progress', output: [] }) }) + '\n\n')
+        res.write('event: response.completed\ndata: ' + JSON.stringify({ type: 'response.completed', sequence_number: 1, response: resp }) + '\n\n')
+        return res.end()
+      }
+      return sendJson(res, 200, resp)
+    }
+    // 上游错误：统一 Responses 错误信封，保留 status/Retry-After/归因与 trace
+    const j = tryParse(out.body)
+    const src = (j && j.error) || {}
+    const msg = typeof src === 'string' ? src : (src.message || ('上游 HTTP ' + out.status))
+    const code = src.code || (out.status === 429 ? 'rate_limited' : 'upstream_error')
+    const extra = { upstream_status: out.status, trace_id: traceId, attempts: out.attempts || 0 }
+    if (src.attribution) extra.attribution = src.attribution
+    if (src.retry_after_ms != null) extra.retry_after_ms = src.retry_after_ms
+    return sendJsonWith(res, out.status, { error: Object.assign({ message: String(msg).slice(0, 2000), type: out.status === 429 ? 'rate_limit_error' : 'upstream_error', code, param: null }, extra) }, out.headers || {})
+  }
   return async function handler(req, res) {
     const path = (req.url || '/').split('?')[0]
     const url = req.url || '/'
@@ -580,12 +671,19 @@ function makeHandler(state) {
 
       if (req.method === 'GET' && (path === '/v1/models' || path === '/models')) { sendJson(res, 200, staticModels(state.cfg)); return }
       const isChat = CHAT_PATHS.has(path)
-      if (!path.startsWith('/v1') && !isChat) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
+      const isResponses = RESPONSES_PATHS.has(path)
+      if (!path.startsWith('/v1') && !isChat && !isResponses) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
 
       // —— 数据面转发（二阶段鉴权已收集 body 时直接复用，流不可二次读取） ——
       let bodyBuf = req.__mgBodyBuf || null
       if (!bodyBuf && (req.method === 'POST' || req.method === 'PUT')) bodyBuf = await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
       const body = req.__mgBody || (bodyBuf && bodyBuf.length ? tryParse(bodyBuf) : null)
+      if (isResponses) {
+        if (req.method !== 'POST') { sendJsonWith(res, 405, { error: { message: 'Responses 端点只接受 POST', type: 'invalid_request_error', code: 'method_not_allowed', trace_id: traceId } }, { allow: 'POST' }); return }
+        if (!body || typeof body !== 'object') { sendJson(res, 400, { error: { message: '请求体必须为 JSON 对象', type: 'invalid_request_error', code: 'invalid_json', trace_id: traceId } }); return }
+        await handleResponses(req, res, body, traceId)
+        return
+      }
       // 入口路径别名：把不带 /v1 的 Chat 兼容路径规范化为 /v1/chat/completions，使 base URL 填 http://127.0.0.1:8787 也被正确代理
       const fPath = (isChat && path !== '/v1/chat/completions') ? '/v1/chat/completions' : path
       const fUrl = (fPath === path) ? url : (fPath + url.slice(path.length))
