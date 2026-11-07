@@ -68,7 +68,7 @@
 
 ```bash
 node --version           # >= 18，本机 22.23.2
-npm run test:offline     # 82 断言；含 429/预算/408/409/422/断流/取消
+npm run test:offline     # 96 断言；含 429/预算/408/409/422/断流/取消/合并硬化回归
 ```
 
 相关用例：`scripts/test/offline/10-budget-429.test.mjs`、`15-status-matrix.test.mjs`。

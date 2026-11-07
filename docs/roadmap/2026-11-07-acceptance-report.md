@@ -25,7 +25,8 @@ src/responses.js    +423   Responses ⇄ Chat 转换 + Codex SSE 事件顺序 + 
 src/request.js       +73   预算接入、429 错误体归因、Retry-After 上限、noRetry
 src/forward.js      +113   预算/429/熔断拆分、wire 过滤、upstreamModel、会话头、408
 src/index.js        +207   /v1/responses、trace/attempts、状态脱敏、/api/capabilities、端口 0
-scripts/test/offline/*     零依赖离线验收套件（6 文件 82 断言）
+scripts/test/offline/*     零依赖离线验收套件（7 文件 96 断言）
+scripts/test/live/*        真实 Codex CLI 实机验收（mock 上游，零费用）
 docs/contracts/*           契约 + 矩阵 + fixtures
 docs/runbooks/*            429/Codex/运维
 ```
@@ -38,7 +39,8 @@ docs/runbooks/*            429/Codex/运维
 
 ```bash
 npm run check                 # node --check 全部 src（含 4 个新模块）
-npm run test:offline          # 82 断言，0 失败
+npm run test:offline          # 96 断言，0 失败
+npm run test:codex-client     # 真实 Codex CLI 9/9（mock 上游）
 ```
 
 完整输出：`docs/audits/evidence/2026-11-07-offline-tests.log`。
@@ -85,34 +87,34 @@ npm run test:offline          # 82 断言，0 失败
 | 能力 | 权重 | 现状 | 依据 |
 | --- | --- | --- | --- |
 | 管理面契约 | 10% | 95% | 契约 + fixtures + capabilities；前端联调未发生 |
-| 路由/虚拟模型/Key/额度 | 15% | 85% | 离线回归；实机未验 |
+| 路由/虚拟模型/Key/额度 | 15% | 90% | 离线 + 隔离 8788 集成回归；真实厂商未验 |
 | 弹性/429/预算/熔断 | 20% | 85% | 预算+归因+熔断/半开离线证据；真实上游未验 |
 | 安全/脱敏/配置并发 | 15% | 90% | 掩码/回写/409/加密落盘 |
 | Chat 协议适配 | 10% | 75% | openai PASS；anthropic/gemini 未新增实机证据 |
-| Responses/Codex | 20% | 75% | 桥接+原生 mock PASS；实机 0 |
+| Responses/Codex | 20% | 88% | 桥接+原生 mock PASS；真实 Codex CLI 9/9（工具闭环/原生直通）；真实厂商未验 |
 | 可观测/诊断 | 5% | 65% | trace/attempts/归因/能力矩阵；成本与趋势 API 未扩展 |
-| 文档/运维/交付 | 5% | 85% | 契约/矩阵/3 份 runbook/验收报告 |
+| 文档/运维/交付 | 5% | 90% | 契约/矩阵/3 份 runbook/验收报告/两份证据日志 |
 
-**加权约 82%**。计算基准：每项按「契约 25% + 实现 25% + 离线证据 30% + 实机证据 20%」加权；实机缺失项不能满分。
+**加权约 85%**。计算基准：每项按「契约 25% + 实现 25% + 离线证据 30% + 实机证据 20%」加权；真实厂商证据缺失项不能满分（Codex 客户端实机证据已计入，厂商侧仍缺）。
 
 ## 5. 阻断项
 
 - **B1 基线分叉**：本地 `main@e746385` 领先远端 17 个未推送提交（约 900 行硬化修复），与远端 `main@6bc6441` 分叉。本 PR 基于远端 main；若 owner 直接以本分支覆盖 main 会丢这些修复。需 owner 决定：先审阅/推送那 17 个提交，或明确放弃。
-- **B2 实机验收**：Codex CLI/桌面、DSH、OpenCode Go 的真实调用需要合法凭据与费用授权 → `NOT_RUN_LIVE`。
+- **B2 真实厂商验收**：Codex/DSH/OpenCode Go 接**真实上游**需要合法凭据与费用授权 → `NOT_RUN_LIVE`。客户端协议侧已用真实 Codex 进程 + mock 上游验证（9/9），不可混为一谈。
 - **B3 PR #2 处置**：需 owner 在 GitHub UI 关闭/归档；本环境无 `gh`/API token（MCP GitHub 调用 `fetch failed`），无法代操作。
 
 非阻断：anthropic/gemini 的 Responses 工具流为降级语义；无成本定价；`gh` 缺失（用 SSH push 替代）。
 
 ## 6. 合并建议
 
-**建议：G1 + G2 可合并（条件式）**，前提是 owner 先处理 B1 基线分叉并接受「实机验收未完成」的显式声明。理由：
+**建议：可合并（条件式）**。B1 已解决（17 个硬化提交已并入本分支并保留独立分支）；剩余条件是 owner 接受「真实厂商验收未完成」的显式声明，并在合并前用低成本模型跑一次真实上游冒烟（需费用授权）。理由：
 
-1. 变更集中在新增模块与受控入口，默认行为对既有 Chat 无破坏（`00` 回归）。
-2. 429/预算/脱敏均为安全与稳定性修复，离线证据完整。
-3. Responses 默认 `chat` 桥接，只有显式 `responsesWire=native` 才走直通，风险可控。
+1. 变更集中在新增模块与受控入口，默认行为对既有 Chat 无破坏：离线基线 + 隔离 8788 既有套件 125/125。
+2. 429/预算/脱敏均为安全与稳定性修复，离线与集成证据完整。
+3. Responses 默认 `chat` 桥接，只有显式 `responsesWire=native` 才走直通；真实 Codex CLI 已跑通文本、`exec_command` 工具闭环与原生直通（9/9，mock 上游）。
 4. PR #2 不合并；其能力已由独立实现覆盖。
 
-不建议把本分支直接当生产发布：真实 Codex/OpenCode Go 组合仍需实机日志后才能宣告兼容。
+不建议把本分支直接当生产发布：真实 Codex/OpenCode Go 接真实厂商仍需实机日志后才能宣告可用。
 
 ## 7. 下一阶段可操作任务
 

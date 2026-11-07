@@ -4,7 +4,7 @@
 
 ## [0.3.0] · 2026-11-07 —— Responses 统一入口 + 尝试预算 + 429 归因 + 脱敏
 
-> 基于 `main@6bc6441` 的独立分支 `dev/gateway-g0-g4-20261107`。实机验收（Codex/DSH/OpenCode Go）为 `NOT_RUN_LIVE`，离线 mock 82 断言通过。
+> 基于 `main@6bc6441` 的独立分支 `dev/gateway-g0-g4-20261107`。真实 Codex CLI 实机验收（mock 上游）9/9 通过、隔离 8788 集成 125/125；接真实厂商仍为 `NOT_RUN_LIVE`，离线 mock 96 断言通过。
 
 ### Added
 - **`/v1/responses` 一等入口**（别名 `/responses`，`src/responses.js`）：与 Chat 共用鉴权、虚拟模型 Key、额度、目录/fallback、熔断、并发与记账，消除「Responses 旁路」。
