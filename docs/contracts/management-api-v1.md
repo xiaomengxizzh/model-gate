@@ -182,7 +182,7 @@ Authorization: Bearer <client-key>
 | `model` | ✅ | 必填；按网关模型/虚拟模型解析 |
 | `input` | ✅ | string 或 item 数组（`message`/`function_call`/`function_call_output`/`custom_tool_call(_output)`/`reasoning` 跳过） |
 | `instructions` | ✅ | 转为首条 system 消息 |
-| `tools` | ✅ | `function`、`custom`；`local_shell` 需原生 Responses 上游，否则 `422` |
+| `tools` | ✅ | `function`、`custom`、`namespace`（展开为 `namespace.tool`）；`web_search` 显式省略并记日志；`local_shell` 需原生 Responses 上游，否则 `422` |
 | `tool_choice` | ✅ | `none/auto/required` 或 `{type,name}` |
 | `max_output_tokens` | ✅ | → `max_tokens` |
 | `temperature` / `top_p` | ✅ | 透传 |
@@ -191,12 +191,14 @@ Authorization: Bearer <client-key>
 | `stream` | ✅ | 默认建议 `true`（Codex 场景） |
 | `previous_response_id` | ❌ 422 | 无状态桥接不保存服务端对话，需回传完整历史 |
 | `input_file` / `item_reference` / `local_shell` | ❌ 422 | 无法保真，明确拒绝而非静默降级 |
-| `store/truncation/include/metadata/service_tier` | 忽略 | 不影响请求内容保真 |
+| `store/truncation/include/metadata/service_tier/reasoning.summary` | 忽略 | 不影响请求内容保真；`include:["reasoning.encrypted_content"]` 在 Chat wire 无对应语义 |
+| `parallel_tool_calls` | ✅ | 透传 |
 
 - 两种 wire：
   - `chat`（默认）：Responses → Chat 有损桥接。`models.<name>.responsesWire` 缺省即此；事件顺序见 §3.3.1。
   - `native`：`models.<name>.responsesWire="native"` 且 `providers.<id>.api="responses"`，字节级直通原生 Responses SSE；声明不一致 → `422 wire_mismatch`（不静默降级）。
-- 上游 model id 分离：`models.<name>.upstreamModel` 存在时发该 id，响应 `model` 仍回写客户端请求名。
+- 上游 model id 分离：`models.<name>.upstreamModel` 存在时发该 id，响应 `model` 仍回写客户端请求名；跨 provider 时 `models.<name>.providerModels[pid]` 优先。
+- 模型级协议：`models.<name>.api`（`openai`/`anthropic`/`gemini`/`responses`）优先于 `providers.<id>.api`；`maxTokensMax` 钳制 `max_tokens`；`forceNoStream` 对「2xx 但零字节 SSE」上游降级为非流拉取再补 SSE。
 - 事件顺序契约（Codex/DSH 依赖，见 `fixtures/responses.stream.events.jsonl`）：
 
 ```
@@ -224,7 +226,7 @@ response.completed | response.failed
 
 | 字段 | 默认 | 语义 |
 | --- | --- | --- |
-| `maxAttempts` | 8（或 `retry.maxAttempts`） | 单请求真实上游请求总数上限（含 request 内重试、跨 provider、跨模型、while 循环） |
+| `maxAttempts` | 8 | 单请求真实上游请求总数上限（含 request 内重试、跨 provider、跨模型、while 循环）。**不跟随 `retry.maxAttempts` 下调**，否则目录 fallback 会被预算饿死 |
 | `maxMs` | `timeout.loopMs` 或 120000 | 单请求墙钟上限 |
 | `maxWaitMs` | 30000 | 单次按 `Retry-After` 等待的上限；超过则不等待，直接换上游或回 429 |
 

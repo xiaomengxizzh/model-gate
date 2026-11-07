@@ -220,7 +220,9 @@ model-gateway/
 
 `npm test` / `node scripts/test/run.mjs [关键词]`：依赖真实运行网关 + 上游配置 + 管理鉴权的集成测试。
 
-**离线验收（推荐先跑）**：`npm run test:offline`（= `node scripts/test/offline/run.mjs`）。零第三方依赖、临时 `MG_CONFIG_DIR`、端口 0、本地 mock 上游，**不读取生产 config、不访问 8787、不产生真实 API 费用**。覆盖：Chat 基线回归、400/401/403/404/408/409/422/429/5xx、重试预算、非幂等不重放、脱敏、configVersion 409、Responses 转换/事件顺序/工具/call_id/原生直通/断流、熔断半开、客户端取消。
+**真实 Codex CLI 验收（mock 上游，零费用）**：`npm run test:codex-client`。用独立 `CODEX_HOME` 启动本机 Codex 0.167 真实进程指向进程内网关，覆盖文本、`exec_command` 工具闭环（真实命令执行 + `call_id` 回传）与原生 Responses 直通；不读 `~/.codex/auth.json`。
+
+**离线验收（推荐先跑）**：`npm run test:offline`（= `node scripts/test/offline/run.mjs`）。零第三方依赖、临时 `MG_CONFIG_DIR`、端口 0、本地 mock 上游，**不读取生产 config、不访问 8787、不产生真实 API 费用**。覆盖：Chat 基线回归、400/401/403/404/408/409/422/429/5xx、重试预算、非幂等不重放、脱敏、configVersion 409、Responses 转换/事件顺序/工具/call_id/原生直通/断流、熔断半开、客户端取消、合并后硬化回归（`/v1` 双拼、`max_tokens` 归一化、per-model 协议、thinking 整形、402/上游侧 4xx、gzip 炸弹）。
 
 ## 边界说明
 

@@ -460,7 +460,11 @@ function makeHandler(state) {
     let fBody = body
     let customTools = new Set()
     if (wire === 'chat') {
-      try { const conv = responsesToChat(body); fBody = conv.body; customTools = conv.customTools } catch (e) {
+      try {
+        const conv = responsesToChat(body)
+        fBody = conv.body; customTools = conv.customTools
+        if (conv.omittedTools && conv.omittedTools.length) log && log.warn('responses 工具省略（Chat wire 无对应语义）', [...new Set(conv.omittedTools)].join(','))
+      } catch (e) {
         if (e instanceof UnsupportedResponsesInput) return sendJson(res, 422, { error: { message: e.message, type: 'invalid_request_error', code: e.code || 'unsupported_responses_input', param: null, trace_id: traceId } })
         throw e
       }
@@ -933,7 +937,8 @@ export function start(opts = {}) {
   server.on('error', (err) => { log.error('server error', err.message); process.exitCode = 1 })
   return new Promise((resolve) => {
     server.listen(port, host, () => {
-      log.info('model-gateway 已启动: http://' + host + ':' + port + '  (健康检查 /healthz, 控制面板 /)')
+      const actualPort = (server.address() && server.address().port) || port
+      log.info('model-gateway 已启动: http://' + host + ':' + actualPort + '  (健康检查 /healthz, 控制面板 /)')
       resolve({ cfg, log, server, router: state.router, st: state.st, state, port: server.address() && server.address().port })
     })
   })

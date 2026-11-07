@@ -15,26 +15,31 @@
 1. `feat(g0)` 管理 API 契约 v1、协议兼容矩阵、11 份 fixtures、G0 审计
 2. `feat(g1)` 单请求尝试预算、429 语义归因、非幂等不重放、全链路脱敏、configVersion 409
 3. `feat(g2)` `/v1/responses` 一等入口、Codex SSE 事件契约、原生 Responses 直通、`upstreamModel`
-4. `docs(g3-g4)` 能力契约、3 份 runbook、验收报告、82 断言证据
+4. `docs(g3-g4)` 能力契约、3 份 runbook、验收报告、离线证据
 5. `docs(g4)` PR 描述与平台限制说明（本文件）
+6. `merge` 合并本地 main 17 个未推送硬化提交 + 冲突解决 + 合并回归测试
+7. `feat(g2)` Codex 0.167 兼容（namespace 展开、web_search 省略）+ 真实 Codex CLI 实机验收
 
 ## 测试证据
 
 ```bash
 npm run check          # 全部 src/*.js 语法检查
-npm run test:offline   # 82 断言 / 0 失败
+npm run test:offline       # 96 断言 / 0 失败（含合并回归）
+npm run test:codex-client # 真实 Codex CLI 9/9（mock 上游，零费用）
+MG_GW=http://127.0.0.1:8788 node scripts/test/run.mjs  # 隔离 8788：125/125，6 SKIP
 ```
 
-- G1 提交在干净 worktree 复跑：34/0
-- G2 提交在干净 worktree 复跑：73/0
+- 合并前 G1 提交在干净 worktree 复跑：34/0；G2 提交：73/0
+- 隔离 8788 集成日志：`docs/audits/evidence/2026-11-07-integration-8788.log`
+- Codex 实机日志：`docs/audits/evidence/2026-11-07-codex-client.log`
 - 完整日志：`docs/audits/evidence/2026-11-07-offline-tests.log`
 - 既有 `scripts/test/*.mjs`（依赖真实网关 + live 配置）：`NOT_RUN`（无 8787 实例，拒绝用生产配置跑）
 - 真实 Codex/DSH/OpenCode Go：`NOT_RUN_LIVE`（无凭据/费用授权）
 
 ## 风险与阻断
 
-- **B1**：本地 `main` 领先 `origin/main` 17 个未推送提交（约 900 行硬化修复），与远端分叉。本 PR 基于远端 main；合并前请 owner 决定先推送/审阅这些提交或明确放弃。
-- **B2**：实机验收未完成，不应据本 PR 宣称「已兼容 Codex/OpenCode Go」。
+- ~~**B1**：本地 main 17 个未推送提交与远端分叉~~ → **已解决**：17 个提交已推送到 `dev/gateway-hardening-20261107` 并合入本分支，冲突解决保留双方语义。
+- **B2**：真实厂商（Codex/DSH/OpenCode Go 接真实上游）仍 `NOT_RUN_LIVE`：本机无凭据注入、生产 keys 加密私密不读取、DSH `~/.dsh` 只读。客户端协议兼容已用真实 Codex 进程 + mock 上游验证（9/9），但不得据此宣称真实厂商可用。
 - **B3**：PR #2（`feature/codex-opencode-go-adapter-20261107`）建议关闭；其转换器思路已独立重写吸收，且原实现绕过治理、无记账、SSE 顺序不完整。
 
 ## 回滚

@@ -5,7 +5,7 @@ let chatMode = 'text'
 const chatHits = []
 const chat = await mockUpstream((req, res, body) => {
   const j = JSON.parse(body || '{}')
-  chatHits.push(j)
+  chatHits.push(Object.assign({ __headers: req.headers }, j))
   if (chatMode === '429') { res.writeHead(429, { 'retry-after': '0', 'content-type': 'application/json' }); res.end('{"error":{"message":"Too many requests"}}'); return }
   if (chatMode === 'tool-json') {
     res.writeHead(200, { 'content-type': 'application/json' })
@@ -113,6 +113,24 @@ chatMode = 'text'; chatHits.length = 0
 const r6 = await gw.responses({ model: 'm-upstream-id', input: 'x' })
 const j6 = await r6.json()
 check('models.upstreamModel 生效（上游收到真实 id）', chatHits[0].model === 'real-model-9' && j6.model === 'm-upstream-id', { upstream: chatHits[0].model, client: j6.model })
+
+// 7b. Codex 0.167 工具形态：namespace 展开、web_search 显式省略、会话头透传
+chatMode = 'text'; chatHits.length = 0
+const r6b = await gw.responses({
+  model: 'm-chat',
+  input: 'x',
+  tools: [
+    { type: 'function', name: 'exec_command', parameters: { type: 'object', properties: { cmd: { type: 'string' } }, required: ['cmd'] } },
+    { type: 'namespace', name: 'multi_agent_v1', description: 'agents', tools: [{ type: 'function', name: 'close_agent', parameters: { type: 'object', properties: { target: { type: 'string' } }, required: ['target'] } }] },
+    { type: 'web_search', external_web_access: true },
+  ],
+}, { 'x-opencode-session': 'sess-codex-1', 'session-id': 'sess-codex-1' })
+const names6b = (chatHits[0].tools || []).map(t => t.function.name)
+check('Codex namespace 工具展开为 namespace.tool', r6b.status === 200 && names6b.includes('multi_agent_v1.close_agent'), { names: names6b })
+check('web_search 不伪造成 function（显式省略）', !names6b.includes('web_search') && names6b.length === 2, { names: names6b })
+check('会话头透传到上游（OpenCode/Codex 粘性路由）', !!(chatHits[0].__headers && chatHits[0].__headers['x-opencode-session'] === 'sess-codex-1'), { got: chatHits[0].__headers && chatHits[0].__headers['x-opencode-session'] })
+const r6c = await gw.responses({ model: 'm-chat', input: 'x' }, { 'x-opencode-session': 'sess-2' })
+check('会话头不会破坏普通请求', r6c.status === 200, { status: r6c.status })
 
 // 8. 原生 Responses 直通：事件不改写
 const r7 = await gw.responses({ model: 'm-native', input: 'x', stream: true })

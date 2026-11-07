@@ -22,6 +22,9 @@
 - **零依赖离线测试** `scripts/test/offline/`（`npm run test:offline`）：临时 `MG_CONFIG_DIR`、端口 0、本地 mock 上游，不碰 8787、不读生产配置、不产生真实费用。
 
 ### Changed
+- **合并本地 main 17 个未推送硬化提交**（保留分支 `dev/gateway-hardening-20261107`）：per-model `api`、`maxTokensMax` 归一化、thinking per-route 整形、`isUpstreamSideFailure`、`forceNoStream`、`providerModels`、`upstreamUrl` 归一化、gzip 炸弹上限等与 G1/G2 共存；冲突解决保留双方语义。
+- **Codex 0.167 兼容**：`tools[].type="namespace"` 展开为 `namespace.tool` function；`web_search` 显式省略并记日志；`store/include/reasoning.summary` 忽略但不影响保真。
+- `budget.maxAttempts` 默认 8 且不再跟随 `retry.maxAttempts` 下调（否则 `retry=1` 时目录 fallback 一个都走不到）；预算耗尽按最近一次真实失败状态收尾。
 - `start()` 支持 `opts.port/opts.host`，显式 `port:0` 不再被 `|| 8787` 吞掉（多实例/测试隔离）。
 - 上游未知模型且无默认上游由 `502` 改为 `400 unknown_model`；上游超时回 `408 MG_UPSTREAM_TIMEOUT`。
 - 429 冷却等待受请求预算约束：等不起就跳过该上游，而不是把客户端挂住。
@@ -34,9 +37,10 @@
 
 ### Tests
 - `npm run check`：全部 `src/*.js` 语法检查通过。
-- `npm run test:offline`：**82 断言通过 / 0 失败**（Chat 基线、400/401/403/404/408/409/422/429/5xx、预算、非幂等、脱敏、configVersion 409、Responses 转换/事件顺序/call_id/custom tool/原生直通/断流、熔断半开、客户端取消）。
-- 既有 `scripts/test/*.mjs`（依赖真实网关 + live 配置）：`NOT_RUN`（本环境无 8787 实例，拒绝用生产配置跑）。
-- 真实 Codex/DSH/OpenCode Go 组合：`NOT_RUN_LIVE`（无凭据/成本授权）。
+- `npm run test:offline`：**96 断言通过 / 0 失败**（含合并回归：`/v1` 双拼、`max_tokens` 归一化、per-model anthropic、thinking 整形、402/上游侧 4xx、gzip 解压与炸弹上限、Codex namespace/web_search）。
+- **隔离 8788 集成套件**：`MG_GW=http://127.0.0.1:8788 node scripts/test/run.mjs` → **125/125 通过，6 SKIP**（约 50s，全部 mock 上游，无真实 Key）。
+- **真实 Codex CLI 实机（mock 上游，零外部调用）**：`npm run test:codex-client` → **9/9 通过**，含 `exec_command` 工具闭环（真实执行命令并回传 `role=tool` + `call_id`）与原生 Responses 直通。
+- 真实厂商（Codex/DSH/OpenCode Go 接真实上游）：`NOT_RUN_LIVE`（本机无凭据注入、生产 keys 加密私密不读取、DSH `~/.dsh` 只读）。
 
 ## [Unreleased] —— 托盘小窗管理器 + 日志按天分文件与 7 天保留 + 交接问题修复批次
 

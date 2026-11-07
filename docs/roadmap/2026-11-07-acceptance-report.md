@@ -3,7 +3,8 @@
 - 日期：2026-11-07
 - 分支：`dev/gateway-g0-g4-20261107`（基于 `main@6bc6441`）
 - 测试环境：Linux 7.0.0-42、Node v22.23.2、零第三方依赖、本地 mock 上游、临时配置目录、随机端口
-- 结论：**G0 PASS / G1 PASS(离线) / G2 PASS(离线, mock) / G3 PARTIAL / G4 PARTIAL**；真实客户端与真实上游 `NOT_RUN_LIVE`。
+- 结论（第二轮接手后）：**G0 PASS / G1 PASS（离线+隔离 8788 集成）/ G2 PASS（离线 + 真实 Codex CLI 实机，mock 上游）/ G3 PARTIAL / G4 PARTIAL**；真实上游鉴权仍 `NOT_RUN_LIVE`（无凭据/费用授权）。
+- 第二轮增量：已合并本地 main 17 个未推送硬化提交并解决 G1/G2 语义冲突；隔离 8788 集成套件 125/125；真实 Codex CLI 9/9；离线 96 断言。
 
 ## 1. 各阶段状态
 
@@ -145,3 +146,46 @@ npm run test:offline          # 82 断言，0 失败
 - 未发起真实模型 API 调用（无费用产生）。
 - 未修改生产 `config/`、未监听/重启 8787、未读写 Codex `auth.json`。
 - 未向 `main` 推送任何提交；未合并 PR。
+
+
+## 10. 第二轮执行记录（接手后）
+
+### 10.1 分叉解决
+
+- 本地 `main@e746385` 的 17 个未推送提交先原样推送到保留分支 `dev/gateway-hardening-20261107`（`git ls-remote` 可核对）。
+- 在 `dev/gateway-g0-g4-20261107` 上 `git merge main`，冲突集中在 `package.json`、`src/index.js`、`src/request.js`、`src/forward.js`：
+  - `index.js`：采用 main 的 `resolveKey` 同源 Key 判定 + 本分支 `extraHeaders/proxy` 脱敏。
+  - `request.js`：同时保留 `upstreamUrl`（`/v1` 双拼归一、探测体上限）与 G1 的 `readSmall`/预算/429 归因。
+  - `forward.js`：采用 main 的 per-model `api`、`maxTokensMax` 归一化、thinking per-route 整形、`isUpstreamSideFailure`、`forceNoStream`、`providerModels`，并叠加 G2 的 `upstreamModel`、wire 过滤、会话头透传、native Responses 保护；熔断跳过不再 `markFail`（main）与 429 冷却预算化共存。
+- 合并后修复：`budget.maxAttempts` 不再被 `retry.maxAttempts` 压低（默认 8，否则 `retry=1` 时目录 fallback 一个都走不到）；预算耗尽按最近一次真实失败状态收尾，不伪造 429。
+
+### 10.2 隔离 8788 集成验收
+
+- 启动隔离实例：`MG_CONFIG_DIR=.tmp-cfgdir/8788`、`port=8788`、无生产配置/无真实 Key、上游全部为测试内 mock。
+- 命令：`MG_GW=http://127.0.0.1:8788 node scripts/test/run.mjs`
+- 结果：**125/125 通过，0 失败，6 SKIP，约 50s**。证据：`docs/audits/evidence/2026-11-07-integration-8788.log`。
+- 期间修复的测试基建问题（非产品语义）：
+  - `body-limit.mjs` 硬编码 8787 → 改用 `GW`，并在 `maxBodyBytes` 大于样本时 SKIP；
+  - `key-encrypt.mjs` 硬编码仓库 `config/` 且假定存在 provider → 改读 `MG_CONFIG_DIR`，无 provider 时 SKIP；
+  - `user-env-fallback.mjs` 在非 Windows 用 `process.exit(0)`，会掐断 runner 后续文件 → 改为 `else { main() }`；
+  - `stream-failover.mjs`、`model-reject-failover.mjs` 固定 provider/模型名导致同一网关进程重复运行时被旧 affinity/cache 排序污染 → 每次运行唯一 id。
+
+### 10.3 真实 Codex CLI 实机验收（mock 上游，零外部调用）
+
+- 二进制：`harness/codex/cli/versions/current/vendor/.../bin/codex`（codex-cli 0.167.0；包装器 `sandbox/launch` 在本机嵌套 sandbox 下因 bwrap 无法建 user namespace，故直接执行底层二进制）。
+- 配置：独立 `CODEX_HOME`（工作区内临时目录），`wire_api="responses"`，`base_url` 指向进程内网关；**不读取/不复制/不修改 `~/.codex/auth.json`**。
+- 命令：`npm run test:codex-client`。结果：**9/9 通过**，证据 `docs/audits/evidence/2026-11-07-codex-client.log`。
+  - Chat 桥接文本：Codex 真实进程 exit 0，输出网关 mock 文本。
+  - 工具闭环：mock 返回 `exec_command` 调用 → Codex 真实执行 `echo codex-tool-ok`（exit 0）→ 以 `role=tool` + 原 `call_id` 回传 → 网关转 Chat → Codex 完成。
+  - 原生 Responses 直通：`responsesWire=native` + `provider.api=responses`，Codex 收到完整事件序列。
+- 实机暴露并修复的真实兼容缺口：
+  - Codex 0.167 发送 `tools:[{type:"namespace", name:"multi_agent_v1", tools:[...]}]` → 网关展开为 `multi_agent_v1.<tool>` function；
+  - 发送 `{type:"web_search"}`（无 `name`）→ 不再 422，显式省略并记日志（Chat wire 无服务端搜索语义，不伪造 function）；
+  - `store/include/reasoning.summary` 忽略但不影响保真。
+
+### 10.4 仍未完成（不可伪称 PASS）
+
+- **真实上游鉴权/费用**：本机环境无 provider API Key 注入，生产 `keys.local.json` 为加密私密文件，按规则不读取/不复制；因此 Codex/DSH/OpenCode Go 接**真实上游**仍为 `NOT_RUN_LIVE`。
+- **DSH 实机**：`~/.dsh` 在当前位置只读，headless 启动需要写入 profile，且 `OPENCODE_API_KEY` 未注入；未绕过、未下载。标 `NOT_RUN_LIVE`。
+- **OpenCode Go 实机**：无 `opencode` CLI、无凭据；仅通过 mock 覆盖其 wire 语义（会话头、Chat/Responses）。
+- 结论口径：**客户端协议兼容 = PASS（真实 Codex 进程 + mock 上游）**；**真实厂商可用性 = NOT_RUN_LIVE**。两者不可混写。

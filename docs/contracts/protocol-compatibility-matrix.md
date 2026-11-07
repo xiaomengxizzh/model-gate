@@ -21,9 +21,9 @@
 
 | 客户端 | 使用入口 | 工具闭环 | 流式 | 会话头 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| Codex CLI / 桌面 | `/v1/responses`（`wire=chat` 或 `native`） | function_call / custom_tool_call、`call_id` 保留、参数拼接 | ✅ 事件顺序契约 | `session-id`/`thread-id` 透传（provider 开启 `passthroughSession`/`opencodeSession`） | `PASS_MOCK`；实机 `NOT_RUN_LIVE` |
-| DSH（DeepSeek Harness） | `/v1/chat/completions` | tool_calls / usage | ✅ | `x-session-id`/`x-conversation-id` | 既有行为回归 `PASS_MOCK`；DSH 实机 `NOT_RUN_LIVE` |
-| OpenCode Go | Chat 或 Responses | 取决于上游 | ✅ | `x-opencode-session` / Codex session 头（需 provider 标记） | `STATIC`（PR #2 文档 + 代码）；实机 `NOT_RUN_LIVE` |
+| Codex CLI 0.167 | `/v1/responses`（`wire=chat` 或 `native`） | function_call / custom_tool_call / namespace 展开、`call_id` 保留、`exec_command` 闭环 | ✅ 真实进程验证 | `session-id`/`thread-id` 实测透传 | **PASS（实机客户端 + mock 上游，零外部调用）**；真实厂商 `NOT_RUN_LIVE` |
+| DSH（DeepSeek Harness） | `/v1/chat/completions` | tool_calls / usage | ✅ | `x-session-id`/`x-conversation-id` | Chat 回归 `PASS`；DSH 实机 `NOT_RUN_LIVE`（`~/.dsh` 只读、无 `OPENCODE_API_KEY`） |
+| OpenCode Go | Chat 或 Responses | 取决于上游 | ✅ | `x-opencode-session` / Codex session 头（offline 已断言透传） | mock 语义 `PASS_MOCK`；无 CLI/凭据，实机 `NOT_RUN_LIVE` |
 | OpenAI SDK / curl | Chat | ✅ | ✅ | 可选 | `PASS_MOCK` |
 | 任意 OpenAI 兼容客户端 | `/chat/completions`（无 `/v1`） | ✅ | ✅ | — | 路径别名，`PASS_MOCK` |
 
@@ -58,6 +58,7 @@
 3. **Responses → Anthropic/Gemini 工具流**：受 `format.js` 桥降级限制，工具 + 流式会变成非流 JSON 后由网关补发 SSE，事件粒度非原生。
 4. **Responses 多轮服务端状态**：无 `previous_response_id`/`store` 服务端存储；要求客户端回传完整历史（显式 422）。
 5. **图片输入**：Responses `input_image` 仅在 Chat 桥接为 `image_url`，未对多模态上游做端到端验证。
+5b. **Codex 专有工具**：`namespace` 已展开为 `namespace.tool`；`web_search` 在 Chat wire 被显式省略（无服务端搜索语义）；真实 Codex + 真实上游未跑。
 6. **成本**：无可靠定价不计算/不展示金额（仅 token）。
 7. **DSH 插件真实端点**：以用户实际版本再核验，本文件不固化未经证实的 URL。
 

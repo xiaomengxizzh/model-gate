@@ -1,0 +1,13 @@
+(node:114) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS  Codex 实机·Chat 桥接文本 :: {"exit":0,"out":"codex-gateway-ok"}
+PASS  Codex namespace 工具被展开为 function :: {"count":12}
+PASS  web_search 被显式省略（不伪造） :: {"tools":["exec_command","write_stdin","request_user_input","view_image","multi_agent_v1.close_agent","multi_agent_v1.resume_agent","multi_agent_v1.send_input","multi_agent_v1.spawn_agent","multi_agent_v1.wait_agent","get_goal","create_goal","update_goal"]}
+PASS  上游收到流式 Responses→Chat 请求 :: {"n":1}
+PASS  网关注入 stream_options.include_usage :: {}
+PASS  Codex 实机·exec_command 工具闭环 :: {"exit":0,"turns":2,"out":"tool-loop-done"}
+PASS  工具结果以 role=tool + call_id 回传上游 :: {"toolMsgs":[{"call_id":"call_codex_1","content":"Chunk ID: 960b07\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 4\nOutput:\ncodex-tool-ok\n"}]}
+PASS  tool_calls call_id 与参数保真 :: {"tc":{"id":"call_codex_1","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"echo codex-tool-ok\"}"}}}
+PASS  Codex 实机·原生 Responses 直通 :: {"exit":0,"hits":1,"out":"native-codex-ok"}
+
+=== Codex 实机结果: 9/9 通过 ===

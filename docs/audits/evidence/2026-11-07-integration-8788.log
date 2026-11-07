@@ -1,0 +1,194 @@
+(node:5) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+网关: http://127.0.0.1:8788  筛选: 全部
+
+== acl.mjs ==
+SKIP  key 写入(ACL 加固下)仍正常
+SKIP  key 设置后 hasKey=true
+SKIP  key 清除后 hasKey=false
+  跳过：需要当前网关已配置 deepseek-official 上游（含管理鉴权），未就绪
+
+== affinity.mjs ==
+PASS  1·首请求命中主上游 A :: {"A":1,"B":0}
+PASS  2·主上游故障后切到备用 B :: {"A":2,"B":1}
+PASS  3·TTL 未到期时仍保持亲和 B（不抖动） :: {"A":2,"B":2}
+PASS  4·TTL 过期后回流主上游 A :: {"A":3,"B":2,"before":{"A":2,"B":2}}
+
+== body-limit.mjs ==
+SKIP  请求体大小上限
+
+== circuit.mjs ==
+PASS  熔断·连续失败数=2 即 open :: {"state":"open","openUntilMs":2691,"hits":1}
+PASS  熔断·冷却到点后放行半开探测（冷却不被持续流量续期） :: {"retried":1,"firstRetryMs":2990,"CD":3000,"hits":2,"hitsAtOpen":1}
+
+== concurrency.mjs ==
+PASS  provider 并发·最大并行<=4 且 12 请求全成功 :: {"maxAct":4}
+PASS  model 并发·最大并行<=2 且全成功 :: {"maxAct":2}
+
+== effort-normalize.mjs ==
+PASS  嵌套 reasoning.effort 不再被严格上游拒绝 :: "code=200 {\"code\":200,\"id\":\"m1\",\"object\":\"chat.completion\",\"model\":\"m-strict\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"pong\"},\"finish_reason\":\"stop\""
+PASS  出站体已剔除嵌套 reasoning 键
+PASS  嵌套 effort 并入平面 reasoning_effort :: "high"
+PASS  平面优先且嵌套对象一并剔除 :: "code=200"
+PASS  仅 summary 的 reasoning 对象被剔除且不注入档位 :: "code=200"
+PASS  关闭拼写 none 归一为 none 且被上游接受 :: "code=200 got=none"
+PASS  关闭拼写 off 归一为 none 且被上游接受 :: "code=200 got=none"
+PASS  关闭拼写 disabled 归一为 none 且被上游接受 :: "code=200 got=none"
+PASS  关闭拼写 false 归一为 none 且被上游接受 :: "code=200 got=none"
+PASS  平面 none + 嵌套 none：上游词表内且不被拒 :: "code=200"
+PASS  兜底切到 thinking 格式模型：请求成功 :: "code=200 {\"code\":200,\"id\":\"m1\",\"object\":\"chat.completion\",\"model\":\"chain-f2t\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"pong\"},\"finish_reason\":\"stop"
+PASS  兜底 thinking 模型收到 thinking:{type:enabled} :: "{\"type\":\"enabled\"}"
+PASS  兜底 thinking 模型不再收到平面 reasoning_effort
+PASS  兜底切到平面格式模型：请求成功 :: "code=200"
+PASS  兜底平面模型收到 reasoning_effort:high :: "\"high\""
+PASS  兜底平面模型不再收到 thinking 对象
+PASS  虚拟入口未给档位时不注入任何档位字段 :: "code=200"
+PASS  真实模型入口仍注入配置默认档位 :: "low"
+PASS  档位白名单仍本地拦截(400) :: "code=400"
+PASS  客户端显式档位优先于配置默认 :: "medium"
+  （effort-normalize 子结果: 20/20）
+
+== empty-model.mjs ==
+PASS  空 model·显式 400(missing_model) :: {"status":400}
+
+== failback.mjs ==
+PASS  1·首请求命中主上游 A :: {"A":1,"B":0}
+PASS  2·主上游故障后切到备用 B :: {"A":2,"B":1}
+PASS  3·降级期间后台确实发出了探活请求 :: {"probesA":2,"probesB":0}
+PASS  3b·探活消息必须为 user 角色（LiteLLM 拒 system-only） :: {"probeRoles":["user","user"]}
+PASS  4·探活成功后自动回切主上游 A :: {"A":3,"B":1,"before":{"A":2,"B":1}}
+
+== format-conversion.mjs ==
+PASS  Anthropic·请求转换(system/messages) :: {"sys":"你是助手","maxTokens":4096}
+PASS  Anthropic·流式重建 OpenAI delta :: {"got":"Hello from Claude over"}
+PASS  Gemini·请求转换(contents/system/path) :: {"path":"/v1beta/models/t-gm-m:generateContent"}
+PASS  Gemini·流式重建 OpenAI delta :: {"path2":"/v1beta/models/t-gm-m:streamGenerateContent?alt=sse"}
+
+== key-encrypt.mjs ==
+SKIP  key 加密存储（无上游或未加密则跳过）
+
+== logrotate.mjs ==
+PASS  log·按天文件已创建
+PASS  log·8 天前 dated 文件被清理
+PASS  log·旧 .old 轮转件被清理
+PASS  log·超 7 天无日期旧版按 mtime 清理
+PASS  log·无关文件不误删
+PASS  log·超 5MB 轮转出 .old
+PASS  log·file() 指向当前天文件
+
+== model-reject-failover.mjs ==
+PASS  1·模型级拒绝 400 切备用：m1(A 拒 400) → B 成功 :: {"status":200,"body":"{\"id\":\"x\",\"object\":\"chat.completion\",\"model\":\"t-mr-pgrp8u-m1\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"conte"}
+PASS  1b·A 确实被尝试过 :: {"A":1}
+PASS  2·纯参数错误 400 不切：m2(C 参数错) → 直接 400 :: {"status":400}
+PASS  2b·B 未被尝试（参数错误换模型同样失败，不应浪费） :: {"B":1,"before":1}
+PASS  2c·原始错误 body 保留透传 :: {"body":"{\"error\":{\"message\":\"Invalid messages: content must be a string\",\"type\":\"invalid_request_error\"}}"}
+
+== modelstats.mjs ==
+PASS  modelstats·上游响应成功 :: {"status":200}
+PASS  modelstats·天级 token 聚合 :: {"tokens":200}
+PASS  modelstats·缓存命中率(hit/miss) :: {"hitRate":80}
+
+== payment-402-failover.mjs ==
+PASS  1·402 切备用：m1(A 欠费 402) → B 成功 :: {"status":200,"body":"{\"id\":\"x\",\"object\":\"chat.completion\",\"model\":\"t-p402-m1-i53uix\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"con"}
+PASS  1b·A 确实被尝试过 :: {"A":1}
+PASS  1c·A 只被尝试 1 次（402 不触发同上游重试，maxAttempts=3 也不该重发） :: {"A":1}
+PASS  2·整链 402：m2(C 单上游 402) → 透传 402（非 502） :: {"status":402}
+PASS  2b·上游原始错误体保留 :: {"body":"{\"error\":\"Insufficient balance\",\"reason\":\"model_access_denied\"}"}
+PASS  2c·C 只被尝试 1 次（不空转到 loopMs） :: {"C":1}
+PASS  2d·未误用备用 B :: {"B":1,"before":1}
+
+== qps.mjs ==
+PASS  model QPS·字段已存储 :: {"qps":2}
+PASS  model QPS·qps=2 时 5 顺序请求被限速 :: {"elapsedMs":1009,"statuses":[200,200,200,200,200]}
+
+== rate429.mjs ==
+PASS  429·首请求按 Retry-After 内部排队后成功(循环兜底) :: {"status":200,"ms":1006,"hits":2}
+PASS  429·后续请求不再等待(冷却已过) :: {"ms":4}
+
+== sse-resume.mjs ==
+PASS  sse 断流续传·重连后内容完整且无重复
+
+== stream-drop-halfopen.mjs ==
+PASS  1·三次断流请求均切备用上游成功 :: {"d":["ok-B","ok-B","ok-B"]}
+PASS  2·A 被尝试过（累计三次断流） :: {"A":9,"B":3}
+PASS  3·冷却期内绕开 A（A 未被请求） :: {"A":9,"before":9}
+PASS  3b·绕开后仍由 B 正常应答 :: {"delta":"ok-B"}
+PASS  4·冷却结束后 half-open 放行 A（A 重新被尝试） :: {"A":12,"before":9}
+PASS  4b·探测仍失败时切 B 成功（不中断服务） :: {"delta":"ok-B"}
+
+== stream-failover.mjs ==
+PASS  1·主上游被尝试过（命中 A） :: {"A":3,"B":1}
+PASS  1b·备用上游被使用（切到 B） :: {"A":3,"B":1}
+PASS  1c·最终收到完整响应内容（ok-B） :: {"status":200,"delta":"ok-B"}
+PASS  2·跨模型切换：m3(A 断流) → m2(B) 成功 :: {"status":200,"delta":"ok-B"}
+PASS  3·半死上游被计入失败（不再被当成成功） :: {"a":{"requests":2,"errors":2,"retries":0,"tokens":0,"avgMs":1,"p50":1,"p95":1,"state":"half","openUntilMs":0,"probe":null}}
+PASS  4·回答中断流也切：m4(C 断流) → B 成功 :: {"status":200,"delta":"half-ok-B"}
+PASS  4b·拼接证据：客户端收到 half-(C) + ok-B(B) :: {"delta":"half-ok-B"}
+PASS  5c·配置确实已改为 false :: {"v":false}
+PASS  5·配置关时回答中断不切（B 未再被用） :: {"B":3,"before":3}
+PASS  5b·客户端收到流内错误事件（非静默） :: {"hasError":true,"head":"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"ee-\"},\"finish_reason\":null}]} |  | : mg-keepalive | : mg-keepalive | : mg-keepalive | : mg-keepalive | : mg-keepalive | data: {\"error\":{\"message\":\"上游流式响应中断："}
+
+== stream-started-4xx.mjs ==
+PASS  1·主上游 A 被尝试（流式已开始） :: {"A":3,"B":1}
+PASS  2·A 断流后切到 B，B 返回 400 :: {"A":3,"B":1}
+PASS  3·客户端收到流内错误事件（非静默半截流） :: {"head":"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]} |  | : mg-keepalive | : mg-keepalive | data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_r"}
+PASS  4·响应以完整 [DONE] 收尾（未因 headers 已发送而崩溃） :: {"tail":"TERRUPTED\"}} |  |  | : [gateway] upstream 400 t-ss-927ii9-m1（已循环兜底约 8s） | data: [DONE] |  | "}
+
+== tools.mjs ==
+PASS  tools·请求转换(tools+tool_choice) :: {"tools":true}
+PASS  tools·非流式响应还原 tool_calls :: {"name":"get_weather"}
+PASS  tools·流式降级为一次性 SSE(含 tool_calls) :: {"n":3}
+PASS  Gemini tools·functionDeclarations + tool_calls :: {"ok":true}
+
+== trend.mjs ==
+PASS  延迟趋势·latTrend 时间序列存在 :: {"len":45}
+
+== upstream-side-4xx.mjs ==
+PASS  ①4xx 上游侧故障(422 upstream_error) 继续链，客户端拿到 200 :: "code=200 {\"id\":\"m1\",\"object\":\"chat.completion\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"pong\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,"
+PASS  ①兜底模型被实际调用 :: {"ok":1,"before":0}
+PASS  ①返回的是兜底模型的正常响应 :: "{\"id\":\"m1\",\"object\":\"chat.completion\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"pong\"},\"finish_reas"
+PASS  ①上游侧故障计入失败统计（供熔断计数） :: 1
+PASS  ②整链上游侧故障 → 透传 422（保留上游原始错误，非 502） :: "code=422 {\"error\":{\"message\":\"Inference request failed.\",\"type\":\"atria_api_error\",\"code\":\"upstream_error\"}}"
+PASS  ③确定性参数错误(400 invalid_request) 直接返回 400 :: "code=400 {\"error\":{\"message\":\"max_tokens must be an integer between 1 and 65536.\",\"type\":\"atria_api_error\",\"code\":\"invalid_request\"}}"
+PASS  ③未误伤：兜底模型没被调用（不空跑整条链） :: {"ok":1,"before":1}
+  （upstream-side-4xx 子结果: 7/7）
+
+== user-env-fallback.mjs ==
+SKIP  user-env fallback（仅 Windows）
+
+== virtual-models.mjs ==
+PASS  status 暴露 configVersion
+PASS  缺 version 宽容放行且递增
+PASS  过期 version 409
+PASS  并发 5 同 version 恰 1 成功
+PASS  /v1/models 聚合虚拟模型
+PASS  route-preview 命中虚拟模型
+PASS  gate-a 路由 200 且 model 回写 :: "{\"code\":200,\"model\":\"gate-a\",\"keys\":[\"code\",\"id\",\"object\",\"model\",\"choices\",\"usage\"]}"
+PASS  未知名 404（已配置虚拟模型）
+PASS  gatemodel 旧入口回归
+PASS  虚拟名与真实模型冲突 400
+PASS  虚拟模型日额度超限 429 :: "code=429"
+PASS  链首真实模型档位补校验 400（先于额度） :: "code=400"
+PASS  gate-a+正确独立 key → 200 :: "code=200"
+PASS  gate-a+错 key → 401
+PASS  未知名+任意 key → 401 统一文案（防枚举）
+PASS  全局 key 超级语义放行
+PASS  删除虚拟模型同步清 key
+PASS  status 暴露虚拟模型 meta
+  （virtual-models 子结果: 18/18）
+
+== z-defaults-merge.mjs ==
+PASS  完整保存·自定义字段落盘 :: {"directory":[],"preheat":[],"retry":{"maxAttempts":2,"initialDelayMs":30,"maxDelayMs":200,"jitter":0},"timeout":{"connectMs":3000,"firstByteMs":10000,"idleMs":8000,"loopMs":20000},"concurrency":{"maxPerProvider":8},"extraHeaders":{},"proxy":"","proxyMode":"auto","clientKey":"","affinityTtlMs":120000,"provider":null,"failbackProbe":{"enabled":true,"everyMs":30000,"successStreak":2,"system":"ping"},"streamInterruptOnContent":true,"streamDropCooldownMs":800,"model":""}
+PASS  面板式保存·affinityTtlMs 保留 :: {"directory":[],"preheat":[],"retry":{"maxAttempts":2,"initialDelayMs":30,"maxDelayMs":200,"jitter":0},"timeout":{"connectMs":3000,"firstByteMs":10000,"idleMs":8000,"loopMs":20000},"concurrency":{"maxPerProvider":8},"extraHeaders":{},"proxy":"","proxyMode":"auto","clientKey":"","affinityTtlMs":120000,"provider":null,"failbackProbe":{"enabled":true,"everyMs":30000,"successStreak":2,"system":"ping"},"streamInterruptOnContent":true,"streamDropCooldownMs":800,"model":""}
+PASS  面板式保存·failbackProbe 保留 :: {"directory":[],"preheat":[],"retry":{"maxAttempts":2,"initialDelayMs":30,"maxDelayMs":200,"jitter":0},"timeout":{"connectMs":3000,"firstByteMs":10000,"idleMs":8000,"loopMs":20000},"concurrency":{"maxPerProvider":8},"extraHeaders":{},"proxy":"","proxyMode":"auto","clientKey":"","affinityTtlMs":120000,"provider":null,"failbackProbe":{"enabled":true,"everyMs":30000,"successStreak":2,"system":"ping"},"streamInterruptOnContent":true,"streamDropCooldownMs":800,"model":""}
+PASS  面板式保存·白名单字段仍生效 :: {"directory":[],"preheat":[],"retry":{"maxAttempts":2,"initialDelayMs":30,"maxDelayMs":200,"jitter":0},"timeout":{"connectMs":3000,"firstByteMs":10000,"idleMs":8000,"loopMs":20000},"concurrency":{"maxPerProvider":8},"extraHeaders":{},"proxy":"","proxyMode":"auto","clientKey":"","affinityTtlMs":120000,"provider":null,"failbackProbe":{"enabled":true,"everyMs":30000,"successStreak":2,"system":"ping"},"streamInterruptOnContent":true,"streamDropCooldownMs":800,"model":""}
+PASS  无 defaults 键·原样保留 :: {"directory":[],"preheat":[],"retry":{"maxAttempts":2,"initialDelayMs":30,"maxDelayMs":200,"jitter":0},"timeout":{"connectMs":3000,"firstByteMs":10000,"idleMs":8000,"loopMs":20000},"concurrency":{"maxPerProvider":8},"extraHeaders":{},"proxy":"","proxyMode":"auto","clientKey":"","affinityTtlMs":120000,"provider":null,"failbackProbe":{"enabled":true,"everyMs":30000,"successStreak":2,"system":"ping"},"streamInterruptOnContent":true,"streamDropCooldownMs":800,"model":""}
+PASS  显式提交·覆盖生效 :: {"directory":[],"preheat":[],"retry":{"maxAttempts":2,"initialDelayMs":30,"maxDelayMs":200,"jitter":0},"timeout":{"connectMs":3000,"firstByteMs":10000,"idleMs":8000,"loopMs":20000},"concurrency":{"maxPerProvider":8},"extraHeaders":{},"proxy":"","proxyMode":"auto","clientKey":"","affinityTtlMs":60000,"provider":null,"failbackProbe":{"enabled":true,"everyMs":30000,"successStreak":2,"system":"ping"},"streamInterruptOnContent":true,"streamDropCooldownMs":800,"model":""}
+PASS  收尾·重置为等价默认 :: {"directory":[],"preheat":[],"retry":{"maxAttempts":2,"initialDelayMs":30,"maxDelayMs":200,"jitter":0},"timeout":{"connectMs":3000,"firstByteMs":10000,"idleMs":8000,"loopMs":20000},"concurrency":{"maxPerProvider":8},"extraHeaders":{},"proxy":"","proxyMode":"auto","clientKey":"","affinityTtlMs":300000,"provider":null,"failbackProbe":{"enabled":false},"streamInterruptOnContent":true,"streamDropCooldownMs":800,"model":""}
+
+== z2-noevent.mjs ==
+PASS  半死流·无事件看门狗判死并回错误事件 :: {"ms":4358,"tail":"兜底约 20s），已重连 0 次仍失败\",\"type\":\"stream_interrupted\",\"code\":\"STREAM_INTERRUPTED\"}}\n\n\n: [gateway] all providers failed（已循环兜底约 20s）\ndata: [DONE]\n\n"}
+PASS  半死流·有限时间内结束（<15s，此前无限悬挂） :: {"ms":4358}
+PASS  健康心跳流·不误杀且内容完整 :: {"len":704}
+
+=== 结果: 125/125 通过 ===

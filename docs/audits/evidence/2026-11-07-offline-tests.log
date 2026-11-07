@@ -1,4 +1,4 @@
-(node:4) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:105) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
 
 === 00-baseline.test.mjs ===
@@ -7,7 +7,7 @@ PASS  管理面带令牌 200 且含 configVersion :: {"cv":0}
 PASS  数据面错误 Key 401 :: {"status":401}
 PASS  /v1/models 暴露 capabilities/wire :: {"ids":["m-good","m-bad"]}
 PASS  Chat 非流式 200 + usage :: {"status":200}
-PASS  Chat 响应带 x-mg-trace-id :: {"trace":"46a721e2-9c03-4877-90fe-cb0843b2e761"}
+PASS  Chat 响应带 x-mg-trace-id :: {"trace":"0f7bd677-2577-4c53-9af3-1d49aed0b100"}
 PASS  Chat 流式 200 + 内容 delta + [DONE] :: {"deltas":2}
 PASS  未知模型且无默认上游 → 400（非 5xx） :: {"status":400}
 PASS  Responses 非 POST → 405 :: {"status":405,"allow":"POST"}
@@ -17,9 +17,9 @@ PASS  上游只收到合法请求 2 次（未知模型未转发） :: {"hits":2}
 PASS  持续 429 → 客户端收到 429（不吞成 502） :: {"status":429}
 PASS  429 保留 Retry-After 响应头 :: {"ra":"1"}
 PASS  429 归因为 rate_limit :: {"code":"MG_429_RATE_LIMIT","attribution":"rate_limit"}
-PASS  429 响应含 trace_id 与 attempts :: {"trace":"c556e985-cf63-4670-bb6c-acdfc0f1a6e0","attempts":3}
+PASS  429 响应含 trace_id 与 attempts :: {"trace":"34b58e81-8e31-4521-8e4e-1c0a6fe46de9","attempts":3}
 PASS  重试被预算封顶（上游总命中 <= 3） :: {"primaryHits":3,"fallbackHits":0}
-PASS  预算内不空转（< 4s） :: {"secs1":0.345}
+PASS  预算内不空转（< 4s） :: {"secs1":0.38}
 PASS  单次 429 后恢复 → 200 :: {"status":200}
 PASS  400 只命中上游 1 次（不重试） :: {"primaryHits":1,"fallbackHits":0}
 PASS  400 原样回显上游错误 :: {"status":400}
@@ -28,7 +28,7 @@ PASS  5xx 仍可切换备用上游 :: {"status":200,"primaryHits":2,"fallbackHit
 PASS  tool 请求 5xx 不重放（上游仅 1 次，不切备用） :: {"status":502,"primaryHits":1,"fallbackHits":0}
 PASS  tool 请求 429 不重放（上游仅 1 次） :: {"status":429,"primaryHits":1}
 PASS  额度类 429 归因为 platform_quota :: {"status":429,"attribution":"platform_quota"}
-PASS  Retry-After 超上限 → 不等待直接 429 :: {"status":429,"ms9":304}
+PASS  Retry-After 超上限 → 不等待直接 429 :: {"status":429,"ms9":305}
 
 === 15-status-matrix.test.mjs ===
 PASS  404 模型级拒绝继续目录链并成功 :: {"status":200,"model":"m-bad"}
@@ -61,7 +61,7 @@ PASS  instructions → system，max_output_tokens → max_tokens :: {"messages":
 PASS  Responses 流式 200 且首事件 response.created :: {"first":["response.created","response.in_progress"]}
 PASS  事件顺序：output_item.added → content_part.added → output_text.delta :: {"iAdded":2,"iPart":3,"iDelta":4}
 PASS  流式 response.completed 输出 message + function_call :: {"output":["message","function_call"]}
-PASS  工具 call_id 原样保留 + 参数拼接完整 :: {"fc":{"id":"fc_7f9f26e3-3174-4b5e-a3b9-fbce74d0fb44","type":"function_call","status":"completed","call_id":"call_abc","name":"shell","arguments":"{\"cmd\":\"ls\"}"}}
+PASS  工具 call_id 原样保留 + 参数拼接完整 :: {"fc":{"id":"fc_977fe2af-ec99-48cd-8ae6-88a15823caa1","type":"function_call","status":"completed","call_id":"call_abc","name":"shell","arguments":"{\"cmd\":\"ls\"}"}}
 PASS  流式 usage 映射（input/output/total） :: {"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}
 PASS  响应 model 回写为客户端请求名 :: {"model":"m-chat"}
 PASS  流式上游收到 stream_options.include_usage :: {"so":{"include_usage":true}}
@@ -69,8 +69,12 @@ PASS  Responses 流带 x-mg-attempts 响应头 :: {"attempts":"1"}
 PASS  previous_response_id → 422 且不转发 :: {"status":422,"code":"unsupported_previous_response"}
 PASS  input_file → 422（不静默丢字段） :: {"status":422}
 PASS  custom tool 入站映射为 function(input) 参数 :: {"tools":[{"type":"function","function":{"name":"apply_patch","description":"apply a patch","parameters":{"type":"object","properties":{"input":{"type":"string","description":"apply a patch"}},"required":["input"]}}}]}
-PASS  custom tool 出站还原 custom_tool_call + call_id :: {"custom":{"id":"ctc_079339f5-4c7e-4dbe-9002-9331919b1129","type":"custom_tool_call","status":"completed","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch"}}
+PASS  custom tool 出站还原 custom_tool_call + call_id :: {"custom":{"id":"ctc_859d7074-e897-424d-b3d9-c8b99e04e26e","type":"custom_tool_call","status":"completed","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch"}}
 PASS  models.upstreamModel 生效（上游收到真实 id） :: {"upstream":"real-model-9","client":"m-upstream-id"}
+PASS  Codex namespace 工具展开为 namespace.tool :: {"names":["exec_command","multi_agent_v1.close_agent"]}
+PASS  web_search 不伪造成 function（显式省略） :: {"names":["exec_command","multi_agent_v1.close_agent"]}
+PASS  会话头透传到上游（OpenCode/Codex 粘性路由） :: {"got":"sess-codex-1"}
+PASS  会话头不会破坏普通请求 :: {"status":200}
 PASS  native responses 直通 SSE（保留 response.completed） :: {"nativeHits":1}
 PASS  wire_mismatch → 422 :: {"status":422,"code":"wire_mismatch"}
 PASS  Responses 429 → HTTP 429 + retry-after + 归因 :: {"status":429,"ra":"1","attribution":"rate_limit"}
@@ -97,4 +101,16 @@ PASS  /api/capabilities 返回契约版本与入口 :: {"contract":"management-a
 PASS  /api/capabilities 不含任何密钥字段 :: {}
 PASS  defaults 未回传字段（customFlag）保存后保留 :: {"saved":200,"customFlag":true,"proxyMode":"direct"}
 
-=== 离线结果: 82 通过, 0 失败 ===
+=== 60-merged-hardening.test.mjs ===
+PASS  baseUrl 以 /v1 结尾不产生 /v1/v1 双拼 :: {"status":200,"urls":["/v1/chat/completions"]}
+PASS  max_tokens=0 被删除而非透传 :: {}
+PASS  max_tokens 按 maxTokensMax 钳制 :: {"max":1000}
+PASS  thinking 模型收到 thinking.type=enabled 且无 reasoning_effort :: {"body":{"model":"m-think","messages":[{"role":"user","content":"x"}],"thinking":{"type":"enabled"}}}
+PASS  models.api=anthropic 走到 /v1/messages 并转回 OpenAI :: {"url":"/v1/messages","status":200}
+PASS  providerModels[pid] 优先于 upstreamModel :: {"models":["actual-upstream-id","upstream-id-2"]}
+PASS  402 继续目录链并成功 :: {"status":200,"model":"m-src"}
+PASS  上游侧 4xx 继续目录链并成功 :: {"status":200}
+PASS  gzip 响应解压后正常解析 :: {"status":200}
+PASS  gzip 解压超上限被拒绝（502）且不假成功 :: {"status":502,"ms":1859}
+
+=== 离线结果: 96 通过, 0 失败 ===

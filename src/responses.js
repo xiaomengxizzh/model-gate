@@ -54,8 +54,14 @@ function textParts(content) {
   return parts
 }
 
-function mapTool(t, customTools) {
-  if (!t || typeof t !== 'object' || typeof t.name !== 'string' || !t.name) throw new UnsupportedResponsesInput('responses tool needs a name')
+function mapTool(t, customTools, omitted) {
+  if (!t || typeof t !== 'object') throw new UnsupportedResponsesInput('responses tool must be an object')
+  if (t.type === 'web_search' || t.type === 'web_search_preview') {
+    // 服务端内置联网搜索在 Chat wire 无对应语义；省略并上报，不伪造成本地 function（Codex 会把它放回下一轮）
+    if (omitted) omitted.push('web_search')
+    return null
+  }
+  if (typeof t.name !== 'string' || !t.name) throw new UnsupportedResponsesInput('responses tool needs a name')
   if (t.type === 'function') {
     return { type: 'function', function: { name: t.name, description: t.description || '', parameters: t.parameters || { type: 'object', properties: {}, additionalProperties: true } } }
   }
@@ -128,9 +134,27 @@ export function responsesToChat(inputBody) {
   const out = { model, messages, stream: !!inputBody.stream }
   if (out.stream && inputBody.stream_options !== false) out.stream_options = { include_usage: true }
   const customTools = new Set()
+  const omittedTools = []
   if (Array.isArray(inputBody.tools)) {
     if (!inputBody.tools.length) throw new UnsupportedResponsesInput('tools must not be an empty array')
-    out.tools = inputBody.tools.map(t => mapTool(t, customTools))
+    const flat = []
+    for (const t of inputBody.tools) {
+      if (t && t.type === 'namespace') {
+        // Codex 0.167 起把多智能体工具放在 namespace 下；Chat wire 无命名空间概念，
+        // 展开为 `namespace.tool` 形式的普通 function，保证客户端仍能按名识别并执行。
+        if (typeof t.name !== 'string' || !t.name || !Array.isArray(t.tools)) throw new UnsupportedResponsesInput('namespace tool needs name and tools', 'unsupported_tool_type')
+        for (const sub of t.tools) {
+          if (!sub || typeof sub !== 'object') continue
+          const named = Object.assign({}, sub, { name: t.name + '.' + sub.name })
+          const m = mapTool(named, customTools, omittedTools)
+          if (m) flat.push(m)
+        }
+        continue
+      }
+      const m = mapTool(t, customTools, omittedTools)
+      if (m) flat.push(m)
+    }
+    if (flat.length) out.tools = flat
   }
   const tc = inputBody.tool_choice
   if (tc === 'none' || tc === 'auto' || tc === 'required') out.tool_choice = tc
@@ -153,7 +177,7 @@ export function responsesToChat(inputBody) {
     else if (fmt.type !== 'text') throw new UnsupportedResponsesInput('unsupported text.format type: ' + fmt.type)
   }
   // 明确忽略的字段（store/truncation/include/metadata/service_tier）：Chat wire 无对应语义，且不影响请求内容保真。
-  return { body: out, customTools, original: inputBody }
+  return { body: out, customTools, omittedTools, original: inputBody }
 }
 
 function toolItem(tc, customTools, status = 'completed') {
