@@ -29,7 +29,7 @@ await new Promise(r => mock.listen(9897, r))
 fs.rmSync(TMP, { recursive: true, force: true })
 fs.mkdirSync(TMP, { recursive: true })
 const gatewayCfg = {
-  server: { host: '127.0.0.1', port: PORT },
+  server: { host: '127.0.0.1', port: PORT, logFile: path.join(TMP, 'gateway.log') },
   defaults: { provider: 'p-mock', model: 'gatemodel', clientKey: '', directory: [{ model: 'm-mock', mode: 'afterAll', providers: [] }], retry: { maxAttempts: 1 }, timeout: { connectMs: 3000, firstByteMs: 5000, idleMs: 5000 } },
   providers: { 'p-mock': { baseUrl: 'http://127.0.0.1:9897', apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' } },
   models: { 'm-mock': { provider: 'p-mock', alias: [], fallbacks: [], maxConcurrent: 0, qps: 0, reasoning: '', effortOptions: [], dailyQuota: 0, quota: 0, maxContext: 0 } },

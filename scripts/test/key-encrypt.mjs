@@ -4,7 +4,8 @@ import { GW, check, jpost, snapshot } from './utils.mjs'
 const st0 = await snapshot()
 if (!st0.server.keyEncrypted) { check('key 加密存储', true, null, true) }
 else {
-  const keysPath = fileURLToPath(new URL('../../config/keys.local.json', import.meta.url))
+  if (!process.env.MG_CONFIG_DIR) throw new Error('key-encrypt requires a disposable MG_CONFIG_DIR')
+  const keysPath = (await import('node:path')).join(process.env.MG_CONFIG_DIR, 'keys.local.json')
   const r1 = await jpost('/api/keys', { id: 'deepseek-official', key: 'sk-secret-demo' })
   await new Promise(r => setTimeout(r, 120))
   const raw = fs.existsSync(keysPath) ? fs.readFileSync(keysPath, 'utf8') : ''

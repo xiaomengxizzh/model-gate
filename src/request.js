@@ -4,11 +4,23 @@ import net from 'node:net'
 import tls from 'node:tls'
 import { URL } from 'node:url'
 import { gunzipSync } from 'node:zlib'
+import { adapterFor } from './format.js'
 
 // 上游连接复用（keep-alive）：减少每次 TLS/TCP 握手，改善连接体验与延迟
 const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 64 })
 const HTTPS_AGENT = new https.Agent({ keepAlive: true, maxSockets: 64 })
 function agentFor(provider) { return /^https:/i.test(provider.baseUrl) ? HTTPS_AGENT : HTTP_AGENT }
+function applyProviderHeaders(headers, provider) {
+  for (const [name, value] of Object.entries((provider && provider.extraHeaders) || {})) {
+    if (value != null && value !== '') headers[String(name).toLowerCase()] = String(value)
+  }
+  // OpenCode Go requires the OpenCode-specific session header. Older gateway
+  // configs used x-session-id; keep accepting it as the configured fallback.
+  if (provider && provider.id === 'opencodego' && !headers['x-opencode-session']) {
+    headers['x-opencode-session'] = headers['x-session-id'] || 'mg-opencodego-bridge'
+  }
+  return headers
+}
 
 // ---------- 上游 HTTP 代理（CONNECT 隧道，零第三方依赖） ----------
 // provider.proxy 形如 http://user:pass@host:port。仅用于非回环上游（本地 3050/9877 等自动直连）。
@@ -192,7 +204,7 @@ export function probe(provider) {
   const url = upstreamUrl(provider, '/v1/models')
   const { mod, reqOpts } = ctxFor(provider, url, 'GET', {})
   return new Promise((resolve) => {
-    const headers = { 'user-agent': 'model-gateway/0.1', accept: 'application/json' }
+    const headers = applyProviderHeaders({ 'user-agent': 'model-gateway/0.1', accept: 'application/json' }, provider)
     if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
     reqOpts.headers = headers
     const started = Date.now()
@@ -212,7 +224,7 @@ export function probe(provider) {
 // 在「预热」语义下只关心能否成功送达（拿到 2xx 响应头），不读响应体、不累计额度，避免污染配额统计。
 export function warm(provider, model, systemPrompt, opts = {}, log) {
   const url = upstreamUrl(provider, '/v1/chat/completions')
-  const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json' }
+  const headers = applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json' }, provider)
   if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
   const payload = Buffer.from(JSON.stringify({ model: model, messages: [{ role: 'system', content: systemPrompt }], max_tokens: 1, stream: false }))
   headers['content-length'] = payload.length
@@ -240,7 +252,7 @@ export function warm(provider, model, systemPrompt, opts = {}, log) {
 // 兼容返回 JSON 的上游（非 event-stream 的 2xx 直接视为恢复）。
 export function probeChat(provider, model, message, opts = {}, log) {
   const url = upstreamUrl(provider, '/v1/chat/completions')
-  const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'text/event-stream' }
+  const headers = applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'text/event-stream' }, provider)
   if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
   const payload = Buffer.from(JSON.stringify({ model: model, messages: [{ role: 'user', content: message || 'ping' }], max_tokens: 1, stream: true }))
   headers['content-length'] = payload.length
@@ -276,11 +288,20 @@ export function probeChat(provider, model, message, opts = {}, log) {
 
 // 模型连通测试：向该模型所属上游发一个极小量的真实 chat 请求（max_tokens=1），验证"这个模型名能真正被调用"
 // 返回 { ok, code, ms, err, body }，body 为响应首片段用于展示后端告警。
-export function probeModel(provider, model) {
-  const url = upstreamUrl(provider, '/v1/chat/completions')
-  const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }
+export function probeModel(provider, model, api = provider.api || 'openai', upstreamModel = model) {
+  const adapter = adapterFor(api)
+  const openaiBody = { model: upstreamModel, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false }
+  const request = adapter ? adapter.build(openaiBody) : { path: '/v1/chat/completions', body: openaiBody }
+  const url = upstreamUrl(provider, request.path)
+  const headers = applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }, provider)
   if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
-  const payload = Buffer.from(JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false }))
+  if (api === 'anthropic') {
+    if (!headers['anthropic-version']) headers['anthropic-version'] = '2023-06-01'
+    if (provider.apiKey && !headers['x-api-key']) headers['x-api-key'] = provider.apiKey
+  } else if (api === 'gemini' && provider.apiKey && !headers['x-goog-api-key']) {
+    headers['x-goog-api-key'] = provider.apiKey
+  }
+  const payload = Buffer.from(JSON.stringify(request.body))
   headers['content-length'] = payload.length
   const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
   return new Promise((resolve) => {

@@ -8,7 +8,7 @@ import { forward } from './request.js'
 import { todayKey } from './shared.js'
 
 const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-length','upgrade','keep-alive','te','trailer'])
-const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection'])
+const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection','x-mg-admin','x-goog-api-key','host'])
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b])
 
 // 模型级拒绝判定：402/403/404 恒真（上游侧故障，与本次请求无关）；400 需响应体含「模型/上游不可用」语义
@@ -62,11 +62,12 @@ function maybeGunzip(buf, contentEncoding) {
 }
 
 // 转发头：剥离客户端授权/敏感头，统一由网关注入鉴权，防止绕过
-function buildHeaders(req, provider, bodyBuf, cfg, api) {
+function buildHeaders(req, provider, bodyBuf, cfg, api, body) {
   const headers = {}
+  const connectionHeaders = new Set(String(req.headers.connection || '').toLowerCase().split(',').map(v => v.trim()))
   for (const [k, v] of Object.entries(req.headers)) {
     const lk = k.toLowerCase()
-    if (HOP_BY_HOP.has(lk) || STRIP_IN.has(lk)) continue
+    if (HOP_BY_HOP.has(lk) || STRIP_IN.has(lk) || connectionHeaders.has(lk)) continue
     headers[k] = v
   }
   headers['user-agent'] = 'model-gateway/0.1'
@@ -75,6 +76,12 @@ function buildHeaders(req, provider, bodyBuf, cfg, api) {
   if (provider.apiKey) headers['authorization'] = 'Bearer ' + provider.apiKey
   const extra = Object.assign({}, (cfg.defaults || {}).extraHeaders, provider.extraHeaders)
   for (const [k, v] of Object.entries(extra)) headers[k.toLowerCase()] = v
+  if (provider.id === 'opencodego') {
+    const first = (v) => Array.isArray(v) ? v[0] : v
+    const session = first(req.headers['x-opencode-session']) || first(req.headers['x-session-id']) || first(req.headers['x-conversation-id']) ||
+      (body && (body.session_id || body.conversation_id)) || headers['x-opencode-session'] || headers['x-session-id']
+    if (session != null && String(session).trim()) headers['x-opencode-session'] = String(session)
+  }
   // 协议专属头（per-model protocol 改革的下游：协议换掉后鉴权头也得跟着换）。
   // Anthropic Messages API 认 x-api-key 且强制 anthropic-version（多数 OpenAI 兼容中转也接受 Bearer，
   // 但官方端点缺 version 直接 400 "anthropic-version is required"）。这里两者都给，兼容性最大。
@@ -175,10 +182,11 @@ function rateWait(state, name, qps) {
   const refill = (now - q.last) * qps / 1000
   q.tokens = Math.min(cap, q.tokens + refill)
   q.last = now
-  if (q.tokens >= 1) { q.tokens -= 1; return }
-  const need = 1 - q.tokens
-  q.tokens = 0
-  return new Promise((res) => setTimeout(res, Math.max(0, Math.round((need / qps) * 1000))))
+  // Reserve each queued request's token. Keeping negative balances prevents
+  // concurrent waiters from all consuming the same future refill.
+  q.tokens -= 1
+  if (q.tokens >= 0) return
+  return new Promise((res) => setTimeout(res, Math.max(0, Math.ceil((-q.tokens / qps) * 1000))))
 }
 function modelThrottleOf(state, name, max) { if (!state.throttleModel[name]) state.throttleModel[name] = { max, inFlight: 0, wait: [] }; return state.throttleModel[name] }
 async function acquireSem(th) { if (th.inFlight >= th.max) await new Promise((s) => th.wait.push(s)); th.inFlight += 1; return () => { th.inFlight -= 1; if (th.wait.length) (th.wait.shift())() } }
@@ -295,6 +303,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         if (d0) { maxModel = d0.maxConcurrent || 0; qps = d0.qps || 0 }
         // 思考强度格式同样下沉到 per-route 整形；此处仅沿用既有语义：链首是 thinking 形态且有配置默认时才注入默认档位
         if (d0 && (d0.effortFormat || '') === 'thinking' && d0.reasoning) entryDefaultEffort = d0.reasoning
+        if (cfg.defaults && cfg.defaults.reasoning) entryDefaultEffort = cfg.defaults.reasoning
       } else {
         routes.push({ model: null, providers: [hit.def.provider].filter(Boolean) })
         if (!(cfg.defaults && cfg.defaults.provider)) return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '未指定默认上游（请配置 defaults.provider 或 defaults.directory）', type: 'missing_model' } })) }
@@ -453,7 +462,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     }
     if (api !== 'openai' && routeBody) { const ad = adapterFor(api); const r = ad.build(routeBody); if ((routeBody.tools || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true } turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body)) }
     else if ((bodyDirty || routeBody !== body) && routeBody) tbuf = Buffer.from(JSON.stringify(routeBody))
-    const headers = buildHeaders(req, prov, tbuf, cfg, api)
+    const headers = buildHeaders(req, prov, tbuf, cfg, api, body)
     const release = await acquireProvider(state, pid, cfg)
     const attemptStart = Date.now()
     try {

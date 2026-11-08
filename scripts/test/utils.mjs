@@ -1,3 +1,13 @@
+import { basename } from 'node:path'
+const isolatedSuites = new Set(['virtual-models.mjs', 'effort-normalize.mjs', 'upstream-side-4xx.mjs'])
+if (!isolatedSuites.has(basename(process.argv[1] || ''))) {
+  let target
+  try { target = new URL(process.env.MG_GW) } catch {}
+  if (process.env.MG_ALLOW_LIVE_TESTS !== '1' || !process.env.MG_CONFIG_DIR ||
+      !target || !['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname) || target.port === '8787') {
+    throw new Error('Legacy tests require MG_ALLOW_LIVE_TESTS=1, disposable MG_CONFIG_DIR and explicit loopback MG_GW outside port 8787')
+  }
+}
 // 测试共享工具
 export const GW = process.env.MG_GW || 'http://127.0.0.1:8787'
 export const results = []

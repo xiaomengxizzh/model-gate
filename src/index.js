@@ -18,15 +18,34 @@ const ADMIN_PAGE = new URL('./admin.html', import.meta.url)
 const FAIL_OPEN_THRESHOLD = 5       // 连续失败熔断阈值（放宽：平台偶发慢/抖不轻易熔断）
 const FAIL_OPEN_COOLDOWN = 10000    // 熔断冷却 ms
 
-async function collectBody(stream, maxBytes = 64 * 1024 * 1024) {
-  const chunks = []
-  let total = 0
-  for await (const c of stream) {
-    total += c.length
-    if (total > maxBytes) throw new Error('body too large (' + maxBytes + ' bytes)')
-    chunks.push(c)
-  }
-  return Buffer.concat(chunks)
+function collectBody(stream, maxBytes = 64 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let total = 0
+    const cleanup = () => {
+      stream.removeListener('data', onData)
+      stream.removeListener('end', onEnd)
+      stream.removeListener('error', onError)
+      stream.removeListener('aborted', onAborted)
+    }
+    const onError = (err) => { cleanup(); reject(err) }
+    const onAborted = () => onError(new Error('request aborted'))
+    const onEnd = () => { cleanup(); resolve(Buffer.concat(chunks)) }
+    const onData = (chunk) => {
+      total += chunk.length
+      if (total > maxBytes) {
+        cleanup()
+        // Drain without retaining the body or destroying the response socket.
+        stream.on('error', () => {})
+        stream.resume()
+        reject(new Error('body too large (' + maxBytes + ' bytes)'))
+      } else chunks.push(chunk)
+    }
+    stream.on('data', onData)
+    stream.once('end', onEnd)
+    stream.once('error', onError)
+    stream.once('aborted', onAborted)
+  })
 }
 
 // 上游偶发返回 gzip 响应却不带 content-encoding 头（如 opencodezen），会导致 usage 解析失败、统计断链
@@ -143,7 +162,7 @@ function buildStatus(state) {
     const m = (s.byModel && s.byModel[name]) || { requests: 0, errors: 0 }
     const dk = (s.daily && s.daily[name] && s.daily[name][todayKey()]) || { tokens: 0, hit: 0, miss: 0 }
     const hitRate = (dk.hit + dk.miss) > 0 ? Math.round((dk.hit / (dk.hit + dk.miss)) * 1000) / 10 : null
-    return { name, provider: d.provider, alias: d.alias || [], fallbacks: d.fallbacks || [], maxConcurrent: d.maxConcurrent || 0, qps: d.qps || 0, reasoning: d.reasoning || '', effortOptions: d.effortOptions || [], effortFormat: d.effortFormat || '', dailyQuota: d.dailyQuota || 0, quota: d.quota || 0, maxContext: d.maxContext || 0, probe: m.probe || null, requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate, affinity: state.affinity[name] || null, avgMs: m.latencyCount ? Math.round(m.latencySum / m.latencyCount) : null }
+    return { name, provider: d.provider, alias: d.alias || [], fallbacks: d.fallbacks || [], maxConcurrent: d.maxConcurrent || 0, qps: d.qps || 0, reasoning: d.reasoning || '', effortOptions: d.effortOptions || [], effortFormat: d.effortFormat || '', dailyQuota: d.dailyQuota || 0, quota: d.quota || 0, maxContext: d.maxContext || 0, maxTokensMax: d.maxTokensMax || 0, api: d.api || '', providerModels: d.providerModels || {}, forceNoStream: !!d.forceNoStream, probe: m.probe || null, requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate, affinity: state.affinity[name] || null, avgMs: m.latencyCount ? Math.round(m.latencySum / m.latencyCount) : null }
   })
   const defaults = state.cfg.defaults || {}
   const todayTotal = models.reduce((a, m) => a + (m.today || 0), 0)
@@ -219,7 +238,7 @@ async function doSaveConfig(state, body) {
   // defaults 合并而非整体替换：面板等客户端只回传它认识的白名单字段，
   // 未回传字段（affinityTtlMs / failbackProbe / preheat 等自定义或扩展项）保留现有值——任何保存都不再冲掉自定义配置。
   // 代价：字段无法经保存接口删除（需要时直接编辑 gateway.local.json 或 /api/config/reload 后手改）。
-  const defaults = body.defaults === undefined ? (cur.defaults || {}) : Object.assign({}, cur.defaults || {}, body.defaults)
+  const defaults = Object.assign({}, cur.defaults || {}, body.defaults || {})
   // 客户端 Key：'********' 掩码视为未改动（不清空）；其它值（含清空 ''）写入加密 keys 库，不再明文进 local，与 provider key 同样加密落盘
   let newClientKey = null
   if (defaults && typeof defaults.clientKey === 'string' && defaults.clientKey !== '********') { newClientKey = defaults.clientKey }
@@ -231,6 +250,13 @@ async function doSaveConfig(state, body) {
     for (const fb of m.fallbacks || []) if (!providers[fb]) return { error: '模型「' + mn + '」的备用上游 ' + fb + ' 不存在' }
     for (const f of ['dailyQuota','quota','maxContext']) if (m[f] != null && (!Number.isFinite(m[f]) || m[f] < 0)) return { error: '模型「' + mn + '」的 ' + f + ' 必须为非负数字（0=不限）' }
     if (m.effortFormat != null && m.effortFormat !== '' && !['reasoning_effort', 'thinking'].includes(m.effortFormat)) return { error: '模型「' + mn + '」的 effortFormat 仅支持 reasoning_effort/thinking' }
+    // 协议（改革：per-model protocol）：未设置/留空 = 继承上游的 api；显式设置时须为已知协议。
+    // 同一上游的不同模型可各走不同协议（如 OpenCode Zen 的 union-alpha 走 anthropic、其余走 openai）。
+    if (m.api != null && m.api !== '' && !['openai', 'anthropic', 'gemini'].includes(String(m.api))) return { error: '模型「' + mn + '」的 api 仅支持 openai/anthropic/gemini（留空=继承上游）' }
+    // per-上游模型名覆盖：{ <providerId>: <该上游侧的模型名> }
+    if (m.providerModels != null && m.providerModels !== '' && (typeof m.providerModels !== 'object' || Array.isArray(m.providerModels))) return { error: '模型「' + mn + '」的 providerModels 须为 { 上游ID: 该上游模型名 } 对象' }
+    if (m.providerModels && typeof m.providerModels === 'object') for (const [pOv, nm] of Object.entries(m.providerModels)) { if (!providers[pOv]) return { error: '模型「' + mn + '」的 providerModels 引用了不存在的上游 ' + pOv }; if (typeof nm !== 'string' || !nm) return { error: '模型「' + mn + '」的 providerModels[' + pOv + '] 须为非空字符串' } }
+    if (m.forceNoStream != null && typeof m.forceNoStream !== 'boolean') return { error: '模型「' + mn + '」的 forceNoStream 须为布尔值' }
   }
   // 单上游代理（名单）：留空/undefined=继承全局；direct/false=强制直连；否则须为合法 http(s):// 地址
   for (const [pid, p] of Object.entries(providers || {})) {
@@ -346,7 +372,7 @@ async function doProbeModel(state, model) {
   let prov
   try { prov = buildProvider(state.cfg, def.provider) } catch (e) { return { id: model, ok: false, err: e.message } }
   if (prov._def.apiKeyEnv && !prov.keyOk && !prov.apiKey) return { id: model, ok: false, err: '上游未配置 Key，无法鉴权' }
-  const r = await probeModel(prov, model)
+  const r = await probeModel(prov, model, def.api || prov.api, (def.providerModels && def.providerModels[def.provider]) || model)
   const o = (state.stats.byModel[model] = state.stats.byModel[model] || { requests: 0, errors: 0 })
   o.probe = { at: Date.now(), ok: r.ok, code: r.code, ms: r.ms, err: r.err || null }
   return { id: model, ok: r.ok, code: r.code, ms: r.ms, err: r.err || null }
@@ -415,7 +441,7 @@ function makeHandler(state) {
       // 面板设置管理令牌：写入加密 keys 库并热生效。未启用鉴权时开放（本地初始化）；已启用时需携带当前令牌。
       if (path === '/api/admin-token' && req.method === 'POST') {
         if (state.adminToken && !adminOk(req, state)) { sendJson(res, 401, { error: '未授权：修改管理令牌需携带当前令牌' }); return }
-        const body = tryParse(await collectBody(req)) || {}
+        const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)) || {}
         const token = typeof body.token === 'string' ? body.token.trim() : ''
         const keys = Object.assign({}, state.cfg._keys)
         if (token) keys.__mg_admin = token
@@ -433,7 +459,7 @@ function makeHandler(state) {
       if (path === '/api/model-stats' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const days = Math.min(90, Math.max(1, parseInt(new URL(url, 'http://x').searchParams.get('days') || '7', 10) || 7)); const out = {}; const now = new Date(); const modelNames = Object.keys(state.cfg.models || {}); const pt = (c) => ({ tokens: c ? c.tokens : 0, inTokens: c ? (c.inTokens || 0) : 0, outTokens: c ? (c.outTokens || 0) : 0, hit: c ? (c.hit || 0) : 0, miss: c ? (c.miss || 0) : 0, hitRate: (c && (c.hit + c.miss) > 0) ? Math.round((c.hit / (c.hit + c.miss)) * 1000) / 10 : null }); if (days === 1) { for (const name of modelNames) { const mh = state.stats.hourly[name] || {}; const arr = []; for (let i2 = 23; i2 >= 0; i2--) { const hd = new Date(now.getTime() - i2 * 3600 * 1000); const hk = todayKey(hd) + ':' + String(hd.getHours()).padStart(2, '0'); arr.push(Object.assign({ date: String(hd.getHours()).padStart(2, '0') + ':00' }, pt(mh[hk]))) } out[name] = arr } } else { for (const name of modelNames) { const md = state.stats.daily[name] || {}; const arr = []; for (let i2 = days - 1; i2 >= 0; i2--) { const d = new Date(now); d.setDate(d.getDate() - i2); const k = todayKey(d); arr.push(Object.assign({ date: k }, pt(md[k]))) } out[name] = arr } } sendJson(res, 200, { days, mode: days === 1 ? 'hourly' : 'daily', models: out }); return }
       if (path === '/api/route-preview' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
-        const body = tryParse(await collectBody(req)) || {}
+        const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)) || {}
         const model = String(body.model || '').trim()
         if (!model) { sendJson(res, 400, { error: '缺少 model' }); return }
         let hit
@@ -454,7 +480,7 @@ function makeHandler(state) {
       if (path === '/api/config/reload' && req.method === 'POST') { if (!await requireAdmin(req, res)) return; reloadConfig(state); sendJson(res, 200, { ok: true }); return }
       if (path === '/api/config/save' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
-        const body = tryParse(await collectBody(req))
+        const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
         if (!body || typeof body !== 'object') { sendJson(res, 400, { error: '请求体必须为 JSON' }); return }
         const r = await saveConfig(state, body)
         if (r.error) { sendJson(res, 400, { error: r.error }); return }
@@ -463,7 +489,7 @@ function makeHandler(state) {
       }
       if (path === '/api/keys' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
-        const body = tryParse(await collectBody(req))
+        const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
         if (!body || !body.id) { sendJson(res, 400, { error: '缺少 provider id' }); return }
         const kr = await saveKeys(state, body)
         if (kr.error) { sendJson(res, 400, { error: kr.error }); return }
@@ -472,7 +498,7 @@ function makeHandler(state) {
       }
       if (path === '/api/probe' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
-        const body = tryParse(await collectBody(req)) || {}
+        const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)) || {}
         const ids = body.id ? [String(body.id)] : Object.keys(state.cfg.providers || {})
         const results = []
         for (const id of ids) if (state.cfg.providers[id]) results.push(await doProbe(state, id))
@@ -480,7 +506,7 @@ function makeHandler(state) {
       }
       if (path === '/api/model-test' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
-        const body = tryParse(await collectBody(req)) || {}
+        const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)) || {}
         const id = String(body.id || '')
         if (id) {
           if (!(state.cfg.models || {})[id]) { sendJson(res, 400, { error: '未知模型: ' + id }); return }
@@ -493,32 +519,25 @@ function makeHandler(state) {
         sendJson(res, 200, { ok: true, results, status: buildStatus(state) }); return
       }
 
-      // —— 数据面客户端鉴权（两阶段，Phase1 Step4）——
-      // 一阶段：全局 clientKey（常规 agent 零额外开销，行为与旧版完全一致）
+      // Global credentials grant access to every model. A virtual credential only
+      // grants its named entry, including when no global credential is configured.
       const clientKey = currentClientKey(state)
-      if (clientKey && !clientAuthOk(req, clientKey)) {
-        // 二阶段（仅当配置了虚拟模型）：解析 body.model 逐虚拟模型 key 校验；否则按旧口径 401
+      const globalAuthorized = clientKey && clientAuthOk(req, clientKey)
+      if (!globalAuthorized) {
+        let vm = null
         const vms = state.cfg.virtualModels || []
         if (vms.length && CHAT_PATHS.has(path) && (req.method === 'POST' || req.method === 'PUT')) {
-          const bodyBuf2 = await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
-          const body2 = bodyBuf2 && bodyBuf2.length ? tryParse(bodyBuf2) : null
-          const reqModel = body2 && typeof body2.model === 'string' ? body2.model.trim() : ''
-          const vm = vms.find(v => v.name === reqModel)
-          const vmKey = vm ? (state.cfg._keys && state.cfg._keys['__mg_vm_' + vm.name]) : null
-          if (vm && vmKey) {
-            // 虚拟模型独立 Key：过期检查（元数据 expiresAt）+ 常量时间比较
-            const meta = state.cfg._keys && state.cfg._keys['__mg_vm_meta_' + vm.name]
-            if (meta && meta.expiresAt && Date.now() > Number(meta.expiresAt)) {
-              log && log.warn('数据面鉴权拒绝(401 虚拟key已过期)', path, 'model=' + vm.name); sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } }); return
-            }
-            if (clientAuthOk(req, vmKey)) { req.__mgBodyBuf = bodyBuf2; req.__mgBody = body2 } // 校验通过：缓存 body 供后续转发复用
-            else { log && log.warn('数据面鉴权拒绝(401 虚拟key不匹配)', path, 'model=' + vm.name); sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } }); return }
-          } else {
-            // 未命中任何「绑了 key 的虚拟模型」→ 统一 401（不区分模型不存在/key 错，防虚拟模型名枚举）
-            log && log.warn('数据面鉴权拒绝(401)', path, 'ip=' + ((req.socket && req.socket.remoteAddress) || '-') + ' ua=' + String(req.headers['user-agent'] || '-').slice(0, 40)); sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } }); return
-          }
-        } else {
-          log && log.warn('数据面鉴权拒绝(401)', path, 'ip=' + ((req.socket && req.socket.remoteAddress) || '-') + ' ua=' + String(req.headers['user-agent'] || '-').slice(0, 40)); sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } }); return
+          req.__mgBodyBuf = await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
+          req.__mgBody = tryParse(req.__mgBodyBuf)
+          const model = req.__mgBody && req.__mgBody.model
+          vm = vms.find(v => v.name === (typeof model === 'string' ? model.trim() : ''))
+        }
+        const vmKey = vm && state.cfg._keys && state.cfg._keys['__mg_vm_' + vm.name]
+        const meta = vm && state.cfg._keys && state.cfg._keys['__mg_vm_meta_' + vm.name]
+        const expired = meta && meta.expiresAt && Date.now() > Number(meta.expiresAt)
+        if ((clientKey || vmKey) && !(vmKey && !expired && clientAuthOk(req, vmKey))) {
+          sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } })
+          return
         }
       }
 
@@ -530,6 +549,10 @@ function makeHandler(state) {
       let bodyBuf = req.__mgBodyBuf || null
       if (!bodyBuf && (req.method === 'POST' || req.method === 'PUT')) bodyBuf = await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
       const body = req.__mgBody || (bodyBuf && bodyBuf.length ? tryParse(bodyBuf) : null)
+      if (isChat && (!body || typeof body !== 'object' || Array.isArray(body))) {
+        sendJson(res, 400, { error: { message: '请求体必须为 JSON 对象', type: 'invalid_request_error' } })
+        return
+      }
       // 入口路径别名：把不带 /v1 的 Chat 兼容路径规范化为 /v1/chat/completions，使 base URL 填 http://127.0.0.1:8787 也被正确代理
       const fPath = (isChat && path !== '/v1/chat/completions') ? '/v1/chat/completions' : path
       const fUrl = (fPath === path) ? url : (fPath + url.slice(path.length))
@@ -540,13 +563,13 @@ function makeHandler(state) {
         const r = await relayStream(res, result.stream, {
           idleMs: (state.cfg.defaults && state.cfg.defaults.timeout && state.cfg.defaults.timeout.idleMs) || 0,
           maxReconnects: 2, log, reconnect: m.reconnect,
-          protocol: m.api || 'openai', extract: (m.api && m.api !== 'openai') ? adapterFor(m.api).extractStreamContent : undefined,
+          protocol: m.api || 'openai', extract: (m.api && m.api !== 'openai') ? adapterFor(m.api).extractStreamContent : undefined, extractFinish: (m.api && m.api !== 'openai') ? adapterFor(m.api).extractStreamFinish : undefined,
           rewriteModel: m.rewriteModel || null, // 「名字没对上」：响应 model 回写为客户端请求名
           onTokens: (n, usage) => {
-            const total = (usage && typeof usage.total_tokens === 'number' && usage.total_tokens > 0) ? usage.total_tokens : n
+            const _u = usage || {}; const _inTk = (typeof _u.prompt_tokens === 'number' && _u.prompt_tokens > 0 ? _u.prompt_tokens : 0) || (typeof _u.input_tokens === 'number' && _u.input_tokens > 0 ? _u.input_tokens : 0); const _outTk = (typeof _u.completion_tokens === 'number' && _u.completion_tokens > 0 ? _u.completion_tokens : 0) || (typeof _u.output_tokens === 'number' && _u.output_tokens > 0 ? _u.output_tokens : 0); const total = (typeof _u.total_tokens === 'number' && _u.total_tokens > 0 ? _u.total_tokens : 0) || (_inTk + _outTk) || n
             // 输入/输出 token：流末 usage 有则取（多数 OpenAI 兼容上游流末帧带），无则记 0（不臆造）；命中+未命中=输入
-            const inTk = (usage && typeof usage.prompt_tokens === 'number' && usage.prompt_tokens > 0) ? usage.prompt_tokens : 0
-            const outTk = (usage && typeof usage.completion_tokens === 'number' && usage.completion_tokens > 0) ? usage.completion_tokens : 0
+            const inTk = _inTk
+            const outTk = _outTk
             if (total > 0) { agg(state, m.pid, 'tokens', total); const sm = m.serving || m.modelName; const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }; sg.tokens = (sg.tokens || 0) + total; sg.inTokens = (sg.inTokens || 0) + inTk; sg.outTokens = (sg.outTokens || 0) + outTk; tallyDaily(state, sm, total, 0, 0, inTk, outTk); tallyVirtual(state, m.modelName, m.serving, total, inTk, outTk); tallyDialogue(state, m.dialogueId, total, 0, 0) }
           },
           onUsage: (u) => { const c = cacheHitMiss(m.api, u); if (c.hit > 0 || c.miss > 0) { const sm = m.serving || m.modelName; noteCacheStat(state, sm, m.pid, c.hit, c.miss); tallyDaily(state, sm, 0, c.hit, c.miss); tallyDialogue(state, m.dialogueId, 0, c.hit, c.miss) } },
@@ -576,13 +599,13 @@ function makeHandler(state) {
         await relayStream(res, out.res.stream, {
           idleMs: (state.cfg.defaults && state.cfg.defaults.timeout && state.cfg.defaults.timeout.idleMs) || 0,
           maxReconnects: 2, log, reconnect: out.reconnect,
-          protocol: out.api || 'openai', extract: (out.api && out.api !== 'openai') ? adapterFor(out.api).extractStreamContent : undefined,
+          protocol: out.api || 'openai', extract: (out.api && out.api !== 'openai') ? adapterFor(out.api).extractStreamContent : undefined, extractFinish: (out.api && out.api !== 'openai') ? adapterFor(out.api).extractStreamFinish : undefined,
           rewriteModel: (body && body.model) || null, // 「名字没对上」：响应 model 回写为客户端请求名
           onTokens: (n, usage) => {
-            const total = (usage && typeof usage.total_tokens === 'number' && usage.total_tokens > 0) ? usage.total_tokens : n
+            const _u = usage || {}; const _inTk = (typeof _u.prompt_tokens === 'number' && _u.prompt_tokens > 0 ? _u.prompt_tokens : 0) || (typeof _u.input_tokens === 'number' && _u.input_tokens > 0 ? _u.input_tokens : 0); const _outTk = (typeof _u.completion_tokens === 'number' && _u.completion_tokens > 0 ? _u.completion_tokens : 0) || (typeof _u.output_tokens === 'number' && _u.output_tokens > 0 ? _u.output_tokens : 0); const total = (typeof _u.total_tokens === 'number' && _u.total_tokens > 0 ? _u.total_tokens : 0) || (_inTk + _outTk) || n
             // 输入/输出 token：流末 usage 有则取（多数 OpenAI 兼容上游流末帧带），无则记 0（不臆造）；命中+未命中=输入
-            const inTk = (usage && typeof usage.prompt_tokens === 'number' && usage.prompt_tokens > 0) ? usage.prompt_tokens : 0
-            const outTk = (usage && typeof usage.completion_tokens === 'number' && usage.completion_tokens > 0) ? usage.completion_tokens : 0
+            const inTk = _inTk
+            const outTk = _outTk
             if (total > 0) { agg(state, out.pid, 'tokens', total); const sm = out.serving || out.modelName; const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }; sg.tokens = (sg.tokens || 0) + total; sg.inTokens = (sg.inTokens || 0) + inTk; sg.outTokens = (sg.outTokens || 0) + outTk; tallyDaily(state, sm, total, 0, 0, inTk, outTk); tallyVirtual(state, out.modelName, out.serving, total, inTk, outTk); tallyDialogue(state, out.dialogueId, total, 0, 0) }
           },
           onUsage: (u) => { const c = cacheHitMiss(out.api, u); if (c.hit > 0 || c.miss > 0) { const sm = out.serving || out.modelName; noteCacheStat(state, sm, out.pid, c.hit, c.miss); tallyDaily(state, sm, 0, c.hit, c.miss); tallyDialogue(state, out.dialogueId, 0, c.hit, c.miss) } },

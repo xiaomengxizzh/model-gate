@@ -61,7 +61,7 @@ await new Promise(r => sLenient.listen(9893, r))
 
 const mdef = (provider, extra) => Object.assign({ provider, alias: [], fallbacks: [], maxConcurrent: 0, qps: 0, reasoning: '', effortOptions: ['off', 'low', 'medium', 'high'], dailyQuota: 0, quota: 0, maxContext: 0 }, extra || {})
 const gatewayCfg = {
-  server: { host: '127.0.0.1', port: PORT },
+  server: { host: '127.0.0.1', port: PORT, logFile: path.join(TMP, 'gateway.log') },
   defaults: { provider: 'p-strict', model: 'gatemodel', clientKey: '', directory: [], retry: { maxAttempts: 1 }, timeout: { connectMs: 3000, firstByteMs: 8000, idleMs: 8000 } },
   providers: {
     'p-fail': { baseUrl: 'http://127.0.0.1:9891', apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },

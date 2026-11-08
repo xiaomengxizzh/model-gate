@@ -49,7 +49,7 @@ await new Promise(r => sOk.listen(9897, r))
 
 const mdef = (provider) => ({ provider, alias: [], fallbacks: [], maxConcurrent: 0, qps: 0, reasoning: '', effortOptions: [], dailyQuota: 0, quota: 0, maxContext: 0 })
 const gatewayCfg = {
-  server: { host: '127.0.0.1', port: PORT },
+  server: { host: '127.0.0.1', port: PORT, logFile: path.join(TMP, 'gateway.log') },
   defaults: { provider: 'p-422', model: 'gatemodel', clientKey: '', directory: [], retry: { maxAttempts: 1 }, timeout: { connectMs: 3000, firstByteMs: 8000, idleMs: 8000 } },
   providers: {
     'p-422': { baseUrl: 'http://127.0.0.1:9894', apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },

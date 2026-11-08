@@ -2,11 +2,27 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-08 审计修复（未发布）
+
+### Fixed
+
+- 无全局客户端 Key 时，绑定 Key 的虚拟模型仍须鉴权；剥离管理/Google Key、客户端 Host 和动态逐跳头。
+- 管理请求采用配置的 body 上限，超限保留响应 socket 返回 413；非法 Chat JSON 返回 400。
+- 模型探测采用模型协议与 providerModels 覆盖名；配置保存先克隆 defaults。
+- QPS 为并发等待请求预留额度，避免相同定时器同时放行突破限速。
+
+### Changed
+
+- 默认 npm test 仅运行隔离 mock 套件；旧测试须显式指定可丢弃实例并 opt in。
+- 现有模型状态字段、OpenCode 会话头/extraHeaders 改动纳入本轮核查；保留原有文档归档迁移。
+- 新增 AI 接手入口、分层文档、审计记录、16 项后端任务及既有前端重建计划映射及 CI/文档链接检查。
+
 ## [Unreleased] —— 托盘小窗管理器 + 日志按天分文件与 7 天保留 + 交接问题修复批次
 
 - **运维(2026-09-07)**:keys.local.json 明文 key 清空转环境变量解析(resolveKey source=env 实测:mimo-v2.5/glm-5.3-flash 200,gmi 到达上游仅账户余额不足);本机 master.key(自动生成的加密主密钥,keys 库空后无物可守)已删,后续写入 keys 时会按需重建;keys.local.json.enc-backup(Windows 加密旧备份)留存待用户定夺
 
 ### Fixed
+- **OpenCode Go 接入使用过期路径/会话头且探测不带自定义头**：按 DSH 当前 `deepseek-v4.1-flash` provider 定义改用 `https://opencode.ai/inference/go/v1` 兼容路径并附加 `x-opencode-session`；ModelGate 将客户端的 `x-opencode-session` / `x-session-id` / `x-conversation-id` 或 body 会话 ID 映射到上游头。上游探测和模型探测现在也带 provider `extraHeaders`。同时支持 `defaults.reasoning` 让虚拟共用名在未指定档位时注入默认强度。
 - **4xx 但语义是「上游出错」的响应被当客户端错误直接抛回，兜底链形同虚设（2026-09-18 生产实录）**：atria 短时故障返回 `422 {"error":{"message":"Inference request failed.","type":"atria_api_error","code":"upstream_error"}}`，`isModelLevelRejection` 只认 402/403/404 与「含模型/上游不可用语义的 400」，422 落到「真·请求错误」分支 → **原样抛给客户端、不切兜底链**，而 `defaults.directory` 上还排着 qwen3.8-flash / glm-5.3-flash 两个健康模型没用上，用户那一轮 turn 直接失败（ZCode: `reason=invalid_request status=422 retryable=false`）。与 402 属同类问题（0.5f99b4c 的修法同源）。现 `src/forward.js` 新增 `isUpstreamSideFailure()`：4xx（排除 401/402/403/404/429 各自的专道）+ 响应体显式含上游出错语义（`upstream_error` / `inference request failed` / `internal server error` / `service unavailable` / `overloaded` / `bad gateway` / `gateway timeout` / `请稍后重试` / `服务不可用`）→ 计为**真·失败**（进熔断计数，反复这么报的上游该被冷却）、保留原始响应、**继续目录链**；整链全败时回最后一个上游的原始 4xx（非 502）。
   - **刻意收窄防过宽**：识别不出该语义的 4xx 仍按客户端错误直接返回，不去空跑整条链——例如 atria 自己的 400 `invalid_request "max_tokens must be an integer between 1 and 65536."`（09-15 实录）是确定性参数错误，换模型一样失败。
   - 回归测试 `scripts/test/upstream-side-4xx.mjs`（7 断言，mock 上游 + 隔离实例）：上游侧故障继续链拿到 200 / 兜底被实际调用 / 计入失败统计 / 整链全败透传原始 422 / **对照组**确定性 400 直接返回且兜底未被调用。反向验证：临时关闭该判定后 ①组 4 项失败（客户端重现拿到 422），恢复后 7/7。
