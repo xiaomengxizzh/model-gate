@@ -2,6 +2,27 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
+## 当前状态（2026-11-09 收口）
+
+分支 `dev/gateway-audit-20261108`，本轮三个提交：`33853d2`（契约基线 + P1 卡）、`522da4a`（旧套件隔离 + 日志脱敏性能）、`9a41547`（指标口径）。
+
+已闭环：MG-016、MG-001、MG-003、MG-005、MG-007、MG-006、MG-004、MG-010（工程侧）、MG-008（适配器半边）。
+仍待办：MG-002（统一 deadline/取消/SSE 背压）、MG-009（管理面投影与前端 fixture）、MG-015（Responses/Codex）、MG-011～MG-014（Embedding/Rerank/Audio-Image/Video）、MG-008 余项（探测/预热一致性、错误信封映射）。
+
+验证（本机 Node v24.22.2，全部离线 mock，未触真实上游）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm run check` | 退出码 0 |
+| `npm test` | 13/13 隔离套件通过 |
+| `MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs` | 27/27 旧套件文件通过（133 断言，无 SKIP） |
+| `npm run docs:check` | PASS |
+| `node scripts/check-metadata.mjs` | PASS (21) |
+
+未验证：GitHub Actions 远程执行、真实上游与计费、生产 8787 重启、Windows/macOS、Node 18/20 实跑。
+
+已知遗留：`user-env-fallback` 的 Windows 分支在 Linux 上打印 N/A；`/api/keys` 的 id 仍无完整白名单（随 MG-009）；前端 F0–F5 全部 TODO，本轮只到契约基线。
+
 ## 本轮完成
 
 | ID | 交付 | 验收证据 |
