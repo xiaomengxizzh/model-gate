@@ -19,6 +19,8 @@
 | MG-003 | 配置结构校验单一入口、保留键拦截、删除墓碑（重启不复活）、并发版本冲突 | offline/config-schema.test.mjs（4 组）；src/index.js、src/router.js |
 | MG-005 | 日志脱敏词表随配置热更新、代理内嵌凭据与 Bearer 兜底、端到端验证错误摘要不落明文 | offline/logger-secrets.test.mjs；src/logger.js、src/index.js（collectSecrets） |
 | MG-008（协议桥半边） | format.js 11 项修复（tool_result 合并、Gemini usage/finish/thought 过滤、tool_choice 等）+ 22 例 wire 测试 + 有损转换清单；sse.js 同帧 finish、forward.js 空 tools 判定 | offline/wire-format.test.mjs；docs/reference/protocol-bridge.md |
+| MG-004 | 27 个旧套件迁移为 OS 临时目录 + 动态端口 + 本地 mock（新增 isolate.mjs/README 证据表），utils 删掉"读改写目标配置"入口与 SKIP 语义，live.mjs 每文件独立子进程 | MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs → 27/27 文件、133 PASS、0 FAIL/SKIP |
+| MG-006 | 指标口径分离：一次请求只计一次对话请求（token/缓存回调只累加数值）、状态字典按当前配置裁剪、对话/模型统计硬上限 | offline/metrics.test.mjs（2 组）；src/index.js、src/forward.js |
 | MG-007 | 统一关闭接口 close()（定时器清理 → 排空连接 → 原子落盘）、SIGTERM/SIGINT 优雅退出、损坏 stats 先备份再重建 | offline/lifecycle.test.mjs（2 组）；src/index.js |
 | MG-010 | Node 18/20/22 CI 矩阵（仅手动触发、零下载探测 runner 自带 node）、元数据核对脚本、LICENSE、部署/回滚与兼容矩阵文档 | scripts/check-metadata.mjs（21 项 PASS）；.github/workflows/check.yml；远程 CI **未执行** |
 
@@ -42,9 +44,9 @@
 | MG-001 / P1 | 已闭环：Host 只收 IP 字面量/白名单；跨源 Origin 403；未设令牌时仅本机可管理；非回环绑定且无令牌打 error 级告警 | 无 | offline/admin-origin.test.mjs；迁移说明见配置参考「管理面来源策略」 |
 | MG-002 / P1 | overallMs 尚未统一覆盖排队、代理 CONNECT、读 body、流式和重连生命周期；队列未取消 | 无 | 单一 deadline/AbortSignal 贯穿；客户端断开释放等待与上游；挂起代理、满队列、慢头、慢流均在预算内结束；SSE 尊重 write 背压，慢客户端不造成无界缓冲 |
 | MG-003 / P1 | 已闭环：形状/保留键单一入口；删除墓碑；并发 409 | 无 | offline/config-schema.test.mjs；余项：/api/keys 的 id 白名单（低频，待 MG-009 一起定） |
-| MG-004 / P1 | 默认只覆盖已隔离套件；多数旧测试仍会修改目标配置，部分缺管理鉴权 | 无 | affinity/circuit/concurrency/QPS/SSE/配额/日志/加密全部迁移 OS 临时目录+动态回环端口；无 SKIP；失败清理；默认套件禁止外部网络 |
-| MG-005 / P1 | 已闭环：secrets 词表随 reloadConfig 刷新；代理 userinfo 与 Bearer 兜底；错误摘要脱敏端到端验证 | MG-003 | 动态凭据、extraHeaders、代理用户信息均脱敏；植入测试秘密后扫描日志/状态无明文；最小必要错误信息 |
-| MG-006 / P2 | 对话请求数按 tallyDialogue 调用增加，流式 usage 与 token 回调可能重复计数；映射字典/序列长度需容量核验 | MG-004 | 请求/尝试/完成三种指标定义；一次请求只计一次；续传 usage 无重复；缓存/对话/延迟/路由状态有可测容量上限 |
+| MG-004 / P1 | 已闭环：旧套件全部隔离（27/27 文件、133 PASS、无 SKIP）；`user-env-fallback` Windows 分支仍未在 Windows 实跑 | 无 | affinity/circuit/concurrency/QPS/SSE/配额/日志/加密全部迁移 OS 临时目录+动态回环端口；无 SKIP；失败清理；默认套件禁止外部网络 |
+| MG-005 / P1 | 已闭环：secrets 词表随 reloadConfig 刷新；代理 userinfo 与 Bearer 兜底；错误摘要脱敏端到端验证；URL 凭据脱敏改线性扫描（128KB 单行 6.8s → 0ms，1MB 2ms） | MG-003 | 动态凭据、extraHeaders、代理用户信息均脱敏；植入测试秘密后扫描日志/状态无明文；最小必要错误信息 |
+| MG-006 / P2 | 已闭环：request/attempt/completion 口径分离；对话请求只 +1；health/throttle/affinity/cacheStat 按配置裁剪 + 硬上限；对话 ≤80、byModel ≤500 | MG-004 | 请求/尝试/完成三种指标定义；一次请求只计一次；续传 usage 无重复；缓存/对话/延迟/路由状态有可测容量上限 |
 | MG-007 / P2 | 已闭环：close() 幂等（停定时器/排空连接/最终原子落盘）、SIGTERM 退出码 0、损坏 stats 留证重建 | MG-002 | close 停止定时器、排空连接、最终原子落盘；SIGTERM/重启/损坏 stats 恢复测试；不损坏旧数据 |
 
 第一阶段退出条件：所有 P1 卡通过离线故障注入和独立 review；默认测试覆盖主要既有能力；生产部署仍单独留收据。不能用新增功能抵消未关闭的安全/生命周期缺口。

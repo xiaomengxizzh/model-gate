@@ -24,7 +24,8 @@
 - `start()` 返回 `close()`：停定时器 → 排空连接 → 原子落盘；SIGTERM/SIGINT 优雅退出（退出码 0），损坏 stats 先备份 `.corrupt-<ts>` 再重建。
 - 协议桥保真：Anthropic 并行 tool_result / Gemini 并行 functionResponse 合并、Gemini usage 与 finish_reason 映射、thought 摘要过滤、tool_choice 映射、空 tools 不再降级流式、SSE 末帧文本与 finish 同帧不再丢结束原因。
 - CI：Node 18/20/22 手动矩阵（不下载 node，先探测 runner 自带），新增 `scripts/check-metadata.mjs`（21 项）与 MIT LICENSE，部署/回滚与兼容矩阵文档。
-- 默认 npm test 仅运行隔离 mock 套件；旧测试须显式指定可丢弃实例并 opt in。
+- 默认 npm test 仅运行隔离 mock 套件；27 个旧套件已全部迁移为自建隔离实例（OS 临时目录 + 动态回环端口 + 本地 mock），`MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs` 即 27/27 文件、133 断言、无 SKIP；utils.mjs 删除「读改写目标配置」入口与 SKIP 语义。
+- 修复 logger URL 凭据脱敏的 O(n²)：可回溯字符类改为线性扫描，128KB 单行 6.8s → 0ms、1MB 2ms。
 - 现有模型状态字段、OpenCode 会话头/extraHeaders 改动纳入本轮核查；保留原有文档归档迁移。
 - 新增 AI 接手入口、分层文档、审计记录、16 项后端任务及既有前端重建计划映射及 CI/文档链接检查。
 

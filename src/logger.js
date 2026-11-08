@@ -13,6 +13,31 @@ function fmt(msg, rest) {
 function escapeReg(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
 // 通用 Bearer 令牌兜底脱敏
 const TOKEN_RE = /Bearer\s+[A-Za-z0-9._~+/=-]{8,}/gi
+// URL 内嵌凭据（scheme://user:pass@host）用线性扫描抹除：可回溯字符类在超长单行上是 O(n²)。
+const URL_STOP = /[\s"'()<>,;]/
+function maskUrlCreds(s) {
+  if (s.indexOf('://') === -1 || s.indexOf('@') === -1) return s
+  let out = ''
+  let i = 0
+  while (true) {
+    const at = s.indexOf('://', i)
+    if (at === -1) break
+    let end = at + 3
+    const limit = Math.min(s.length, at + 3 + 512)
+    while (end < limit && !URL_STOP.test(s[end])) end++
+    const authority = s.slice(at + 3, end)
+    const atSign = authority.indexOf('@')
+    const colon = authority.indexOf(':')
+    if (atSign > 0 && colon > 0 && colon < atSign) {
+      out += s.slice(i, at + 3) + '****:****@' + authority.slice(atSign + 1)
+      i = end
+      continue
+    }
+    out += s.slice(i, at + 3)
+    i = at + 3
+  }
+  return out + s.slice(i)
+}
 
 // 日志落盘策略（2026-08-29）：按天分文件 <base>-YYYY-MM-DD.log；
 //   启动/跨天时清理 7 天前的旧日志（含 .old 轮转件与历史无日期旧版，后者按 mtime 判断）；
@@ -40,8 +65,7 @@ export function createLogger(opts = {}) {
     for (const sec of secrets) { const re = new RegExp(escapeReg(sec), 'g'); s = s.replace(re, '****') }
     s = s.replace(TOKEN_RE, 'Bearer ****')
     // 代理/URL 内嵌凭据：http://user:pass@host 属于最常见的"日志里带秘密"形态，与 secrets 列表无关地兜底
-    s = s.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s:@/]+:[^\s@/]+@/gi, '$1****:****@')
-    return s
+    return maskUrlCreds(s)
   }
   function localDate(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') }
   let curDate = localDate(new Date())

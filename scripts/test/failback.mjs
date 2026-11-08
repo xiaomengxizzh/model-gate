@@ -3,8 +3,9 @@
 //
 // 关键对照：affinityTtlMs 设为 1 小时（本测试时间内绝不会过期），
 // 若仍切回主上游，则只能是 failback 探活生效，而非亲和 TTL 过期。
-import http from 'node:http'
-import { GW, check, snapshot, save, chat } from './utils.mjs'
+// MG-004：自建隔离实例，不再读写目标网关配置。
+import { startGateway, startMockServer } from './isolate.mjs'
+import { check, finish } from './utils.mjs'
 
 const hits = { A: 0, B: 0 }      // 真实请求计数
 const probes = { A: 0, B: 0 }    // 探活请求计数
@@ -13,7 +14,7 @@ const down = { A: false, B: false }
 // 缓存命中率注入：B（备用）响应带 cached_tokens=100（命中率 100%），A（主）带 cache_write_tokens=100（命中率 0%）。
 // 复现生产场景「无亲和时按缓存命中率排序，缓存热的备用上游反超主上游」——否则测试环境 cacheStat 为空会碰巧切回，
 // 掩盖「探活成功却切不回去」的缺陷（探活须把亲和置为主上游，而非清除后交给命中率路由）。
-const mkServer = (name) => http.createServer((req, res) => {
+const mkServer = (name) => startMockServer((req, res) => {
   let body = ''
   req.on('data', (c) => { body += c })
   req.on('end', () => {
@@ -35,46 +36,44 @@ const mkServer = (name) => http.createServer((req, res) => {
     }))
   })
 })
-const sA = mkServer('A'); const sB = mkServer('B')
-await new Promise(r => sA.listen(0, () => r()))
-await new Promise(r => sB.listen(0, () => r()))
-const portA = sA.address().port; const portB = sB.address().port
+const sA = await mkServer('A'); const sB = await mkServer('B')
 
-const base = await snapshot()
-const origDefaults = JSON.parse(JSON.stringify(base.defaults))
-base.providers['t-fb-a'] = { baseUrl: `http://127.0.0.1:${portA}`, apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai', proxy: 'direct', circuit: null }
-base.providers['t-fb-b'] = { baseUrl: `http://127.0.0.1:${portB}`, apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai', proxy: 'direct', circuit: null }
-base.models['t-fb-m'] = { provider: 't-fb-a', alias: [], fallbacks: ['t-fb-b'], maxConcurrent: 0 }
-base.defaults = {
-  ...(base.defaults || {}),
-  retry: { maxAttempts: 1, initialDelayMs: 10, maxDelayMs: 20 },
-  affinityTtlMs: 3600000,   // 1 小时：排除 TTL 过期导致回流的可能
-  failbackProbe: { enabled: true, everyMs: 2000, successStreak: 2, system: 'ping' },
+const fx = await startGateway({
+  name: 'failback',
+  config: {
+    providers: {
+      't-fb-a': { baseUrl: sA.base, apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai', proxy: 'direct', circuit: null },
+      't-fb-b': { baseUrl: sB.base, apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai', proxy: 'direct', circuit: null },
+    },
+    models: { 't-fb-m': { provider: 't-fb-a', alias: [], fallbacks: ['t-fb-b'], maxConcurrent: 0 } },
+    defaults: {
+      retry: { maxAttempts: 1, initialDelayMs: 10, maxDelayMs: 20 },
+      affinityTtlMs: 3600000,   // 1 小时：排除 TTL 过期导致回流的可能
+      failbackProbe: { enabled: true, everyMs: 2000, successStreak: 2, system: 'ping' },
+    },
+  },
+})
+try {
+  // 1) 首请求：主上游 A 正常 → 命中 A
+  await fx.chat('t-fb-m')
+  check('1·首请求命中主上游 A', hits.A === 1, { A: hits.A, B: hits.B })
+
+  // 2) A 故障 → 流量切到备用 B（亲和记录为 B）
+  down.A = true
+  await fx.chat('t-fb-m')
+  check('2·主上游故障后切到备用 B', hits.B === 1, { A: hits.A, B: hits.B })
+
+  // 3) A 恢复；此后不发任何真实请求，仅等待后台探活
+  down.A = false
+  await new Promise(r => setTimeout(r, 20000))
+  check('3·降级期间后台确实发出了探活请求', probes.A >= 2, { probesA: probes.A, probesB: probes.B })
+  check('3b·探活消息必须为 user 角色（LiteLLM 拒 system-only）', probeRoles.length > 0 && probeRoles.every(r => r === 'user'), { probeRoles })
+
+  // 4) 真实请求应已回到主上游 A（TTL 为 1 小时未过期，只能是探活清除亲和所致）
+  const before = { A: hits.A, B: hits.B }
+  await fx.chat('t-fb-m')
+  check('4·探活成功后自动回切主上游 A', hits.A === before.A + 1 && hits.B === before.B, { A: hits.A, B: hits.B, before })
+} finally {
+  await fx.stop(); await sA.stop(); await sB.stop()
 }
-await save(base.providers, base.models, base.defaults)
-
-// 1) 首请求：主上游 A 正常 → 命中 A
-await chat('t-fb-m')
-check('1·首请求命中主上游 A', hits.A === 1, { A: hits.A, B: hits.B })
-
-// 2) A 故障 → 流量切到备用 B（亲和记录为 B）
-down.A = true
-await chat('t-fb-m')
-check('2·主上游故障后切到备用 B', hits.B === 1, { A: hits.A, B: hits.B })
-
-// 3) A 恢复；此后不发任何真实请求，仅等待后台探活
-down.A = false
-await new Promise(r => setTimeout(r, 20000))
-check('3·降级期间后台确实发出了探活请求', probes.A >= 2, { probesA: probes.A, probesB: probes.B })
-check('3b·探活消息必须为 user 角色（LiteLLM 拒 system-only）', probeRoles.length > 0 && probeRoles.every(r => r === 'user'), { probeRoles })
-
-// 4) 真实请求应已回到主上游 A（TTL 为 1 小时未过期，只能是探活清除亲和所致）
-const before = { A: hits.A, B: hits.B }
-await chat('t-fb-m')
-check('4·探活成功后自动回切主上游 A', hits.A === before.A + 1 && hits.B === before.B, { A: hits.A, B: hits.B, before })
-
-const after = await snapshot()
-delete after.providers['t-fb-a']; delete after.providers['t-fb-b']; delete after.models['t-fb-m']
-await save(after.providers, after.models, origDefaults)
-await new Promise(r => sA.close(r))
-await new Promise(r => sB.close(r))
+finish('failback')

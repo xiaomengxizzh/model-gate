@@ -1,42 +1,35 @@
+// 测试共享工具（MG-004 后只保留断言/结果/SSE 解析；不再提供 snapshot/save 这类「读改写目标网关配置」的入口）
+// 门禁：npm test 白名单里的自包含套件直接运行；其余旧套件（现均为自建隔离实例）需显式 MG_ALLOW_LIVE_TESTS=1。
+// 它们不再读写目标网关配置，也不再需要 MG_GW / MG_CONFIG_DIR。
 import { basename } from 'node:path'
-const isolatedSuites = new Set(['virtual-models.mjs', 'effort-normalize.mjs', 'upstream-side-4xx.mjs'])
-if (!isolatedSuites.has(basename(process.argv[1] || ''))) {
-  let target
-  try { target = new URL(process.env.MG_GW) } catch {}
-  if (process.env.MG_ALLOW_LIVE_TESTS !== '1' || !process.env.MG_CONFIG_DIR ||
-      !target || !['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname) || target.port === '8787') {
-    throw new Error('Legacy tests require MG_ALLOW_LIVE_TESTS=1, disposable MG_CONFIG_DIR and explicit loopback MG_GW outside port 8787')
-  }
+
+const defaultSuites = new Set(['virtual-models.mjs', 'effort-normalize.mjs', 'upstream-side-4xx.mjs'])
+if (!defaultSuites.has(basename(process.argv[1] || '')) && process.env.MG_ALLOW_LIVE_TESTS !== '1') {
+  throw new Error('Legacy suites require MG_ALLOW_LIVE_TESTS=1（旧套件自建隔离网关实例，不再需要 MG_GW / MG_CONFIG_DIR）')
 }
-// 测试共享工具
-export const GW = process.env.MG_GW || 'http://127.0.0.1:8787'
+
 export const results = []
-export function check(name, ok, detail, skip) {
-  if (skip) { console.log('SKIP  ' + name + (detail ? ' :: ' + JSON.stringify(detail) : '')); return }
+
+// 断言记录。FAIL 不中断用例（便于一次看完全部失败），退出码由 finish() 统一给出。
+export function check(name, ok, detail) {
   results.push(!!ok)
   console.log((ok ? 'PASS' : 'FAIL') + '  ' + name + (detail ? ' :: ' + JSON.stringify(detail) : ''))
 }
-export const jpost = (path, body) => fetch(GW + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(async r => ({ s: r.status, d: await r.json().catch(() => ({})) }))
-// 运行时统计字段（非配置）：回写时必须剔除，其余字段一律**原样带回**。
-// 教训（2026-09-17 事故）：snapshot 此前把 model 压成 { provider, alias, fallbacks, maxConcurrent } 四个字段，
-// 而 saveConfig 对 `body.models` 是**整体替换**（index.js: `body.models !== undefined ? body.models : cur.models`）
-// ——于是任何走「读-改-写」的测试每跑一次就把 live 配置洗一遍：reasoning / effortFormat / effortOptions /
-// api / providerModels / maxTokensMax / qps / quota / dailyQuota / maxContext / probe 全被清空（实测 6 个模型全中，
-// union-alpha 的 providerModels 被洗掉后上游直接 404 No endpoints found）。加字段时别再加白名单，用黑名单。
-const RUNTIME_MODEL_FIELDS = new Set(['name', 'requests', 'errors', 'tokens', 'today', 'hitRate', 'affinity', 'avgMs'])
-const RUNTIME_PROVIDER_FIELDS = new Set(['id', 'hasKey', 'keySource', 'st'])
-export async function snapshot() {
-  const st = await (await fetch(GW + '/api/status')).json()
-  // 逐字段回写（黑名单剔除运行时字段）：漏字段 = 洗 live 配置，别手写字段清单
-  const providers = {}
-  for (const p of st.providers || []) { const o = {}; for (const [k, v] of Object.entries(p)) if (!RUNTIME_PROVIDER_FIELDS.has(k)) o[k] = v; providers[p.id] = o }
-  const models = {}
-  for (const m of st.models || []) { const o = {}; for (const [k, v] of Object.entries(m)) if (!RUNTIME_MODEL_FIELDS.has(k)) o[k] = v; models[m.name] = o }
-  return { providers, models, defaults: st.defaults || {}, server: st.server || {} }
+
+export const count = () => {
+  const pass = results.filter(Boolean).length
+  const fail = results.filter(x => !x).length
+  return { pass, fail, total: pass + fail }
 }
-export async function save(p, m, d) { return jpost('/api/config/save', { providers: p, models: m, defaults: d }) }
-export const chat = (model, stream, extra) => fetch(GW + '/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, stream: !!stream, messages: [{ role: 'user', content: 'x' }], ...(extra || {}) }) })
-export const count = () => { const pass = results.filter(Boolean).length; const fail = results.filter((x) => !x).length; return { pass, fail, total: pass + fail } }
+
+// 每个旧套件收尾调用：打印子结果，失败时置非零退出码（退出码 0 才代表通过）。
+export function finish(label) {
+  const c = count()
+  console.log('  （' + (label || basename(process.argv[1] || 'suite')) + ' 子结果: ' + c.pass + '/' + c.total + '）')
+  if (c.fail) process.exitCode = 1
+  return c
+}
+
 export function streamDeltaText(text) {
   let o = ''
   for (const m of text.matchAll(/data:\s*([^\n]+)/g)) { const r = m[1].trim(); if (r === '[DONE]') continue; try { const j = JSON.parse(r); const c = j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content; if (typeof c === 'string') o += c } catch {} }

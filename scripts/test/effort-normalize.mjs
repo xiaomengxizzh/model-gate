@@ -8,14 +8,18 @@
 import { check, count } from './utils.mjs'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
+import { mkdtemp } from 'node:fs/promises'
 import path from 'node:path'
 import http from 'node:http'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { killAndWait, reservePort } from './isolate.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..', '..')
-const TMP = path.join(ROOT, '.tmp-test-effort')
-const PORT = 8796
+// MG-004：OS 临时目录 + 动态回环端口（原来是仓库内 .tmp-test-effort + 固定 8796）
+const TMP = await mkdtemp(path.join(tmpdir(), 'modelgate-effort-'))
+const PORT = await reservePort()
 const BASE = 'http://127.0.0.1:' + PORT
 const ADMIN = { 'Authorization': 'Bearer devtoken', 'Content-Type': 'application/json' }
 const CH = { 'Authorization': 'Bearer testkey123', 'Content-Type': 'application/json' }
@@ -55,18 +59,19 @@ function mockUpstream(name, mode) {
 const sFail = mockUpstream('p-fail', 'fail')
 const sStrict = mockUpstream('p-strict', 'strict')
 const sLenient = mockUpstream('p-lenient', 'lenient')
-await new Promise(r => sFail.listen(9891, r))
-await new Promise(r => sStrict.listen(9892, r))
-await new Promise(r => sLenient.listen(9893, r))
+await new Promise(r => sFail.listen(0, '127.0.0.1', r))
+await new Promise(r => sStrict.listen(0, '127.0.0.1', r))
+await new Promise(r => sLenient.listen(0, '127.0.0.1', r))
+const upURL = (s) => 'http://127.0.0.1:' + s.address().port
 
 const mdef = (provider, extra) => Object.assign({ provider, alias: [], fallbacks: [], maxConcurrent: 0, qps: 0, reasoning: '', effortOptions: ['off', 'low', 'medium', 'high'], dailyQuota: 0, quota: 0, maxContext: 0 }, extra || {})
 const gatewayCfg = {
   server: { host: '127.0.0.1', port: PORT, logFile: path.join(TMP, 'gateway.log') },
   defaults: { provider: 'p-strict', model: 'gatemodel', clientKey: '', directory: [], retry: { maxAttempts: 1 }, timeout: { connectMs: 3000, firstByteMs: 8000, idleMs: 8000 } },
   providers: {
-    'p-fail': { baseUrl: 'http://127.0.0.1:9891', apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
-    'p-strict': { baseUrl: 'http://127.0.0.1:9892', apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
-    'p-lenient': { baseUrl: 'http://127.0.0.1:9893', apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
+    'p-fail': { baseUrl: upURL(sFail), apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
+    'p-strict': { baseUrl: upURL(sStrict), apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
+    'p-lenient': { baseUrl: upURL(sLenient), apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
   },
   models: {
     'm-strict': mdef('p-strict'),                                                        // 严格上游 + 默认格式
@@ -82,8 +87,6 @@ const gatewayCfg = {
     { name: 'chain-plain', directory: [{ model: 'm-flat', mode: 'afterAll', providers: [] }] },
   ],
 }
-fs.rmSync(TMP, { recursive: true, force: true })
-fs.mkdirSync(TMP, { recursive: true })
 fs.writeFileSync(path.join(TMP, 'gateway.json'), JSON.stringify(gatewayCfg, null, 2))
 fs.writeFileSync(path.join(TMP, 'keys.local.json'), '{}')
 
@@ -166,7 +169,7 @@ if (!ready) {
   check('客户端显式档位优先于配置默认', r.code === 200 && seen['p-lenient'].reasoning_effort === 'medium', seen['p-lenient'] && String(seen['p-lenient'].reasoning_effort))
 }
 } finally {
-  try { child.kill() } catch {}
+  try { await killAndWait(child) } catch {}
   try { sFail.close() } catch {}
   try { sStrict.close() } catch {}
   try { sLenient.close() } catch {}

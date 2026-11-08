@@ -7,14 +7,18 @@
 import { check, count } from './utils.mjs'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
+import { mkdtemp } from 'node:fs/promises'
 import path from 'node:path'
 import http from 'node:http'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { killAndWait, reservePort } from './isolate.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..', '..')
-const TMP = path.join(ROOT, '.tmp-test-upside')
-const PORT = 8798
+// MG-004：OS 临时目录 + 动态回环端口（原来是仓库内 .tmp-test-upside + 固定 8798）
+const TMP = await mkdtemp(path.join(tmpdir(), 'modelgate-upside-'))
+const PORT = await reservePort()
 const BASE = 'http://127.0.0.1:' + PORT
 const ADMIN = { 'Authorization': 'Bearer devtoken', 'Content-Type': 'application/json' }
 const CH = { 'Authorization': 'Bearer testkey123', 'Content-Type': 'application/json' }
@@ -42,20 +46,21 @@ const s422 = mockUpstream('p-422', 422, P_UPSTREAM_FAULT)
 const s422b = mockUpstream('p-422b', 422, P_UPSTREAM_FAULT)
 const s400 = mockUpstream('p-400', 400, P_INVALID_REQ)
 const sOk = mockUpstream('p-ok', 200, P_OK)
-await new Promise(r => s422.listen(9894, r))
-await new Promise(r => s422b.listen(9895, r))
-await new Promise(r => s400.listen(9896, r))
-await new Promise(r => sOk.listen(9897, r))
+await new Promise(r => s422.listen(0, '127.0.0.1', r))
+await new Promise(r => s422b.listen(0, '127.0.0.1', r))
+await new Promise(r => s400.listen(0, '127.0.0.1', r))
+await new Promise(r => sOk.listen(0, '127.0.0.1', r))
+const upURL = (s) => 'http://127.0.0.1:' + s.address().port
 
 const mdef = (provider) => ({ provider, alias: [], fallbacks: [], maxConcurrent: 0, qps: 0, reasoning: '', effortOptions: [], dailyQuota: 0, quota: 0, maxContext: 0 })
 const gatewayCfg = {
   server: { host: '127.0.0.1', port: PORT, logFile: path.join(TMP, 'gateway.log') },
   defaults: { provider: 'p-422', model: 'gatemodel', clientKey: '', directory: [], retry: { maxAttempts: 1 }, timeout: { connectMs: 3000, firstByteMs: 8000, idleMs: 8000 } },
   providers: {
-    'p-422': { baseUrl: 'http://127.0.0.1:9894', apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
-    'p-422b': { baseUrl: 'http://127.0.0.1:9895', apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
-    'p-400': { baseUrl: 'http://127.0.0.1:9896', apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
-    'p-ok': { baseUrl: 'http://127.0.0.1:9897', apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
+    'p-422': { baseUrl: upURL(s422), apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
+    'p-422b': { baseUrl: upURL(s422b), apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
+    'p-400': { baseUrl: upURL(s400), apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
+    'p-ok': { baseUrl: upURL(sOk), apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' },
   },
   models: { 'm-422': mdef('p-422'), 'm-422b': mdef('p-422b'), 'm-400': mdef('p-400'), 'm-ok': mdef('p-ok') },
   virtualModels: [
@@ -64,8 +69,6 @@ const gatewayCfg = {
     { name: 'up-400-then-ok', directory: [{ model: 'm-400', mode: 'afterAll', providers: [] }, { model: 'm-ok', mode: 'afterAll', providers: [] }] },
   ],
 }
-fs.rmSync(TMP, { recursive: true, force: true })
-fs.mkdirSync(TMP, { recursive: true })
 fs.writeFileSync(path.join(TMP, 'gateway.json'), JSON.stringify(gatewayCfg, null, 2))
 fs.writeFileSync(path.join(TMP, 'keys.local.json'), '{}')
 
@@ -109,7 +112,7 @@ if (!ready) {
   check('③未误伤：兜底模型没被调用（不空跑整条链）', hits['p-ok'] === beforeOk, { ok: hits['p-ok'], before: beforeOk })
 }
 } finally {
-  try { child.kill() } catch {}
+  try { await killAndWait(child) } catch {}
   try { s422.close() } catch {}
   try { s422b.close() } catch {}
   try { s400.close() } catch {}
