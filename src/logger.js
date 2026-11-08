@@ -29,12 +29,18 @@ export function createLogger(opts = {}) {
   const dir = m[1] || ''
   const base = m[2] || 'gateway'
   const ext = m[3] || '.log'
-  // 硬性约定：环境变量/面板 Key 值一律抹成 '****'，杜绝落盘/落日志
-  const secrets = (opts.secrets || []).map((s) => String(s)).filter((s) => s && s.length >= 3)
+  // 硬性约定：环境变量/面板 Key 值一律抹成 '****'，杜绝落盘/落日志。
+  // 列表可在运行期替换（MG-005）：热更新 Key 后面板保存会调 setSecrets 重新收集，
+  // 否则新 Key 在重启前永远不会被脱敏。
+  const normalize = (list) => (list || []).map((s) => String(s)).filter((s) => s && s.length >= 3)
+  let secrets = normalize(opts.secrets)
+  function setSecrets(list) { secrets = normalize(list) }
   function mask(line) {
     let s = line
     for (const sec of secrets) { const re = new RegExp(escapeReg(sec), 'g'); s = s.replace(re, '****') }
     s = s.replace(TOKEN_RE, 'Bearer ****')
+    // 代理/URL 内嵌凭据：http://user:pass@host 属于最常见的"日志里带秘密"形态，与 secrets 列表无关地兜底
+    s = s.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s:@/]+:[^\s@/]+@/gi, '$1****:****@')
     return s
   }
   function localDate(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') }
@@ -79,5 +85,7 @@ export function createLogger(opts = {}) {
     warn: (m, ...r) => write('[' + ts() + '] [warn]  ' + fmt(m, r)),
     error: (m, ...r) => write('[' + ts() + '] [error] ' + fmt(m, r)),
     file: () => curFile, // 当前实际日志文件（面板 /api/logs 用）
+    setSecrets,          // 运行期刷新脱敏词表（配置保存/Key 热更新后调用）
+    secrets: () => secrets.slice(),
   }
 }

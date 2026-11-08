@@ -1,20 +1,75 @@
+# 手动触发的离线检查。资源门禁见 RESOURCE_APPROVAL.md：
+# 本 workflow 不安装依赖、不下载 Node 工具链、不拉模型或容器镜像，只使用 runner 既有的 node/npm。
 name: Offline check (existing runtime only)
 on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: offline-check-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   offline:
+    name: offline / node ${{ matrix.node }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 package.json engines.node（>=18）对齐；engines 下限必须出现在矩阵里，
+        # 由 scripts/check-metadata.mjs 强制核对。新增/调整版本时两处同步。
+        node: ['18', '20', '22']
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect existing runtime (no installation)
+        with:
+          persist-credentials: false
+      - name: Select preinstalled Node ${{ matrix.node }} (no download)
+        shell: bash
+        env:
+          TARGET_NODE: ${{ matrix.node }}
         run: |
+          set -euo pipefail
+          major_of() { "$1" --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/'; }
+          candidate=""
+          if command -v node >/dev/null 2>&1 && [ "$(major_of "$(command -v node)")" = "$TARGET_NODE" ]; then
+            candidate="$(command -v node)"
+          fi
+          if [ -z "$candidate" ] && [ -n "${RUNNER_TOOL_CACHE:-}" ] && [ -d "${RUNNER_TOOL_CACHE}/node" ]; then
+            for bin in "${RUNNER_TOOL_CACHE}"/node/"${TARGET_NODE}".*/x64/bin/node; do
+              [ -x "$bin" ] || continue
+              if [ "$(major_of "$bin")" = "$TARGET_NODE" ]; then candidate="$bin"; break; fi
+            done
+          fi
+          if [ -z "$candidate" ]; then
+            echo "::error::runner image has no preinstalled Node ${TARGET_NODE}; this workflow never downloads toolchains (RESOURCE_APPROVAL.md). Use an image that ships it, or obtain explicit owner approval before adding a download step."
+            exit 1
+          fi
+          echo "using $candidate ($("$candidate" --version))"
+          echo "$(dirname "$candidate")" >> "$GITHUB_PATH"
+          if [ ! -x "$(dirname "$candidate")/npm" ]; then
+            echo "::error::npm not found next to $candidate; refusing to install it (resource gate)."
+            exit 1
+          fi
+      - name: Verify toolchain matches matrix entry
+        shell: bash
+        env:
+          TARGET_NODE: ${{ matrix.node }}
+        run: |
+          set -euo pipefail
           command -v node
           node --version
           command -v npm
           npm --version
-          node -e "if (+process.versions.node.split('.')[0] < 18) process.exit(1)"
-      - run: npm run check
-      - run: npm test
-      - run: npm run docs:check
+          actual="$(node -p 'process.versions.node.split(".")[0]')"
+          if [ "$actual" != "$TARGET_NODE" ]; then
+            echo "::error::expected Node ${TARGET_NODE} on PATH, got $(node --version)"
+            exit 1
+          fi
+          echo "Node major $actual matches matrix entry; engines floor is enforced by scripts/check-metadata.mjs."
+      - name: Syntax check
+        run: npm run check
+      - name: Isolated mock suites (local mock only, no upstream, no credentials)
+        run: npm test
+      - name: Documentation link check
+        run: npm run docs:check
+      - name: Release metadata consistency (version / LICENSE / CHANGELOG / matrix)
+        run: node scripts/check-metadata.mjs

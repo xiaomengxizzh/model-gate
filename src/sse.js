@@ -120,6 +120,11 @@ export async function relayStream(client, firstUpstream, opts) {
       return // 非 openai 空内容事件丢弃（不产生 delta）
     }
     sendDelta(ct)
+    // 内容与结束原因同帧（Gemini 常见：最后一段文本与 finishReason 在一个 chunk）：先发文本再补 finish 帧
+    if (!finishSent && opts.extractFinish) {
+      const fr = opts.extractFinish(dataStr)
+      if (fr) { finishSent = true; sendDataJson({ choices: [{ delta: {}, finish_reason: fr }] }) }
+    }
     sent += ct; contentChars += ct.length
 
     if (sent.length > MAX_SENT_TRACK) { sent = ''; sentOverflow = true; log && log.warn('已发送内容超出续传比对窗口(' + MAX_SENT_TRACK + ' 字符)，后续断流不再做前缀去重') }

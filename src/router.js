@@ -57,6 +57,11 @@ export function loadConfig(opts = {}) {
     const patch = readJson(p.local)
     base.providers = Object.assign({}, base.providers, patch.providers)
     base.models = Object.assign({}, base.models, patch.models)
+    // 删除墓碑：patch 只做合并，缺键无法表达"删除"，因此保存时显式记录被删的上游/模型名（MG-003）
+    if (patch._removed && typeof patch._removed === 'object') {
+      for (const id of (Array.isArray(patch._removed.providers) ? patch._removed.providers : [])) delete base.providers[id]
+      for (const n of (Array.isArray(patch._removed.models) ? patch._removed.models : [])) delete base.models[n]
+    }
     base.defaults = Object.assign({}, base.defaults, patch.defaults)
     base.configVersion = Number(patch.configVersion) || 0
     if (patch.virtualModels !== undefined) base.virtualModels = patch.virtualModels

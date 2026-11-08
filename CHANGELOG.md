@@ -11,8 +11,19 @@
 - 模型探测采用模型协议与 providerModels 覆盖名；配置保存先克隆 defaults。
 - QPS 为并发等待请求预留额度，避免相同定时器同时放行突破限速。
 
+### Added
+
+- 管理 API v1 契约基线与离线回归：`scripts/test/offline/harness.mjs`（临时目录 + 动态端口 + 本地 mock 夹具）与 admin-contract / admin-secrets / admin-origin / config-schema / logger-secrets / lifecycle / wire-format 七套离线回归；契约正文见 `docs/contracts/management-api-v1.md`。
+- 管理面来源策略配置项 `server.allowedHosts` / `server.allowedOrigins`（反代/自定义域名/跨源面板的唯一放行入口）。
+
 ### Changed
 
+- **管理面来源策略（行为变更）**：Host 只接受 IP 字面量与 `localhost`/`server.host`/`allowedHosts` 中的名字，跨源 `Origin` 请求（含 `Origin: null`）在到达路由前 403；未配置管理令牌时管理接口仅允许本机对端，远程返回 403；数据面同样做 Host 校验并拒绝跨源写请求。用域名访问面板或跨源前端调用网关者需补白名单（见配置参考「管理面来源策略」）。
+- 配置保存：形状与保留键校验收敛为单一入口，数组/字符串 body、`__proto__`/`constructor`/`prototype` 一律 400；新增删除墓碑 `_removed`，删掉的上游/模型重启后不再复活。
+- 日志脱敏词表随配置热更新，代理 URL 内嵌凭据与通用 Bearer 兜底脱敏。
+- `start()` 返回 `close()`：停定时器 → 排空连接 → 原子落盘；SIGTERM/SIGINT 优雅退出（退出码 0），损坏 stats 先备份 `.corrupt-<ts>` 再重建。
+- 协议桥保真：Anthropic 并行 tool_result / Gemini 并行 functionResponse 合并、Gemini usage 与 finish_reason 映射、thought 摘要过滤、tool_choice 映射、空 tools 不再降级流式、SSE 末帧文本与 finish 同帧不再丢结束原因。
+- CI：Node 18/20/22 手动矩阵（不下载 node，先探测 runner 自带），新增 `scripts/check-metadata.mjs`（21 项）与 MIT LICENSE，部署/回滚与兼容矩阵文档。
 - 默认 npm test 仅运行隔离 mock 套件；旧测试须显式指定可丢弃实例并 opt in。
 - 现有模型状态字段、OpenCode 会话头/extraHeaders 改动纳入本轮核查；保留原有文档归档迁移。
 - 新增 AI 接手入口、分层文档、审计记录、16 项后端任务及既有前端重建计划映射及 CI/文档链接检查。

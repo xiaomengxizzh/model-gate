@@ -1,8 +1,11 @@
 // 协议适配：OpenAI ⇄ Anthropic / Gemini（文本对话 + function calling）
+// 文本拼接：OpenAI/Anthropic 的 content parts 语义是「按顺序拼接」，不是「以换行分段」。
+// 图片/文件等非文本 part 在 Anthropic/Gemini 都需要不同的二进制字段，这里没有等价表达，直接跳过
+// 且不补分隔符——否则会凭空插入换行，把 "look "/"now" 变成 "look \n\nnow"。有损项见 docs/reference/protocol-bridge.md。
 function joinContent(c) {
   if (c == null) return ''
   if (typeof c === 'string') return c
-  if (Array.isArray(c)) return c.map((p) => (typeof p === 'string' ? p : (p && p.text) || '')).join('\n')
+  if (Array.isArray(c)) return c.map((p) => (typeof p === 'string' ? p : (p && typeof p.text === 'string' ? p.text : ''))).join('')
   return String(c)
 }
 function makeOA(model, text, finish, extra) {
@@ -10,7 +13,10 @@ function makeOA(model, text, finish, extra) {
   if (extra && extra.toolCalls && extra.toolCalls.length) msg.tool_calls = extra.toolCalls
   return { id: 'chatcmpl-' + Math.random().toString(36).slice(2, 10), object: 'chat.completion', created: Math.floor(Date.now() / 1000), model: model || '', choices: [{ index: 0, message: msg, finish_reason: finish || 'stop' }], usage: (extra && extra.usage) || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } }
 }
-function hasTools(b) { return !!(b && (b.tools || b.tool_choice)) }
+function hasTools(b) {
+  const t = b && b.tools
+  return !!(b && ((Array.isArray(t) ? t.length > 0 : !!t) || b.tool_choice))
+}
 
 // Anthropic stop_reason → OpenAI finish_reason。
 // OpenAI 客户端的合法取值只有 stop / length / tool_calls / content_filter 四个，
@@ -23,18 +29,25 @@ function mapStop(sr) { return (sr && STOP_MAP[sr]) || 'stop' }
 const anthropic = {
   build(openaiBody) {
     const messages = []; let system = ''; const id2name = {}
+    let appendToolResult = false // 上一条消息是否已是本轮 tool_result 容器
     for (const m of openaiBody.messages || []) {
       const text = joinContent(m.content)
-      if (m.role === 'system') { system = system ? system + '\n' + text : text; continue }
+      if (m.role === 'system') { system = system ? system + '\n' + text : text; appendToolResult = false; continue }
       if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
         const parts = text ? [{ type: 'text', text }] : []
         for (const tc of m.tool_calls) { id2name[tc.id] = tc.function.name; parts.push({ type: 'tool_use', id: tc.id || ('tc_' + Math.random().toString(36).slice(2, 8)), name: tc.function.name, input: safeJSON(tc.function.arguments) }) }
-        messages.push({ role: 'assistant', content: parts }); continue
+        messages.push({ role: 'assistant', content: parts }); appendToolResult = false; continue
       }
       if (m.role === 'tool') {
-        messages.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: m.tool_call_id || (Object.keys(id2name)[0] || ''), content: text }] }); continue
+        // Anthropic 要求并行工具调用的多个 tool_result 放在紧邻 assistant tool_use 的**同一个** user 消息里；
+        // 逐条各开一条 user 消息会产生连续 user 轮（roles must alternate），上游直接 400。
+        const block = { type: 'tool_result', tool_use_id: m.tool_call_id || (Object.keys(id2name)[0] || ''), content: text }
+        if (appendToolResult) messages[messages.length - 1].content.push(block)
+        else messages.push({ role: 'user', content: [block] })
+        appendToolResult = true; continue
       }
       messages.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content: text })
+      appendToolResult = false
     }
     const out = { model: openaiBody.model, max_tokens: openaiBody.max_tokens || openaiBody.max_completion_tokens || 4096, messages }
     if (system) out.system = system
@@ -115,18 +128,55 @@ function thinkingSpec(openaiBody) {
 }
 
 // ================= Gemini =================
+// Gemini finishReason → OpenAI finish_reason（OpenAI 只有 stop/length/tool_calls/content_filter 四个合法值）。
+// 安全类原因统一收敛到 content_filter；无等价物的原因（MALFORMED_FUNCTION_CALL 等）收敛为 stop，见有损清单文档。
+const GEMINI_FINISH_MAP = { STOP: 'stop', MAX_TOKENS: 'length', SAFETY: 'content_filter', RECITATION: 'content_filter', BLOCKLIST: 'content_filter', PROHIBITED_CONTENT: 'content_filter', SPII: 'content_filter', IMAGE_SAFETY: 'content_filter', LANGUAGE: 'content_filter' }
+function mapGeminiFinish(fr) { return (fr && GEMINI_FINISH_MAP[fr]) || 'stop' }
+function geminiFinish(o, cand) {
+  const fr = (cand && cand.finishReason) || (o && o.promptFeedback && o.promptFeedback.blockReason)
+  return fr ? mapGeminiFinish(fr) : 'stop'
+}
+// usageMetadata → OpenAI usage。promptTokenCount 含 cached；thoughtsTokenCount 不并入 completion（见文档）。
+function geminiUsage(o) {
+  const um = o && o.usageMetadata
+  if (!um) return undefined
+  const inT = Number(um.promptTokenCount) || 0
+  const outT = Number(um.candidatesTokenCount) || 0
+  const usage = { prompt_tokens: inT, completion_tokens: outT, total_tokens: Number(um.totalTokenCount) || (inT + outT) }
+  const cached = Number(um.cachedContentTokenCount) || 0
+  if (cached > 0) usage.prompt_tokens_details = { cached_tokens: cached }
+  return usage
+}
+// tool_choice → Gemini toolConfig.functionCallingConfig；ANY + allowedFunctionNames 对应指定函数。
+function mapGeminiToolChoice(c) {
+  if (c === 'none') return { functionCallingConfig: { mode: 'NONE' } }
+  if (c === 'required') return { functionCallingConfig: { mode: 'ANY' } }
+  if (c === 'auto') return { functionCallingConfig: { mode: 'AUTO' } }
+  if (c && c.type === 'function' && c.function && c.function.name) return { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [c.function.name] } }
+  return { functionCallingConfig: { mode: 'AUTO' } }
+}
 const gemini = {
   build(openaiBody) {
     const contents = []; let system = ''; const id2name = {}
+    let appendFunctionResponse = false // 上一条 content 是否已是本轮 functionResponse 容器
     for (const m of openaiBody.messages || []) {
       const text = joinContent(m.content)
-      if (m.role === 'system') { system = system ? system + '\n' + text : text; continue }
+      if (m.role === 'system') { system = system ? system + '\n' + text : text; appendFunctionResponse = false; continue }
       if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
         const parts = []; if (text) parts.push({ text }); for (const tc of m.tool_calls) { id2name[tc.id] = tc.function.name; parts.push({ functionCall: { name: tc.function.name, args: safeJSON(tc.function.arguments) } }) }
-        contents.push({ role: 'model', parts }); continue
+        contents.push({ role: 'model', parts }); appendFunctionResponse = false; continue
       }
-      if (m.role === 'tool') { const name = id2name[m.tool_call_id] || 'fn'; contents.push({ role: 'user', parts: [{ functionResponse: { name, response: { result: text } } }] }); continue }
+      if (m.role === 'tool') {
+        // 与 Anthropic 同因：并行工具结果应合并成一个 user turn，连续同角色 content 会触发
+        // Gemini 的 "multiturn requests alternate between user and model" 400。
+        const name = id2name[m.tool_call_id] || 'fn'
+        const part = { functionResponse: { name, response: { result: text } } }
+        if (appendFunctionResponse) contents[contents.length - 1].parts.push(part)
+        else contents.push({ role: 'user', parts: [part] })
+        appendFunctionResponse = true; continue
+      }
       contents.push({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text }] })
+      appendFunctionResponse = false
     }
     const gc = {}
     if (openaiBody.temperature != null) gc.temperature = openaiBody.temperature
@@ -135,7 +185,10 @@ const gemini = {
     const out = { contents }
     if (system) out.systemInstruction = { parts: [{ text: system }] }
     if (Object.keys(gc).length) out.generationConfig = gc
-    if (Array.isArray(openaiBody.tools) && openaiBody.tools.length) out.tools = [{ functionDeclarations: openaiBody.tools.map((t) => ({ name: t.function.name, description: (t.function.description || '') + '', parameters: t.function.parameters || { type: 'object', properties: {} } })) }]
+    if (Array.isArray(openaiBody.tools) && openaiBody.tools.length) {
+      out.tools = [{ functionDeclarations: openaiBody.tools.map((t) => ({ name: t.function.name, description: (t.function.description || '') + '', parameters: t.function.parameters || { type: 'object', properties: {} } })) }]
+      if (openaiBody.tool_choice) out.toolConfig = mapGeminiToolChoice(openaiBody.tool_choice)
+    }
     const model = encodeURIComponent(openaiBody.model || 'model')
     const suffix = hasTools(openaiBody) ? ':generateContent' : (openaiBody.stream ? ':streamGenerateContent?alt=sse' : ':generateContent')
     return { path: '/v1beta/models/' + model + suffix, body: out }
@@ -144,12 +197,36 @@ const gemini = {
     const cand = o && o.candidates && o.candidates[0]
     let text = '', toolCalls = []
     for (const p of ((cand && cand.content && cand.content.parts) || [])) {
+      // thought:true 是思考摘要（Gemini 2.5 thinking），不是回答正文；混进 content 会污染客户端展示与缓存。
+      if (p.thought === true) continue
       if (p.text) text += p.text
       if (p.functionCall) toolCalls.push({ id: 'call_' + Math.random().toString(36).slice(2, 10), type: 'function', function: { name: p.functionCall.name || '', arguments: JSON.stringify(p.functionCall.args || {}) } })
     }
-    return makeOA((o && o.model) || '', text, toolCalls.length ? 'tool_calls' : 'stop', { toolCalls })
+    const finish = toolCalls.length ? 'tool_calls' : geminiFinish(o, cand)
+    // Gemini 响应通常只有 modelVersion、没有 model；留空会让 forward.js 的「响应 model 回写」跳过（p2.model 为假），
+    // 客户端最终看到空 model。回退 modelVersion 后，回写逻辑才能把名字改回客户端请求名。
+    return makeOA((o && (o.model || o.modelVersion)) || '', text, finish, { toolCalls, usage: geminiUsage(o) })
   },
-  extractStreamContent(dataStr) { try { const j = JSON.parse(dataStr); const c = j && j.candidates && j.candidates[0]; const p = c && c.content && c.content.parts && c.content.parts[0]; return (p && typeof p.text === 'string') ? p.text : '' } catch { return '' } },
+  // 流式抽取：一个 chunk 可能带多个 text part（Gemini 会把文本拆开），必须全部拼接；
+  // functionCall/thought part 无文本产出（工具+流式由 forward.js 降级为非流式，见文档）。
+  extractStreamContent(dataStr) {
+    try {
+      const j = JSON.parse(dataStr)
+      const c = j && j.candidates && j.candidates[0]
+      let text = ''
+      for (const p of ((c && c.content && c.content.parts) || [])) { if (p && p.thought !== true && typeof p.text === 'string') text += p.text }
+      return text
+    } catch { return '' }
+  },
+  // finish_reason 抽取：Gemini 把 finishReason 放在候选帧（常在无文本的收尾帧），由 relayStream 在空内容帧调用。
+  extractStreamFinish(dataStr) {
+    try {
+      const j = JSON.parse(dataStr)
+      const cand = j && j.candidates && j.candidates[0]
+      const fr = (cand && cand.finishReason) || (j && j.promptFeedback && j.promptFeedback.blockReason)
+      return fr ? mapGeminiFinish(fr) : ''
+    } catch { return '' }
+  },
 }
 
 export function adapterFor(api) {

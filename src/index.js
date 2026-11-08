@@ -1,8 +1,9 @@
 import http from 'node:http'
-import { readFileSync, chmodSync, existsSync, writeFileSync } from 'node:fs'
+import { readFileSync, chmodSync, existsSync, writeFileSync, copyFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
 import { gunzipSync } from 'node:zlib'
+import { isIP } from 'node:net'
 import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh } from './router.js'
 import { createLogger } from './logger.js'
 import { forward, probe, probeModel, probeChat, warm } from './request.js'
@@ -70,6 +71,41 @@ function adminOk(req, state) {
   if (ah.slice(0, 7).toLowerCase() === 'bearer ') return safeTokenCmp(ah.slice(7).trim(), state.adminToken)
   const x = req.headers['x-mg-admin']
   return !!x && safeTokenCmp(String(x), state.adminToken)
+}
+// ── 来源策略（MG-001）：Host/DNS 重绑定 + 跨源管理请求 ──
+// Host 只接受 IP 字面量与白名单名字：DNS 重绑定必须借道域名，因此未经 server.allowedHosts 声明的域名一律拒绝。
+// 反向代理与自定义域名通过 server.allowedHosts 显式放行，属于部署决策而不是默认放宽。
+const LOOPBACK_NAMES = new Set(['localhost', '127.0.0.1', '::1'])
+function bareHost(h) { return String(h || '').trim().toLowerCase().replace(/^\[|\]$/g, '') }
+function hostAllowed(req, cfg) {
+  const raw = req.headers.host
+  if (!raw) return true // HTTP/1.0 或未带 Host 的 CLI 客户端：无重绑定向量
+  let name
+  try { name = bareHost(new URL('http://' + raw).hostname) } catch { return false }
+  if (LOOPBACK_NAMES.has(name) || isIP(name)) return true
+  const server = (cfg && cfg.server) || {}
+  if (server.host && bareHost(server.host) === name) return true
+  return (server.allowedHosts || []).some((h) => bareHost(h) === name)
+}
+// Origin：缺失=非浏览器客户端（CLI/curl）；跨源网页必须显式加入 server.allowedOrigins（同源面板天然通过）。
+function originAllowed(req, cfg) {
+  const raw = req.headers.origin
+  if (!raw) return true
+  if (raw === 'null') return false
+  let host
+  try { host = new URL(raw).host.toLowerCase() } catch { return false }
+  if (host === String(req.headers.host || '').toLowerCase()) return true
+  const list = ((cfg && cfg.server && cfg.server.allowedOrigins) || []).map((o) => String(o).trim().toLowerCase().replace(/\/$/, ''))
+  return list.includes(String(raw).trim().toLowerCase().replace(/\/$/, ''))
+}
+function isLoopbackPeer(req) {
+  const a = (req.socket && req.socket.remoteAddress) || ''
+  return a === '::1' || a === '127.0.0.1' || a === '::ffff:127.0.0.1' || a.startsWith('::ffff:127.')
+}
+function denyOrigin(res, path, msg) {
+  // 管理面沿用 {error: string}；数据面沿用 {error:{message,type}}，避免同一个 403 出现两种信封
+  if (path === '/api' || path.startsWith('/api/')) { sendJson(res, 403, { error: msg }); return }
+  sendJson(res, 403, { error: { message: msg, type: 'forbidden' } })
 }
 // 数据面客户端 Key 校验：解析 Authorization: Bearer <key>，常量时间比较复用 safeTokenCmp
 function clientAuthOk(req, key) {
@@ -207,9 +243,27 @@ function staticModels(cfg) {
   return { object: 'list', data }
 }
 
+// 日志脱敏词表（MG-005）：上游 Key（环境变量/注册表/面板）、extraHeaders 值、客户端/管理令牌、代理内嵌凭据。
+// 每次 reloadConfig 重新收集，热更新 Key 后立即生效，不必重启进程。
+function collectSecrets(cfg) {
+  const out = []
+  for (const d of Object.values(cfg.providers || {})) { if (d && d.apiKeyEnv && process.env[d.apiKeyEnv]) out.push(process.env[d.apiKeyEnv]) }
+  for (const d of Object.values(cfg.providers || {})) { for (const v of Object.values((d && d.extraHeaders) || {})) if (v) out.push(String(v)) }
+  for (const v of Object.values(cfg._keys || {})) if (v && typeof v === 'string') out.push(v)
+  if (process.env.MG_CLIENT_KEY) out.push(process.env.MG_CLIENT_KEY)
+  if (process.env.MG_ADMIN_TOKEN) out.push(process.env.MG_ADMIN_TOKEN)
+  const proxyUrls = [(cfg.defaults && cfg.defaults.proxy) || '']
+  for (const d of Object.values(cfg.providers || {})) if (d && typeof d.proxy === 'string') proxyUrls.push(d.proxy)
+  for (const u of proxyUrls) {
+    try { const pu = new URL(u); if (pu.username) out.push(decodeURIComponent(pu.username)); if (pu.password) out.push(decodeURIComponent(pu.password)) } catch { /* 非法代理串由保存校验拦截 */ }
+  }
+  return out
+}
+
 function reloadConfig(state) {
   state.cfg = loadConfig()
   state.router = createRouter(state.cfg)
+  if (state.log && state.log.setSecrets) state.log.setSecrets(collectSecrets(state.cfg))
   // 管理令牌优先级：环境变量 MG_ADMIN_TOKEN > server.adminToken > 面板设置（keys.__mg_admin）
   state.adminToken = process.env.MG_ADMIN_TOKEN || (state.cfg.server && state.cfg.server.adminToken) || (state.cfg._keys && state.cfg._keys.__mg_admin) || ''
   const ids = Object.keys(state.cfg.providers || {})
@@ -223,6 +277,27 @@ function withConfigWriteLock(fn) {
   _cfgWriteChain = run.then(() => {}, () => {})
   return run
 }
+// —— 配置结构校验单一入口（MG-003）——
+// 形状与保留键在这里判完再进入语义校验；任何一步失败都不写盘、不改内存。
+const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+function isPlainObject(v) { return !!v && typeof v === 'object' && !Array.isArray(v) }
+function reservedKeyIn(obj, label) {
+  for (const k of Object.keys(obj || {})) if (RESERVED_KEYS.has(k)) return { error: label + ' 含保留键名：' + k }
+  return null
+}
+function validateConfigShape(body) {
+  if (!isPlainObject(body)) return { error: '请求体必须为 JSON 对象' }
+  for (const f of ['providers', 'models', 'defaults']) {
+    if (body[f] === undefined) continue
+    if (!isPlainObject(body[f])) return { error: f + ' 必须为对象（收到' + (Array.isArray(body[f]) ? '数组' : typeof body[f]) + '）' }
+    const r = reservedKeyIn(body[f], f)
+    if (r) return r
+  }
+  if (body.virtualModels !== undefined && !Array.isArray(body.virtualModels)) return { error: 'virtualModels 必须为数组' }
+  if (body.version !== undefined && !Number.isFinite(Number(body.version))) return { error: 'version 必须为数字' }
+  return null
+}
+
 // configVersion 校验：调用方显式带 version 且已过期 → 冲突；缺省视为旧版客户端，宽容放行（响应带最新 version 供自愈）
 function versionConflict(state, body) {
   const cv = Number(body && body.version)
@@ -232,6 +307,7 @@ function versionConflict(state, body) {
 function saveConfig(state, body) { return withConfigWriteLock(() => doSaveConfig(state, body)) }
 async function doSaveConfig(state, body) {
   const cur = state.cfg
+  const _shape = validateConfigShape(body); if (_shape) return _shape
   const _c = versionConflict(state, body); if (_c) return _c
   const providers = body.providers !== undefined ? body.providers : (cur.providers || {})
   const models = body.models !== undefined ? body.models : (cur.models || {})
@@ -255,6 +331,7 @@ async function doSaveConfig(state, body) {
     if (m.api != null && m.api !== '' && !['openai', 'anthropic', 'gemini'].includes(String(m.api))) return { error: '模型「' + mn + '」的 api 仅支持 openai/anthropic/gemini（留空=继承上游）' }
     // per-上游模型名覆盖：{ <providerId>: <该上游侧的模型名> }
     if (m.providerModels != null && m.providerModels !== '' && (typeof m.providerModels !== 'object' || Array.isArray(m.providerModels))) return { error: '模型「' + mn + '」的 providerModels 须为 { 上游ID: 该上游模型名 } 对象' }
+    for (const pOv of Object.keys(m.providerModels || {})) if (RESERVED_KEYS.has(pOv)) return { error: '模型「' + mn + '」的 providerModels 含保留键名：' + pOv }
     if (m.providerModels && typeof m.providerModels === 'object') for (const [pOv, nm] of Object.entries(m.providerModels)) { if (!providers[pOv]) return { error: '模型「' + mn + '」的 providerModels 引用了不存在的上游 ' + pOv }; if (typeof nm !== 'string' || !nm) return { error: '模型「' + mn + '」的 providerModels[' + pOv + '] 须为非空字符串' } }
     if (m.forceNoStream != null && typeof m.forceNoStream !== 'boolean') return { error: '模型「' + mn + '」的 forceNoStream 须为布尔值' }
   }
@@ -293,6 +370,7 @@ async function doSaveConfig(state, body) {
   for (const vm of vmsIn) {
     if (!vm || typeof vm.name !== 'string' || !vm.name.trim()) return { error: '虚拟模型缺少名称' }
     const name = vm.name.trim()
+    if (RESERVED_KEYS.has(name)) return { error: '虚拟模型名不能使用保留键名: ' + name }
     if (vmNames.has(name)) return { error: '虚拟模型名重复: ' + name }
     vmNames.add(name)
     if (models[name]) return { error: '虚拟模型名与真实模型冲突: ' + name }
@@ -335,7 +413,19 @@ async function doSaveConfig(state, body) {
     hardenKeyFile(state.paths.keys)
   }
   const newVersion = (cur.configVersion || 0) + 1
-  writeJsonAtomic(state.paths.local, { configVersion: newVersion, providers: clean, models, defaults, virtualModels: cleanVms })
+  // 删除墓碑（MG-003）：local 是"合并补丁"，缺键无法表达删除；累计记录被删的上游/模型名，
+  // 重新加回来时撤销墓碑。虚拟模型整体替换，不需要墓碑。
+  const prevLocal = readJson(state.paths.local, {}) || {}
+  const prevTomb = (prevLocal._removed && typeof prevLocal._removed === 'object') ? prevLocal._removed : {}
+  const removedProviders = new Set(Array.isArray(prevTomb.providers) ? prevTomb.providers : [])
+  const removedModels = new Set(Array.isArray(prevTomb.models) ? prevTomb.models : [])
+  for (const id of Object.keys(cur.providers || {})) if (!Object.prototype.hasOwnProperty.call(providers || {}, id)) removedProviders.add(id)
+  for (const n of Object.keys(cur.models || {})) if (!Object.prototype.hasOwnProperty.call(models || {}, n)) removedModels.add(n)
+  for (const id of Object.keys(providers || {})) removedProviders.delete(id)
+  for (const n of Object.keys(models || {})) removedModels.delete(n)
+  const localOut = { configVersion: newVersion, providers: clean, models, defaults, virtualModels: cleanVms }
+  if (removedProviders.size || removedModels.size) localOut._removed = { providers: [...removedProviders], models: [...removedModels] }
+  writeJsonAtomic(state.paths.local, localOut)
   reloadConfig(state)
   return { version: newVersion }
 }
@@ -343,9 +433,12 @@ function saveKeys(state, body) { return withConfigWriteLock(() => doSaveKeys(sta
 async function doSaveKeys(state, body) {
   const _c = versionConflict(state, body); if (_c) return _c
   // 盘上最新 keys 合并（而非内存副本）
+  const keyId = typeof body.id === 'string' ? body.id.trim() : ''
+  if (!keyId) return { error: '缺少 provider id' }
+  if (RESERVED_KEYS.has(keyId)) return { error: '非法的 Key 标识：' + keyId }
   const keys = Object.assign({}, readKeysFresh(state.paths.keys))
-  if (body.key) keys[body.id] = body.key
-  else delete keys[body.id]
+  if (body.key) keys[keyId] = body.key
+  else delete keys[keyId]
   const enc = keysEncrypt(keys)
   if (!enc) return { error: '无法加密 keys.local.json：缺少主密钥（MG_KEYS_MASTER 未设置且自动主密钥不可用），已拒绝明文写入' }
   writeFileSync(state.paths.keys, enc)
@@ -420,14 +513,28 @@ function makeHandler(state) {
   const log = state.log
   const logFile = () => state.cfg.server && state.cfg.server.logFile
   async function requireAdmin(req, res) {
-    if (adminOk(req, state)) return true
-    sendJson(res, 401, { error: '未授权：请在控制面板设置管理令牌（MG_ADMIN_TOKEN）' })
-    return false
+    if (!adminOk(req, state)) {
+      sendJson(res, 401, { error: '未授权：请在控制面板设置管理令牌（MG_ADMIN_TOKEN）' })
+      return false
+    }
+    // 未配置令牌时的"本地初始化"不能延伸到网络：远程管理请求必须先有令牌（MG-001）
+    if (!state.adminToken && !isLoopbackPeer(req)) {
+      sendJson(res, 403, { error: '拒绝远程管理请求：本实例未启用管理令牌，管理 API 仅允许本机访问；请先在本机设置 MG_ADMIN_TOKEN（或 server.adminToken）' })
+      return false
+    }
+    return true
   }
   return async function handler(req, res) {
     const path = (req.url || '/').split('?')[0]
     const url = req.url || '/'
+    const isApi = path === '/api' || path.startsWith('/api/')
     try {
+      // 来源校验：先 Host（DNS 重绑定），再 Origin（跨源网页）。两者都只放行显式声明的部署形态。
+      if (!hostAllowed(req, state.cfg)) { denyOrigin(res, path, 'Host 不被接受：' + String(req.headers.host || '') + '（DNS 重绑定防护；反向代理/自定义域名请加入 server.allowedHosts）'); return }
+      if ((isApi && !originAllowed(req, state.cfg)) || (req.method !== 'GET' && req.method !== 'HEAD' && req.headers.origin && !originAllowed(req, state.cfg))) {
+        denyOrigin(res, path, '跨源请求被拒绝：' + String(req.headers.origin || '') + '（同源或 server.allowedOrigins 白名单之外）')
+        return
+      }
       if ((req.method === 'GET' || req.method === 'HEAD') && path === '/healthz') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok'); return }
       if (req.method === 'GET' && path === '/favicon.ico') { res.writeHead(204); res.end(); return }
       if (req.method === 'GET' && (path === '/' || path === '/admin' || path === '/admin.html')) {
@@ -441,6 +548,7 @@ function makeHandler(state) {
       // 面板设置管理令牌：写入加密 keys 库并热生效。未启用鉴权时开放（本地初始化）；已启用时需携带当前令牌。
       if (path === '/api/admin-token' && req.method === 'POST') {
         if (state.adminToken && !adminOk(req, state)) { sendJson(res, 401, { error: '未授权：修改管理令牌需携带当前令牌' }); return }
+        if (!state.adminToken && !isLoopbackPeer(req)) { sendJson(res, 403, { error: '拒绝远程初始化：未启用管理令牌时只允许本机设置令牌（MG_ADMIN_TOKEN）' }); return }
         const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)) || {}
         const token = typeof body.token === 'string' ? body.token.trim() : ''
         const keys = Object.assign({}, state.cfg._keys)
@@ -481,7 +589,7 @@ function makeHandler(state) {
       if (path === '/api/config/save' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
         const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
-        if (!body || typeof body !== 'object') { sendJson(res, 400, { error: '请求体必须为 JSON' }); return }
+        if (!isPlainObject(body)) { sendJson(res, 400, { error: '请求体必须为 JSON 对象' }); return }
         const r = await saveConfig(state, body)
         if (r.error) { sendJson(res, 400, { error: r.error }); return }
         if (r.conflict) { sendJson(res, 409, { error: '配置版本已过期（他处已保存过新版本），请刷新后重试', currentVersion: r.currentVersion }); return }
@@ -672,18 +780,24 @@ function makeHandler(state) {
   }
 }
 
+// stats 落盘（MG-007）：定时写与关闭写共用同一实现；原子写避免半截文件。
+function writeStats(state) {
+  pruneStatsHistory(state)
+  const q = {}
+  for (const [n, m] of Object.entries(state.stats.byModel || {})) q[n] = { tokens: m.tokens || 0, inTokens: m.inTokens || 0, outTokens: m.outTokens || 0 }
+  const g = state.stats.global || {}
+  const globalP = { requests: g.requests||0, errors: g.errors||0, retries: g.retries||0, interrupts: g.interrupts||0, tokens: g.tokens||0, latencySum: g.latencySum||0, confirmed: g.confirmed||0, lats: g.lats||[], latTrend: g.latTrend||[] }
+  const provP = {}
+  for (const [pid, o] of Object.entries(state.stats.byProvider || {})) provP[pid] = { requests: o.requests||0, errors: o.errors||0, retries: o.retries||0, latencySum: o.latencySum||0, latencyCount: o.latencyCount||0, tokens: o.tokens||0, lats: o.lats||[], probe: o.probe||null }
+  writeJsonAtomic(state.paths.stats, { daily: state.stats.daily, hourly: state.stats.hourly, byModel: q, dialogue: state.dialogue, global: globalP, byProvider: provP, lastServing: (state.st && state.st.lastServing) || null })
+}
+
 export function start(opts = {}) {
   const cfg = opts.config ? loadConfig({ configFile: opts.config }) : loadConfig()
   const mb = process.env.MG_MAX_BODY ? parseInt(process.env.MG_MAX_BODY, 10) : 0
   if (mb > 0) cfg.server = Object.assign({}, cfg.server || {}, { maxBodyBytes: mb })
-  // 收集所有密钥值供日志脱敏：环境变量 Key + 面板 Key + extraHeaders 值 + 客户端/管理令牌，确保永不落日志
-  const secretList = []
-  for (const d of Object.values(cfg.providers || {})) { if (d && d.apiKeyEnv && process.env[d.apiKeyEnv]) secretList.push(process.env[d.apiKeyEnv]) }
-  for (const d of Object.values(cfg.providers || {})) { for (const v of Object.values((d && d.extraHeaders) || {})) if (v && String(v).length >= 3) secretList.push(String(v)) }
-  for (const v of Object.values(cfg._keys || {})) { if (v) secretList.push(v) }
-  if (process.env.MG_CLIENT_KEY) secretList.push(process.env.MG_CLIENT_KEY)
-  if (process.env.MG_ADMIN_TOKEN) secretList.push(process.env.MG_ADMIN_TOKEN)
-  const log = createLogger({ logFile: cfg.server && cfg.server.logFile, silent: opts.silent, secrets: secretList })
+  // 收集所有密钥值供日志脱敏：环境变量 Key + 面板 Key + extraHeaders 值 + 客户端/管理令牌 + 代理内嵌凭据
+  const log = createLogger({ logFile: cfg.server && cfg.server.logFile, silent: opts.silent, secrets: collectSecrets(cfg) })
   const pids = (() => { const o = {}; for (const id of Object.keys(cfg.providers || {})) o[id] = { requests:0, errors:0, retries:0, latencySum:0, latencyCount:0, tokens:0 }; return o })()
   const state = {
     cfg, log, router: createRouter(cfg),
@@ -703,11 +817,25 @@ export function start(opts = {}) {
     dUnnamed: null,      // 无会话 ID 时的当前兜底对话（按间隔切分）
     stats: { global: { requests:0, errors:0, retries:0, interrupts:0, tokens:0, latencySum:0, confirmed:0, lats: [], latTrend: [] }, byProvider: pids, byModel: {}, daily: {}, hourly: {} },
   }
-  try { const _sf = state.paths.stats; const _j = existsSync(_sf) ? JSON.parse(readFileSync(_sf, 'utf8') || '{}') : {}; state.st.lastServing = _j.lastServing || null; state.stats.daily = Object.assign({}, state.stats.daily, _j.daily || {}); state.stats.hourly = Object.assign({}, state.stats.hourly, _j.hourly || {}); for (const [n, t] of Object.entries(_j.byModel || {})) { state.stats.byModel[n] = Object.assign(state.stats.byModel[n] || { requests: 0, errors: 0 }, { tokens: (t && t.tokens) || 0, inTokens: (t && t.inTokens) || 0, outTokens: (t && t.outTokens) || 0 }) }; const _dlg = _j.dialogue || {}; for (const k of Object.keys(_dlg)) state.dialogue[k] = _dlg[k]; let _u = null; for (const k of Object.keys(state.dialogue)) { if (k.startsWith('conv-') && (!_u || state.dialogue[k].lastAt > _u.lastAt)) _u = state.dialogue[k] } state.dUnnamed = _u || null; const _g = _j.global || {}; for (const k of ['requests','errors','retries','interrupts','tokens','latencySum','confirmed']) if (typeof _g[k] === 'number') state.stats.global[k] = _g[k]; if (Array.isArray(_g.lats)) state.stats.global.lats = _g.lats; if (Array.isArray(_g.latTrend)) state.stats.global.latTrend = _g.latTrend; for (const [pid, po] of Object.entries(_j.byProvider || {})) { const o = ensureSt(state, pid); for (const k of ['requests','errors','retries','latencySum','latencyCount','tokens']) if (typeof po[k] === 'number') o[k] = po[k]; if (Array.isArray(po.lats)) o.lats = po.lats; if (po.probe) o.probe = po.probe } } catch { /* 统计文件缺失/损坏则从空开始 */ }
-  setInterval(() => { try { pruneStatsHistory(state); const q = {}; for (const [n, m] of Object.entries(state.stats.byModel || {})) q[n] = { tokens: m.tokens || 0, inTokens: m.inTokens || 0, outTokens: m.outTokens || 0 }; const g = state.stats.global || {}; const globalP = { requests: g.requests||0, errors: g.errors||0, retries: g.retries||0, interrupts: g.interrupts||0, tokens: g.tokens||0, latencySum: g.latencySum||0, confirmed: g.confirmed||0, lats: g.lats||[], latTrend: g.latTrend||[] }; const provP = {}; for (const [pid, o] of Object.entries(state.stats.byProvider || {})) provP[pid] = { requests: o.requests||0, errors: o.errors||0, retries: o.retries||0, latencySum: o.latencySum||0, latencyCount: o.latencyCount||0, tokens: o.tokens||0, lats: o.lats||[], probe: o.probe||null }; writeFileSync(state.paths.stats, JSON.stringify({ daily: state.stats.daily, hourly: state.stats.hourly, byModel: q, dialogue: state.dialogue, global: globalP, byProvider: provP, lastServing: (state.st && state.st.lastServing) || null })) } catch {} }, 30000).unref()
-  setInterval(() => { const l = state.stats.global.lats; const avg = (l && l.length) ? Math.round(l.reduce((a, b) => a + b, 0) / l.length) : 0; const tr = state.stats.global.latTrend; tr.push({ t: Date.now(), v: avg }); if (tr.length > 80) tr.shift() }, 10000).unref()
+  const timers = []
+  const every = (ms, fn) => { const h = setInterval(fn, ms); h.unref(); timers.push(h); return h }
+  try {
+    const _sf = state.paths.stats
+    let _j = {}
+    if (existsSync(_sf)) {
+      const raw = readFileSync(_sf, 'utf8') || '{}'
+      try { _j = JSON.parse(raw) } catch (e) {
+        // 损坏的 stats 先留证再重建（MG-007）：不让一次坏文件把历史统计静默清零
+        try { copyFileSync(_sf, _sf + '.corrupt-' + Date.now()) } catch {}
+        log.warn('stats 文件损坏，已备份并重建', e.message)
+        _j = {}
+      }
+    } state.st.lastServing = _j.lastServing || null; state.stats.daily = Object.assign({}, state.stats.daily, _j.daily || {}); state.stats.hourly = Object.assign({}, state.stats.hourly, _j.hourly || {}); for (const [n, t] of Object.entries(_j.byModel || {})) { state.stats.byModel[n] = Object.assign(state.stats.byModel[n] || { requests: 0, errors: 0 }, { tokens: (t && t.tokens) || 0, inTokens: (t && t.inTokens) || 0, outTokens: (t && t.outTokens) || 0 }) }; const _dlg = _j.dialogue || {}; for (const k of Object.keys(_dlg)) state.dialogue[k] = _dlg[k]; let _u = null; for (const k of Object.keys(state.dialogue)) { if (k.startsWith('conv-') && (!_u || state.dialogue[k].lastAt > _u.lastAt)) _u = state.dialogue[k] } state.dUnnamed = _u || null; const _g = _j.global || {}; for (const k of ['requests','errors','retries','interrupts','tokens','latencySum','confirmed']) if (typeof _g[k] === 'number') state.stats.global[k] = _g[k]; if (Array.isArray(_g.lats)) state.stats.global.lats = _g.lats; if (Array.isArray(_g.latTrend)) state.stats.global.latTrend = _g.latTrend; for (const [pid, po] of Object.entries(_j.byProvider || {})) { const o = ensureSt(state, pid); for (const k of ['requests','errors','retries','latencySum','latencyCount','tokens']) if (typeof po[k] === 'number') o[k] = po[k]; if (Array.isArray(po.lats)) o.lats = po.lats; if (po.probe) o.probe = po.probe } } catch { /* 统计文件缺失/损坏则从空开始 */ }
+  every(30000, () => { try { writeStats(state) } catch (e) { log && log.warn('stats 写盘失败', e.message) } })
+  every(10000, () => { const l = state.stats.global.lats; const avg = (l && l.length) ? Math.round(l.reduce((a, b) => a + b, 0) / l.length) : 0; const tr = state.stats.global.latTrend; tr.push({ t: Date.now(), v: avg }); if (tr.length > 80) tr.shift() })
   // B4 主动缓存预热：按 defaults.preheat 周期向模型上游发送带长 system 前缀的最小请求，保持厂商 prefix cache 存活
   ;(() => { const lastWarm = {}; setInterval(async () => {
+    if (state.closed) return
     const ph = (state.cfg.defaults && state.cfg.defaults.preheat) || []
     if (!ph.length) return
     const now = Date.now()
@@ -731,6 +859,7 @@ export function start(opts = {}) {
     const streak = {}   // 模型 → 连续探活成功次数
     const lastAt = {}   // 模型 → 上次探活时间
     setInterval(async () => {
+      if (state.closed) return
       const fb = (state.cfg.defaults && state.cfg.defaults.failbackProbe) || {}
       if (fb.enabled === false) return
       const everyMs = Number(fb.everyMs) > 0 ? Number(fb.everyMs) : 30000
@@ -761,6 +890,7 @@ export function start(opts = {}) {
   })()
   // B5 缓存命中率趋势 + 骤降告警：近期命中率相对基线明显下滑时告警（通常因模型/上游切换导致缓存碎片化）
   ;(() => { setInterval(() => {
+    if (state.closed) return
     let tHit = 0, tMiss = 0
     for (const m of Object.values(state.stats.daily || {})) { for (const c of Object.values(m || {})) { tHit += (c && c.hit) || 0; tMiss += (c && c.miss) || 0 } }
     const tot = tHit + tMiss
@@ -778,22 +908,60 @@ export function start(opts = {}) {
       } else if (state.cacheAlert && recent > hist - 10) state.cacheAlert = null
     }
   }, 30000).unref() })()
+  const bindHost = String((cfg.server && cfg.server.host) || '127.0.0.1').toLowerCase()
+  const loopbackBind = bindHost === '::1' || bindHost === 'localhost' || bindHost.startsWith('127.')
   if (state.adminToken) log.info('管理 API 已启用令牌保护（MG_ADMIN_TOKEN）')
-  else log.warn('未设置 MG_ADMIN_TOKEN：管理 API(/api/*)无鉴权裸露，仅建议绑定回环地址使用')
+  else if (loopbackBind) log.warn('未设置 MG_ADMIN_TOKEN：管理 API 仅允许本机访问（远程管理请求返回 403）')
+  else log.error('非回环绑定 ' + bindHost + ' 且未设置管理令牌：远程管理 API 将被拒绝（403），数据面仍按客户端 Key 策略开放')
   hardenKeyFile(state.paths.keys)
   const server = opts.server || http.createServer(makeHandler(state))
   const host = (cfg.server && cfg.server.host) || '127.0.0.1'
   const port = (cfg.server && cfg.server.port) || 8787
   server.on('error', (err) => { log.error('server error', err.message); process.exitCode = 1 })
+  // 统一关闭接口（MG-007）：停定时器 → 排空连接（带超时兜底）→ 最终原子落盘。
+  // 幂等：重复调用返回同一个 promise，SIGTERM 与测试代码可以安全各调一次。
+  let closing = null
+  function close(closeOpts = {}) {
+    if (closing) return closing
+    closing = (async () => {
+      state.closed = true
+      for (const t of timers) clearInterval(t)
+      timers.length = 0
+      const timeoutMs = Number(closeOpts.timeoutMs) > 0 ? Number(closeOpts.timeoutMs) : 3000
+      await new Promise((resolve) => {
+        const finish = () => resolve()
+        const timer = setTimeout(finish, timeoutMs)
+        if (timer.unref) timer.unref()
+        server.close(() => { clearTimeout(timer); finish() })
+        if (server.closeIdleConnections) server.closeIdleConnections()
+        // 已建立的 keep-alive 连接不会自己结束：短暂宽限后强制关闭，避免关闭被挂起的流拖住
+        const force = setTimeout(() => { if (server.closeAllConnections) server.closeAllConnections() }, 50)
+        if (force.unref) force.unref()
+      })
+      try { writeStats(state) } catch (e) { log && log.warn('关闭时统计落盘失败', e.message) }
+      log && log.info('model-gateway 已关闭，统计已落盘')
+    })()
+    return closing
+  }
   return new Promise((resolve) => {
     server.listen(port, host, () => {
       log.info('model-gateway 已启动: http://' + host + ':' + port + '  (健康检查 /healthz, 控制面板 /)')
-      resolve({ cfg, log, server, router: state.router, st: state.st })
+      resolve({ cfg, log, server, router: state.router, st: state.st, state, close })
     })
   })
 }
 
 const MAIN_HREF = process.argv[1] ? (await import('node:url')).pathToFileURL(process.argv[1]).href : ''
 if (import.meta.url === MAIN_HREF && basename(process.argv[1] || '').toLowerCase() === 'index.js') {
-  start().catch((err) => { console.error('fatal:', err.message); process.exit(1) })
+  // 信号处理：SIGTERM/SIGINT 走统一关闭（停定时器 → 排空连接 → 统计落盘），退出码 0；
+  // 关闭超过 5s 仍未完成则强制退出，避免 systemd stop 超时后 SIGKILL 丢掉最终落盘。
+  start().then((gw) => {
+    const shutdown = (sig) => {
+      const hard = setTimeout(() => { console.error('shutdown timeout:', sig); process.exit(1) }, 5000)
+      if (hard.unref) hard.unref()
+      gw.close().then(() => process.exit(0), (err) => { console.error('shutdown failed:', err.message); process.exit(1) })
+    }
+    process.once('SIGTERM', () => shutdown('SIGTERM'))
+    process.once('SIGINT', () => shutdown('SIGINT'))
+  }).catch((err) => { console.error('fatal:', err.message); process.exit(1) })
 }

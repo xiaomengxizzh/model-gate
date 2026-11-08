@@ -14,6 +14,13 @@
 | MG-A06 | 配置保存克隆 defaults，避免提前改内存对象；补齐现有模型状态字段回归 | offline/boundary.test.mjs、代码审查 |
 | MG-A07 | QPS 为等待请求预留负余额，避免一批并发请求同时醒来突破限速 | boundary 的 10 并发、5 QPS 时序断言 |
 | MG-A08 | 文档分层、AI 入口、开发规范、CI 与本地链接检查 | npm run docs:check；CI 本轮未远程运行 |
+| MG-016 | 管理 API v1 契约基线：逐路径 schema/鉴权矩阵/错误信封/敏感字段/偏离清单/前端调用矩阵 | offline/admin-contract.test.mjs、offline/admin-secrets.test.mjs、scripts/test/offline/harness.mjs；docs/contracts/management-api-v1.md；v1 仍未冻结 |
+| MG-001 | 管理面来源策略：Host/DNS 重绑定白名单、跨源 Origin 拒绝、无令牌时仅本机可管理、非回环绑定告警 | offline/admin-origin.test.mjs（4 组，含局域网对端实测）；docs/reference/configuration.md |
+| MG-003 | 配置结构校验单一入口、保留键拦截、删除墓碑（重启不复活）、并发版本冲突 | offline/config-schema.test.mjs（4 组）；src/index.js、src/router.js |
+| MG-005 | 日志脱敏词表随配置热更新、代理内嵌凭据与 Bearer 兜底、端到端验证错误摘要不落明文 | offline/logger-secrets.test.mjs；src/logger.js、src/index.js（collectSecrets） |
+| MG-008（协议桥半边） | format.js 11 项修复（tool_result 合并、Gemini usage/finish/thought 过滤、tool_choice 等）+ 22 例 wire 测试 + 有损转换清单；sse.js 同帧 finish、forward.js 空 tools 判定 | offline/wire-format.test.mjs；docs/reference/protocol-bridge.md |
+| MG-007 | 统一关闭接口 close()（定时器清理 → 排空连接 → 原子落盘）、SIGTERM/SIGINT 优雅退出、损坏 stats 先备份再重建 | offline/lifecycle.test.mjs（2 组）；src/index.js |
+| MG-010 | Node 18/20/22 CI 矩阵（仅手动触发、零下载探测 runner 自带 node）、元数据核对脚本、LICENSE、部署/回滚与兼容矩阵文档 | scripts/check-metadata.mjs（21 项 PASS）；.github/workflows/check.yml；远程 CI **未执行** |
 
 ## 与既有计划的映射
 
@@ -31,14 +38,14 @@
 
 | ID / 优先级 | 现状与目标 | 依赖 | 验收标准 |
 | --- | --- | --- | --- |
-| MG-016 / P1、先做 G0 | 管理 API schema/fixture、兼容矩阵与 PR #2 差异审计；本轮仅清单初稿 | 无 | 每个管理路径鉴权/默认值/错误/409/敏感字段契约测试；前端确认 fixture；明确 PR SHA 和真实 vs mock 边界 |
-| MG-001 / P1 | 未设管理令牌时管理写接口开放；补管理初始化、跨 Origin 请求策略与非回环部署策略 | 无 | 同源面板、无 Origin CLI、跨源网页、Host/DNS 重绑定场景明确；匿名远程写入被拒；兼容迁移指南 |
+| MG-016 / P1、先做 G0 | 契约基线与离线回归已闭环（逐路径 schema、鉴权矩阵、错误信封、敏感字段、前端调用矩阵、偏离清单）；PR #2 仅核对元数据、未审计实现；前端 fixture 归 MG-009/F0 | 无（已完成，待 MG-001/003/005 后冻结 v1） | 每个管理路径鉴权/默认值/错误/409/敏感字段契约测试；前端确认 fixture；明确 PR SHA 和真实 vs mock 边界 |
+| MG-001 / P1 | 已闭环：Host 只收 IP 字面量/白名单；跨源 Origin 403；未设令牌时仅本机可管理；非回环绑定且无令牌打 error 级告警 | 无 | offline/admin-origin.test.mjs；迁移说明见配置参考「管理面来源策略」 |
 | MG-002 / P1 | overallMs 尚未统一覆盖排队、代理 CONNECT、读 body、流式和重连生命周期；队列未取消 | 无 | 单一 deadline/AbortSignal 贯穿；客户端断开释放等待与上游；挂起代理、满队列、慢头、慢流均在预算内结束；SSE 尊重 write 背压，慢客户端不造成无界缓冲 |
-| MG-003 / P1 | 配置结构校验分散；坏形状可抛异常；普通对象字典可能受保留名称干扰；模板/patch 合并影响删除 | 无 | schema/规范化单一入口；null/数组/错误类型/保留键均返回 400 且不改盘/内存；删除重启不复活；并发版本冲突 409 |
+| MG-003 / P1 | 已闭环：形状/保留键单一入口；删除墓碑；并发 409 | 无 | offline/config-schema.test.mjs；余项：/api/keys 的 id 白名单（低频，待 MG-009 一起定） |
 | MG-004 / P1 | 默认只覆盖已隔离套件；多数旧测试仍会修改目标配置，部分缺管理鉴权 | 无 | affinity/circuit/concurrency/QPS/SSE/配额/日志/加密全部迁移 OS 临时目录+动态回环端口；无 SKIP；失败清理；默认套件禁止外部网络 |
-| MG-005 / P1 | logger 的 secrets 列表在启动时建立，热更新 Key 后未同步；错误摘要可能携带上游秘密 | MG-003 | 动态凭据、extraHeaders、代理用户信息均脱敏；植入测试秘密后扫描日志/状态无明文；最小必要错误信息 |
+| MG-005 / P1 | 已闭环：secrets 词表随 reloadConfig 刷新；代理 userinfo 与 Bearer 兜底；错误摘要脱敏端到端验证 | MG-003 | 动态凭据、extraHeaders、代理用户信息均脱敏；植入测试秘密后扫描日志/状态无明文；最小必要错误信息 |
 | MG-006 / P2 | 对话请求数按 tallyDialogue 调用增加，流式 usage 与 token 回调可能重复计数；映射字典/序列长度需容量核验 | MG-004 | 请求/尝试/完成三种指标定义；一次请求只计一次；续传 usage 无重复；缓存/对话/延迟/路由状态有可测容量上限 |
-| MG-007 / P2 | stats 周期写盘；start 返回无统一关闭接口，后台任务未集中管理 | MG-002 | close 停止定时器、排空连接、最终原子落盘；SIGTERM/重启/损坏 stats 恢复测试；不损坏旧数据 |
+| MG-007 / P2 | 已闭环：close() 幂等（停定时器/排空连接/最终原子落盘）、SIGTERM 退出码 0、损坏 stats 留证重建 | MG-002 | close 停止定时器、排空连接、最终原子落盘；SIGTERM/重启/损坏 stats 恢复测试；不损坏旧数据 |
 
 第一阶段退出条件：所有 P1 卡通过离线故障注入和独立 review；默认测试覆盖主要既有能力；生产部署仍单独留收据。不能用新增功能抵消未关闭的安全/生命周期缺口。
 
@@ -47,9 +54,9 @@
 | ID / 优先级 | 交付范围 | 依赖 | 验收标准 |
 | --- | --- | --- | --- |
 | MG-015 / P1 | 审计 Draft PR #2，统一 /v1/responses 到现有治理，按模型配置原生 Responses 或 Chat 桥 | MG-002、MG-004、MG-016 | 工具 call_id/arguments/custom tool、SSE 顺序、完成/失败、取消/usage/权限/配额全部 wire 测试；真实 Codex CLI/桌面与 DSH 对照单独授权；不改官方 auth.json |
-| MG-008 / P2 | OpenAI/Anthropic/Gemini 协议桥保真：工具、reasoning、usage、finish reason、错误、SSE 事件顺序 | MG-002、MG-004、MG-006 | 固定 wire fixtures；分片/断流/重连/多 tool-call 索引测试；显式列出有损转换；探测、预热、failback 采用一致模型解析 |
+| MG-008 / P2 | 适配器层已闭环（wire fixture 22 例 + 有损清单；sse 同帧 finish、空 tools 判定已修）；剩余：探测/预热/failback 的模型解析一致性、错误信封映射、真实上游对照（MG-015/单独授权） | MG-002、MG-004、MG-006 | 固定 wire fixtures；分片/断流/重连/多 tool-call 索引测试；显式列出有损转换；探测、预热、failback 采用一致模型解析 |
 | MG-009 / P2 | 管理面配置编辑与状态投影分离，校验/冲突/刷新反馈；托盘独立部署说明 | MG-003、MG-005 | 浏览器真实鉴权和保存回读；未知字段保留；无静默洗配置；Linux/Windows 托盘有单独 smoke 记录，价格为用户输入 |
-| MG-010 / P2 | 工程持续集成与交付：版本支持策略、Windows、docs 契约检查、安装/升级/回滚 | MG-004、MG-007 | CI 固定版本矩阵全绿；完整启动/关闭/恢复验证；发布说明含迁移及回滚；许可证实际文件与发布元数据一致 |
+| MG-010 / P2 | 已交付：CI 矩阵 18/20/22（手动触发、零下载探测 runner 自带 node）、元数据核对脚本、LICENSE、部署/回滚与兼容矩阵文档 | MG-004、MG-007 | 本地 21 项元数据 PASS + 启动/关闭/恢复实测；**远程 CI 未执行**；Windows/macOS 与 Node 18/20 实跑未验证 |
 
 ## 第三阶段：能力扩展（按卡启动，不一次铺开）
 
@@ -64,4 +71,6 @@
 
 ## 下一位 AI 的第一张卡
 
-先关闭 MG-016 的 G0 契约/基线缺口，再从 MG-001 开始：读当前 handler、adminOk 和面板调用方式 → 制作本地跨 Origin/Host 复现 → 写安全初始化与兼容提案 → 实现并回归。同一时刻一个文件一个作者。完成后更新本表状态、实际测试和审计链接，再进入 MG-002/003；互斥任务可按工作区模型政策分派。
+G0 契约基线（MG-016）与 MG-001/003/005/007 已闭环。下一张卡是 **MG-002**（统一 deadline/AbortSignal、队列取消、SSE 背压）：它横跨 forward.js / sse.js / index.js，必须串行独写；随后 MG-006（指标去重与状态容量）、MG-004（旧测试隔离迁移收尾由 test-isolation 负责）、MG-009（管理面投影与前端 fixture）、MG-015（Responses）。同一时刻一个文件一个作者。
+
+并行分派（2026-11-08 第二批）：MG-004（scripts/test 旧套件隔离迁移）、MG-008（src/format.js 协议 wire 保真）、MG-010（CI 矩阵/部署回滚/元数据）写集互不重叠。同一时刻一个文件一个作者，完成后统一由 Lead 提交并更新本表。

@@ -6,7 +6,10 @@
 | 测试与回归 | [测试指南](how-to/testing.md) |
 | 运行、配置、排错 | [运维指南](how-to/operations.md) |
 | 查询配置与环境变量 | [配置参考](reference/configuration.md) |
-| 查询当前管理 API 清单 | [管理 API 初稿](contracts/management-api-v1.md) |
+| 查询当前管理 API 契约 | [管理 API v1（未冻结）](contracts/management-api-v1.md) |
+| 查协议桥字段映射与有损转换 | [协议桥映射](reference/protocol-bridge.md) |
+| 安装、升级、回滚与停机语义 | [部署与回滚](how-to/deploy-and-rollback.md) |
+| 查询 Node/平台支持边界 | [兼容矩阵](reference/compatibility.md) |
 | 既有后端/前端重建目标 | [G0–G4](roadmap/2026-11-07-gateway-platform-plan.md)、[F0–F5](roadmap/2026-11-07-frontend-rebuild-plan.md) |
 | 理解项目术语 | [术语表](reference/glossary.md) |
 | 理解模块边界和数据流 | [架构说明](explanation/architecture.md) |

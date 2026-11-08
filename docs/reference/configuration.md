@@ -6,7 +6,11 @@
 
 ```jsonc
 {
-  "server": { "host": "127.0.0.1", "port": 8787, "logFile": "logs/gateway.log", "maxBodyBytes": 33554432 },
+  "server": {
+    "host": "127.0.0.1", "port": 8787, "logFile": "logs/gateway.log", "maxBodyBytes": 33554432,
+    "allowedHosts": [],        // 额外放行的 Host 名字（反向代理/自定义域名）；IP 字面量与 localhost 默认放行
+    "allowedOrigins": []       // 额外放行的浏览器 Origin（如 http://panel.lan）；同源面板默认放行
+  },
   "defaults": {
     "provider": "deepseek-official",      // 兜底上游（未匹配模型时）
     "model": "auto",                      // 虚拟共用模型名：客户端可统一用这个名字接入
@@ -49,7 +53,7 @@
 - `defaults.failbackProbe`：**主上游回切探活**（默认开启，仅降级中工作）。当某模型当前由**备用上游**（`fallbacks`）服务时，按 `everyMs`（默认 30s）向主上游发最小探活请求（真实 chat、`max_tokens:1`、**不计额度**、超时取 `defaults.timeout.connectMs`），连续 `successStreak`（默认 2）次成功后清除亲和，下一个请求即回到主上游。这样**回切前已验证可用**，真实请求不会踩到"刚恢复又挂"的雷；正常态（用主上游时）**零开销、不发探活**。主上游处于熔断中时跳过探活（交给熔断的半开机制，避免打架）。`system` 为探活消息内容（默认 `ping`，省 token；以 **user 角色**发送——部分上游/聚合网关的 LiteLLM 层拒绝 system-only 请求并返回 400 `LITELLM_ERROR`，用 system 前缀探活会永远失败）。
   - 与 `affinityTtlMs` 的关系：探活是**主动**回切（30s 粒度、验证后切），TTL 是**被动**兜底（过期后下一个请求试水）；二者互补，探活为主。
   - 探活**刻意不用** `/v1/models`：聚合平台常见「models 通、chat 挂」（平台健康、推理层过载），用 models 探活会误判为已恢复，切过去反而卡住。
-- `gateway.local.json`（已 gitignore）：真实 baseUrl / Key 名 / 私有覆盖放这里，浅合并覆盖 `gateway.json` 的 providers/models/defaults；`server` 段始终取自 `gateway.json`。`MG_CONFIG=/path/config.json` 可指定别处配置。
+- `gateway.local.json`（已 gitignore）：真实 baseUrl / Key 名 / 私有覆盖放这里，浅合并覆盖 `gateway.json` 的 providers/models/defaults；`server` 段始终取自 `gateway.json`。`MG_CONFIG=/path/config.json` 可指定别处配置。保存接口删除上游/模型时会在该文件写 `_removed: {providers:[…],models:[…]}` 墓碑，加载时先合并后删除，因此删除在重启后仍然生效；重新加回同名条目会自动撤销墓碑。
 - **上游 HTTP 代理 `proxy`**：未配置时可能使用进程代理环境变量。字段可放 `defaults.proxy`（全局）或 `providers.<名>.proxy`（单上游覆盖）；形如 `"http://user:pass@127.0.0.1:7890"`。也可不写配置、直接给网关进程设系统级 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。**优先级**：`providers.<名>.proxy` > `defaults.proxy` > 环境变量。**按上游定名单**（auto 模式生效）：单上游 `proxy` 留空/缺省 = 继承全局；填 `http(s)://...` = 强制走该代理；填 `direct`（或 `false`）= 强制直连、无视全局。**全局 `defaults.proxy` 可在面板「默认上游」卡「网络代理」输入框配置，单上游名单在「上游服务」编辑弹窗「代理」字段配置（均持久化，不再丢）**。网关用 Node 内置 `https` 的 **CONNECT 隧道**实现，零依赖；`proxy.proxy` 指向 Clash/mihomo 等本地混合端口即可让上游请求走代理出口（**注意**：网关的转发、探活、模型测试、预热一律经代理；本机回环上游如 `127.0.0.1:3050` 自动跳过代理直连）。
 - **代理模式 `proxyMode`**（`auto` 默认 / `direct` / `global`，面板「代理模式」下拉或配置 `defaults.proxyMode`）：
   - `auto`：按配置/名单——回环直连；非回环按 `providers.<名>.proxy` > `defaults.proxy` > 环境变量，名单里标 `direct`/`false` 的单上游强制直连；
@@ -63,7 +67,8 @@
 
 ## 安全
 
-- **管理令牌**：设置后受保护的管理接口需 `Authorization: Bearer <token>`，未授权返回 401；未设置时控制台对回环可访问，但启动会打警告。三种设置方式（优先级从高到低）：① 环境变量 `MG_ADMIN_TOKEN`；② `gateway.json` 的 `server.adminToken`；③ 控制面板顶部「令牌」按钮——**面板录入即写服务端并热生效**（加密存于 keys 库，重启不失效），留空则关闭保护。若设了环境变量，以环境变量为准。
+- **管理令牌**：设置后受保护的管理接口需 `Authorization: Bearer <token>` 或 `x-mg-admin: <token>`，未授权返回 401；未设置时只有**本机**（回环对端）可调用管理接口，远程对端一律 403，启动会打警告（非回环绑定且无令牌时升级为错误级）。三种设置方式（优先级从高到低）：① 环境变量 `MG_ADMIN_TOKEN`；② `gateway.json` 的 `server.adminToken`；③ 控制面板顶部「令牌」按钮——**面板录入即写服务端并热生效**
+- **管理面来源策略（MG-001）**：① Host 只接受 IP 字面量与 `localhost`/`server.host`/`server.allowedHosts` 中的名字，其他域名返回 403（DNS 重绑定防护）；② 带 `Origin` 的浏览器请求必须同源或命中 `server.allowedOrigins`，跨源写/读一律 403（`Origin: null` 同样拒绝）；③ 无 `Origin` 的 CLI/curl 不受影响。数据面同样做 Host 校验，跨源写请求返回 403 `{error:{message,type:'forbidden'}}`。**迁移**：用自定义域名或局域网域名访问面板/网关时，把该名字加入 `server.allowedHosts`；用另一源的前端页面调用网关时，把该源加入 `server.allowedOrigins`；远程管理访问必须先配置管理令牌。（加密存于 keys 库，重启不失效），留空则关闭保护。若设了环境变量，以环境变量为准。
 - **面板门禁**：启用管理令牌后，打开控制台先显示**登录卡片**，输入正确令牌才进入主界面（令牌错误红字提示）。浏览器记住当前网关实例（按启动时间戳 `startedAt` 判定），同一实例内刷新不再要求输入；**网关重启后需重新输入令牌**。
 - **数据面鉴权**：`MG_CLIENT_KEY` 或面板里的 `clientKey` 设置后，`/v1/*` 需携带同一 Key，否则 401；未配置全局 Key 时，绑定独立 Key 的虚拟模型仍需验证其 Key；其他入口保留本地匿名访问。全局 Key 可访问全部模型；虚拟 Key 在启用全局门禁时只放行自己的入口。
 - **转发鉴权**：向各上游转发时**剥离客户端自带** `Authorization/Cookie/x-api-key/proxy-*`，统一由网关注入，杜绝绕过。
@@ -163,4 +168,4 @@ model-gateway/
 
 ## HTTP 边界
 
-Chat 请求必须为 JSON 对象，否则 400。管理和数据面请求均受 server.maxBodyBytes（默认 32 MiB）限制，超限返回 413。客户端 Host、Cookie、鉴权头、x-mg-admin、x-goog-api-key 以及 Connection 列出的逐跳头不会转发；上游鉴权来自 provider。/healthz 和 /api/auth 是公开的状态入口。
+Chat 请求必须为 JSON 对象，否则 400。管理和数据面请求均受 server.maxBodyBytes（默认 32 MiB）限制，超限返回 413。跨源请求与非 IP 字面量 Host 在到达路由前即被 403（见上文「管理面来源策略」）。客户端 Host、Cookie、鉴权头、x-mg-admin、x-goog-api-key 以及 Connection 列出的逐跳头不会转发；上游鉴权来自 provider。/healthz 和 /api/auth 是公开的状态入口。

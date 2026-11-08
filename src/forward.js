@@ -1,7 +1,7 @@
 // 转发链模块（Phase1 TD3 自 index.js 拆分）：routes 构建 + 三层重试 + 循环兜底 + 限流/记账协作
 // 共享辅助（健康/统计/工具）由 index.js 经 deps 注入，避免双向依赖
 import { gunzipSync } from 'node:zlib'
-import { adapterFor, cacheHitMiss } from './format.js'
+import { adapterFor, cacheHitMiss, hasTools } from './format.js'
 import { buildProvider } from './router.js'
 import { isStreamResponse } from './sse.js'
 import { forward } from './request.js'
@@ -460,7 +460,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       degraded = true
       log && log.warn('流式降级(forceNoStream)', pid, 'model=' + (serving || '-') + ' -> 非流式拉取后以 SSE 交付')
     }
-    if (api !== 'openai' && routeBody) { const ad = adapterFor(api); const r = ad.build(routeBody); if ((routeBody.tools || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true } turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body)) }
+    if (api !== 'openai' && routeBody) { const ad = adapterFor(api); const r = ad.build(routeBody); if ((hasTools(routeBody) || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true } turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body)) }
     else if ((bodyDirty || routeBody !== body) && routeBody) tbuf = Buffer.from(JSON.stringify(routeBody))
     const headers = buildHeaders(req, prov, tbuf, cfg, api, body)
     const release = await acquireProvider(state, pid, cfg)

@@ -8,7 +8,7 @@
 
 ## 实现与验证
 
-维持 Node.js 内置模块实现。先给缺陷建立行为复现，再修复并运行 `npm run check`、`npm test`、`npm run docs:check`。单个主题可用 `npm test -- boundary` 筛选；交付前运行完整默认套件。只要改了 API、配置或操作步骤，同一提交同步相应参考或指南。
+维持 Node.js 内置模块实现。先给缺陷建立行为复现，再修复并运行 `npm run check`、`npm test`、`npm run docs:check`、`node scripts/check-metadata.mjs`。单个主题可用 `npm test -- boundary` 筛选；交付前运行完整默认套件。只要改了 API、配置或操作步骤，同一提交同步相应参考或指南。
 
 默认套件使用本地 mock，不需要用户网关。旧套件另见[测试指南](docs/how-to/testing.md)。保持同一文件同一时刻一个写者；需要独立审查时给 reviewer 固定 diff 和验收条件，区分作者自检与独立结论。
 
