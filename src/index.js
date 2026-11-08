@@ -260,6 +260,28 @@ function collectSecrets(cfg) {
   return out
 }
 
+// 容量核验（MG-006）：状态字典只保留当前配置仍在用的键。改名/删上游后旧键不会无限增长。
+const STATE_MAX_CACHE_STAT = 500
+function pruneStateCapacity(state) {
+  const providers = state.cfg.providers || {}
+  const models = state.cfg.models || {}
+  const vms = new Set((state.cfg.virtualModels || []).map((v) => v.name))
+  const keepModel = (n) => Object.prototype.hasOwnProperty.call(models, n) || vms.has(n)
+  const keepProvider = (id) => Object.prototype.hasOwnProperty.call(providers, id)
+  for (const id of Object.keys(state.health || {})) if (!keepProvider(id)) delete state.health[id]
+  for (const id of Object.keys(state.throttle || {})) if (!keepProvider(id)) delete state.throttle[id]
+  for (const n of Object.keys(state.throttleModel || {})) if (!keepModel(n)) delete state.throttleModel[n]
+  for (const k of Object.keys(state.qpsToken || {})) if (!keepProvider(k) && !keepModel(k)) delete state.qpsToken[k]
+  for (const n of Object.keys(state.affinity || {})) if (!keepModel(n)) { delete state.affinity[n]; if (state.affinityAt) delete state.affinityAt[n] }
+  for (const k of Object.keys(state.cacheStat || {})) { const [m, pid] = k.split('\u0000'); if (!keepModel(m) || !keepProvider(pid)) delete state.cacheStat[k] }
+  const csKeys = Object.keys(state.cacheStat || {})
+  if (csKeys.length > STATE_MAX_CACHE_STAT) {
+    csKeys.sort((a, b) => (state.cacheStat[a].ts || 0) - (state.cacheStat[b].ts || 0))
+    for (const k of csKeys.slice(0, csKeys.length - STATE_MAX_CACHE_STAT)) delete state.cacheStat[k]
+  }
+  trimDialogue(state)
+}
+
 function reloadConfig(state) {
   state.cfg = loadConfig()
   state.router = createRouter(state.cfg)
@@ -268,6 +290,7 @@ function reloadConfig(state) {
   state.adminToken = process.env.MG_ADMIN_TOKEN || (state.cfg.server && state.cfg.server.adminToken) || (state.cfg._keys && state.cfg._keys.__mg_admin) || ''
   const ids = Object.keys(state.cfg.providers || {})
   for (const id of ids) if (!state.stats.byProvider[id]) state.stats.byProvider[id] = { requests:0, errors:0, retries:0, latencySum:0, latencyCount:0, tokens:0 }
+  pruneStateCapacity(state)
 }
 // 写盘互斥：saveConfig/saveKeys 当前为同步函数（事件循环天然串行、无交错），
 // 此队列固化「读改写全程独占」语义，防止未来异步化（fs/promises）后出现交错写与 tmp 同名冲突
@@ -473,22 +496,39 @@ async function doProbeModel(state, model) {
 
 // ── 按对话（会话）统计：会话 ID 优先，无 ID 按时间间隔切分兜底 ──
 // 解析本次请求归属的对话 ID：优先请求头 X-Conversation-Id / X-Session-Id，其次 body session_id/conversation_id；
-function tallyDialogue(state, id, tokens, hit, miss) {
-  if (!id) return
+// 指标口径（MG-006）：
+//   request = 一次进入转发的客户端请求（每个对话 +1 一次，与尝试次数无关）
+//   attempt = 每次上游尝试（byProvider.requests / retries）
+//   completion = 拿到可交付结果的请求（latencyCount/confirmed）
+// token/缓存回调可能对同一请求触发多次，因此只累加数值、绝不重复计请求数。
+function ensureDialogue(state, id) {
   const now = Date.now()
   let d = state.dialogue[id]
   if (!d) { d = state.dialogue[id] = { id, requests: 0, tokens: 0, hit: 0, miss: 0, startAt: now, lastAt: now, named: !id.startsWith('conv-') } }
+  return d
+}
+function trimDialogue(state) {
+  const keys = Object.keys(state.dialogue)
+  if (keys.length <= 80) return
+  // 容量保护：保留最近 50 个（含当前无 ID 对话）
+  const victims = keys.filter((k) => state.dialogue[k] !== state.dUnnamed).sort((a, b) => state.dialogue[a].lastAt - state.dialogue[b].lastAt).slice(0, keys.length - 50)
+  for (const k of victims) delete state.dialogue[k]
+}
+function tallyDialogueRequest(state, id) {
+  if (!id) return
+  const d = ensureDialogue(state, id)
   d.requests += 1
+  d.lastAt = Date.now()
+  trimDialogue(state)
+}
+function tallyDialogue(state, id, tokens, hit, miss) {
+  if (!id) return
+  const d = ensureDialogue(state, id)
   d.tokens += tokens || 0
   d.hit += hit || 0
   d.miss += miss || 0
-  d.lastAt = now
-  // 容量保护：对话过多时清掉最旧的（保留最近 50 个 + 当前无 ID 对话）
-  const keys = Object.keys(state.dialogue)
-  if (keys.length > 80) {
-    const victims = keys.filter(k => state.dialogue[k] !== state.dUnnamed).sort((a, b) => state.dialogue[a].lastAt - state.dialogue[b].lastAt).slice(0, keys.length - 50)
-    for (const k of victims) delete state.dialogue[k]
-  }
+  d.lastAt = Date.now()
+  trimDialogue(state)
 }
 
 function hardenKeyFile(path) {
@@ -508,7 +548,7 @@ function keysFileEncrypted(path) { try { return readFileSync(path, 'utf8').trimS
 // 数据面客户端 Key：环境变量优先，其次加密 keys 库（__mg_client），最后兼容旧 defaults.clientKey
 function currentClientKey(state) { return process.env.MG_CLIENT_KEY || (state.cfg._keys && state.cfg._keys.__mg_client) || (state.cfg.defaults && state.cfg.defaults.clientKey) || '' }
 
-const FWD_DEPS = { ensureHst, markFail, markOk, healthy, effState: (h, now) => (h.state === 'open' && h.openUntil <= now) ? 'half' : h.state, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tryParse, collectBody }
+const FWD_DEPS = { ensureHst, markFail, markOk, healthy, effState: (h, now) => (h.state === 'open' && h.openUntil <= now) ? 'half' : h.state, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tallyDialogueRequest, tryParse, collectBody }
 function makeHandler(state) {
   const log = state.log
   const logFile = () => state.cfg.server && state.cfg.server.logFile
@@ -783,6 +823,12 @@ function makeHandler(state) {
 // stats 落盘（MG-007）：定时写与关闭写共用同一实现；原子写避免半截文件。
 function writeStats(state) {
   pruneStatsHistory(state)
+  // 模型统计字典硬上限：长期改名/试用模型不应让 stats.json 无界增长
+  const bmKeys = Object.keys(state.stats.byModel || {})
+  if (bmKeys.length > 500) {
+    bmKeys.sort((a, b) => ((state.stats.byModel[b].tokens || 0) - (state.stats.byModel[a].tokens || 0)))
+    for (const n of bmKeys.slice(500)) delete state.stats.byModel[n]
+  }
   const q = {}
   for (const [n, m] of Object.entries(state.stats.byModel || {})) q[n] = { tokens: m.tokens || 0, inTokens: m.inTokens || 0, outTokens: m.outTokens || 0 }
   const g = state.stats.global || {}

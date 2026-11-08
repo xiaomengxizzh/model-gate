@@ -240,7 +240,7 @@ function resolveDialogue(state, req, body) {
 }
 
 export async function forwardChain(deps, state, req, url, path, method, bodyBuf, body, log, streamRelay) {
-  const { ensureHst, markFail, markOk, healthy, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tryParse, collectBody } = deps
+  const { ensureHst, markFail, markOk, healthy, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tallyDialogueRequest, tryParse, collectBody } = deps
   const cfg = state.cfg
   let routes = []
   let maxModel = 0
@@ -254,6 +254,8 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   if (effNote && log) log.warn('思考强度入站归一化', effNote)
   if (effNote) bodyDirty = true
   const dialogueId = resolveDialogue(state, req, body)
+  // 一次客户端请求只计一次对话请求数（token/缓存回调各自累加数值，不再 +1）
+  if (dialogueId && typeof tallyDialogueRequest === 'function') tallyDialogueRequest(state, dialogueId)
   if (body && body.model) {
     const hit = state.router.resolve(body.model)
     // 决策 1：已配置虚拟模型后，未知名不再静默走 defaults 链（防 key 隔离被无感绕过），明确 404
