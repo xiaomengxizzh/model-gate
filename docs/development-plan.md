@@ -63,6 +63,22 @@
 
 本轮代码改动：Responses 桥对 `include` 只接受可安全丢弃项（`reasoning.encrypted_content` / `output_text.logprobs`）并记 lossy，其余仍显式拒绝；否则真实 Codex/DSH 无法使用 `/v1/responses`。契约与 `offline/responses-mapping.test.mjs` 同步。
 
+## 暂停点（2026-11-09 收口，等待用户真实验证）
+
+状态：分支 `dev/gateway-audit-20261108` 已推送远端，HEAD `298e9b0`（本轮四个提交：`4fec9ad` / `1396bb7` / `3a651ee` / `298e9b0`）。代码侧任务卡全部闭环，**不再继续开发**；等用户真实验证后按下面清单恢复。
+
+待用户真实验证（按顺序）：
+
+1. **生产实例**：以既有方式启动 `model-gateway.service`（8787），核对 `/healthz` 与 `/api/status` 的 provider `hasKey`/`keySource`——本轮全程未触碰 8787，仍是 inactive。
+2. **真实客户端三连**：Codex CLI（`wire_api="responses"`）、DSH headless（`api: openai-responses` 或默认 chat）、任一 OpenAI 兼容 SDK；判据见[验证报告](roadmap/2026-11-09-dsh-cli-live-verification-report.md) §7。
+3. **有损项确认**：网关日志 `responses 有损转换 …` 是否符合预期（Codex 的 `web_search`/`multi_agent` 经 Chat 桥不可用，属设计内丢弃；要支持只能走原生 `api:"responses"` 上游）。
+4. **能力卡 MG-011/012/013/014**：需要一个真实 embedding/rerank/audio/image/video 模型才能做真上游对照（属"模型+计费"决策，本轮 NOT_EXECUTED）。
+5. **托盘（Linux）**：需 `gir1.2-ayatanaappindicator3`（属安装授权）；`scripts/tray/mg-tray-linux.py` 仍是未跟踪文件。
+
+恢复开发前先读：本文件「当前状态」、验证报告 §7/§8、`CHANGELOG` 最新两节。
+
+环境备注（非本仓库代码，`2026-11-09` 已修）：`~/.workbuddy/mcp.json` 与 `aitool/mcp/tool-gate/gate.json` 里 5 处 Node 绝对路径原先指向已删除的 `v22.23.2`（`~/.nvm/...` 与 `~/.local/share/nvm/...` 两种写法都有），导致 GitHub MCP 完全不可用；已改为现存的 `v24.22.2` 并各自备份（`*.bak-20261109-140208` / `*.bak-20261109-140326`），`tool_find "github"` 已能发现 26 个 github 工具。下次升级 Node 需同步这两个文件。遗留：`gate.json` 的 obsidian 项 vault 路径 `knowledge/resource/aistudy` 不存在，且 obsidian-mcp 提示需要 `--legacy`（未改，待决定）。
+
 ## 本轮完成
 
 | ID | 交付 | 验收证据 |
