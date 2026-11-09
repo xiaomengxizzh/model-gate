@@ -7,6 +7,10 @@
 | 运行、配置、排错 | [运维指南](how-to/operations.md) |
 | 查询配置与环境变量 | [配置参考](reference/configuration.md) |
 | 查询当前管理 API 契约 | [管理 API v1（未冻结）](contracts/management-api-v1.md) |
+| 查询请求预算/取消/SSE 背压契约 | [请求生命周期契约（未冻结）](contracts/request-lifecycle-v1.md) |
+| 查询管理面 UI 投影/保存/409 契约 | [管理面 UI 投影 v1（草案）](contracts/management-ui-projection-v1.md) |
+| 前端 F0 联调样例与调用矩阵 | [管理面投影 fixture v1](contracts/fixtures/v1/README.md) |
+| 部署/替换/回滚托盘管理器 | [托盘部署（Linux/Windows）](how-to/tray-deployment.md) |
 | 查协议桥字段映射与有损转换 | [协议桥映射](reference/protocol-bridge.md) |
 | 安装、升级、回滚与停机语义 | [部署与回滚](how-to/deploy-and-rollback.md) |
 | 查询 Node/平台支持边界 | [兼容矩阵](reference/compatibility.md) |

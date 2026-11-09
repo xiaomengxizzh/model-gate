@@ -2,19 +2,19 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
-## 当前状态（2026-11-09 收口）
+## 当前状态（2026-11-09 第二批收口）
 
-分支 `dev/gateway-audit-20261108`，本轮三个提交：`33853d2`（契约基线 + P1 卡）、`522da4a`（旧套件隔离 + 日志脱敏性能）、`9a41547`（指标口径）。
+分支 `dev/gateway-audit-20261108`。第一批三个提交：`33853d2`（契约基线 + P1 卡）、`522da4a`（旧套件隔离 + 日志脱敏性能）、`9a41547`（指标口径）；第二批为本轮未提交工作树（MG-002 实现 + 契约/测试，Lead 统一提交）。
 
-已闭环：MG-016、MG-001、MG-003、MG-005、MG-007、MG-006、MG-004、MG-010（工程侧）、MG-008（适配器半边）。
-仍待办：MG-002（统一 deadline/取消/SSE 背压）、MG-009（管理面投影与前端 fixture）、MG-015（Responses/Codex）、MG-011～MG-014（Embedding/Rerank/Audio-Image/Video）、MG-008 余项（探测/预热一致性、错误信封映射）。
+已闭环：MG-016、MG-001、MG-003、MG-005、MG-007、MG-006、MG-004、MG-010（工程侧）、MG-008（适配器半边）、**MG-002（请求生命周期预算/取消/SSE 背压）**。
+仍待办：MG-009（管理面投影与前端 fixture）、MG-015（Responses/Codex）、MG-011～MG-014（Embedding/Rerank/Audio-Image/Video）、MG-008 余项（探测/预热/failback 模型解析一致性、错误信封映射）。
 
 验证（本机 Node v24.22.2，全部离线 mock，未触真实上游）：
 
 | 命令 | 结果 |
 | --- | --- |
 | `npm run check` | 退出码 0 |
-| `npm test` | 13/13 隔离套件通过 |
+| `npm test` | 14/14 隔离套件通过（新增 offline/deadline.test.mjs 13 用例，覆盖 MG-002 AC-1..AC-7） |
 | `MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs` | 27/27 旧套件文件通过（133 断言，无 SKIP） |
 | `npm run docs:check` | PASS |
 | `node scripts/check-metadata.mjs` | PASS (21) |
@@ -44,6 +44,7 @@
 | MG-006 | 指标口径分离：一次请求只计一次对话请求（token/缓存回调只累加数值）、状态字典按当前配置裁剪、对话/模型统计硬上限 | offline/metrics.test.mjs（2 组）；src/index.js、src/forward.js |
 | MG-007 | 统一关闭接口 close()（定时器清理 → 排空连接 → 原子落盘）、SIGTERM/SIGINT 优雅退出、损坏 stats 先备份再重建 | offline/lifecycle.test.mjs（2 组）；src/index.js |
 | MG-010 | Node 18/20/22 CI 矩阵（仅手动触发、零下载探测 runner 自带 node）、元数据核对脚本、LICENSE、部署/回滚与兼容矩阵文档 | scripts/check-metadata.mjs（21 项 PASS）；.github/workflows/check.yml；远程 CI **未执行** |
+| MG-002 | 新增 `src/budget.js`（请求级 deadline + AbortSignal 单一来源）；预算覆盖读 body/全部排队（QPS、provider/模型并发、429 退避）/代理 CONNECT/等头/非流式读体/SSE 中继与续传，并钳制 `loopMs`；排队 waiter 可取消（移除 + 归还 QPS 令牌 + release 恰好一次）；SSE 背压（write=false 暂停读上游、等待 drain，30s/8MiB 上限）；预算耗尽 504 `request_timeout`（流式则 `code=REQUEST_TIMEOUT` 错误事件 + `[DONE]`）；客户端断开始终取消且不熔断 | offline/deadline.test.mjs（13 用例，AC-1..AC-7）；docs/contracts/request-lifecycle-v1.md；npm test 14/14；npm run check 0 |
 
 ## 与既有计划的映射
 
@@ -57,13 +58,13 @@
 
 ## 第一阶段：稳定性与安全（先完成，再扩展能力）
 
-所有条目均为 **TODO**；下列“现状”区分已从代码确认的限制与需要专项复现的风险。每张卡实现前补一个失败复现，提交时写实际结果和未验证项。
+MG-002 已闭环（离线故障注入），其余条目均为 **TODO**；下列“现状”区分已从代码确认的限制与需要专项复现的风险。每张卡实现前补一个失败复现，提交时写实际结果和未验证项。
 
 | ID / 优先级 | 现状与目标 | 依赖 | 验收标准 |
 | --- | --- | --- | --- |
 | MG-016 / P1、先做 G0 | 契约基线与离线回归已闭环（逐路径 schema、鉴权矩阵、错误信封、敏感字段、前端调用矩阵、偏离清单）；PR #2 仅核对元数据、未审计实现；前端 fixture 归 MG-009/F0 | 无（已完成，待 MG-001/003/005 后冻结 v1） | 每个管理路径鉴权/默认值/错误/409/敏感字段契约测试；前端确认 fixture；明确 PR SHA 和真实 vs mock 边界 |
 | MG-001 / P1 | 已闭环：Host 只收 IP 字面量/白名单；跨源 Origin 403；未设令牌时仅本机可管理；非回环绑定且无令牌打 error 级告警 | 无 | offline/admin-origin.test.mjs；迁移说明见配置参考「管理面来源策略」 |
-| MG-002 / P1 | overallMs 尚未统一覆盖排队、代理 CONNECT、读 body、流式和重连生命周期；队列未取消 | 无 | 单一 deadline/AbortSignal 贯穿；客户端断开释放等待与上游；挂起代理、满队列、慢头、慢流均在预算内结束；SSE 尊重 write 背压，慢客户端不造成无界缓冲 |
+| MG-002 / P1 | **已闭环**：`src/budget.js` 单一 deadline/AbortSignal 贯穿读 body、排队、代理 CONNECT、等头、读体、SSE 与续传；队列可取消并归还令牌；SSE 尊重 write 背压（drain 等待 + 8MiB 上限） | 无 | offline/deadline.test.mjs（AC-1..AC-7）；契约见 docs/contracts/request-lifecycle-v1.md；余项：独立 review（作者自检之外） |
 | MG-003 / P1 | 已闭环：形状/保留键单一入口；删除墓碑；并发 409 | 无 | offline/config-schema.test.mjs；余项：/api/keys 的 id 白名单（低频，待 MG-009 一起定） |
 | MG-004 / P1 | 已闭环：旧套件全部隔离（27/27 文件、133 PASS、无 SKIP）；`user-env-fallback` Windows 分支仍未在 Windows 实跑 | 无 | affinity/circuit/concurrency/QPS/SSE/配额/日志/加密全部迁移 OS 临时目录+动态回环端口；无 SKIP；失败清理；默认套件禁止外部网络 |
 | MG-005 / P1 | 已闭环：secrets 词表随 reloadConfig 刷新；代理 userinfo 与 Bearer 兜底；错误摘要脱敏端到端验证；URL 凭据脱敏改线性扫描（128KB 单行 6.8s → 0ms，1MB 2ms） | MG-003 | 动态凭据、extraHeaders、代理用户信息均脱敏；植入测试秘密后扫描日志/状态无明文；最小必要错误信息 |
@@ -78,7 +79,7 @@
 | --- | --- | --- | --- |
 | MG-015 / P1 | 审计 Draft PR #2，统一 /v1/responses 到现有治理，按模型配置原生 Responses 或 Chat 桥 | MG-002、MG-004、MG-016 | 工具 call_id/arguments/custom tool、SSE 顺序、完成/失败、取消/usage/权限/配额全部 wire 测试；真实 Codex CLI/桌面与 DSH 对照单独授权；不改官方 auth.json |
 | MG-008 / P2 | 适配器层已闭环（wire fixture 22 例 + 有损清单；sse 同帧 finish、空 tools 判定已修）；剩余：探测/预热/failback 的模型解析一致性、错误信封映射、真实上游对照（MG-015/单独授权） | MG-002、MG-004、MG-006 | 固定 wire fixtures；分片/断流/重连/多 tool-call 索引测试；显式列出有损转换；探测、预热、failback 采用一致模型解析 |
-| MG-009 / P2 | 管理面配置编辑与状态投影分离，校验/冲突/刷新反馈；托盘独立部署说明 | MG-003、MG-005 | 浏览器真实鉴权和保存回读；未知字段保留；无静默洗配置；Linux/Windows 托盘有单独 smoke 记录，价格为用户输入 |
+| MG-009 / P2 | 契约与 fixture 已先行（`docs/contracts/management-ui-projection-v1.md`、`docs/contracts/fixtures/v1/`、`docs/how-to/tray-deployment.md`）；实现待开卡：`/api/keys` id 白名单与孤儿键清理、服务端剥离 models 运行时投影字段（D-2）、dirty 时冻结 baseVersion 防 409 失效（D-3）、上游 Key 保存带 version（D-7） | MG-003、MG-005 | 浏览器真实鉴权和保存回读；未知字段保留；无静默洗配置；Linux/Windows 托盘有单独 smoke 记录，价格为用户输入。静态检查已过；浏览器/托盘实跑 **NOT EXECUTED** |
 | MG-010 / P2 | 已交付：CI 矩阵 18/20/22（手动触发、零下载探测 runner 自带 node）、元数据核对脚本、LICENSE、部署/回滚与兼容矩阵文档 | MG-004、MG-007 | 本地 21 项元数据 PASS + 启动/关闭/恢复实测；**远程 CI 未执行**；Windows/macOS 与 Node 18/20 实跑未验证 |
 
 ## 第三阶段：能力扩展（按卡启动，不一次铺开）
@@ -94,6 +95,12 @@
 
 ## 下一位 AI 的第一张卡
 
-G0 契约基线（MG-016）与 MG-001/003/005/007 已闭环。下一张卡是 **MG-002**（统一 deadline/AbortSignal、队列取消、SSE 背压）：它横跨 forward.js / sse.js / index.js，必须串行独写；随后 MG-006（指标去重与状态容量）、MG-004（旧测试隔离迁移收尾由 test-isolation 负责）、MG-009（管理面投影与前端 fixture）、MG-015（Responses）。同一时刻一个文件一个作者。
+G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-004/006/007 已闭环。下一批按依赖顺序：
 
-并行分派（2026-11-08 第二批）：MG-004（scripts/test 旧套件隔离迁移）、MG-008（src/format.js 协议 wire 保真）、MG-010（CI 矩阵/部署回滚/元数据）写集互不重叠。同一时刻一个文件一个作者，完成后统一由 Lead 提交并更新本表。
+1. **MG-008 余项**（P2）：探测/预热/failback 的模型解析一致性、错误信封映射；写集 src/index.js、src/forward.js、src/request.js——与 MG-002 同文件，**必须等 MG-002 提交后**再开，串行独写。
+2. **MG-009**（P2）：管理面配置编辑与状态投影分离、`/api/keys` id 白名单、前端 fixture；契约与 fixture 已先行（docs/contracts/management-ui-projection-v1.md、docs/contracts/fixtures/v1/），实现写集 src/index.js、src/admin.html。
+3. **MG-015**（P1）：Responses/Codex 接入；契约草案见 docs/contracts/responses-v1.md，实现写集 src/router.js、src/format.js、新增 src/responses*.js（forward/index 只在 MG-008 收口后接线）。
+
+同一时刻一个文件一个作者：MG-008 与 MG-009 都改 src/index.js，必须串行；MG-015 的 format.js/router.js 写集与二者不重叠。全部完成后由 Lead 统一提交并更新本表。
+
+并行分派记录（2026-11-08 第二批）：MG-004、MG-008、MG-010 写集互不重叠。2026-11-09 第二批：MG-002 由 Lead 独写 src/ 四文件；mg002-tests 只写 scripts/test/offline/；mg015-spec 只写 docs/contracts/responses-v1.md；mg009-fixture 只写 docs/contracts/management-ui-projection-v1.md、docs/contracts/fixtures/v1/、docs/how-to/tray-deployment.md。
