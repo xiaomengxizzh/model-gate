@@ -17,6 +17,9 @@
 | `ui-dashboard-mobile.png` | 390×844 手机布局 |
 | `browser-acceptance.txt` | CDP 浏览器验收原始输出（14/14） |
 | `client-mock-validation.txt` | DSH 0.2.2-rc.1 × 本地 mock 的 Chat / Responses 桥 / 原生 Responses 结果与阻断说明 |
+| `real-client-validation.txt` | Codex CLI / DSH × 真实 OpenCode Go 最小链路、网关记账、GitHub/PR 与 MCP 更正 |
+| `raw-codex-real.txt` / `raw-dsh-real.txt` | 真实客户端原始输出（无 Key） |
+| `raw-codex-mock-chat.txt` / `raw-codex-mock-native.txt` | Codex × 本地 mock 的 Chat 桥 / 原生 Responses 原始输出 |
 
 原始日志末尾的 `/tmp/mg-ui-final3` 是生成时的临时目录；对应截图已复制到本目录。
 
@@ -36,4 +39,4 @@ node scripts/test/ui-browser-check.mjs --port 8788 \
   --token fixture-admin-token --out /tmp/mg-ui-shots
 ```
 
-DSH 复现使用临时 `DSH_HOME` 与 overlay（见 `client-mock-validation.txt`）；不要指向真实上游或真实 Key。Codex CLI 在本机因 `bwrap` user namespace 不可用而阻断，未使用跳过沙箱参数。
+DSH 复现使用临时 `DSH_HOME` 与 overlay（见 `client-mock-validation.txt` / `real-client-validation.txt`）。真实上游最小验证只使用用户级环境中的既有 Key（网关运行时解析，不读取值），共 3 请求 / 18,809 tokens。Codex 通过 vendor 二进制 + `--sandbox read-only` 运行；真实工具执行仍因宿主 bwrap user namespace 不可用而 NOT_RUN，未使用 `--dangerously-bypass...`。

@@ -5,6 +5,7 @@
 - 候选分支：`integration/modelgate-next`
 - 起点：`35bed9b`（`dev/gateway-audit-20261108` @ `3a4ba89` + 新前端三个预览提交）
 - 候选代码 HEAD（报告提交前）：`1ab84f3`
+- Draft PR：**#5** https://github.com/xiaomengxizzh/model-gate/pull/5
 - 对照主线：`origin/main` @ `6bc6441`（**未合并、未改写**）
 - 工作树：`workplace/idproject/model-gateway-next`（独立 worktree；审计 worktree 的未跟踪托盘文件未被触碰）
 - 新增依赖：**0**；真实上游调用：**0**；生产 8787 / systemd / 用户私有配置：**未触碰**
@@ -16,8 +17,8 @@
 | A 后端整合候选 | **PARTIAL → 可评审** | 以审计分支为主体；移植 429/Retry-After/工具请求不重放；修复配置投影两处契约缺口；未整包合并 G0–G4 或 PR #2。 |
 | B 可使用的 /ui-next 前端 | **PASS（Mock/浏览器层）** | 六区齐全，供应商/模型/虚拟模型/Key/409/诊断/设置均真实连通；旧 `/` 保留。 |
 | C 前后端 API 适配报告 | **PASS** | [ui-next-api-matrix.md](../contracts/ui-next-api-matrix.md)：逐操作列出 API、鉴权、错误与状态。 |
-| D 测试与验收报告 | **PASS（分层）** | 28/28 离线套件、14/14 浏览器检查、DSH 真客户端 × 本地 Mock 3 条路径；真实上游/Codex 阻断。 |
-| E Git 交接与合并建议 | **PASS（本地）** | 8 个候选提交、无冲突、无未提交文件；远端推送/PR 因本机无 GitHub 写凭据而 BLOCKED。 |
+| D 测试与验收报告 | **PASS（分层）** | 28/28 离线套件、14/14 浏览器检查、Codex/DSH × 本地 Mock、Codex/DSH × 真实上游；真实工具执行与 Desktop 仍 NOT_RUN。 |
+| E Git 交接与合并建议 | **PASS** | 已推送分支并创建 Draft PR #5；无冲突、无未提交文件。 |
 | 合并 main | **不允许** | 未获所有者明确批准；真实上游/客户端与部署验收未完成。 |
 
 ## 1. 分支审计与取舍
@@ -96,8 +97,10 @@
 | MOCK_OFFLINE | `npm test ui-next` | **PASS 2/2** | 静态资源/CSP/鉴权/穿越/注入面 |
 | BROWSER | `node scripts/test/ui-browser-check.mjs` | **PASS 14/14** | `docs/evidence/2026-11-09-integration/browser-acceptance.txt` |
 | CLIENT_MOCK | DSH 0.2.2-rc.1 × 本地 mock | **PASS 3/3** | Chat、Responses 桥、原生 Responses；见 `client-mock-validation.txt` |
-| CLIENT_LIVE | Codex CLI × 网关 × 真实上游 | **BLOCKED** | 宿主 `bwrap` 不允许非特权 user namespace；未使用跳过沙箱参数 |
-| UPSTREAM_LIVE | 真实上游计费调用 | **BLOCKED** | 本轮无逐次费用授权/预算确认；未调用 |
+| CLIENT_LIVE | Codex CLI 0.167 × 网关 × 真实 OpenCode Go | **PASS** | exit 0、输出 `MODELGATE_REAL_OK`、9,084 tokens；vendor 二进制 + `--sandbox read-only`，未用跳过沙箱参数 |
+| CLIENT_LIVE | DSH 0.2.2-rc.1 × 网关 × 真实 OpenCode Go | **PASS** | exit 0、输出 `DSH_REAL_OK` |
+| CLIENT_TOOL | Codex/DSH 真实工具执行 | **NOT_RUN** | 宿主仍不能创建非特权 user namespace；文本/流式已验证，工具往返未执行 |
+| UPSTREAM_LIVE | 真实上游计费调用 | **PASS（最小）** | 3 请求 / 18,809 tokens / 0 错误，仅最小提示词；未做 429/5xx 故障注入 |
 | DEPLOY | 8787/systemd/灰度 | **NOT_RUN** | 按约束未触碰生产实例 |
 
 ### 3.2 浏览器检查明细（14/14）
@@ -107,10 +110,18 @@
 ### 3.3 本轮没有验证的东西
 
 - 真实上游的 429/5xx 故障注入、Retry-After 真实值、非幂等工具请求真实重放行为。
-- Codex CLI / Codex Desktop 真实客户端；本机 Codex 被宿主沙箱阻断。
-- DSH 实际工具调用（本轮只跑文本/流式；历史审计分支有真实工具往返证据，但未在本候选分支复跑）。
+- Codex/DSH 的真实工具执行（shell/apply_patch）：宿主仍不能创建非特权 user namespace，文本/流式已 PASS；未使用 `--dangerously-bypass...`。
+- Codex Desktop：未启动；CLI 证据不能替代桌面端。
 - Windows/macOS、Node 18/20；本机仅 Node v24.22.2。
 - 生产部署、回滚演练、负载/长稳。
+
+### 3.4 真实客户端 × 真实上游（最小验证）
+
+- 隔离实例 `127.0.0.1:8789`：provider `opencodego`、模型 `deepseek-v4.1-flash`；Key 由用户级环境在运行时解析（`keySource=env-registry`），未读取/打印/复制 Key。
+- **Codex CLI 0.167**：使用 vendor 二进制直接启动（harness wrapper 的 nsfs/bwrap 视图在本机不可用；未使用 `--dangerously-bypass...`），`--sandbox read-only --ephemeral --skip-git-repo-check`，经 `/v1/responses` → Chat 桥 → OpenCode Go，exit 0、输出 `MODELGATE_REAL_OK`、9,084 tokens。
+- **DSH 0.2.2-rc.1**：临时 `DSH_HOME` + overlay（`api=openai-responses`），经同一实例，exit 0、输出 `DSH_REAL_OK`。
+- **网关记账**：3 请求 / 0 错误 / 18,809 tokens / p95 2,628 ms；`lastServing={model:"deepseek-v4.1-flash",provider:"opencodego"}`。
+- **仍 NOT_RUN**：真实工具执行（bwrap user namespace 不可用）、Codex Desktop、429/5xx 故障注入。证据见 `docs/evidence/2026-11-09-integration/real-client-validation.txt`。
 
 ## 4. 已知风险与未完成项
 
@@ -122,7 +133,8 @@
 6. **备份/恢复**：没有管理 API，设置页明确 NOT_SUPPORTED，不提供无效按钮。
 7. **配置删除语义**：`defaults` 顶层合并且无法经保存删除字段；需要直接编辑文件或后续 API。
 8. **凭据回显**：`/api/status` 与 `/api/config` 仍返回 `extraHeaders`/`proxy` 原值（鉴权后）；新版 UI 默认掩码、导出脱敏，但接口层脱敏仍是后续安全项。
-9. **GitHub 写操作**：本机无 HTTPS token、SSH 22 不通，无法 push 或创建/查询 PR；PR #2/#4 状态本轮只能用 `git ls-remote` 校验分支 SHA，API 查询被未认证速率限制。
+9. **GitHub 写操作（已纠正）**：本机 `gh` v2.46.0 经 keyring 登录 `xiaomengxizzh`（repo/workflow），分支已推送并创建 Draft PR #5。此前“无凭据”的结论来自只查 PATH 中无 `~/.local/bin/gh`，不成立。GitHub 的 push option 只支持 `ci.skip` 等 Actions 开关，`pull_request.create` 是 GitLab 语义，GitHub 从未支持；PR 必须用 API/CLI 创建。
+10. **MCP tool-gate 断连**：当前会话的 MCP client 显示 disconnected；手工用 v24.22.2 启动 `tool-gate/server.js` 可列出 9 个下游（含 github）。live `~/.workbuddy/mcp.json` 已指向 v24.22.2，v22.23.2 只存在于历史会话日志；根文件系统为只读挂载，本会话无法修改该配置，需客户端重启后重连。
 
 ## 5. Git 交接
 
@@ -144,8 +156,10 @@ main：6bc6441（未合并）
 
 - 合并冲突：**无**（候选分支线性构建，未合并 main）。
 - 未提交文件：报告提交后应为空（运行日志已清理；`.tmp-*` 等被 gitignore）。
-- 远端：分支未推送（无写凭据）；所有者可在具备凭据的环境执行 `git push origin integration/modelgate-next`，再创建 **Draft PR** 到 main。
-- 合并条件（未满足）：真实上游/真实 Codex/Desktop 验收、所有者对工具重放取舍与前端默认入口的明确批准、生产回滚演练。
+- 远端：**已推送** `origin/integration/modelgate-next`。
+- Draft PR：**#5** https://github.com/xiaomengxizzh/model-gate/pull/5 （base `main`，Draft）。
+- 既有 PR：#2 OPEN/Draft、head `9a0bfe3`；#4 OPEN/Draft、head `35bed9b`、base `dev/gateway-audit-20261108`；均 MERGEABLE/ CLEAN。
+- 合并条件（未满足）：Codex Desktop/真实工具执行、429/5xx 真实故障注入、所有者对工具重放取舍与前端默认入口的明确批准、生产回滚演练。
 
 ### 回滚
 
@@ -156,6 +170,7 @@ main：6bc6441（未合并）
 ## 6. 资源与安全合规
 
 - 未安装/下载任何新依赖、浏览器包、模型或镜像；浏览器使用宿主已有 Chrome 153（headless CDP），测试夹具使用 Node 内置模块与本地 mock 上游。
+- 真实上游验证只发 3 次最小提示词（18,809 tokens，0 错误），未做长上下文/批量/故障注入；Key 仅由网关运行时解析，未读取或打印。
 - 未读取/打印真实 API Key、Codex/DSH auth 文件或私有配置；DSH 使用临时 `DSH_HOME` 与假 Key 环境变量；mock 上游忽略鉴权。
 - 未修改 Git 全局设置、未强推、未删除共享分支、未合并 main、未切换生产默认前端。
 
@@ -163,10 +178,10 @@ main：6bc6441（未合并）
 
 | 维度 | 权重 | 当前证据 | 状态 |
 | --- | --- | --- | --- |
-| 后端能力整合与契约一致 | 30% | 429 治理 + 投影修复 + 28 套件 | 80%：内联链 429、真实上游未验 |
+| 后端能力整合与契约一致 | 30% | 429 治理 + 投影修复 + 真实上游链路 | 85%：内联链 429 未统一 |
 | 前端功能完整度 | 25% | 六区真实连通 + CRUD/Key/409 | 75%：备份/恢复、trace 无后端 |
 | 前后端契约与安全 | 20% | API 矩阵 + 越权/穿越/XSS/CSP | 80%：接口层 header 脱敏待做 |
-| 测试证据可复核 | 15% | 静态/离线/浏览器/客户端 Mock | 80%：真实客户端/上游阻断 |
-| 合并与部署就绪 | 10% | 分支/回滚/隔离入口 | 40%：无远端推送、无生产演练 |
+| 测试证据可复核 | 15% | 静态/离线/浏览器/客户端 Mock/真实上游 | 90%：工具执行、Desktop、故障注入未验 |
+| 合并与部署就绪 | 10% | 分支/PR/回滚/隔离入口 | 60%：无生产演练，需所有者批准 |
 
 **综合判断：可提交所有者评审的候选版；不具备直接合并 main 或替换默认前端的条件。**

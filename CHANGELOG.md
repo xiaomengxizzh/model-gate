@@ -17,11 +17,14 @@
 ### 已验证
 - `npm test`：28/28 隔离套件通过；`npm run check` 0（含 UI 模块 15/15）；docs:check PASS；metadata 21 项 PASS。
 - 浏览器：14/14 检查通过（锁定页、真实指标、六个路由、对话框 Esc、409、XSS 文本化、主题、1440/1024/768/390 无横向溢出、错误令牌、0 未捕获异常）。
-- DSH 0.2.2-rc.1 × 本地 mock：Chat、Responses Chat 桥、原生 Responses 三条路径均 exit 0；真实上游未调用。
+- DSH 0.2.2-rc.1 × 本地 mock：Chat、Responses Chat 桥、原生 Responses 三条路径均 exit 0。
+- **真实客户端 × 真实上游（最小验证）**：Codex CLI 0.167 与 DSH 0.2.2-rc.1 经隔离 8789 → OpenCode Go `deepseek-v4.1-flash`，均 exit 0，输出 `MODELGATE_REAL_OK` / `DSH_REAL_OK`；网关 3 请求 / 18,809 tokens / 0 错误。证据 `docs/evidence/2026-11-09-integration/real-client-validation.txt`。
+- 分支已推送并创建 Draft PR #5（base main）；#2/#4 均为 OPEN/Draft 且 MERGEABLE。
 
 ### 未验证 / 阻断
-- Codex CLI：宿主 `bwrap: No permissions to create a new namespace`，未使用跳过沙箱参数，BLOCKED。
-- 真实上游与真实客户端计费调用：本轮无逐次费用授权，BLOCKED；工具调用未复跑。
+- 真实工具执行（Codex/DSH shell/apply_patch）：宿主 bwrap 仍不能创建非特权 user namespace，文本/流式已验证，工具往返 NOT_RUN；未使用跳过沙箱参数。
+- Codex Desktop：未启动；CLI 证据不覆盖桌面端。
+- 429/5xx 真实故障注入：NOT_RUN；真实上游仅做最小成功链路。
 - Web 备份/恢复：后端无 API，界面明确 NOT_SUPPORTED。
 - 嵌入/重排内联链的 429 仍按旧逻辑计熔断；流式重连对工具请求的重发边界未改。
 

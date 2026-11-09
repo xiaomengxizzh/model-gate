@@ -6,11 +6,11 @@
 
 起点 `35bed9b`（`dev/gateway-audit-20261108` @ `3a4ba89` + ui-next 三个预览提交）。候选分支只做整合与新增，不改写审计分支历史；旧 `/` 与 `/admin` 保留。
 
-已完成：G1 429 归因 / Retry-After / 工具请求不重放移植；管理面配置投影修复（虚拟模型 `expiresAt/note`、`clientKey` 掩码）；`/ui-next` 静态资源安全服务与数据面 `out.headers` 透传；六大功能区前端（Dashboard / Providers / Models & Routing / Clients / Observability / Security & Settings）与共享草稿/409 事务；浏览器验收 14/14；DSH 真实客户端 × 本地 Mock 的 Chat、Responses 桥、原生 Responses 三条路径 PASS。
+已完成：G1 429 归因 / Retry-After / 工具请求不重放移植；管理面配置投影修复（虚拟模型 `expiresAt/note`、`clientKey` 掩码）；`/ui-next` 静态资源安全服务与数据面 `out.headers` 透传；六大功能区前端（Dashboard / Providers / Models & Routing / Clients / Observability / Security & Settings）与共享草稿/409 事务；浏览器验收 14/14；Codex CLI 0.167 与 DSH 0.2.2-rc.1 经真实上游 `deepseek-v4.1-flash` 最小链路 PASS（3 请求 / 18,809 tokens）；分支已推送并创建 Draft PR #5。
 
 验证：`npm test` 28/28 隔离套件；`npm run check` 0（含 15 个 UI 模块语法）；`npm run docs:check` PASS；`node scripts/check-metadata.mjs` PASS (21)；浏览器证据见 [验收报告](roadmap/2026-11-09-integration-candidate-report.md)。
 
-未验证/阻断：真实上游与真实客户端计费调用（未获本轮授权，BLOCKED）；Codex CLI 因宿主 bwrap user namespace 不可用（BLOCKED，未使用跳过沙箱参数）；DSH 工具调用本轮未复跑；Web 备份/恢复无后端 API（NOT_SUPPORTED）。生产 8787、systemd、真实 Key 与用户私有配置均未触碰。
+未验证/阻断：真实工具执行（Codex/DSH shell/apply_patch）因宿主 bwrap user namespace 不可用 NOT_RUN（未使用跳过沙箱参数）；Codex Desktop 未启动；429/5xx 故障注入未做；Web 备份/恢复无后端 API（NOT_SUPPORTED）。生产 8787、systemd、真实 Key 与用户私有配置均未触碰。
 
 ## 当前状态（2026-11-09 第三批/真实链路验证收口）
 
