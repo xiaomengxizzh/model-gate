@@ -123,7 +123,7 @@ function viewModels(root){
   search.placeholder='搜索模型名称 / 供应商…';search.type='search';search.setAttribute('aria-label','搜索模型');
   add(actions,badge('共 '+all.length+' 个入口'),goOld());add(tools,search,actions);add(root,tools);
   const p=panel('模型目录','点击“预览”检查路由，不会消耗上游额度'),tableSlot=node('div','data-table-wrap'),routeBox=node('div','');
-  p.body.style.padding='0';
+  p.body.classList.add('is-bleed');
   const renderRows=()=>{tableSlot.replaceChildren();const matches=all.filter(m=>(m.name+' '+(m.provider||'')).toLowerCase().includes(search.value.toLowerCase()));
     if(!matches.length){empty(tableSlot,'没有匹配的模型','尝试调整搜索词');return;}
     const table=node('table','data-table'),thead=node('thead'),hr=node('tr');
@@ -193,7 +193,7 @@ async function request(path,opts={}){
   const h={'accept':'application/json'};if(S.token)h.authorization='Bearer '+S.token;if(opts.body!==undefined)h['content-type']='application/json';
   const r=await fetch(path,{method:opts.method||'GET',headers:h,body:opts.body===undefined?undefined:JSON.stringify(opts.body),cache:'no-store',credentials:'same-origin'});
   let data;try{data=await r.json();}catch{data={};}
-  if(r.status===401){$('auth-overlay').hidden=false;throw new Error('需要有效的管理令牌');}
+  if(r.status===401){S.status=null;S.config=null;S.logs=null;$('auth-overlay').hidden=false;throw new Error('需要有效的管理令牌');}
   if(!r.ok)throw new Error(typeof data.error==='string'?data.error:data.error?.message||('HTTP '+r.status));
   return data;
 }
