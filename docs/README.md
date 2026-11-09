@@ -23,6 +23,7 @@
 | 确定当前已修复项及验证限制 | [2026-11-08 审计](audit-20261108.md)、[2026-11-09 浏览器 smoke](audit-20261109-browser-smoke.md) |
 | 查真实客户端（DSH CLI）经网关调上游的验证证据 | [2026-11-09 DSH CLI × ModelGate 验证](roadmap/2026-11-09-dsh-cli-live-verification-report.md) |
 | 验收整合候选版、查看分支取舍与合并/回滚条件 | [2026-11-09 整合候选验收报告](roadmap/2026-11-09-integration-candidate-report.md) |
+| 查逐能力分支差异、已知问题与风险等级 | [后端能力差异审计](roadmap/2026-11-09-backend-diff-audit.md) |
 | 查看浏览器截图与客户端 Mock 证据 | [2026-11-09 整合证据](evidence/2026-11-09-integration/browser-acceptance.txt) |
 | 安排后续工作 | [开发计划](development-plan.md) |
 
