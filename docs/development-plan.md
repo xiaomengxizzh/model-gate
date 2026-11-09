@@ -6,8 +6,8 @@
 
 分支 `dev/gateway-audit-20261108`。第一批三个提交：`33853d2`（契约基线 + P1 卡）、`522da4a`（旧套件隔离 + 日志脱敏性能）、`9a41547`（指标口径）。第二批（2026-11-09）：`5498c1a`（MG-002 预算/取消/背压 + 契约 + deadline 测试）、`42f06cd`（MG-009 投影契约/fixture/托盘文档）、`81b37e6`（MG-009 服务端投影清洗、Key 白名单、面板版本）、`027a97f`（MG-015 Responses 契约草案）。
 
-已闭环：MG-016、MG-001、MG-003、MG-005、MG-007、MG-006、MG-004、MG-010（工程侧）、**MG-002（请求生命周期预算/取消/SSE 背压）**、**MG-009（服务端投影清洗/Key 白名单/面板版本，浏览器实跑待 F2）**、**MG-008（适配器半边 + 模型解析一致性 + 错误信封映射）**、**MG-011（capability 声明 + Embedding，chat/embedding 双向隔离、Gemini 适配、记账/探测/发现）**、**MG-012（Rerank：/v1/rerank、OpenAI/Cohere 适配与稳定排序）**、**MG-013（Audio/Image：multipart 原样转发、二进制响应、体积/预算/取消）**。
-仍待办：MG-014 Video 异步任务池、MG-015 原生 responses 透传与真实客户端对照（Chat 桥已闭环）、MG-009 余项（不透明袋 D-1、只读配置投影 D-6、browser/托盘实跑）、MG-008/MG-011/MG-012/MG-013 真实上游对照（单独授权）。MG-002 二次复核：H1/M1–M3 PASS，M4 边界（已完成流误判超时）已修并补 AC-4e。
+已闭环：MG-016、MG-001、MG-003、MG-005、MG-007、MG-006、MG-004、MG-010（工程侧）、**MG-002（请求生命周期预算/取消/SSE 背压）**、**MG-009（服务端投影清洗/Key 白名单/面板版本，浏览器实跑待 F2）**、**MG-008（适配器半边 + 模型解析一致性 + 错误信封映射）**、**MG-011（capability 声明 + Embedding，chat/embedding 双向隔离、Gemini 适配、记账/探测/发现）**、**MG-012（Rerank：/v1/rerank、OpenAI/Cohere 适配与稳定排序）**、**MG-013（Audio/Image：multipart 原样转发、二进制响应、体积/预算/取消）**、**MG-014（Video 异步任务池：创建/幂等/轮询/取消/重启恢复/GC，ADR-0001）**。
+仍待办：MG-015 原生 responses 透传与真实客户端对照（Chat 桥已闭环）、MG-009 余项（不透明袋 D-1、只读配置投影 D-6、browser/托盘实跑）、MG-008/MG-011/MG-012/MG-013/MG-014 真实上游对照（单独授权）。MG-002 二次复核：H1/M1–M3 PASS，M4 边界（已完成流误判超时）已修并补 AC-4e。
 
 验证（本机 Node v24.22.2，全部离线 mock，未触真实上游）：
 
@@ -39,6 +39,7 @@
 | MG-001 | 管理面来源策略：Host/DNS 重绑定白名单、跨源 Origin 拒绝、无令牌时仅本机可管理、非回环绑定告警 | offline/admin-origin.test.mjs（4 组，含局域网对端实测）；docs/reference/configuration.md |
 | MG-003 | 配置结构校验单一入口、保留键拦截、删除墓碑（重启不复活）、并发版本冲突 | offline/config-schema.test.mjs（4 组）；src/index.js、src/router.js |
 | MG-005 | 日志脱敏词表随配置热更新、代理内嵌凭据与 Bearer 兜底、端到端验证错误摘要不落明文 | offline/logger-secrets.test.mjs；src/logger.js、src/index.js（collectSecrets） |
+| MG-014 | Video 异步任务池：capability `video`；`POST /v1/videos`（Idempotency-Key 幂等）、`GET /v1/videos/:id`（惰性+后台轮询）、`POST /v1/videos/:id/cancel`、列表；任务持久化 `<config>/videos.json`（原子写）、状态机与终态幂等、重启恢复、7 天保留/500 上限/24h 过期 GC；上游路径可配置；只桥接 OpenAI 兼容 | offline/video.test.mjs（6 用例：创建轮询、幂等、取消、重启+GC、隔离/协议、校验/预算）；docs/explanation/adr-0001-video-task-pool.md；npm test 22/22 |
 | MG-013 | capability `audio`/`image` + 四个媒体入口：speech（JSON→二进制）、transcriptions（multipart 原样转发）、images/generations（JSON）、images/edits（multipart）；multipart 只解析 model 字段、per-上游覆盖名替换、文件字节不动；响应 content-type/字节透传；请求体 maxBodyBytes、响应体 mediaMaxResponseBytes（超限 media_too_large）；能力隔离/fallback/预算/记账；不支持的协议显式 502 | offline/media.test.mjs（8 用例）；docs/reference/configuration.md；npm test 21/21 |
 | MG-012 | capability `rerank` + `/v1/rerank`（兼容 `/rerank`）：OpenAI 兼容 `/v1/rerank` 与 Cohere `/v2/rerank` 适配，结果按分数降序/同分 index 升序稳定排序、top_n 裁剪、model 回写；能力隔离、fallback、探测、记账、预算 | offline/rerank.test.mjs（6 用例）；docs/reference/configuration.md；npm test 20/20 |
 | MG-011 | capability 声明（chat/embedding）+ `/v1/embeddings`：OpenAI 透传、Gemini batchEmbedContents 适配、Anthropic 拒绝；双向能力隔离；usage 记账、/v1/models 与 /api/status 暴露 capability、/api/model-test 按能力探测；批量上限/dimensions/fallback/预算测试 | offline/embeddings.test.mjs（7 用例）；docs/reference/configuration.md；npm test 19/19 |
@@ -95,7 +96,7 @@ MG-002 已闭环（离线故障注入），其余条目均为 **TODO**；下列�
 | MG-011 / P3 | **已闭环（2026-11-09）**：`models.<名>.capability`（chat/embedding）；`/v1/embeddings` 入口、OpenAI 透传 + Gemini batchEmbedContents 适配、Anthropic 拒绝；记账/探测/模型发现六处打通；虚拟模型不支持 embeddings | 第一阶段、MG-008 | offline/embeddings.test.mjs（批量上限、dimensions、fallback、能力隔离、预算） |
 | MG-012 / P3 | **已闭环（2026-11-09）**：`/v1/rerank`（OpenAI 兼容与 Cohere v2 适配）、稳定排序/top_n/model 回写、能力隔离、fallback/探测/记账/预算；`documents` 上限 2048 | MG-011 | offline/rerank.test.mjs（排序稳定、批量限制、模型路由、预算、隔离） |
 | MG-013 / P3 | **已闭环（2026-11-09）**：Audio（speech/transcriptions）+ Image（generations/edits）；multipart 原样转发（只改 model 字段）、二进制响应透传、请求/响应体积上限、overallMs 预算/取消、能力隔离、fallback；Anthropic/Gemini/Cohere 显式拒绝；媒体 probe 明确不执行（避免计费） | MG-011、MG-002 | offline/media.test.mjs（multipart、二进制、体积、预算、隔离、拒绝） |
-| MG-014 / P3 | Video 异步任务池与持久化 | MG-007、MG-013 | 先 ADR 决定存储与 Node 版本要求；幂等创建、状态轮询、取消、重启恢复、GC；真实预算与外部发布单独授权 |
+| MG-014 / P3 | **已闭环（2026-11-09，ADR-0001）**：`/v1/videos` 创建/查询/取消/列表；JSON 文件持久化 + 原子写、重启恢复、终态幂等、7 天/500 条/24h GC；Idempotency-Key 幂等；上游路径可配置；只桥接 OpenAI 兼容；真实预算与外部发布仍单独授权 | MG-007、MG-013 | offline/video.test.mjs（创建/轮询、幂等、取消、重启+GC、隔离、预算） |
 
 虚拟模型 priority、exact/prefix 匹配为候选需求，待 MG-003 确立名称匹配/冲突契约后单独立卡；现阶段保留精确名称语义。不要将字段预留当已实现。
 
@@ -109,7 +110,8 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 4. ~~**MG-011**（P3）：capability 声明与 Embedding~~ **已闭环（2026-11-09）**。
 5. ~~**MG-012**（P3）：Rerank~~ **已闭环（2026-11-09）**。
 6. ~~**MG-013**（P3）：Audio / Image~~ **已闭环（2026-11-09）**。
-7. **MG-014**（P3）：Video 异步任务池与持久化（下一张卡）——先补 ADR（存储/Node 版本/恢复语义），再做幂等创建、状态轮询、取消、重启恢复、GC；真实预算与外部发布单独授权。
+7. ~~**MG-014**（P3）：Video 异步任务池与持久化~~ **已闭环（2026-11-09，ADR-0001）**。
+8. **MG-015 原生 responses 透传 / MG-009 余项**（下一张卡）：`api:"responses"` 原生转发、D-6 只读配置投影、D-1 不透明袋、浏览器/托盘实跑。
 
 同一时刻一个文件一个作者：MG-008 与 MG-009 都改 src/index.js，必须串行；MG-015 的 format.js/router.js 写集与二者不重叠。全部完成后由 Lead 统一提交并更新本表。
 

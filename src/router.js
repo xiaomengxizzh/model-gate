@@ -8,7 +8,7 @@ export function configPaths() {
   // MG_CONFIG_DIR：可选。多实例隔离时为实例指定独立配置目录（keys/stats 随之独立）；未设置=cwd/config（单实例零配置）
   const envDir = (process.env.MG_CONFIG_DIR || '').trim()
   const dir = envDir || join(process.cwd(), 'config')
-  return { dir, local: join(dir, 'gateway.local.json'), keys: join(dir, 'keys.local.json'), stats: join(dir, 'stats.json') }
+  return { dir, local: join(dir, 'gateway.local.json'), keys: join(dir, 'keys.local.json'), stats: join(dir, 'stats.json'), videos: join(dir, 'videos.json') }
 }
 
 export function readJson(path, dflt = {}) {

@@ -2,6 +2,21 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-09 Video 异步任务池（未发布，MG-014）
+
+### Added
+
+- `capability=video` 与 Video API：`POST /v1/videos` 创建任务（支持 `Idempotency-Key`，同 key 返回既有任务不重复请求上游）、`GET /v1/videos/:id` 查询（惰性 ≥1.5s 一次 + 后台 5s 轮询）、`POST /v1/videos/:id/cancel`、`GET /v1/videos` 列表。
+- 任务持久化到 `<配置目录>/videos.json`（原子写、单进程）：状态机 queued/running/succeeded/failed/canceled，终态幂等；重启恢复未完成任务并继续轮询；终态保留 7 天、总量上限 500、非终态超 24h 判 failed；启动与每小时 GC。
+- 上游只桥接 OpenAI 兼容协议；路径可按模型覆盖 `videoCreatePath` / `videoStatusPath` / `videoCancelPath`（默认 `/v1/videos`、`/v1/videos/{id}`、`/v1/videos/{id}/cancel`）；任务 id 兼容 `id/task_id/request_id`，状态词归一；创建/轮询/取消复用 `forward()` 的 retry/timeout 与 `overallMs` 预算。
+- 决策文档 `docs/explanation/adr-0001-video-task-pool.md`；回归 `scripts/test/offline/video.test.mjs`（6 用例：创建→轮询→完成与落盘、幂等、取消、重启恢复+GC、能力隔离/不支持协议、校验与预算）。
+
+### Changed
+- `npm run check` 覆盖 `src/videos.js`；`configPaths()` 新增 `videos`；admin 编辑器 capability 增加 video。
+
+### 未验证
+- 真实视频上游（Sora/Veo/Kling 等）路径/状态词/结果格式与计费；多进程共享配置目录；webhook 与结果转存；Windows/macOS、Node 18/20。
+
 ## 2026-11-09 Audio/Image 媒体能力（未发布，MG-013）
 
 ### Added

@@ -181,9 +181,23 @@ OpenAI 客户端只接受 `stop / length / tool_calls / content_filter` 四个�
 
 边界：请求体受 `server.maxBodyBytes`；响应体受 `defaults.mediaMaxResponseBytes`（默认 64MiB，超限 502 `media_too_large`）；multipart 只解析 `model`，不重编码文件；Anthropic/Gemini/Cohere 无媒体桥接 → 502 且不触上游；audio/image 不做在线探测（避免计费）。回归：`scripts/test/offline/media.test.mjs`。
 
-## 10. 模型解析与错误信封（MG-008 余项）
+## 10. Video 异步任务（MG-014）
 
-### 10.1 单一模型解析入口
+入口与存储见 ADR-0001；本层只描述上游协议归一。
+
+| 项 | 约定 |
+| --- | --- |
+| 创建 | `POST videoCreatePath`（默认 `/v1/videos`），请求 `{model, prompt, ...}`；任务 id 取响应 `id/task_id/request_id` |
+| 轮询 | `GET videoStatusPath`（`{id}` 占位符替换为编码后的上游任务 id）；状态词归一为 queued/running/succeeded/failed/canceled；进度取 `progress/percent`；结果取 `result/output/url/video.url/data[0]` |
+| 取消 | `POST videoCancelPath`；上游失败仅记日志，本地仍置 canceled（终态幂等） |
+| 鉴权 | Bearer + extraHeaders（与 JSON 转发一致） |
+| 边界 | 只支持 OpenAI 兼容（`api=openai`）；任务在本地持久化；video 不做在线探测（避免计费生成） |
+
+有损：无法识别的上游状态保持当前状态并在 24h 后过期；结果只保存上游 JSON/URL，不做文件转存；不支持 webhook。
+
+## 11. 模型解析与错误信封（MG-008 余项）
+
+### 11.1 单一模型解析入口
 
 `modelTarget(cfg, modelName, pid)`（src/router.js）返回 `{ servingName, api, effortFormat, maxTokensMax }`：
 
@@ -193,7 +207,7 @@ OpenAI 客户端只接受 `stop / length / tool_calls / content_filter` 四个�
 - 预热与 failback 还按协议生成 path/body 与鉴权头：Anthropic `/v1/messages` + `x-api-key`/`anthropic-version`；Gemini `:generateContent`/`:streamGenerateContent?alt=sse` + `x-goog-api-key`。Anthropic/Gemini 的预热消息会补一条 user 消息（协议要求至少一条非 system 消息）。
 - 回归：`scripts/test/offline/model-resolution.test.mjs`。
 
-### 10.2 上游错误信封映射
+### 11.2 上游错误信封映射
 
 非 OpenAI 上游的**非 2xx 原生错误信封**在数据面返回前统一映射为 OpenAI 形状（状态码保留）：
 

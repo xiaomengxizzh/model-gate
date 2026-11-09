@@ -18,6 +18,7 @@
 | 既有后端/前端重建目标 | [G0–G4](roadmap/2026-11-07-gateway-platform-plan.md)、[F0–F5](roadmap/2026-11-07-frontend-rebuild-plan.md) |
 | 理解项目术语 | [术语表](reference/glossary.md) |
 | 理解模块边界和数据流 | [架构说明](explanation/architecture.md) |
+| 查视频异步任务池的存储/恢复决策 | [ADR-0001 Video 任务池](explanation/adr-0001-video-task-pool.md) |
 | 确定当前已修复项及验证限制 | [2026-11-08 审计](audit-20261108.md) |
 | 安排后续工作 | [开发计划](development-plan.md) |
 

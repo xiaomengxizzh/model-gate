@@ -16,6 +16,7 @@ import { createResponsesStream } from './responses-stream.js'
 import { validateEmbeddingRequest, buildEmbeddingRequest, embeddingHeaders, normalizeEmbeddingResponse, supportsEmbeddings, MAX_EMBEDDING_INPUTS } from './embeddings.js'
 import { validateRerankRequest, buildRerankRequest, rerankHeaders, normalizeRerankResponse, supportsRerank } from './rerank.js'
 import { supportsMedia, parseMultipartField, replaceMultipartField, isMultipart, validateSpeechRequest, validateImageRequest, mediaResponseLimit } from './media.js'
+import { defaultVideoPaths, newVideoTask, upstreamTaskId, applyUpstreamStatus, clientTask, loadVideoTasks, saveVideoTasks, gcVideoTasks, findTaskByIdem, validateVideoCreate, VIDEO_POLL_MIN_MS } from './videos.js'
 import { todayKey } from './shared.js'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
@@ -390,7 +391,11 @@ async function doSaveConfig(state, body) {
     if (m.providerModels && typeof m.providerModels === 'object') for (const [pOv, nm] of Object.entries(m.providerModels)) { if (!providers[pOv]) return { error: '模型「' + mn + '」的 providerModels 引用了不存在的上游 ' + pOv }; if (typeof nm !== 'string' || !nm) return { error: '模型「' + mn + '」的 providerModels[' + pOv + '] 须为非空字符串' } }
     if (m.forceNoStream != null && typeof m.forceNoStream !== 'boolean') return { error: '模型「' + mn + '」的 forceNoStream 须为布尔值' }
     // 能力声明（MG-011）：chat（默认）/embedding；未知值拦截，避免拼写错误静默变成 chat
-    if (m.capability != null && m.capability !== '' && !['chat', 'embedding', 'rerank', 'audio', 'image'].includes(String(m.capability))) return { error: '模型「' + mn + '」的 capability 仅支持 chat/embedding/rerank/audio/image' }
+    if (m.capability != null && m.capability !== '' && !['chat', 'embedding', 'rerank', 'audio', 'image', 'video'].includes(String(m.capability))) return { error: '模型「' + mn + '」的 capability 仅支持 chat/embedding/rerank/audio/image/video' }
+    // video 异步任务路径（可选）：必须以 / 开头，避免把绝对 URL 注入到转发层
+    for (const k of ['videoCreatePath', 'videoStatusPath', 'videoCancelPath']) {
+      if (m[k] != null && m[k] !== '' && (typeof m[k] !== 'string' || !m[k].startsWith('/'))) return { error: '模型「' + mn + '」的 ' + k + ' 必须是以 / 开头的路径' }
+    }
   }
   // 单上游代理（名单）：留空/undefined=继承全局；direct/false=强制直连；否则须为合法 http(s):// 地址
   for (const [pid, p] of Object.entries(providers || {})) {
@@ -540,7 +545,7 @@ async function doProbeModel(state, model) {
   // 能力感知探测（MG-011/012/013）：embedding → /v1/embeddings，rerank → /v1|v2/rerank；
   // audio/image 会真实产生计费媒体，明确不做在线探测；其余走 chat 补全
   const cap = def.capability || 'chat'
-  if (cap === 'audio' || cap === 'image') return { id: model, ok: false, err: '该能力不提供在线探测（避免产生计费媒体生成）' }
+  if (cap === 'audio' || cap === 'image' || cap === 'video') return { id: model, ok: false, err: '该能力不提供在线探测（避免产生计费媒体生成）' }
   const r = cap === 'embedding' ? await probeEmbedding(prov, model, target.api, target.servingName)
     : cap === 'rerank' ? await probeRerank(prov, model, target.api, target.servingName)
     : await probeModel(prov, model, target.api, target.servingName)
@@ -668,6 +673,113 @@ async function handleMediaProxy(state, budget, log, opts) {
     } finally { if (release) release() }
   }
   return { status: 502, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: '媒体上游失败：' + (lastErr ? lastErr.message : 'all providers failed'), type: 'all_providers_failed' } })) }
+}
+
+// —— MG-014 Video 异步任务池（ADR-0001）：创建/轮询/取消；上游只桥接 OpenAI 兼容 ——
+function videoJsonHeaders(state, provider, payloadLen) {
+  const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }
+  const extra = Object.assign({}, (state.cfg.defaults && state.cfg.defaults.extraHeaders) || {}, (provider && provider.extraHeaders) || {})
+  for (const [k, v] of Object.entries(extra)) headers[String(k).toLowerCase()] = v
+  if (provider && provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
+  if (payloadLen) headers['content-length'] = payloadLen
+  return headers
+}
+function saveVideos(state, log) { try { saveVideoTasks(state.paths.videos, state.videos) } catch (e) { log && log.warn('videos 落盘失败', e.message) } }
+
+async function createVideoTask(state, budget, log, opts) {
+  const { modelName, def, body, idem } = opts
+  const paths = defaultVideoPaths(def)
+  const candidates = [def.provider, ...(def.fallbacks || [])].filter(Boolean)
+  let lastErr = null
+  for (const pid of candidates) {
+    if (!state.cfg.providers[pid]) continue
+    const prov = buildProvider(state.cfg, pid)
+    if (!healthy(ensureHst(state, pid), Date.now())) { lastErr = new Error('provider ' + pid + ' 熔断中'); continue }
+    if (prov._def.apiKeyEnv && !prov.keyOk) { lastErr = new Error('provider ' + pid + ' 未配置 Key'); continue }
+    const target = modelTarget(state.cfg, modelName, pid)
+    if (target.api !== 'openai') { lastErr = new Error('上游协议 ' + target.api + ' 不支持 video'); continue }
+    const payload = Buffer.from(JSON.stringify(Object.assign({}, body, { model: target.servingName })))
+    const headers = videoJsonHeaders(state, prov, payload.length)
+    let release = null
+    try {
+      release = await acquireProvider(state, pid, state.cfg, budget.signal)
+      const up = await forward(prov, paths.createPath, 'POST', headers, payload, state.cfg.defaults || {}, log, { budget, signal: budget.signal })
+      const outBuf = await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
+      if (up.ok) {
+        const j = tryParse(outBuf)
+        const task = newVideoTask({ model: modelName, provider: pid, idem, prompt: body.prompt })
+        task.upstreamId = upstreamTaskId(j)
+        applyUpstreamStatus(task, j)
+        if (!task.upstreamId && task.status === 'queued') task.error = 'upstream 未返回任务 id，无法轮询'
+        state.videos[task.id] = task
+        state.st.counters.requests += 1
+        agg(state, pid, 'requests', 1)
+        const sg = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
+        sg.requests = (sg.requests || 0) + 1
+        markOk(state, pid); noteAffinity(state, modelName, pid)
+        saveVideos(state, log)
+        return { ok: true, task }
+      }
+      const mapped = mapErrorEnvelope(target.api, up.status, outBuf) || outBuf
+      if (up.status === 402 || up.status === 403 || up.status === 404 || up.status === 429 || up.status >= 500) {
+        lastErr = new Error('upstream ' + up.status)
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        markFail(state, pid, prov.circuit)
+        continue
+      }
+      return { ok: false, status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: mapped }
+    } catch (err) {
+      if (err && err.aborted) throw err
+      lastErr = err
+      agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+      markFail(state, pid, prov.circuit)
+    } finally { if (release) release() }
+  }
+  return { ok: false, status: 502, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: 'video 上游失败：' + (lastErr ? lastErr.message : 'all providers failed'), type: 'all_providers_failed' } })) }
+}
+
+async function pollVideoTask(state, task, log) {
+  if (!task) return task
+  task.lastPollAt = Date.now()
+  if (['succeeded', 'failed', 'canceled'].includes(task.status)) { saveVideos(state, log); return task }
+  const def = state.cfg.models && state.cfg.models[task.model]
+  if (!def) { task.status = 'failed'; task.error = '模型已删除'; task.updatedAt = Date.now(); saveVideos(state, log); return task }
+  let prov = null
+  try { prov = buildProvider(state.cfg, task.provider) } catch { prov = null }
+  if (!prov) { task.status = 'failed'; task.error = '上游已删除'; task.updatedAt = Date.now(); saveVideos(state, log); return task }
+  if (!task.upstreamId) { task.updatedAt = Date.now(); saveVideos(state, log); return task }
+  const paths = defaultVideoPaths(def)
+  const path = paths.statusPath.replace('{id}', encodeURIComponent(task.upstreamId))
+  try {
+    const up = await forward(prov, path, 'GET', videoJsonHeaders(state, prov, 0), null, state.cfg.defaults || {}, log)
+    const buf = await collectBody(up.stream, 1024 * 1024, { destroyOnAbort: true })
+    if (up.ok) applyUpstreamStatus(task, tryParse(buf))
+    else if (up.status === 404) { task.status = 'failed'; task.error = '上游任务不存在'; task.updatedAt = Date.now() }
+    else task.error = 'poll HTTP ' + up.status
+  } catch (e) { task.error = 'poll failed: ' + (e && (e.message || e.code) ? (e.message || e.code) : e) }
+  task.lastPollAt = Date.now(); task.updatedAt = Date.now()
+  saveVideos(state, log)
+  return task
+}
+
+async function cancelVideoTask(state, task, log) {
+  if (!task) return task
+  if (task.status === 'succeeded' || task.status === 'failed' || task.status === 'canceled') return task
+  const def = state.cfg.models && state.cfg.models[task.model]
+  if (def && task.upstreamId) {
+    const paths = defaultVideoPaths(def)
+    let prov = null
+    try { prov = buildProvider(state.cfg, task.provider) } catch { prov = null }
+    if (prov) {
+      const path = paths.cancelPath.replace('{id}', encodeURIComponent(task.upstreamId))
+      try {
+        const up = await forward(prov, path, 'POST', videoJsonHeaders(state, prov, 0), null, state.cfg.defaults || {}, log)
+        try { await collectBody(up.stream, 1024 * 1024, { destroyOnAbort: true }) } catch {}
+      } catch (e) { log && log.warn('video 上游取消失败（本地仍标记 canceled）', e.message || e.code) }
+    }
+  }
+  task.status = 'canceled'; task.updatedAt = Date.now(); saveVideos(state, log)
+  return task
 }
 
 const FWD_DEPS = { ensureHst, markFail, markOk, healthy, effState: (h, now) => (h.state === 'open' && h.openUntil <= now) ? 'half' : h.state, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tallyDialogueRequest, tryParse, collectBody }
@@ -990,6 +1102,45 @@ function makeHandler(state) {
         res.writeHead(result.status, { 'content-type': result.contentType, 'content-length': result.buf.length })
         res.end(result.buf); return
       }
+
+      // —— MG-014：Video 异步任务池（ADR-0001）：创建 / 列表 / 查询 / 取消 ——
+      if (path === '/v1/videos' && req.method === 'POST') {
+        const vmax = (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024
+        const vbuf = await collectBody(req, vmax, { budget, signal: budget.signal })
+        const vbody = tryParse(vbuf)
+        const verr = validateVideoCreate(vbody)
+        if (verr) { sendJson(res, 400, { error: { message: verr.error, type: 'invalid_request_error' } }); return }
+        const vhit = state.router.resolve(vbody.model)
+        if (!vhit.known && (state.cfg.virtualModels || []).length) { sendJson(res, 404, { error: { message: '未知模型名: ' + vbody.model + '。可用虚拟模型见 GET /v1/models', type: 'unknown_model' } }); return }
+        const vdef = vhit.def || null
+        if (!vdef || vdef.isVirtualModel || vdef.virtual) { sendJson(res, 400, { error: { message: '虚拟模型/默认共用名不支持 video', type: 'unsupported_model' } }); return }
+        const vcap = vdef.capability || 'chat'
+        if (vcap !== 'video') { sendJson(res, 400, { error: { message: '模型 ' + vhit.canonicalName + ' 不是 video 模型（capability=' + vcap + '）', type: 'unsupported_model' } }); return }
+        const idem = String(req.headers['idempotency-key'] || '').trim() || null
+        const existing = findTaskByIdem(state.videos, idem)
+        if (existing) { sendJson(res, 200, clientTask(existing)); return }   // 幂等：同 key 不重复创建/不重复计上游
+        const created = await createVideoTask(state, budget, log, { modelName: vhit.canonicalName, def: vdef, body: vbody, idem })
+        if (created.ok) { sendJson(res, 202, clientTask(created.task)); return }
+        res.writeHead(created.status, { 'content-type': created.contentType }); res.end(created.buf); return
+      }
+      if (path === '/v1/videos' && req.method === 'GET') {
+        const list = Object.values(state.videos).sort((a, b) => b.createdAt - a.createdAt).slice(0, 50).map(clientTask)
+        sendJson(res, 200, { object: 'list', data: list }); return
+      }
+      const vmatch = /^\/v1\/videos\/([^/]+)(\/cancel)?$/.exec(path)
+      if (vmatch) {
+        const vid = decodeURIComponent(vmatch[1])
+        const task = state.videos[vid]
+        if (!task) { sendJson(res, 404, { error: { message: '未知视频任务: ' + vid, type: 'not_found' } }); return }
+        if (vmatch[2] === '/cancel') {
+          if (req.method !== 'POST') { sendJson(res, 405, { error: { message: '仅支持 POST /v1/videos/:id/cancel', type: 'invalid_request_error' } }); return }
+          await cancelVideoTask(state, task, log)
+          sendJson(res, 200, clientTask(task)); return
+        }
+        if (req.method !== 'GET') { sendJson(res, 405, { error: { message: '仅支持 GET /v1/videos/:id', type: 'invalid_request_error' } }); return }
+        if (!['succeeded', 'failed', 'canceled'].includes(task.status) && Date.now() - (task.lastPollAt || 0) >= VIDEO_POLL_MIN_MS) await pollVideoTask(state, task, log)
+        sendJson(res, 200, clientTask(task)); return
+      }
       const isChat = CHAT_PATHS.has(path)
       const isResponses = RESPONSES_PATHS.has(path)
       if (!path.startsWith('/v1') && !isChat && !isResponses) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
@@ -1233,6 +1384,7 @@ export function start(opts = {}) {
     cacheStat: {},       // "模型\0上游" → { hit, miss }（命中率路由）
     cacheTrend: [],      // 全局缓存命中率趋势样本 { t, v }（告警基线）
     cacheAlert: null,    // 最近一次命中率骤降告警
+    videos: {},          // Video 异步任务池（ADR-0001）：id -> task；持久化到 <config>/videos.json
     dialogue: {},        // 对话维度统计：id -> { requests, tokens, hit, miss, startAt, lastAt, named }
     dUnnamed: null,      // 无会话 ID 时的当前兜底对话（按间隔切分）
     stats: { global: { requests:0, errors:0, retries:0, interrupts:0, tokens:0, latencySum:0, confirmed:0, lats: [], latTrend: [] }, byProvider: pids, byModel: {}, daily: {}, hourly: {} },
@@ -1252,6 +1404,18 @@ export function start(opts = {}) {
       }
     } state.st.lastServing = _j.lastServing || null; state.stats.daily = Object.assign({}, state.stats.daily, _j.daily || {}); state.stats.hourly = Object.assign({}, state.stats.hourly, _j.hourly || {}); for (const [n, t] of Object.entries(_j.byModel || {})) { state.stats.byModel[n] = Object.assign(state.stats.byModel[n] || { requests: 0, errors: 0 }, { tokens: (t && t.tokens) || 0, inTokens: (t && t.inTokens) || 0, outTokens: (t && t.outTokens) || 0 }) }; const _dlg = _j.dialogue || {}; for (const k of Object.keys(_dlg)) state.dialogue[k] = _dlg[k]; let _u = null; for (const k of Object.keys(state.dialogue)) { if (k.startsWith('conv-') && (!_u || state.dialogue[k].lastAt > _u.lastAt)) _u = state.dialogue[k] } state.dUnnamed = _u || null; const _g = _j.global || {}; for (const k of ['requests','errors','retries','interrupts','tokens','latencySum','confirmed']) if (typeof _g[k] === 'number') state.stats.global[k] = _g[k]; if (Array.isArray(_g.lats)) state.stats.global.lats = _g.lats; if (Array.isArray(_g.latTrend)) state.stats.global.latTrend = _g.latTrend; for (const [pid, po] of Object.entries(_j.byProvider || {})) { const o = ensureSt(state, pid); for (const k of ['requests','errors','retries','latencySum','latencyCount','tokens']) if (typeof po[k] === 'number') o[k] = po[k]; if (Array.isArray(po.lats)) o.lats = po.lats; if (po.probe) o.probe = po.probe } } catch { /* 统计文件缺失/损坏则从空开始 */ }
   every(30000, () => { try { writeStats(state) } catch (e) { log && log.warn('stats 写盘失败', e.message) } })
+  // —— MG-014 Video 任务池：加载 + GC + 后台轮询（ADR-0001；文件损坏不阻塞启动） ——
+  try { state.videos = loadVideoTasks(state.paths.videos) } catch (e) { state.videos = {}; log && log.warn('videos.json 读取失败，按空任务池启动', e.message) }
+  try { if (gcVideoTasks(state.videos)) saveVideoTasks(state.paths.videos, state.videos) } catch {}
+  every(5000, async () => {
+    if (state.closed) return
+    for (const t of Object.values(state.videos)) {
+      if (!t || ['succeeded', 'failed', 'canceled'].includes(t.status)) continue
+      if (Date.now() - (t.lastPollAt || 0) < 5000) continue
+      await pollVideoTask(state, t, log)
+    }
+  })
+  every(3600000, () => { if (state.closed) return; if (gcVideoTasks(state.videos)) saveVideos(state, log) })
   every(10000, () => { const l = state.stats.global.lats; const avg = (l && l.length) ? Math.round(l.reduce((a, b) => a + b, 0) / l.length) : 0; const tr = state.stats.global.latTrend; tr.push({ t: Date.now(), v: avg }); if (tr.length > 80) tr.shift() })
   // B4 主动缓存预热：按 defaults.preheat 周期向模型上游发送带长 system 前缀的最小请求，保持厂商 prefix cache 存活
   ;(() => { const lastWarm = {}; setInterval(async () => {
@@ -1363,6 +1527,7 @@ export function start(opts = {}) {
         if (force.unref) force.unref()
       })
       try { writeStats(state) } catch (e) { log && log.warn('关闭时统计落盘失败', e.message) }
+      try { saveVideoTasks(state.paths.videos, state.videos) } catch (e) { log && log.warn('关闭时 video 任务落盘失败', e.message) }
       log && log.info('model-gateway 已关闭，统计已落盘')
     })()
     return closing
