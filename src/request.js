@@ -22,6 +22,23 @@ function applyProviderHeaders(headers, provider) {
   }
   return headers
 }
+// 协议鉴权头（探测/预热/failback/模型测试共用）：Anthropic 认 x-api-key + anthropic-version，
+// Gemini 认 x-goog-api-key，其余走 Bearer。与 forward.js buildHeaders 的协议头规则保持一致。
+function protocolHeaders(headers, provider, api) {
+  if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
+  if (api === 'anthropic') {
+    if (!headers['anthropic-version']) headers['anthropic-version'] = '2023-06-01'
+    if (provider.apiKey && !headers['x-api-key']) headers['x-api-key'] = provider.apiKey
+  } else if (api === 'gemini') {
+    if (provider.apiKey && !headers['x-goog-api-key']) headers['x-goog-api-key'] = provider.apiKey
+  }
+  return headers
+}
+// 按协议整形最小请求：api 非 openai 时用适配器生成 path/body（模型名与字段跟着协议走）。
+function protocolRequest(api, openaiBody) {
+  const adapter = adapterFor(api)
+  return adapter ? adapter.build(openaiBody) : { path: '/v1/chat/completions', body: openaiBody }
+}
 
 // ---------- 上游 HTTP 代理（CONNECT 隧道，零第三方依赖） ----------
 // provider.proxy 形如 http://user:pass@host:port。仅用于非回环上游（本地 3050/9877 等自动直连）。
@@ -276,10 +293,16 @@ export function probe(provider) {
 // 缓存预热：向模型上游发送一个携带长 system 前缀的最小请求（max_tokens=1），保持厂商侧 prefix cache 存活。
 // 在「预热」语义下只关心能否成功送达（拿到 2xx 响应头），不读响应体、不累计额度，避免污染配额统计。
 export function warm(provider, model, systemPrompt, opts = {}, log) {
-  const url = upstreamUrl(provider, '/v1/chat/completions')
-  const headers = applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json' }, provider)
-  if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
-  const payload = Buffer.from(JSON.stringify({ model: model, messages: [{ role: 'system', content: systemPrompt }], max_tokens: 1, stream: false }))
+  // MG-008：预热与转发共用模型解析（api/上游模型名），否则 anthropic/gemini 上游会被打到 chat 路径，
+  // providerModels 覆盖名也会失效（发网关名 → 上游 404）。
+  const api = (opts && opts.api) || provider.api || 'openai'
+  const upstreamModel = (opts && opts.upstreamModel) || model
+  const messages = [{ role: 'system', content: systemPrompt }]
+  if (adapterFor(api)) messages.push({ role: 'user', content: 'ping' }) // Anthropic/Gemini 要求至少一条非 system 消息
+  const spec = protocolRequest(api, { model: upstreamModel, messages, max_tokens: 1, stream: false })
+  const url = upstreamUrl(provider, spec.path)
+  const headers = protocolHeaders(applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json' }, provider), provider, api)
+  const payload = Buffer.from(JSON.stringify(spec.body))
   headers['content-length'] = payload.length
   const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
   const to = Object.assign({ connectMs: 10000, firstByteMs: 60000 }, (opts && opts.timeout) || {})
@@ -304,10 +327,13 @@ export function warm(provider, model, systemPrompt, opts = {}, log) {
 // 否则间歇性「头 2xx + 流中断」的上游会被探活误判为已恢复、亲和被切回故障主上游（回切后又立刻断流）。
 // 兼容返回 JSON 的上游（非 event-stream 的 2xx 直接视为恢复）。
 export function probeChat(provider, model, message, opts = {}, log) {
-  const url = upstreamUrl(provider, '/v1/chat/completions')
-  const headers = applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'text/event-stream' }, provider)
-  if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
-  const payload = Buffer.from(JSON.stringify({ model: model, messages: [{ role: 'user', content: message || 'ping' }], max_tokens: 1, stream: true }))
+  // MG-008：failback 探活与转发共用模型解析（api/上游模型名），否则非 OpenAI 上游/覆盖名会被误判"未恢复"。
+  const api = (opts && opts.api) || provider.api || 'openai'
+  const upstreamModel = (opts && opts.upstreamModel) || model
+  const spec = protocolRequest(api, { model: upstreamModel, messages: [{ role: 'user', content: message || 'ping' }], max_tokens: 1, stream: true })
+  const url = upstreamUrl(provider, spec.path)
+  const headers = protocolHeaders(applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'text/event-stream' }, provider), provider, api)
+  const payload = Buffer.from(JSON.stringify(spec.body))
   headers['content-length'] = payload.length
   const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
   const to = Object.assign({ connectMs: 10000, firstByteMs: 60000 }, (opts && opts.timeout) || {})
@@ -342,18 +368,9 @@ export function probeChat(provider, model, message, opts = {}, log) {
 // 模型连通测试：向该模型所属上游发一个极小量的真实 chat 请求（max_tokens=1），验证"这个模型名能真正被调用"
 // 返回 { ok, code, ms, err, body }，body 为响应首片段用于展示后端告警。
 export function probeModel(provider, model, api = provider.api || 'openai', upstreamModel = model) {
-  const adapter = adapterFor(api)
-  const openaiBody = { model: upstreamModel, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false }
-  const request = adapter ? adapter.build(openaiBody) : { path: '/v1/chat/completions', body: openaiBody }
+  const request = protocolRequest(api, { model: upstreamModel, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false })
   const url = upstreamUrl(provider, request.path)
-  const headers = applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }, provider)
-  if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
-  if (api === 'anthropic') {
-    if (!headers['anthropic-version']) headers['anthropic-version'] = '2023-06-01'
-    if (provider.apiKey && !headers['x-api-key']) headers['x-api-key'] = provider.apiKey
-  } else if (api === 'gemini' && provider.apiKey && !headers['x-goog-api-key']) {
-    headers['x-goog-api-key'] = provider.apiKey
-  }
+  const headers = protocolHeaders(applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }, provider), provider, api)
   const payload = Buffer.from(JSON.stringify(request.body))
   headers['content-length'] = payload.length
   const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)

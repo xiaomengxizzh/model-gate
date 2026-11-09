@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import { isIP } from 'node:net'
-import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh } from './router.js'
+import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh, modelTarget } from './router.js'
 import { createLogger } from './logger.js'
 import { forward, probe, probeModel, probeChat, warm } from './request.js'
 import { adapterFor, cacheHitMiss } from './format.js'
@@ -528,7 +528,8 @@ async function doProbeModel(state, model) {
   let prov
   try { prov = buildProvider(state.cfg, def.provider) } catch (e) { return { id: model, ok: false, err: e.message } }
   if (prov._def.apiKeyEnv && !prov.keyOk && !prov.apiKey) return { id: model, ok: false, err: '上游未配置 Key，无法鉴权' }
-  const r = await probeModel(prov, model, def.api || prov.api, (def.providerModels && def.providerModels[def.provider]) || model)
+  const target = modelTarget(state.cfg, model, def.provider)
+  const r = await probeModel(prov, model, target.api, target.servingName)
   const o = (state.stats.byModel[model] = state.stats.byModel[model] || { requests: 0, errors: 0 })
   o.probe = { at: Date.now(), ok: r.ok, code: r.code, ms: r.ms, err: r.err || null }
   return { id: model, ok: r.ok, code: r.code, ms: r.ms, err: r.err || null }
@@ -957,7 +958,9 @@ export function start(opts = {}) {
       lastWarm[e.model] = now
       let prov; try { prov = buildProvider(state.cfg, md.provider) } catch { continue }
       if (prov._def.apiKeyEnv && !prov.keyOk) continue
-      const r = await warm(prov, e.model, e.system, state.cfg.defaults || {}, log)
+      // MG-008：预热与转发共用模型解析（api/上游模型名），避免非 OpenAI 上游与 providerModels 覆盖名失效
+      const target = modelTarget(state.cfg, e.model, md.provider)
+      const r = await warm(prov, e.model, e.system, Object.assign({}, state.cfg.defaults || {}, { api: target.api, upstreamModel: target.servingName }), log)
       log && (r.ok ? log.info('preheat ok', e.model, 'status ' + r.status) : log.warn('preheat fail', e.model, r.status || r.err || '-'))
     }
   }, 15000).unref() })()
@@ -985,7 +988,9 @@ export function start(opts = {}) {
         let prov; try { prov = buildProvider(state.cfg, primary) } catch { continue }
         if (prov._def.apiKeyEnv && !prov.keyOk) continue
         if (!healthy(ensureHst(state, primary), now)) continue       // 主上游熔断中：交给熔断半开处理，避免打架
-        const r = await probeChat(prov, name, sys, state.cfg.defaults || {}, log)  // user 消息探活：LiteLLM 层拒 system-only（400），warm 的 system 前缀不适用
+        // MG-008：failback 探活与转发共用模型解析（api/上游模型名），否则非 OpenAI 上游/覆盖名会被误判未恢复
+        const target = modelTarget(state.cfg, name, primary)
+        const r = await probeChat(prov, name, sys, Object.assign({}, state.cfg.defaults || {}, { api: target.api, upstreamModel: target.servingName }), log)  // user 消息探活：LiteLLM 层拒 system-only（400），warm 的 system 前缀不适用
         if (r.ok) {
           streak[name] = (streak[name] || 0) + 1
           if (streak[name] >= need) {

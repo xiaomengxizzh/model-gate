@@ -234,6 +234,27 @@ export function adapterFor(api) {
   if (api === 'gemini') return gemini
   return null
 }
+
+// 上游错误信封映射（MG-008 余项）：非 OpenAI 协议的错误体不能原样回给 OpenAI 客户端，
+// 否则客户端拿不到 error.message（表现为只看到 "invalid_request_error" 之类的裸 type）。
+// 仅映射可识别的原生形状，其余（含已经是 OpenAI 形状的代理）原样透传：
+//   Anthropic: { type:"error", error:{ type, message } }
+//   Gemini:    { error:{ code:number, message, status } }
+export function mapErrorEnvelope(api, status, buf) {
+  if (!buf || !buf.length) return null
+  if (api !== 'anthropic' && api !== 'gemini') return null
+  let j; try { j = JSON.parse(buf.toString('utf8')) } catch { return null }
+  const e = j && j.error
+  if (!e || typeof e !== 'object') return null
+  const message = typeof e.message === 'string' ? e.message : ''
+  if (!message) return null
+  const native = (api === 'anthropic' && j.type === 'error') ||
+    (api === 'gemini' && (typeof e.code === 'number' || typeof e.status === 'string'))
+  if (!native) return null
+  const code = (typeof e.type === 'string' && e.type) || (typeof e.status === 'string' && e.status) ||
+    (typeof e.code === 'string' || typeof e.code === 'number' ? String(e.code) : String(status))
+  return Buffer.from(JSON.stringify({ error: { message, type: 'upstream_error', code } }))
+}
 export { makeOA, hasTools }
 
 // ── 缓存命中/未命中 字段映射（四桶互斥模型，按上游协议精确取数）──

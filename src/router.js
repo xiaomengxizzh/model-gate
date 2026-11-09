@@ -47,6 +47,17 @@ function normalizeVirtualModels(vms, base) {
   return out
 }
 
+// 模型解析单一入口（MG-008 余项）：探测/预热/failback/转发必须得到同一组
+// { servingName(上游模型名), api(协议), effortFormat, maxTokensMax }，否则同一模型在不同路径
+// 会打不同上游名/协议（典型：providerModels 覆盖只在转发生效，预热却发网关模型名 → 404）。
+export function modelTarget(cfg, modelName, pid) {
+  const md = (modelName && cfg && cfg.models && cfg.models[modelName]) || null
+  const prov = (cfg && cfg.providers && cfg.providers[pid]) || null
+  const servingName = (md && md.providerModels && md.providerModels[pid]) || modelName
+  const api = (md && md.api) || (prov && prov.api) || 'openai'
+  return { servingName, api, effortFormat: (md && md.effortFormat) || 'reasoning_effort', maxTokensMax: Number((md && md.maxTokensMax) || 0) || 0 }
+}
+
 export function loadConfig(opts = {}) {
   const p = configPaths()
   let mainFile = opts.configFile || (process.env.MG_CONFIG && existsSync(process.env.MG_CONFIG) ? process.env.MG_CONFIG : null)

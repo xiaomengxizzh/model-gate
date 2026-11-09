@@ -2,6 +2,24 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-09 模型解析一致性与错误信封（未发布，MG-008 余项）
+
+### Fixed
+
+- **预热/failback 与转发模型解析不一致**：`warm()`（缓存预热）与 `probeChat()`（主上游回切探活）此前固定打 `/v1/chat/completions` 并使用网关模型名，导致 per-model `api`（anthropic/gemini）与 `providerModels` 覆盖名在这两条路径失效（非 OpenAI 上游预热/探活永远失败，或探活打到错误模型）。现两者接受 `{ api, upstreamModel }`，按协议生成 path/body 与鉴权头（Anthropic `/v1/messages` + `x-api-key`/`anthropic-version`；Gemini `generateContent`/`streamGenerateContent` + `x-goog-api-key`）；Anthropic/Gemini 预热补一条 user 消息（协议要求至少一条非 system 消息）。
+- **非 OpenAI 上游 4xx 原生错误信封原样回给 OpenAI 客户端**：Anthropic `{type:"error",error:{type,message}}` / Gemini `{error:{code,message,status}}` 客户端拿不到 `error.message`。现由 `mapErrorEnvelope()` 映射为 `{error:{message,type:'upstream_error',code}}`（状态码保留；已是 OpenAI 形状的代理响应原样透传；日志仍记录原始片段）。
+
+### Added
+
+- `router.modelTarget(cfg, modelName, pid)` 单一模型解析入口：`servingName`（providerModels 覆盖名）/`api`（模型优先、上游兜底）/`effortFormat`/`maxTokensMax`；转发、`probeModel`、预热、failback 全部复用。
+- 回归 `scripts/test/offline/model-resolution.test.mjs`（7 用例）：modelTarget 优先级、warm/probeChat 的 Anthropic/Gemini path+覆盖名+鉴权头、错误信封映射、Anthropic 400 集成、OpenAI 错误透传对照。
+- 文档：`docs/reference/protocol-bridge.md` §7（模型解析与错误信封）。
+
+### 验证
+
+- `npm run check` 0；`npm test` 16/16 隔离套件；`MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs` 27/27 文件；`npm run docs:check` PASS。
+- 未验证：真实 Anthropic/Gemini 上游、预热/failback 的实时定时器端到端（仅函数级 + 转发集成）、Windows/macOS、Node 18/20。
+
 ## 2026-11-09 管理面投影清洗与 Key 标识白名单（未发布，MG-009）
 
 ### Fixed

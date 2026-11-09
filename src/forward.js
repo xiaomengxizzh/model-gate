@@ -1,8 +1,8 @@
 // 转发链模块（Phase1 TD3 自 index.js 拆分）：routes 构建 + 三层重试 + 循环兜底 + 限流/记账协作
 // 共享辅助（健康/统计/工具）由 index.js 经 deps 注入，避免双向依赖
 import { gunzipSync } from 'node:zlib'
-import { adapterFor, cacheHitMiss, hasTools } from './format.js'
-import { buildProvider } from './router.js'
+import { adapterFor, cacheHitMiss, hasTools, mapErrorEnvelope } from './format.js'
+import { buildProvider, modelTarget } from './router.js'
 import { isStreamResponse } from './sse.js'
 import { forward } from './request.js'
 import { abortedError, sleepWith } from './budget.js'
@@ -449,8 +449,9 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     const _md = (cfg.models && route.model && cfg.models[route.model]) || null
     // per-上游模型名覆盖（可选）：同一模型在不同上游叫不同名字（如 union-alpha 在 OpenRouter 侧为
     // stealth/union-alpha），跨上游兜底时不映射会拿到 404，备用等于没有。
-    const _ovr = (_md && _md.providerModels) || null
-    const servingName = (_ovr && _ovr[pid]) || route.model
+    // 单一解析入口（MG-008）：探测/预热/failback/转发共用 modelTarget，避免同名不同路。
+    const _target = modelTarget(cfg, route.model, pid)
+    const servingName = _target.servingName
     let routeBody = (servingName && body && servingName !== body.model) ? Object.assign({}, body, { model: servingName }) : body
     // max_tokens 归一化（按目标模型的输出上限收敛）：不同上游对取值范围的容忍度不同，网关原样透传会让
     // 严格上游把整个请求判为参数非法，而 400 属请求参数类错误、换模型也一样失败——不清掉就会拖垮整条兜底链。
@@ -496,7 +497,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       }
     }
     let turl = url, tbuf = bodyBuf
-    const api = (_md && _md.api) || prov.api
+    const api = _target.api
     let degraded = false
     // 上游不给流时的降级（可选 models.<名>.forceNoStream）：
     // 实测 OpenCode Zen 的 union-alpha —— 流式请求返回 200 + content-type: text/event-stream，
@@ -651,7 +652,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         // 计为**真·失败**（进熔断计数——反复这么报的上游该被冷却，而不是每笔请求都白撞一次），
         // 保留原始响应供整链全败时回显真实错误，继续目录链下一上游/模型。
         // 不改 rejectedOnly：一轮走完即收尾，不必空转到 loopMs（与 403/404 的取舍一致）。
-        last4xx = { status: result.status, body: out }
+        last4xx = { status: result.status, body: mapErrorEnvelope(api, result.status, out) || out }
         last4xxPid = pid
         lastErr = Object.assign(new Error('upstream-side ' + result.status + ' ' + (serving || '')), { status: result.status })
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
@@ -664,7 +665,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         // 记入错误统计（不熔断），保留原始响应供整链全拒时回显，继续尝试下一模型。
         // 注：opencodego 等上游对「模型不可用」也返回 400（Provider rejected / Model not supported），
         // 若按普通 4xx 直接返回，jiyuan 故障期间目录链会在 opencodego 处断掉，客户端只拿到 400 而非自动切到 MiniMax 等后续模型。
-        last4xx = { status: result.status, body: out }
+        last4xx = { status: result.status, body: mapErrorEnvelope(api, result.status, out) || out }
         last4xxPid = pid
         lastErr = Object.assign(new Error('upstream ' + result.status + ' ' + (serving || '')), { status: result.status })
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
@@ -674,7 +675,8 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       if (out.length) {
         // 其余 4xx（真·参数/请求错误）：直接返回保留原始错误，不再尝试下一模型（换模型同样会失败）
         log && log.warn('upstream ' + result.status, 'provider=' + pid, 'model=' + (serving || '-'), 'body=' + out.toString('utf8', 0, 300).replace(/\n/g, ' '))
-        return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: out, pid, modelName, chain: chainModels.join('>') }
+        // 非 OpenAI 上游的原生错误信封 → OpenAI 形状回给客户端（状态码与原始 body 保留在日志里）
+        return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: mapErrorEnvelope(api, result.status, out) || out, pid, modelName, chain: chainModels.join('>') }
       }
       return { kind: 'json', status: result.status || 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'gateway upstream error', type: 'upstream_error', status: result.status } })), pid, modelName }
     } catch (err) {

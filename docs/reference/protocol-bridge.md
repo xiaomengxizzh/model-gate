@@ -126,7 +126,7 @@ OpenAI 客户端只接受 `stop / length / tool_calls / content_filter` 四个�
 1. **`src/sse.js`：Gemini 末帧 finish 丢失风险**。`relayStream` 只在 `ct === ''`（该帧无文本）时调用 `extractFinish`；Gemini 常把 `finishReason` 放在无文本收尾帧（已覆盖），但若与最后一段文本同帧则丢掉 finish_reason。建议在发送 delta 后也检查 `extractFinish`，并用 `finishSent` 保证只发一次。
 2. **`src/forward.js`：空 `tools: []` 的真值判断**。第 463 行 `(routeBody.tools || routeBody.tool_choice)` 对空数组为真，仍会把 `stream` 置 false 并标 `degraded`；与 `format.js#hasTools` 的长度判断不一致。建议改为与 `hasTools` 相同的长度判断（本卡未改 `forward.js`）。
 3. **流式工具调用降级**：`forward.js` 对“工具 + stream”统一降级为非流式单帧 SSE。若要让原生客户端获得增量 `tool_calls` delta，需要在 `sse.js`/`forward.js` 重建 delta 与 `index`，属独立设计（本卡只断言现状并记录）。
-4. **错误映射**：上游 4xx/5xx 形状、Anthropic/Gemini 错误体到 OpenAI 错误信封的映射均不在适配器层；MG-008 的错误保真半边应单独评估。
+4. **错误映射**：适配器层不做错误映射；非 OpenAI 原生错误信封的映射已由 MG-008 余项补齐，见 §7.2（`mapErrorEnvelope`，在 `forward.js` 返回前应用）。
 
 ## 6. 验证
 
@@ -140,3 +140,30 @@ OpenAI 客户端只接受 `stop / length / tool_calls / content_filter` 四个�
 | `npm run docs:check` | 通过（本文件链接与长度检查） |
 
 **未验证范围**：真实 Anthropic/Gemini 上游行为（含 `stop: []`、`stop_sequences`、thinking 预算上限、Gemini 末帧时序）、Windows、生产端口 8787、SSE 断流/重连（属 `sse.js` 既有测试与 MG-002/MG-004）。本文件不能作为真实上游验收证据。
+
+## 7. 模型解析与错误信封（MG-008 余项）
+
+### 7.1 单一模型解析入口
+
+`modelTarget(cfg, modelName, pid)`（src/router.js）返回 `{ servingName, api, effortFormat, maxTokensMax }`：
+
+- `servingName = models.<名>.providerModels[pid] || 模型名`（per-上游覆盖名）；
+- `api = models.<名>.api || providers.<pid>.api || openai`（per-model 协议优先）；
+- 转发（forward.js）、模型连通测试（probeModel/doProbeModel）、缓存预热（warm）、failback 探活（probeChat）全部走此入口，避免“转发用覆盖名、预热用网关名”这类同名不同路。
+- 预热与 failback 还按协议生成 path/body 与鉴权头：Anthropic `/v1/messages` + `x-api-key`/`anthropic-version`；Gemini `:generateContent`/`:streamGenerateContent?alt=sse` + `x-goog-api-key`。Anthropic/Gemini 的预热消息会补一条 user 消息（协议要求至少一条非 system 消息）。
+- 回归：`scripts/test/offline/model-resolution.test.mjs`。
+
+### 7.2 上游错误信封映射
+
+非 OpenAI 上游的**非 2xx 原生错误信封**在数据面返回前统一映射为 OpenAI 形状（状态码保留）：
+
+```json
+{ "error": { "message": "...", "type": "upstream_error", "code": "<上游 type/status/code>" } }
+```
+
+- Anthropic：`{ "type":"error", "error": { "type", "message" } }` → `code = error.type`；
+- Gemini：`{ "error": { "code", "message", "status" } }` → `code = error.status`；
+- 已是 OpenAI 形状（如代理已转译）或无法解析的 body **原样透传**；OpenAI 上游不做映射；
+- 映射只影响客户端可见 body：日志仍记录上游原始响应片段；带内容的 4xx/上游侧故障继续按既有分类走 fallback 链。
+
+有损：上游专有错误 type/status 被折叠进 `code`，`error.details`/`error.type` 以外的富字段丢弃。
