@@ -7,6 +7,7 @@ import { isStreamResponse } from './sse.js'
 import { forward } from './request.js'
 import { abortedError, sleepWith } from './budget.js'
 import { todayKey } from './shared.js'
+import { isToolBearingBody, retryAfterHeader, attributionCode, retryWaitFits } from './retry-policy.js'
 
 const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-length','upgrade','keep-alive','te','trailer'])
 const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection','x-mg-admin','x-goog-api-key','host'])
@@ -118,6 +119,8 @@ const STREAM_DROP_THRESHOLD = 3 // 同一上游连续流式中断 >= 该值，�
 // 连续断流绕开的冷却时长：到点后放行一次半开探测，避免上游「一断流就永久出局」（可用 defaults.streamDropCooldownMs 覆盖）
 const STREAM_DROP_COOLDOWN_MS = 60000
 const AFFINITY_TTL_MS = 300000  // 缓存亲和有效期（可用 defaults.affinityTtlMs 覆盖）：过期后主上游可被重新试用
+// 429 上游冷却上限：Retry-After 再长也只冷却这么久，避免一个上游被永久钉死（到期后正常半开放行）
+const MAX_429_COOLDOWN_MS = 60000
 
 // ===== 思考强度（effort）：入站归一化 + 出口 per-route 整形 =====
 // thinking.type 值映射：OpenAI 系档位词（off/low/high…）→ 上游 thinking.type 词表
@@ -270,10 +273,17 @@ function resolveDialogue(state, req, body) {
   return id
 }
 
-export async function forwardChain(deps, state, req, url, path, method, bodyBuf, body, log, streamRelay, budget) {
+export async function forwardChain(deps, state, req, url, path, method, bodyBuf, body, log, streamRelay, budget, opts = {}) {
   const { ensureHst, markFail, markOk, healthy, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tallyDialogueRequest, tryParse, collectBody } = deps
   const cfg = state.cfg
   const budgetSignal = (budget && budget.signal) || null
+  // 非幂等不重放（G1）：带工具语义的请求（tools / tool_calls / tool 结果）重放可能重复触发
+  // 客户端已执行的工具（shell_command / apply_patch）。策略：同一上游只发一次（forward 的 noRetry）、
+  // 整条链最多走一轮（可换上游/模型，但绝不回队首重放）；opts.noReplay 可显式覆盖
+  // （true=强制不重放，false=显式允许）。
+  const noReplay = opts.noReplay != null ? !!opts.noReplay : isToolBearingBody(body)
+  // 剩余请求预算（无预算/overallMs=0 = Infinity）：429 冷却与 Retry-After 等待都不得越过它
+  const remainingBudgetMs = () => (budget ? budget.remaining() : Infinity)
   const overallMsCfg = (cfg.defaults && cfg.defaults.timeout && cfg.defaults.timeout.overallMs) || 0
   const timeoutBody = () => Buffer.from(JSON.stringify({ error: { message: '请求超时：超出整体预算 ' + overallMsCfg + 'ms（defaults.timeout.overallMs）', type: 'request_timeout' } }))
   const abortedResult = () => (budget && budget.reason === 'client_closed')
@@ -400,6 +410,8 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   let last4xx = null          // 模型级拒绝（403/404）的最后一次响应：整条链全被拒绝时回它（保留上游原始错误）
   let last4xxPid = null       // last4xx 对应的上游（pid 是 for 循环块作用域，循环外取不到）
   let rejectedOnly = false    // 本轮是否只有模型级拒绝（无网络错/5xx/429）：是则不再循环重试（403 是确定性拒绝，循环无意义）
+  let last429 = null          // 最后一次 429 限流（归因/Retry-After）：链或预算结束时回 429，不再吞成 502
+  let upstreamHits = 0        // 本次请求已发起的上游尝试次数（含同上游重试；429 响应的 attempts 字段）
   let tried = false
   let streamStarted = false   // 流式已开始（响应头已发给客户端）：此后不能再写 json 状态码，失败只能以流内错误事件收尾
   const loopMs = (cfg.defaults && cfg.defaults.timeout && cfg.defaults.timeout.loopMs) || 120000
@@ -519,6 +531,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     if (api !== 'openai' && routeBody) { const ad = adapterFor(api); const r = ad.build(routeBody); if ((hasTools(routeBody) || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true } turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body)) }
     else if ((bodyDirty || routeBody !== body) && routeBody) tbuf = Buffer.from(JSON.stringify(routeBody))
     const headers = buildHeaders(req, prov, tbuf, cfg, api, body)
+    // 429 冷却（rateUntil）：只有剩余预算等得下才等；等不下就跳过该上游并记 429 归因
+    // （全部上游都在冷却 → 收尾回 429 + Retry-After，而不是为了等冷却把客户端挂死或误报 502）
+    const cooldownWaitMs = Math.max(0, throttleOf(state, pid).rateUntil - Date.now())
+    if (cooldownWaitMs > 0 && !retryWaitFits(cooldownWaitMs, remainingBudgetMs())) {
+      if (!last429) last429 = { pid, retryAfter: cooldownWaitMs, attribution: 'rate_limit', bodyText: '' }
+      log && log.warn('skip provider (429 冷却超出剩余预算)', pid, Math.ceil(cooldownWaitMs / 1000) + 's')
+      continue
+    }
     let release = null
     try { release = await acquireProvider(state, pid, cfg, budgetSignal) } catch (e) {
       if (e && e.aborted) { lastErr = e; refundQps(); log && log.warn('request aborted (queued)', e.reason || e.message); break outer }
@@ -527,7 +547,9 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     const attemptStart = Date.now()
     try {
       upstreamAttempted = true
-      const result = await forward(prov, turl, req.method, headers, tbuf, cfg.defaults || {}, log, { budget, signal: budgetSignal })
+      // noRetry：非幂等请求同上游只发一次（Retry-After 仍在预算内时允许等待后重发，见 request.js）
+      const result = await forward(prov, turl, req.method, headers, tbuf, Object.assign({}, cfg.defaults || {}, { noRetry: noReplay }), log, { budget, signal: budgetSignal })
+      upstreamHits += (result.retries || 0) + 1
       const latency = Date.now() - attemptStart
       const o = ensureSt(state, pid)
       o.latencySum += latency; o.latencyCount += 1
@@ -660,6 +682,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         // 不改 rejectedOnly：一轮走完即收尾，不必空转到 loopMs（与 403/404 的取舍一致）。
         last4xx = { status: result.status, body: mapErrorEnvelope(api, result.status, out) || out }
         last4xxPid = pid
+        last429 = null // 最后失败不是 429：不把更早的 429 当归因回给客户端
         lastErr = Object.assign(new Error('upstream-side ' + result.status + ' ' + (serving || '')), { status: result.status })
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
         markFail(state, pid, prov.circuit)
@@ -673,6 +696,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         // 若按普通 4xx 直接返回，jiyuan 故障期间目录链会在 opencodego 处断掉，客户端只拿到 400 而非自动切到 MiniMax 等后续模型。
         last4xx = { status: result.status, body: mapErrorEnvelope(api, result.status, out) || out }
         last4xxPid = pid
+        last429 = null // 最后失败不是 429：不把更早的 429 当归因回给客户端
         lastErr = Object.assign(new Error('upstream ' + result.status + ' ' + (serving || '')), { status: result.status })
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
         log && log.warn('provider rejected (model-level)', pid, 'status ' + result.status, '-> next model', out && out.length ? 'body=' + out.toString('utf8', 0, 300).replace(/\n/g, ' ') : '')
@@ -702,16 +726,43 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       bm.latencySum = (bm.latencySum || 0) + latency; bm.latencyCount = (bm.latencyCount || 0) + 1
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
       agg(state, pid, 'retries', err.retries || 0)
-      if (err.status === 429) { const th = throttleOf(state, pid); th.rateUntil = Date.now() + (err.retryAfter || 3000) }
-      markFail(state, pid, prov && prov.circuit)
-      lastErr = err
-      rejectedOnly = false // 网络错/5xx/429：可重试类失败，允许回到队首循环
-      log && log.warn('provider failed', pid, err.message, '-> next fallback')
+      upstreamHits += (err.retries || 0) + 1 // 失败的上游尝试同样计入 attempts（含同上游重试）
+      if (err.status === 429) {
+        // 429 是限流/额度语义，不是上游故障：只做上游级冷却（Retry-After），不 markFail、不熔断。
+        // 保留原始归因与 Retry-After；链或预算结束时由收尾逻辑回 HTTP 429，不再吞成 502。
+        const th = throttleOf(state, pid)
+        const raMs = err.retryAfter != null ? err.retryAfter : (last429 && last429.retryAfter != null ? last429.retryAfter : 1000)
+        th.rateUntil = Date.now() + Math.min(raMs, MAX_429_COOLDOWN_MS)
+        const prev = last429 && last429.pid === pid ? last429 : null
+        last429 = {
+          pid,
+          retryAfter: err.retryAfter != null ? err.retryAfter : (prev && prev.retryAfter != null ? prev.retryAfter : null),
+          attribution: err.attribution || (prev && prev.attribution) || 'unknown',
+          bodyText: err.bodyText || (prev && prev.bodyText) || '',
+        }
+        lastErr = err
+        rejectedOnly = false // 429 属可重试类失败：允许换下一个上游/模型
+        log && log.warn('provider rate-limited (429)', pid, 'attribution=' + last429.attribution, 'retryAfter=' + last429.retryAfter + 'ms', '-> next provider/model')
+        // Retry-After 等不下（剩余预算/单次上限不足）：本轮不再尝试该上游（冷却已置位），但**不**终止整条链——
+        // 让链继续换下一个上游/模型（429 归因已记录，最终仍以 429 收尾）；不空等、不越过 deadline。
+        if (!retryWaitFits(last429.retryAfter, remainingBudgetMs())) log && log.warn('429 retry-after 超出剩余预算，跳过该上游并继续换上游')
+      } else {
+        // 5xx / 网络错 / 408 等才是上游故障：计入熔断；最后失败不是 429，就不得把更早的 429 当归因回给客户端
+        markFail(state, pid, prov && prov.circuit)
+        lastErr = err
+        last429 = null
+        rejectedOnly = false // 可重试类失败，允许回到队首循环
+        log && log.warn('provider failed', pid, err.message, '-> next fallback')
+      }
+      // 非幂等（tool）请求在这里**不** break：同一上游不重试已由 forward 的 noRetry 保证，
+      // 允许沿链换下一个上游/模型再试一次（可用性优先）；本轮走完由下方 noReplay break 收尾，绝不回队首。
     } finally {
       release()
     }
     } // for pid
   } // for route
+  // 非幂等（tool）请求：整条链最多走一轮（每个上游至多一次尝试，可换上游/模型），绝不回队首重放
+  if (noReplay) break
   if (!cycleTried || rejectedOnly) break // 无上游被尝试，或整轮只有 403/404 模型级拒绝（确定性失败）：再循环无意义，直接收尾
   try { await sleepWith(300, budgetSignal) } catch (e) { if (!(e && e.aborted)) throw e; lastErr = e; refundQps(); break }      // 一轮全败后回到队首前稍停；取消时立即退出
   } // while() 有界循环兜底：整条链(a→b→c)失败后回到 a 继续，直到成功 / 业务4xx / 整体超时 / 全部熔断
@@ -721,6 +772,33 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     if (budget && budget.reason === 'client_closed') return { kind: 'aborted' }
     if (streamStarted) return { kind: 'stream-interrupted', pid: null, modelName, timeout: true, chain: chainModels.join('>'), note: '请求超出整体预算 ' + overallMsCfg + 'ms（defaults.timeout.overallMs）', reconnects: 0 }
     return abortedResult()
+  }
+  // 429 收尾（G1）：上游限流/额度不是网关故障 —— 保留 429 + Retry-After + 归因 + attempts，
+  // 绝不吞成 502（否则客户端无法区分「网关坏了」和「过一会儿再来」）。流已开始时只能走流内错误事件。
+  if (last429 && !streamStarted) {
+    const raSec = retryAfterHeader(last429.retryAfter)
+    const attempts = upstreamHits
+    log && log.warn('请求以 429 收尾', 'provider=' + (last429.pid || '-'), 'attribution=' + last429.attribution, 'retryAfter=' + last429.retryAfter + 'ms', 'attempts=' + attempts)
+    return {
+      kind: 'json',
+      status: 429,
+      contentType: 'application/json; charset=utf-8',
+      headers: raSec != null ? { 'retry-after': raSec } : undefined,
+      pid: last429.pid,
+      modelName,
+      chain: chainModels.join('>'),
+      body: Buffer.from(JSON.stringify({
+        error: {
+          message: '上游限流（429）：' + last429.attribution + '，已按请求预算停止重试',
+          type: 'rate_limited',
+          code: attributionCode(last429.attribution),
+          attribution: last429.attribution,
+          upstream_status: 429,
+          retry_after_ms: last429.retryAfter != null ? last429.retryAfter : null,
+          attempts,
+        },
+      })),
+    }
   }
   // 整条链都是 403/404 模型级拒绝：回最后一个上游原始响应（比 502 更有信息量）
   if (last4xx && !streamStarted) return { kind: 'json', status: last4xx.status, contentType: 'application/json; charset=utf-8', body: last4xx.body, pid: last4xxPid, modelName, chain: chainModels.join('>') }

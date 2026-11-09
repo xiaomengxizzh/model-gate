@@ -6,6 +6,7 @@ import { URL } from 'node:url'
 import { gunzipSync } from 'node:zlib'
 import { adapterFor, embeddingAdapterFor } from './format.js'
 import { abortedError, sleepWith } from './budget.js'
+import { classify429, parseRetryAfterMs, retryWaitCap, MAX_ERR_BODY_BYTES } from './retry-policy.js'
 
 // 上游连接复用（keep-alive）：减少每次 TLS/TCP 握手，改善连接体验与延迟
 const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 64 })
@@ -145,14 +146,31 @@ function isRetryableNetErr(err) {
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)) }
 
-function parseRetryAfter(headers) {
-  const ra = headers && (headers['retry-after'])
-  if (ra == null) return null
-  const n = parseInt(String(ra), 10)
-  if (!isNaN(n) && n >= 0) return n * 1000
-  const dt = Date.parse(String(ra))
-  if (!isNaN(dt)) return Math.max(0, dt - Date.now())
-  return null
+// Retry-After 解析与「是否等得下」的判定统一在 retry-policy.js（429 归因与等待预算同源）。
+function parseRetryAfter(headers) { return parseRetryAfterMs(headers) }
+
+// 读一小段错误体用于 429 归因（限 8KB，读完立即销毁）：既不让上游大错误体打爆内存，
+// 也不因为已经读了一部分就让连接悬挂；预算中止时立刻销毁。
+async function readSmall(stream, signal, limit = MAX_ERR_BODY_BYTES) {
+  if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return ''
+  const chunks = []
+  let n = 0
+  const onAbort = () => { try { stream.destroy && stream.destroy() } catch {} }
+  if (signal) {
+    if (signal.aborted) return ''
+    try { signal.addEventListener('abort', onAbort, { once: true }) } catch {}
+  }
+  try {
+    for await (const c of stream) {
+      chunks.push(c)
+      n += c.length
+      if (n >= limit) break
+    }
+  } catch { /* 半截错误体不影响状态码语义 */ } finally {
+    if (signal) { try { signal.removeEventListener('abort', onAbort) } catch {} }
+  }
+  try { stream.destroy && stream.destroy() } catch {}
+  return Buffer.concat(chunks).toString('utf8').slice(0, limit)
 }
 
 // 单次转发（全双工，流式）。resolve: 收到上游响应头即返回 stream
@@ -206,10 +224,13 @@ function single(provider, url, method, headers, bodyBuf, timeout, ctl = {}) {
 
 function reasonOf(budget) { return (budget && budget.reason) || 'request_timeout' }
 
-async function settle(attempt, cfg, last, signal) {
+async function settle(attempt, cfg, last, signal, capMs) {
   const ra = last && last.retryAfter
-  if (ra != null) await sleepWith(ra + Math.random() * 40, signal)
-  else {
+  if (ra != null) {
+    // 调用方已用 retryWaitCap/retryWaitFits 确认「等得下」；这里再按 cap 钳一次，绝不越过 deadline
+    const ms = Number.isFinite(capMs) ? Math.min(ra, capMs) : ra
+    await sleepWith(Math.max(0, ms) + Math.random() * 40, signal)
+  } else {
     const base = Math.min(cfg.maxDelayMs, cfg.initialDelayMs * Math.pow(2, attempt - 1))
     await sleepWith(base + base * (cfg.jitter || 0) * Math.random(), signal)
   }
@@ -231,7 +252,12 @@ export function upstreamUrl(provider, path) {
  *  - resolve { ok:true }         → 2xx，可直接透传
  *  - resolve { ok:false }        → 非重试错误码（业务 4xx）：外层直接返回、不熔断、不 fallback
  *  - reject(err)                 → 网络错或 5xx/429 重试耗尽：视为 provider 不可用（err.status 表示状态码）
- * 重试次数附在结果/错误 .retries。
+ * 重试次数附在结果/错误 .retries；429 额外带 .attribution / .retryAfter / .bodyText，供外层
+ * 回 HTTP 429 + Retry-After（不再吞成 502），且 429 不算 provider 故障（不熔断）。
+ *
+ * opts.noRetry：非幂等（tool/tool 结果）请求 → 同上游只发一次，绝不自动重放。
+ * Retry-After：只有能在本次请求剩余预算内等完才等（retryWaitFits）；等不下立即停止重试，
+ * 把最后一次状态/归因/Retry-After 上抛，由外层决定换上游或回 429 —— 绝不空等越过 deadline。
  */
 export async function forward(provider, path, method, headers, bodyBuf, opts = {}, log, ctl = {}) {
   const url = upstreamUrl(provider, path)
@@ -240,34 +266,71 @@ export async function forward(provider, path, method, headers, bodyBuf, opts = {
   const overallMs = timeout.overallMs || 0
   const budget = ctl.budget || null
   const signal = ctl.signal || (budget && budget.signal) || null
+  const noRetry = opts.noRetry === true
+  const maxAttempts = noRetry ? 1 : Math.max(1, retry.maxAttempts)
+  // 单次 Retry-After 等待上限：显式配置 > 默认 30s（与剩余预算取小，见 retryWaitCap）
+  const maxWaitMs = Number(opts.maxRetryAfterMs) > 0 ? Number(opts.maxRetryAfterMs) : 0
   const t0 = Date.now()
   // 统一 deadline：请求级预算优先；无预算时沿用 overallMs（既有语义），两者都是硬上限
   const deadlineAt = budget && budget.deadlineAt != null ? budget.deadlineAt : (overallMs ? t0 + overallMs : null)
   const timeoutErr = (attempt, detail) => { const e = abortedError((budget && budget.reason) || 'request_timeout', detail); e.retries = attempt - 1; return e }
+  // 剩余预算（无预算/无 deadline = Infinity）：Retry-After 等待不得越过它
+  const remainingMs = () => {
+    const a = budget ? budget.remaining() : Infinity
+    const b = deadlineAt != null ? Math.max(0, deadlineAt - Date.now()) : Infinity
+    return Math.min(a, b)
+  }
 
   let last
-  for (let attempt = 1; attempt <= retry.maxAttempts; attempt++) {
+  let attemptsMade = 0
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    attemptsMade = attempt
     if (budget && budget.expired()) throw timeoutErr(attempt)
     if (deadlineAt != null && Date.now() >= deadlineAt) throw timeoutErr(attempt, 'overall timeout (' + Math.round(deadlineAt - t0) + 'ms)')
     try {
       const result = await single(provider, url, method, headers, bodyBuf, timeout, Object.assign({}, ctl, { budget }))
       if (result.ok || !isRetryableCode(result.status)) { result.retries = attempt - 1; return result }
-      last = result
-      log && log.warn('upstream retryable status', result.status, 'attempt', attempt, '/', retry.maxAttempts)
+      // 可重试状态：读一小段错误体做归因（429 平台额度/容量/速率），读完即销毁连接
+      const bodyText = await readSmall(result.stream, signal)
+      const cls = classify429(bodyText, result.headers)
+      last = {
+        status: result.status,
+        retryAfter: result.retryAfter,
+        attribution: result.status === 429 ? cls.attribution : null,
+        hasRetryAfter: cls.hasRetryAfter,
+        bodyText,
+      }
+      log && log.warn('upstream retryable status', result.status, 'attempt', attempt, '/', maxAttempts, last.attribution ? 'attribution=' + last.attribution : '')
     } catch (err) {
       last = err
       if (err && err.aborted) { err.retries = attempt - 1; throw err }   // 预算/客户端取消：立即收尾，不重试不熔断
       if (!isRetryableNetErr(err)) throw err            // 非网络类致命错，直接抛
-      if (attempt >= retry.maxAttempts) throw err        // 重试耗尽 → provider 失败
-      log && log.warn('upstream error', err.code || err.message, 'attempt', attempt, '/', retry.maxAttempts)
+      if (attempt >= maxAttempts) { err.retries = attempt - 1; throw err }   // 重试耗尽 → provider 失败（带 .retries 供外层记账）
+      log && log.warn('upstream error', err.code || err.message, 'attempt', attempt, '/', maxAttempts)
     }
-    if (attempt < retry.maxAttempts) await settle(attempt, retry, last, signal)
+    if (attempt < maxAttempts) {
+      const ra = last && last.retryAfter
+      if (ra != null) {
+        // Retry-After 必须在剩余预算内：等得下才等（并按 cap 钳制），等不下就停止重试，
+        // 把最后一次状态/归因/Retry-After 上抛 —— 不空等、不越过 overall deadline。
+        const cap = retryWaitCap(remainingMs(), maxWaitMs)
+        if (ra > cap) {
+          log && log.warn('retry-after 超出剩余预算，停止重试', ra + 'ms', 'cap=' + Math.round(cap) + 'ms')
+          break
+        }
+        await settle(attempt, retry, last, signal, cap)
+        continue
+      }
+      await settle(attempt, retry, last, signal)
+    }
   }
-  // 可重试状态码耗尽 → 抛 provider 失败
+  // 可重试状态码耗尽（或 Retry-After 等不下）→ 抛 provider 失败；429 保留归因供外层回 429
   const fail = new Error('upstream failed: ' + (last && last.status))
-  fail.status = last.status
-  fail.retries = retry.maxAttempts - 1
-  fail.retryAfter = (last && last.retryAfter) || null
+  fail.status = last && last.status
+  fail.retries = Math.max(0, attemptsMade - 1)
+  fail.retryAfter = (last && last.retryAfter != null) ? last.retryAfter : null
+  fail.attribution = (last && last.attribution) || null
+  fail.bodyText = (last && last.bodyText) || ''
   fail.providerFail = true
   throw fail
 }

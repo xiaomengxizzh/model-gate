@@ -2,6 +2,26 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-09 429 归因 / Retry-After / 非幂等不重放治理（未发布，G1 移植）
+
+### Added
+- `src/retry-policy.js`（零依赖纯函数）：`classify429` 把上游 429 归因为 `platform_quota|model_capacity|rate_limit|unknown`（读 ≤8KB 错误体，匹配不到不臆造）；`parseRetryAfterMs`/`retryWaitCap`/`retryWaitFits` 把 Retry-After 与请求剩余预算对齐（单次上限 30s、留 50ms 收尾余量、支持 HTTP-date）；`isToolBearingBody` 识别 `tools`/`tool_calls`/`role:"tool"`/`input` 工具项等非幂等请求。
+- 离线回归 `scripts/test/offline/retry-governance.test.mjs`（11 用例）：四类归因、Retry-After 解析与预算钳制、429 原样返回、等得下才等、等不下立即 429、429 不熔断、普通请求仍可重试、tool 请求同上游不重试/可换一次上游/不回队首重放、预算耗尽仍 504 且不计上游失败。
+
+### Fixed
+- **上游 429 被吞成 502**：`forwardChain` 追踪最后一次 429（含所有上游都在 429 冷却中），链/预算结束时按原状态回 `429` + `Retry-After` + `{type:"rate_limited", code:"MG_429_<ATTRIBUTION>", attribution, upstream_status, retry_after_ms, attempts}`；数据面 JSON 分发透传结果里的 `headers`。已进入流式阶段仍走流内错误事件（不改已发出状态码）。
+- **429 触发熔断**：429 不再 `markFail`/打开 `circuit`，只做 `min(Retry-After, 60s)` 上游冷却；仍计入 errors/retries 与延迟样本。5xx/网络错继续熔断。
+- **Retry-After 空等**：只有能在剩余预算内等完才等（`retryWaitCap`），等不下立即停止重试并上抛，不再把 5s/1h 的 Retry-After 硬等成超时，也不越过 deadline；冷却超出预算的上游直接跳过。
+- **非幂等重放**：带工具语义的请求同上游只发一次，且整条链最多走一轮（本轮内可换一个上游/模型，但不回队首重放），避免重复触发 `shell_command`/`apply_patch` 这类客户端工具。
+- 上游可重试错误的响应体只读 ≤8KB 用于归因，读完即销毁连接；429 归因不影响 2xx/4xx 透传路径。
+
+### Changed
+- 带工具语义的请求默认不再自动重放：同上游只发一次（不按 `retry.maxAttempts` 重试），整条链最多走一轮——本轮内仍可换一个上游/模型继续尝试（可用性优先：**Codex CLI / DSH 每轮都带工具定义**，不能让这类 agent 流量整体失去 fallback），但不回队首重复整条链。可用 `forwardChain(..., opts.noReplay = false)` 显式放开，取舍记录在 [请求生命周期契约](docs/contracts/request-lifecycle-v1.md) §9.5。
+
+### 未验证
+- 真实上游 429 与真实客户端（DSH/Codex）重放行为实跑：`NOT_RUN_LIVE`（本轮全部为本地离线 mock）。
+- `/v1/embeddings`、`/v1/rerank` 内联链的 429 仍按旧逻辑计入熔断并最终回 502，未纳入本次治理（不在 `src/forward.js` 链内）。
+
 ## 2026-11-09 剩余验证闭环与 Responses 客户端兼容（未发布）
 
 ### Fixed

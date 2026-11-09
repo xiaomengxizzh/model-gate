@@ -2,7 +2,7 @@
 
 状态：**未冻结**（实现已完成，离线验收 AC-1..AC-7 通过；冻结待独立 review 与真实上游对照）。本契约定义数据面单次请求的预算（deadline）、取消（AbortSignal）与 SSE 背压语义，是 MG-002 的实现与验收依据。改动需同步 `docs/reference/configuration.md` 与开发计划。
 
-实现与证据（2026-11-09）：`src/budget.js`（预算/取消原语）、`src/request.js`（CONNECT/等头/退避可中止）、`src/forward.js`（排队取消、链循环钳制、流式中止收尾）、`src/sse.js`（背压与流式预算）、`src/index.js`（请求入口预算与 504 信封）；离线验收 `scripts/test/offline/deadline.test.mjs`（13 用例）随默认套件运行（`npm test` 14/14 套件通过）。
+实现与证据（2026-11-09）：`src/budget.js`（预算/取消原语）、`src/request.js`（CONNECT/等头/退避可中止、429 错误体限读与 Retry-After 预算）、`src/forward.js`（排队取消、链循环钳制、流式中止收尾、429 收尾/不熔断/非幂等不重放）、`src/retry-policy.js`（429 归因与不重放判定，§9）、`src/sse.js`（背压与流式预算）、`src/index.js`（请求入口预算与 504 信封）；离线验收 `scripts/test/offline/deadline.test.mjs`（13 用例）与 `scripts/test/offline/retry-governance.test.mjs`（10 用例）随默认套件运行（`npm test` 28/28 套件通过）。
 
 ## 1. 术语
 
@@ -99,3 +99,59 @@
 | AC-7 | 慢 body | 读取 body 受预算约束，超时返回 504 并释放连接 |
 
 以上全部使用离线 mock 覆盖（OS 临时配置目录 + 动态回环端口 + 本地 mock 上游），不触达真实上游；不引入任何第三方依赖。
+
+## 9. 429 / Retry-After / 非幂等不重放（G1 治理，2026-11-09）
+
+429 是「限流/额度」语义，不是上游故障：必须原样回给客户端并保留可重试信号；含工具语义的请求非幂等，禁止自动重放。实现：`src/retry-policy.js`（零依赖纯函数：归因/等待预算/工具判定）、`src/request.js`（限长错误体 + Retry-After 预算）、`src/forward.js`（429 收尾/不熔断/不重放）；离线验收 `scripts/test/offline/retry-governance.test.mjs`。
+
+### 9.1 归因
+
+上游 429 只读**最多 8KB** 错误体做保守文本归因（`classify429`），归因固定四类；匹配不到一律 `unknown`，不臆造：
+
+| attribution | 语义 | 典型文本 |
+| --- | --- | --- |
+| `platform_quota` | 账户额度/计费停服（等 Retry-After 无意义） | `insufficient_quota`、`quota`、`余额`、`额度` |
+| `model_capacity` | 单模型容量/过载 | `overloaded`、`capacity`、`busy`、`并发` |
+| `rate_limit` | 请求速率/频率限制（有 Retry-After 但无文本也归此类） | `rate limit`、`too many requests`、`rpm`、`频率` |
+| `unknown` | 匹配不到 | — |
+
+### 9.2 Retry-After 与请求预算
+
+- `Retry-After` 支持秒数与 HTTP-date；解析失败视为「上游未提供」，退回指数退避。
+- 等待必须同时满足：≤ 剩余整体预算 − 50ms（`retryWaitCap`）且 ≤ 单次上限 30s。**等不下就不等**：立即停止重试，把最后的状态/归因/Retry-After 交给上层，绝不空等越过 deadline。
+- 429 上游冷却（`throttle.rateUntil`）同样只在剩余预算内等待；冷却超出预算的上游直接跳过。
+- deadline 真正触发时仍是 §4 的 `504 request_timeout`/aborted，不因 429 治理改成 429；预算耗尽不计上游失败、不熔断（§3 语义不变）。
+
+### 9.3 响应语义
+
+响应头未发出时，429 原样返回（不得吞成 502）：
+
+```json
+{ "error": { "message": "上游限流（429）：rate_limit，已按请求预算停止重试", "type": "rate_limited",
+  "code": "MG_429_RATE_LIMIT", "attribution": "rate_limit", "upstream_status": 429,
+  "retry_after_ms": 5000, "attempts": 2 } }
+```
+
+同时回 `Retry-After: <秒>` 响应头（`retry_after_ms=0` 回 `0`；上游未提供则不发明响应头）。`attempts` 为本次请求实际发起的上游调用次数（含同上游重试）。已进入流式阶段（§4.2）仍只能以流内错误事件收尾，不改已发出的状态码。
+
+### 9.4 熔断与记账
+
+- 429 **不计入熔断**（不 `markFail`、不打开 `circuit`），只做上游级冷却 `min(Retry-After, 60s)`：一次限流不该把可用上游打进冷宫。
+- 429 仍计入 `errors`/`retries` 统计与延迟样本（账目不被吞）。
+- 链/预算结束时，若**最后一次**失败是 429（含所有上游都在 429 冷却中），按 §9.3 回 429；若最后一次失败是 5xx/网络错，仍回 502。
+
+### 9.5 非幂等不重放
+
+`isToolBearingBody(body)` 为真（`tools` 非空、Responses `input` 含 `tool_call`/`function_call`、消息含 `role: "tool"` 或 `tool_calls`）即视为非幂等，除非调用方显式覆盖（`forwardChain` 的 `opts.noReplay`）：
+
+- 同一上游**只发一次**（`forward(..., { noRetry: true })`）：不按 `retry.maxAttempts` 重试，杜绝同一上游对同一请求执行两次；
+- 整条链**最多走一轮**：本轮内仍允许换下一个上游/模型继续尝试（可用性优先——Codex CLI / DSH 每轮都带工具定义，tool 请求若失去 fallback 会整体拖垮这类 agent 流量），但绝不回到队首重复整条链；
+- 一轮链走完仍失败：按 §9.3/§9.4 收尾（最后一次是 429 回 429，否则 502），不再做循环兜底；
+- 流式断流续传（§2.7）不属本条，语义未变。
+
+取舍（明确记录）：切断的是「同一上游对同一请求的重复执行」；代价是某上游失败后不再回到队首重试（原有循环兜底对 tool 请求失效），但保留「换一个上游/模型试一次」的可用性兜底。
+
+### 9.6 验收
+
+`scripts/test/offline/retry-governance.test.mjs`（11 用例，随默认 `npm test` 运行）：四类归因、Retry-After 解析与预算钳制、429 原样返回（`Retry-After` 头 + `MG_429_*` + attempts，不是 502）、Retry-After 等得下才等（真等待后 200）、等不下立即 429 且上游只被调用一次、连续 429 不打开熔断、普通请求仍按 `retry.maxAttempts` 重试、tool 请求同上游不重试但可换一次上游且不回队首重放、预算耗尽仍是 504 且不计上游失败。全部离线 mock；真实上游 429 与真实客户端重放行为未对照（`NOT_RUN_LIVE`）。
+
