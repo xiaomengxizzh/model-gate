@@ -10,6 +10,7 @@ import { forward, probe, probeModel, probeChat, warm } from './request.js'
 import { adapterFor, cacheHitMiss } from './format.js'
 import { isStreamResponse, writeUpstreamHeaders, relayStream, endInterruptedStream } from './sse.js'
 import { forwardChain, routeLimit, virtualQuotaExceeded } from './forward.js'
+import { createBudget, abortedError } from './budget.js'
 import { todayKey } from './shared.js'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
@@ -19,18 +20,28 @@ const ADMIN_PAGE = new URL('./admin.html', import.meta.url)
 const FAIL_OPEN_THRESHOLD = 5       // 连续失败熔断阈值（放宽：平台偶发慢/抖不轻易熔断）
 const FAIL_OPEN_COOLDOWN = 10000    // 熔断冷却 ms
 
-function collectBody(stream, maxBytes = 64 * 1024 * 1024) {
+// ctl = { budget, signal }（MG-002）：读 body 也受请求预算/客户端断开约束，中止时销毁源流并 reject。
+function collectBody(stream, maxBytes = 64 * 1024 * 1024, ctl = null) {
   return new Promise((resolve, reject) => {
     const chunks = []
     let total = 0
+    const signal = (ctl && ctl.signal) || null
+    const budget = (ctl && ctl.budget) || null
     const cleanup = () => {
       stream.removeListener('data', onData)
       stream.removeListener('end', onEnd)
       stream.removeListener('error', onError)
       stream.removeListener('aborted', onAborted)
+      if (signal && onAbort) { try { signal.removeEventListener('abort', onAbort) } catch {} }
     }
     const onError = (err) => { cleanup(); reject(err) }
-    const onAborted = () => onError(new Error('request aborted'))
+    const onAbort = () => {
+      cleanup()
+      // 上游 body：预算中止时立即销毁连接；客户端请求体：保留连接以便回写 504，由 handler 收尾后释放
+      if (ctl && ctl.destroyOnAbort) { try { if (stream && typeof stream.destroy === 'function') stream.destroy() } catch {} }
+      reject(abortedError((budget && budget.reason) || 'request_timeout'))
+    }
+    const onAborted = () => onError(abortedError('client_closed'))
     const onEnd = () => { cleanup(); resolve(Buffer.concat(chunks)) }
     const onData = (chunk) => {
       total += chunk.length
@@ -46,6 +57,10 @@ function collectBody(stream, maxBytes = 64 * 1024 * 1024) {
     stream.once('end', onEnd)
     stream.once('error', onError)
     stream.once('aborted', onAborted)
+    if (signal) {
+      if (signal.aborted) { onAbort(); return }
+      try { signal.addEventListener('abort', onAbort, { once: true }) } catch {}
+    }
   })
 }
 
@@ -568,6 +583,7 @@ function makeHandler(state) {
     const path = (req.url || '/').split('?')[0]
     const url = req.url || '/'
     const isApi = path === '/api' || path.startsWith('/api/')
+    let budget = null
     try {
       // 来源校验：先 Host（DNS 重绑定），再 Origin（跨源网页）。两者都只放行显式声明的部署形态。
       if (!hostAllowed(req, state.cfg)) { denyOrigin(res, path, 'Host 不被接受：' + String(req.headers.host || '') + '（DNS 重绑定防护；反向代理/自定义域名请加入 server.allowedHosts）'); return }
@@ -667,6 +683,12 @@ function makeHandler(state) {
         sendJson(res, 200, { ok: true, results, status: buildStatus(state) }); return
       }
 
+      // —— 数据面请求预算（MG-002）：从进入数据面起算，覆盖排队/代理 CONNECT/读 body/等头/流式/续传 ——
+      const _to = (state.cfg.defaults && state.cfg.defaults.timeout) || {}
+      budget = createBudget({ overallMs: _to.overallMs || 0 })
+      const onClientGone = () => { if (!res.writableEnded) budget.abort('client_closed') }
+      try { res.on('close', onClientGone); req.on('aborted', onClientGone) } catch {}
+
       // Global credentials grant access to every model. A virtual credential only
       // grants its named entry, including when no global credential is configured.
       const clientKey = currentClientKey(state)
@@ -675,7 +697,7 @@ function makeHandler(state) {
         let vm = null
         const vms = state.cfg.virtualModels || []
         if (vms.length && CHAT_PATHS.has(path) && (req.method === 'POST' || req.method === 'PUT')) {
-          req.__mgBodyBuf = await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
+          req.__mgBodyBuf = await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024, { budget, signal: budget.signal })
           req.__mgBody = tryParse(req.__mgBodyBuf)
           const model = req.__mgBody && req.__mgBody.model
           vm = vms.find(v => v.name === (typeof model === 'string' ? model.trim() : ''))
@@ -695,7 +717,7 @@ function makeHandler(state) {
 
       // —— 数据面转发（二阶段鉴权已收集 body 时直接复用，流不可二次读取） ——
       let bodyBuf = req.__mgBodyBuf || null
-      if (!bodyBuf && (req.method === 'POST' || req.method === 'PUT')) bodyBuf = await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
+      if (!bodyBuf && (req.method === 'POST' || req.method === 'PUT')) bodyBuf = await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024), { budget, signal: budget.signal })
       const body = req.__mgBody || (bodyBuf && bodyBuf.length ? tryParse(bodyBuf) : null)
       if (isChat && (!body || typeof body !== 'object' || Array.isArray(body))) {
         sendJson(res, 400, { error: { message: '请求体必须为 JSON 对象', type: 'invalid_request_error' } })
@@ -710,7 +732,7 @@ function makeHandler(state) {
         if (!res.headersSent) writeUpstreamHeaders(res, result) // 切换上游后的第二次 relay：响应头已随首个上游发出，不可重写
         const r = await relayStream(res, result.stream, {
           idleMs: (state.cfg.defaults && state.cfg.defaults.timeout && state.cfg.defaults.timeout.idleMs) || 0,
-          maxReconnects: 2, log, reconnect: m.reconnect,
+          maxReconnects: 2, log, reconnect: m.reconnect, signal: budget.signal, budget,
           protocol: m.api || 'openai', extract: (m.api && m.api !== 'openai') ? adapterFor(m.api).extractStreamContent : undefined, extractFinish: (m.api && m.api !== 'openai') ? adapterFor(m.api).extractStreamFinish : undefined,
           rewriteModel: m.rewriteModel || null, // 「名字没对上」：响应 model 回写为客户端请求名
           onTokens: (n, usage) => {
@@ -725,7 +747,7 @@ function makeHandler(state) {
         })
         return Object.assign({}, r, { finish: (note) => endInterruptedStream(res, note, r ? r.reconnects : 0) })
       }
-      const out = await forwardChain(FWD_DEPS, state, req, fUrl, fPath, req.method, bodyBuf, body, log, streamRelay)
+      const out = await forwardChain(FWD_DEPS, state, req, fUrl, fPath, req.method, bodyBuf, body, log, streamRelay, budget)
       // 请求级日志：记录每次数据面请求的请求模型/实际服务模型/上游与结果，便于定位空响应与连接问题（不含消息正文/密钥）
       const reqModel = (body && body.model) || '-'
       const _chain = (n) => n || ''
@@ -742,11 +764,12 @@ function makeHandler(state) {
           if (!_has) log.warn('data 2xx 无正文内容 model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-'))
         }
       }
+      if (out.kind === 'aborted') return   // 客户端已断开/请求已取消：连接不可写，不产生响应
       if (out.kind === 'stream') {
         writeUpstreamHeaders(res, out.res)
         await relayStream(res, out.res.stream, {
           idleMs: (state.cfg.defaults && state.cfg.defaults.timeout && state.cfg.defaults.timeout.idleMs) || 0,
-          maxReconnects: 2, log, reconnect: out.reconnect,
+          maxReconnects: 2, log, reconnect: out.reconnect, signal: budget.signal, budget,
           protocol: out.api || 'openai', extract: (out.api && out.api !== 'openai') ? adapterFor(out.api).extractStreamContent : undefined, extractFinish: (out.api && out.api !== 'openai') ? adapterFor(out.api).extractStreamFinish : undefined,
           rewriteModel: (body && body.model) || null, // 「名字没对上」：响应 model 回写为客户端请求名
           onTokens: (n, usage) => {
@@ -789,7 +812,7 @@ function makeHandler(state) {
       }
       if (out.kind === 'stream-interrupted') {
         // forward 在「配置关」路径已调 relay.finish 收尾；流已开始后的全链失败等路径未收尾——此处兜底
-        if (!res.writableEnded && !res.destroyed) endInterruptedStream(res, out.note || '上游流式响应中断', out.reconnects || 0)
+        if (!res.writableEnded && !res.destroyed) endInterruptedStream(res, out.note || '上游流式响应中断', out.reconnects || 0, out.timeout ? { type: 'stream_interrupted', code: 'REQUEST_TIMEOUT' } : null)
         return
       }
       if (out.kind === 'json' && out.asSSE) {
@@ -812,10 +835,25 @@ function makeHandler(state) {
       }
       res.writeHead(out.status, { 'content-type': out.contentType }); res.end(out.body)
     } catch (err) {
+      if (err && err.aborted) {
+        // 预算耗尽/客户端断开：不算网关路由失败，按契约 §4 收尾
+        log && log.warn('request aborted', err.reason || err.message, path)
+        if (!res.headersSent) {
+          if (err.reason === 'client_closed' || res.destroyed) return   // 客户端已断：不写
+          const _to2 = (state.cfg.defaults && state.cfg.defaults.timeout) || {}
+          sendJson(res, 504, { error: { message: '请求超时：超出整体预算 ' + (_to2.overallMs || 0) + 'ms（defaults.timeout.overallMs）', type: 'request_timeout' } })
+          if (!req.complete) res.once('finish', () => setImmediate(() => { try { req.destroy() } catch {} }))   // 慢 body：响应后释放半截连接
+        } else if (!res.writableEnded && !res.destroyed) {
+          endInterruptedStream(res, '请求超出整体预算', 0, { type: 'stream_interrupted', code: 'REQUEST_TIMEOUT' })
+        }
+        return
+      }
       state.st.counters.errors += 1
       log && log.error('route failed', path, '->', err.message)
       if (!res.headersSent) { const tooBig = /too large/i.test(String(err.message || '')); sendJson(res, tooBig ? 413 : 502, { error: { message: err.message || String(err), type: tooBig ? 'payload_too_large' : 'gateway_error' } }) }
       else if (!res.destroyed) { try { res.end() } catch {} }
+    } finally {
+      if (budget) { try { budget.dispose() } catch {} }
     }
   }
 }

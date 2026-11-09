@@ -2,6 +2,31 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-09 请求生命周期预算与 SSE 背压（未发布，MG-002）
+
+### Fixed
+
+- 单次数据面请求此前没有统一的跨排队/流式 deadline：`overallMs` 只在 `forward()` 重试循环里检查，排队（QPS/并发/429 退避）、代理 CONNECT、读客户端 body、非流式读体和流式中继都可能无限等待；客户端断开也只在中继阶段生效，排队与上游等待会泄漏。
+- 代理 CONNECT 挂起（TCP 接受但不应答）此前没有任何超时，请求永久悬挂。
+
+### Added
+
+- `src/budget.js`：请求级预算与 AbortSignal 单一来源。`createBudget({overallMs, signal})` 提供 `deadlineAt`/`remaining()`/`expired()`/`abort(reason)`；`abortedError()` 统一取消/超时错误（status 504、`aborted=true`，上层据此跳过重试与熔断）；`sleepWith()` 为可取消退避。
+- SSE 背压：`relayStream` 在 `res.write()` 返回 false 后暂停读取上游并等待 `drain`；等待超过 30s 或未写出缓冲超过 8MiB 立即中止并销毁客户端/上游，按 clientGone 记账（不计上游故障）。
+- 契约与回归：`docs/contracts/request-lifecycle-v1.md`（AC-1..AC-7）；`scripts/test/offline/deadline.test.mjs` 13 用例覆盖满队列预算、代理 CONNECT 挂起、慢响应头、慢上游体、客户端断开的排队/等头/流式三种时序、流式预算耗尽、SSE 背压（确定性 fake client）与慢请求 body；`scripts/test/offline/harness.mjs` 新增 `startScriptedUpstream` / `startHangingProxy` 两个夹具导出。
+
+### Changed
+
+- **超时语义（行为变更）**：`defaults.timeout.overallMs>0` 现在是从请求进入网关起算的硬上限，覆盖读 body、全部排队等待、代理 CONNECT、等响应头、非流式读体、SSE 中继与续传，并把模型链 `loopMs` 钳制到剩余预算；每个阶段有效上限 = min(阶段配置, 剩余预算)。**流式阶段同样受该上限约束**。默认 0 保持旧行为（无全局上限），但客户端断开取消始终生效。
+- 预算耗尽响应：响应头未发出 → `504 {error:{type:'request_timeout'}}`；已进入流式 → SSE `error`（`type=stream_interrupted`, `code=REQUEST_TIMEOUT`）+ `[DONE]`，已发出的状态码与内容不撤回。
+- 排队取消：`acquireProvider`、模型并发信号量、QPS 令牌等待与退避 sleep 均可取消；waiter 从队列移除、已预留 QPS 令牌归还、`release()` 恰好一次；取消不记上游错误、不熔断。
+- 探测/预热/回切探活与管理面请求不在本契约范围，行为不变。
+
+### 验证
+
+- `npm run check` 退出码 0；`npm test` 14/14 隔离套件（含 deadline 13 用例）通过；`MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs` 27/27 文件通过；`npm run docs:check` PASS；`node scripts/check-metadata.mjs` PASS (21)。
+- 未验证：真实上游与计费、生产 8787 重启、Windows/macOS、Node 18/20 实跑；MG-002 尚未做作者自检之外的独立 review。
+
 ## 2026-11-08 审计修复（未发布）
 
 ### Fixed

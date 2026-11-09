@@ -1,6 +1,7 @@
 // 离线契约测试共用的隔离夹具：OS 临时配置目录 + 动态回环端口 + 本地 mock 上游。
 // 不读取用户主配置、不写 cwd/config、不触达真实上游；每个夹具一个子进程，结束即清理。
 import http from 'node:http'
+import net from 'node:net'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
@@ -104,3 +105,66 @@ export async function startGateway(opts = {}) {
   }
   return { base, dir, port, child, call, get, post, stop, stderr: () => stderr }
 }
+
+
+// 可脚本化 mock 上游（MG-002 扩展）：handler(req, res, rec) 完全接管响应。
+// rec 记录到达时间与 socket 关闭时间（closedAt/aborted），用于断言网关确实销毁了上游连接。
+// 既有 startMockUpstream 的默认行为不变；本函数只新增入口。
+export async function startScriptedUpstream(handler) {
+  const hits = []
+  const server = http.createServer(async (req, res) => {
+    const rec = {
+      index: hits.length,
+      method: req.method,
+      url: req.url,
+      headers: req.headers,
+      at: Date.now(),
+      closedAt: null,
+      aborted: null, // true = 响应未正常 end 连接就被关掉（网关中止/销毁）
+    }
+    hits.push(rec)
+    res.on('close', () => { rec.closedAt = Date.now(); rec.aborted = !res.writableEnded })
+    res.on('error', () => {})
+    req.on('error', () => {})
+    try { await handler(req, res, rec) } catch { try { res.destroy() } catch {} }
+  })
+  server.on('clientError', (err, socket) => { try { socket.destroy() } catch {} })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const port = server.address().port
+  return {
+    port,
+    base: 'http://127.0.0.1:' + port,
+    hits,
+    stop: async () => {
+      server.closeAllConnections?.()
+      await new Promise((r) => server.close(r))
+    },
+  }
+}
+
+// 接受 TCP 连接后只读取 CONNECT 请求行、永不应答的本地代理（AC-2 的挂起隧道）。
+// connections 记录每条隧道收到的字节与关闭时间；closing 表示网关是否主动关闭了隧道 socket。
+export async function startHangingProxy() {
+  const connections = []
+  const server = net.createServer((sock) => {
+    const rec = { at: Date.now(), data: '', closedAt: null }
+    connections.push(rec)
+    sock.on('data', (d) => { rec.data += d.toString('utf8') })
+    sock.on('close', () => { rec.closedAt = Date.now() })
+    sock.on('error', () => {})
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const port = server.address().port
+  return {
+    port,
+    url: 'http://127.0.0.1:' + port,
+    connections,
+    stop: async () => {
+      server.closeAllConnections?.()
+      await new Promise((r) => server.close(r))
+    },
+  }
+}
+

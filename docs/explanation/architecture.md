@@ -6,6 +6,6 @@
 
 配置加载在主模板上合并本地覆盖；provider/models 按键合并，defaults 顶层合并，virtualModels 整体替换。配置保存有进程内写锁和可选版本检查，但不构成跨进程事务。模型删除、配置 schema 与严格验证仍需专项设计。
 
-Key 库使用 AES-GCM；stats 周期性落盘。加密解决静态存储，不替代进程权限、主密钥备份或日志脱敏。重试、目录轮转、SSE 重连及各级超时并存，尚无统一的跨排队/流式生命周期 deadline；这也是下一阶段优先收敛的契约。
+Key 库使用 AES-GCM；stats 周期性落盘。加密解决静态存储，不替代进程权限、主密钥备份或日志脱敏。MG-002 已把单次数据面请求收敛为单一 deadline + AbortSignal（src/budget.js）：排队/QPS 等待/代理 CONNECT/读 body/等响应头/非流式读体/SSE 中继与续传共享 `defaults.timeout.overallMs`（0=不限，旧行为），客户端断开经同一取消源从队列移除 waiter 并销毁上游连接；SSE 写客户端遵守背压（等待 drain，30s 或 8MiB 上限）。管理面请求与探测/预热/回切探活不在该预算内。契约见 `docs/contracts/request-lifecycle-v1.md`。
 
 当前协议桥以 OpenAI Chat 为入口；非 OpenAI tools 流可能先降级再封装。为保持已有客户端行为，本轮没有把未来 Embedding/媒体能力塞入现有 Chat 分支。先完成安全、资源边界及协议保真测试，再按开发计划扩展能力入口。

@@ -5,6 +5,7 @@ import { adapterFor, cacheHitMiss, hasTools } from './format.js'
 import { buildProvider } from './router.js'
 import { isStreamResponse } from './sse.js'
 import { forward } from './request.js'
+import { abortedError, sleepWith } from './budget.js'
 import { todayKey } from './shared.js'
 
 const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-length','upgrade','keep-alive','te','trailer'])
@@ -165,16 +166,37 @@ function throttleOf(state, pid) {
   if (!state.throttle[pid]) state.throttle[pid] = { max: maxConcur(state.cfg), inFlight: 0, wait: [], rateUntil: 0 }
   return state.throttle[pid]
 }
+// 可取消等待：signal 中止时从 waiter 队列移除并 reject，避免「已取消仍在排队/醒来后继续发请求」。
+function waitSlot(queue, signal) {
+  if (!signal) return new Promise((resolve) => queue.push(resolve))
+  if (signal.aborted) return Promise.reject(abortedError('request_timeout'))
+  return new Promise((resolve, reject) => {
+    const waiter = () => { cleanup(); resolve() }
+    const cleanup = () => { try { signal.removeEventListener('abort', onAbort) } catch {} }
+    const onAbort = () => {
+      const i = queue.indexOf(waiter)
+      if (i !== -1) queue.splice(i, 1)
+      cleanup()
+      reject(abortedError('request_timeout'))
+    }
+    queue.push(waiter)
+    try { signal.addEventListener('abort', onAbort, { once: true }) } catch { cleanup() }
+  })
+}
+function wakeSlot(queue) { if (queue.length) (queue.shift())() }
+
 // 每 provider 并发信号量 + 429 排队（rateUntil 内新请求等待）
-async function acquireProvider(state, pid, cfg) {
+async function acquireProvider(state, pid, cfg, signal) {
   const th = throttleOf(state, pid)
   const r = th.rateUntil
-  if (r > Date.now()) await new Promise((s) => setTimeout(s, Math.min(r - Date.now(), 60000)))
-  if (th.inFlight >= th.max) await new Promise((s) => th.wait.push(s))
+  if (r > Date.now()) await sleepWith(Math.min(r - Date.now(), 60000), signal)
+  if (th.inFlight >= th.max) await waitSlot(th.wait, signal)
+  // 取消可能发生在被唤醒与占用槽位之间：此时不占槽、不再发请求（已归还的槽位保持空闲）
+  if (signal && signal.aborted) throw abortedError('request_timeout')
   th.inFlight += 1
-  return () => { th.inFlight -= 1; if (th.wait.length) (th.wait.shift())() }
+  return () => { th.inFlight -= 1; wakeSlot(th.wait) }
 }
-function rateWait(state, name, qps) {
+function rateWait(state, name, qps, signal) {
   const now = Date.now()
   const cap = Math.max(1, Math.ceil(qps))
   let q = state.qpsToken[name]
@@ -185,11 +207,17 @@ function rateWait(state, name, qps) {
   // Reserve each queued request's token. Keeping negative balances prevents
   // concurrent waiters from all consuming the same future refill.
   q.tokens -= 1
-  if (q.tokens >= 0) return
-  return new Promise((res) => setTimeout(res, Math.max(0, Math.ceil((-q.tokens / qps) * 1000))))
+  if (q.tokens >= 0) return Promise.resolve()
+  // 取消时归还预留令牌，避免一次取消把令牌余额永久打成负数
+  return sleepWith(Math.max(0, Math.ceil((-q.tokens / qps) * 1000)), signal).catch((e) => { q.tokens += 1; throw e })
 }
 function modelThrottleOf(state, name, max) { if (!state.throttleModel[name]) state.throttleModel[name] = { max, inFlight: 0, wait: [] }; return state.throttleModel[name] }
-async function acquireSem(th) { if (th.inFlight >= th.max) await new Promise((s) => th.wait.push(s)); th.inFlight += 1; return () => { th.inFlight -= 1; if (th.wait.length) (th.wait.shift())() } }
+async function acquireSem(th, signal) {
+  if (th.inFlight >= th.max) await waitSlot(th.wait, signal)
+  if (signal && signal.aborted) throw abortedError('request_timeout')
+  th.inFlight += 1
+  return () => { th.inFlight -= 1; wakeSlot(th.wait) }
+}
 
 // 粗略估计 prompt 的 token 数（用于 maxContext 判断）：中文/全角按 1 字≈1 token，其它按约 4 字符≈1 token
 function estPromptTokens(body) {
@@ -239,9 +267,15 @@ function resolveDialogue(state, req, body) {
   return id
 }
 
-export async function forwardChain(deps, state, req, url, path, method, bodyBuf, body, log, streamRelay) {
+export async function forwardChain(deps, state, req, url, path, method, bodyBuf, body, log, streamRelay, budget) {
   const { ensureHst, markFail, markOk, healthy, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tallyDialogueRequest, tryParse, collectBody } = deps
   const cfg = state.cfg
+  const budgetSignal = (budget && budget.signal) || null
+  const overallMsCfg = (cfg.defaults && cfg.defaults.timeout && cfg.defaults.timeout.overallMs) || 0
+  const timeoutBody = () => Buffer.from(JSON.stringify({ error: { message: '请求超时：超出整体预算 ' + overallMsCfg + 'ms（defaults.timeout.overallMs）', type: 'request_timeout' } }))
+  const abortedResult = () => (budget && budget.reason === 'client_closed')
+    ? { kind: 'aborted' }
+    : { kind: 'json', status: 504, contentType: 'application/json', body: timeoutBody() }
   let routes = []
   let maxModel = 0
   let qps = 0
@@ -342,8 +376,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   const bm = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
 
   let releaseModel = null
-  if (maxModel > 0) releaseModel = await acquireSem(modelThrottleOf(state, modelName, maxModel))
-  if (qps > 0) await rateWait(state, modelName, qps)
+  try {
+    if (maxModel > 0) releaseModel = await acquireSem(modelThrottleOf(state, modelName, maxModel), budgetSignal)
+    if (qps > 0) await rateWait(state, modelName, qps, budgetSignal)
+  } catch (e) {
+    if (releaseModel) { releaseModel(); releaseModel = null }
+    if (e && e.aborted) return abortedResult()
+    throw e
+  }
   let lastErr = null
   let last4xx = null          // 模型级拒绝（403/404）的最后一次响应：整条链全被拒绝时回它（保留上游原始错误）
   let last4xxPid = null       // last4xx 对应的上游（pid 是 for 循环块作用域，循环外取不到）
@@ -351,12 +391,13 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   let tried = false
   let streamStarted = false   // 流式已开始（响应头已发给客户端）：此后不能再写 json 状态码，失败只能以流内错误事件收尾
   const loopMs = (cfg.defaults && cfg.defaults.timeout && cfg.defaults.timeout.loopMs) || 120000
-  const loopDeadline = Date.now() + loopMs
-  const _sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  // 模型链循环上限进一步被请求级整体预算钳制（MG-002）：预算小于 loopMs 时以预算为准
+  const loopDeadline = (budget && budget.deadlineAt != null) ? Math.min(Date.now() + loopMs, budget.deadlineAt) : Date.now() + loopMs
   const chainModels = []            // 实际尝试过的 serving 模型链（跨模型兜底/循环标记，供日志/面板查看）
   try {
   // 循环兜底：整条路由链(a→b→c)一轮失败后回到队首反复尝试，直到成功 / 业务4xx / 整体超时(loopMs)
-  while (Date.now() < loopDeadline) {
+  outer: while (Date.now() < loopDeadline) {
+    if (budget && budget.expired()) { lastErr = abortedError((budget && budget.reason) || 'request_timeout'); break }
     let cycleTried = false
     rejectedOnly = true // 每轮重置：遇到可重试类失败（catch）即置 false；整轮只有 403/404 则维持 true → 轮末 break
     for (const route of routes) {
@@ -465,10 +506,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     if (api !== 'openai' && routeBody) { const ad = adapterFor(api); const r = ad.build(routeBody); if ((hasTools(routeBody) || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true } turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body)) }
     else if ((bodyDirty || routeBody !== body) && routeBody) tbuf = Buffer.from(JSON.stringify(routeBody))
     const headers = buildHeaders(req, prov, tbuf, cfg, api, body)
-    const release = await acquireProvider(state, pid, cfg)
+    let release = null
+    try { release = await acquireProvider(state, pid, cfg, budgetSignal) } catch (e) {
+      if (e && e.aborted) { lastErr = e; log && log.warn('request aborted (queued)', e.reason || e.message); break outer }
+      throw e
+    }
     const attemptStart = Date.now()
     try {
-      const result = await forward(prov, turl, req.method, headers, tbuf, cfg.defaults || {}, log)
+      const result = await forward(prov, turl, req.method, headers, tbuf, cfg.defaults || {}, log, { budget, signal: budgetSignal })
       const latency = Date.now() - attemptStart
       const o = ensureSt(state, pid)
       o.latencySum += latency; o.latencyCount += 1
@@ -484,7 +529,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           // 不能在响应头阶段 markOk——头 2xx 不代表流能走完，故障上游「头 2xx + 流中断」若在此刻被洗白，
           // 熔断计数永远攒不齐，后续请求被亲和钉在故障主上游，「切备用/切下一模型」形同虚设。
           const reconnector = async () => {
-            const again = await forward(prov, turl, req.method, headers, tbuf, cfg.defaults || {}, log)
+            const again = await forward(prov, turl, req.method, headers, tbuf, cfg.defaults || {}, log, { budget, signal: budgetSignal })
             if (!again.ok) throw new Error('reconnect status ' + again.status)
             return again.stream
           }
@@ -498,6 +543,11 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           })
           const sm = serving || modelName
           const h = ensureHst(state, pid)
+          if (relay && relay.timedOut) {
+            // 整体预算在流式阶段耗尽：不再续传/切上游，以流内错误事件收尾（客户端可感知）
+            log && log.warn('请求超出整体预算（流式阶段）', 'model=' + sm, 'provider=' + pid, 'overallMs=' + overallMsCfg)
+            return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, timeout: true, chain: chainModels.join('>'), note: '请求超出整体预算 ' + overallMsCfg + 'ms（defaults.timeout.overallMs）', reconnects: relay.reconnects || 0 }
+          }
           if (relay.completed) {
             // 流完整结束（含续传成功）：正常计成功
             h.streamDrops = 0
@@ -528,7 +578,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         markOk(state, pid)
         ensureHst(state, pid).streamDrops = 0 // 非流式请求完整成功同样代表上游健康：解除连续断流绕开
         noteAffinity(state, serving || route.model, pid) // 非流式响应已完整收到：记录本次成功上游，供后续请求保持亲和、复用其缓存
-        let out = await collectBody(result.stream)
+        let out = await collectBody(result.stream, undefined, { budget, signal: budgetSignal, destroyOnAbort: true })
         out = maybeGunzip(out, result.headers && result.headers['content-encoding'])
         const parsed = tryParse(out)
         const usage = parsed && parsed.usage
@@ -574,7 +624,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         if (streamStarted) { lastErr = Object.assign(new Error('upstream redirect ' + result.status), { status: result.status }); continue }
         return { kind: 'json', status: 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'upstream returned unexpected redirect (' + result.status + ')', type: 'upstream_error', status: result.status } })), pid, modelName, chain: chainModels.join('>') }
       }
-      const out = await collectBody(result.stream)
+      const out = await collectBody(result.stream, undefined, { budget, signal: budgetSignal, destroyOnAbort: true })
       // 流已开始（响应头/部分内容已发给客户端）后，json 状态码再也写不回去：按上游失败继续切下一上游，
       // 全链失败时由收尾逻辑以流内错误事件结束。此前此处直接 return json，index.js 二次 writeHead
       // 抛 "Cannot write headers after they are sent"，客户端只拿到没有 [DONE] 的半截流。
@@ -617,6 +667,12 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       }
       return { kind: 'json', status: result.status || 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'gateway upstream error', type: 'upstream_error', status: result.status } })), pid, modelName }
     } catch (err) {
+      // 预算耗尽/客户端取消：不是上游故障——不记错误、不熔断、不重试，直接结束模型链
+      if (err && err.aborted) {
+        lastErr = err
+        log && log.warn('request aborted', err.reason || err.message, 'model=' + (serving || '-'), 'provider=' + pid, '-> stop chain')
+        break outer
+      }
       const latency = Date.now() - attemptStart
       const o = ensureSt(state, pid)
       o.latencySum += latency; o.latencyCount += 1
@@ -637,8 +693,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     } // for pid
   } // for route
   if (!cycleTried || rejectedOnly) break // 无上游被尝试，或整轮只有 403/404 模型级拒绝（确定性失败）：再循环无意义，直接收尾
-  await _sleep(300)      // 一轮全败后回到队首前稍停，避免空转打爆上游
+  try { await sleepWith(300, budgetSignal) } catch (e) { if (!(e && e.aborted)) throw e; lastErr = e; break }      // 一轮全败后回到队首前稍停；取消时立即退出
   } // while() 有界循环兜底：整条链(a→b→c)失败后回到 a 继续，直到成功 / 业务4xx / 整体超时 / 全部熔断
+  // 预算耗尽/客户端取消优先于其他收尾：不把取消伪装成上游 502
+  if ((lastErr && lastErr.aborted) || (budget && budget.expired())) {
+    if (budget && budget.reason === 'client_closed') return { kind: 'aborted' }
+    if (streamStarted) return { kind: 'stream-interrupted', pid: null, modelName, timeout: true, chain: chainModels.join('>'), note: '请求超出整体预算 ' + overallMsCfg + 'ms（defaults.timeout.overallMs）', reconnects: 0 }
+    return abortedResult()
+  }
   // 整条链都是 403/404 模型级拒绝：回最后一个上游原始响应（比 502 更有信息量）
   if (last4xx && !streamStarted) return { kind: 'json', status: last4xx.status, contentType: 'application/json; charset=utf-8', body: last4xx.body, pid: last4xxPid, modelName, chain: chainModels.join('>') }
   if (!tried) return { kind: 'json', status: 502, contentType: 'application/json', chain: chainModels.join('>'), body: Buffer.from(JSON.stringify({ error: { message: lastErr ? lastErr.message : 'no usable provider (无可用上游：可能未配 Key 或全部熔断)', type: 'no_provider' } })) }

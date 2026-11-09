@@ -5,6 +5,7 @@ import tls from 'node:tls'
 import { URL } from 'node:url'
 import { gunzipSync } from 'node:zlib'
 import { adapterFor } from './format.js'
+import { abortedError, sleepWith } from './budget.js'
 
 // 上游连接复用（keep-alive）：减少每次 TLS/TCP 握手，改善连接体验与延迟
 const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 64 })
@@ -37,10 +38,26 @@ function normalizeProxy(proxy) {
   return null
 }
 // 经代理打开一条到目标:端口的 TLS 隧道（HTTP CONNECT）。
-function connectViaProxy(targetHost, targetPort, p) {
+// MG-002：CONNECT 阶段此前无任何超时，代理接受 TCP 但不应答 CONNECT 会永久挂起，
+// 连请求级 deadline 都兜不住（预算在 request 生命周期之外）。这里接受 signal + 墙钟超时。
+function connectViaProxy(targetHost, targetPort, p, opts = {}) {
   return new Promise((resolve, reject) => {
+    const signal = opts.signal || null
+    const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : 0
     const raw = net.connect(p.port, p.host)
-    const fail = (e) => { try { raw.destroy() } catch { } reject(e) }
+    let settled = false
+    let timer = null
+    const onAbort = () => fail(abortedError((opts.budget && opts.budget.reason) || 'request_timeout', 'proxy CONNECT aborted'))
+    const cleanup = () => {
+      if (timer) { clearTimeout(timer); timer = null }
+      if (signal && onAbort) { try { signal.removeEventListener('abort', onAbort) } catch { } }
+    }
+    const fail = (e) => { if (settled) return; settled = true; cleanup(); try { raw.destroy() } catch { } ; reject(e) }
+    if (signal) {
+      if (signal.aborted) { fail(abortedError('request_timeout', 'proxy CONNECT aborted')); return }
+      try { signal.addEventListener('abort', onAbort, { once: true }) } catch { }
+    }
+    if (timeoutMs) timer = setTimeout(() => fail(Object.assign(new Error('proxy CONNECT timeout (' + timeoutMs + 'ms)'), { code: 'ETIMEDOUT', status: 504 })), timeoutMs)
     raw.on('error', (e) => fail(new Error('proxy error: ' + (e && e.message))))
     raw.once('connect', () => {
       let r = 'CONNECT ' + targetHost + ':' + targetPort + ' HTTP/1.1\r\nHost: ' + targetHost + ':' + targetPort + '\r\n'
@@ -50,6 +67,7 @@ function connectViaProxy(targetHost, targetPort, p) {
     })
     let buf = Buffer.alloc(0)
     raw.on('data', (d) => {
+      if (settled) return
       buf = Buffer.concat([buf, d])
       const idx = buf.indexOf('\r\n\r\n'); if (idx === -1) return
       raw.removeAllListeners('data')
@@ -57,7 +75,7 @@ function connectViaProxy(targetHost, targetPort, p) {
       const code = parseInt(line.split(' ')[1] || '', 10)
       if (code !== 200) { fail(new Error('proxy CONNECT failed: ' + line)); return }
       const tlsSock = tls.connect({ socket: raw, servername: targetHost })
-      tlsSock.once('secureConnect', () => resolve(tlsSock))
+      tlsSock.once('secureConnect', () => { if (settled) { try { tlsSock.destroy() } catch { } ; return } settled = true; cleanup(); resolve(tlsSock) })
       tlsSock.on('error', (e) => fail(e))
     })
   })
@@ -70,7 +88,14 @@ function proxyAgentFor(proxy) {
   const make = (isHttps) => {
     const Base = isHttps ? https.Agent : http.Agent
     const ag = new Base({ keepAlive: true, maxSockets: 64 })
-    if (isHttps) ag.createConnection = (options, cb) => { connectViaProxy(options.host, Number(options.port) || 443, p).then((s) => cb(null, s), (er) => cb(er)) }
+    if (isHttps) ag.createConnection = (options, cb) => {
+      // 每请求的取消/预算上下文通过自定义请求选项传入（Node 会把 reqOpts 透传给 createConnection）。
+      const ctl = options._mgCtl || {}
+      const remaining = ctl.budget ? ctl.budget.remaining() : Infinity
+      const capMs = Number(ctl.connectMs) > 0 ? Number(ctl.connectMs) : 0
+      const timeoutMs = Number.isFinite(remaining) ? (capMs > 0 ? Math.min(capMs, remaining) : remaining) : capMs
+      connectViaProxy(options.host, Number(options.port) || 443, p, { signal: ctl.signal, timeoutMs, budget: ctl.budget }).then((s) => cb(null, s), (er) => cb(er))
+    }
     return ag
   }
   e = { host: p.host, port: p.port, https: make(true), http: make(false) }
@@ -80,12 +105,12 @@ function proxyAgentFor(proxy) {
 // 统一构建请求上下文：按是否回环 + 是否配置代理，决定直连还是走代理。
 //  - https 目标经代理：CONNECT 隧道（origin-form 路径 + 保持目标 host 供 SNI/Host）
 //  - http 目标经代理：absolute-form（path 为完整 URL + 注入 Host 头）
-function ctxFor(provider, url, method, headers) {
+function ctxFor(provider, url, method, headers, ctl) {
   const isHttps = url.protocol === 'https:'
   const mod = isHttps ? https : http
   const proxy = (provider && provider.proxy && !LOOPBACK.has(url.hostname)) ? proxyAgentFor(provider.proxy) : null
   if (proxy) {
-    if (isHttps) return { mod, reqOpts: { method, hostname: url.hostname, port: url.port || 443, path: url.pathname + url.search, headers, agent: proxy.https } }
+    if (isHttps) return { mod, reqOpts: { method, hostname: url.hostname, port: url.port || 443, path: url.pathname + url.search, headers, agent: proxy.https, _mgCtl: ctl } }
     return { mod, reqOpts: { method, hostname: proxy.host, port: proxy.port, path: url.href, headers: Object.assign({}, headers, { host: url.host }), agent: proxy.http } }
   }
   return { mod, reqOpts: { method, hostname: url.hostname, port: url.port || (isHttps ? 443 : 80), path: url.pathname + url.search, headers, agent: isHttps ? HTTPS_AGENT : HTTP_AGENT } }
@@ -96,6 +121,7 @@ function isRetryableCode(c) { return RETRYABLE_HTTP.has(c) }
 
 const NET_ERR_CODES = [ 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ECONNABORTED', 'UND_ERR_SOCKET' ]
 function isRetryableNetErr(err) {
+  if (err && err.aborted) return false   // 预算耗尽/客户端断开：不是上游网络故障，不重试
   const c = err && err.code
   return !c || NET_ERR_CODES.includes(c)
 }
@@ -113,26 +139,44 @@ function parseRetryAfter(headers) {
 }
 
 // 单次转发（全双工，流式）。resolve: 收到上游响应头即返回 stream
-function single(provider, url, method, headers, bodyBuf, timeout) {
+// ctl = { signal, budget, connectMs }：整体预算中止时立即销毁在途请求。
+function single(provider, url, method, headers, bodyBuf, timeout, ctl = {}) {
+  const signal = ctl.signal || null
+  const budget = ctl.budget || null
   return new Promise((resolve, reject) => {
-    const { mod, reqOpts } = ctxFor(provider, url, method, headers)
+    const remaining = budget ? budget.remaining() : Infinity
+    // 剩余预算已耗尽：不再建连
+    if (budget && budget.expired()) { reject(abortedError((budget && budget.reason) || 'request_timeout')); return }
+    const effFirstByte = Number.isFinite(remaining) ? Math.min(timeout.firstByteMs, Math.max(0, remaining)) : timeout.firstByteMs
+    const effIdle = Number.isFinite(remaining) ? Math.min(timeout.idleMs || 60000, Math.max(1, remaining)) : (timeout.idleMs || 60000)
+    const { mod, reqOpts } = ctxFor(provider, url, method, headers, Object.assign({}, ctl, { connectMs: effFirstByte }))
     let settled = false
+    let firstByteTimer = null
+    const cleanup = () => {
+      if (firstByteTimer) { clearTimeout(firstByteTimer); firstByteTimer = null }
+      if (signal && onAbort) { try { signal.removeEventListener('abort', onAbort) } catch { } }
+    }
+    const onAbort = () => req.destroy(abortedError(reasonOf(budget)))
     const req = mod.request(reqOpts, (res) => {
       settled = true
-      clearTimeout(firstByteTimer)
+      cleanup()
       // 头到达后转入空闲检测（idleMs）：思考型上游首 token 前可静默数十秒，
       // 沿用 connectMs 会把活连接误杀在 15s（connectMs 只该管建连阶段）
-      req.setTimeout(timeout.idleMs || 60000, () => req.destroy(Object.assign(new Error('upstream idle'), { code: 'ETIMEDOUT' })))
+      req.setTimeout(effIdle, () => req.destroy(Object.assign(new Error('upstream idle'), { code: 'ETIMEDOUT' })))
       resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, headers: res.headers, stream: res, retryAfter: parseRetryAfter(res.headers) })
     })
-    const firstByteTimer = setTimeout(() => req.destroy(new Error('first-byte timeout')), timeout.firstByteMs)
+    firstByteTimer = setTimeout(() => req.destroy(new Error('first-byte timeout')), effFirstByte)
     // 建连+等响应头阶段：总时长由 firstByteTimer 墙钟兜底，socket 静默上限对齐 firstByteMs，
     // 避免慢思考上游被更短的 connect 空闲定时器提前掐断
-    req.setTimeout(timeout.firstByteMs, () => req.destroy(Object.assign(new Error('connect timeout'), { code: 'ETIMEDOUT' })))
+    req.setTimeout(effFirstByte, () => req.destroy(Object.assign(new Error('connect timeout'), { code: 'ETIMEDOUT' })))
+    if (signal) {
+      if (signal.aborted) { req.destroy(abortedError(reasonOf(budget))); return }
+      try { signal.addEventListener('abort', onAbort, { once: true }) } catch { }
+    }
     req.on('error', (err) => {
       if (settled) return
       settled = true
-      clearTimeout(firstByteTimer)
+      cleanup()
       reject(err)
     })
     if (bodyBuf && bodyBuf.length) req.write(bodyBuf)
@@ -140,12 +184,14 @@ function single(provider, url, method, headers, bodyBuf, timeout) {
   })
 }
 
-async function settle(attempt, cfg, last) {
+function reasonOf(budget) { return (budget && budget.reason) || 'request_timeout' }
+
+async function settle(attempt, cfg, last, signal) {
   const ra = last && last.retryAfter
-  if (ra != null) await sleep(ra + Math.random() * 40)
+  if (ra != null) await sleepWith(ra + Math.random() * 40, signal)
   else {
     const base = Math.min(cfg.maxDelayMs, cfg.initialDelayMs * Math.pow(2, attempt - 1))
-    await sleep(base + base * (cfg.jitter || 0) * Math.random())
+    await sleepWith(base + base * (cfg.jitter || 0) * Math.random(), signal)
   }
 }
 
@@ -167,28 +213,35 @@ export function upstreamUrl(provider, path) {
  *  - reject(err)                 → 网络错或 5xx/429 重试耗尽：视为 provider 不可用（err.status 表示状态码）
  * 重试次数附在结果/错误 .retries。
  */
-export async function forward(provider, path, method, headers, bodyBuf, opts = {}, log) {
+export async function forward(provider, path, method, headers, bodyBuf, opts = {}, log, ctl = {}) {
   const url = upstreamUrl(provider, path)
   const retry = Object.assign({ maxAttempts: 1, initialDelayMs: 500, maxDelayMs: 8000, jitter: 0.2 }, opts.retry)
   const timeout = Object.assign({ connectMs: 10000, firstByteMs: 60000, idleMs: 60000 }, opts.timeout)
   const overallMs = timeout.overallMs || 0
+  const budget = ctl.budget || null
+  const signal = ctl.signal || (budget && budget.signal) || null
   const t0 = Date.now()
+  // 统一 deadline：请求级预算优先；无预算时沿用 overallMs（既有语义），两者都是硬上限
+  const deadlineAt = budget && budget.deadlineAt != null ? budget.deadlineAt : (overallMs ? t0 + overallMs : null)
+  const timeoutErr = (attempt, detail) => { const e = abortedError((budget && budget.reason) || 'request_timeout', detail); e.retries = attempt - 1; return e }
 
   let last
   for (let attempt = 1; attempt <= retry.maxAttempts; attempt++) {
-    if (overallMs && Date.now() - t0 > overallMs) { const e = new Error('overall timeout (' + overallMs + 'ms)'); e.status = 408; e.retries = attempt - 1; e.providerFail = true; throw e }
+    if (budget && budget.expired()) throw timeoutErr(attempt)
+    if (deadlineAt != null && Date.now() >= deadlineAt) throw timeoutErr(attempt, 'overall timeout (' + Math.round(deadlineAt - t0) + 'ms)')
     try {
-      const result = await single(provider, url, method, headers, bodyBuf, timeout)
+      const result = await single(provider, url, method, headers, bodyBuf, timeout, Object.assign({}, ctl, { budget }))
       if (result.ok || !isRetryableCode(result.status)) { result.retries = attempt - 1; return result }
       last = result
       log && log.warn('upstream retryable status', result.status, 'attempt', attempt, '/', retry.maxAttempts)
     } catch (err) {
       last = err
+      if (err && err.aborted) { err.retries = attempt - 1; throw err }   // 预算/客户端取消：立即收尾，不重试不熔断
       if (!isRetryableNetErr(err)) throw err            // 非网络类致命错，直接抛
       if (attempt >= retry.maxAttempts) throw err        // 重试耗尽 → provider 失败
       log && log.warn('upstream error', err.code || err.message, 'attempt', attempt, '/', retry.maxAttempts)
     }
-    if (attempt < retry.maxAttempts) await settle(attempt, retry, last)
+    if (attempt < retry.maxAttempts) await settle(attempt, retry, last, signal)
   }
   // 可重试状态码耗尽 → 抛 provider 失败
   const fail = new Error('upstream failed: ' + (last && last.status))
