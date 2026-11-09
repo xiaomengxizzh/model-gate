@@ -2,6 +2,16 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
+## 2026-11-09 整合候选分支（integration/modelgate-next）
+
+起点 `35bed9b`（`dev/gateway-audit-20261108` @ `3a4ba89` + ui-next 三个预览提交）。候选分支只做整合与新增，不改写审计分支历史；旧 `/` 与 `/admin` 保留。
+
+已完成：G1 429 归因 / Retry-After / 工具请求不重放移植；管理面配置投影修复（虚拟模型 `expiresAt/note`、`clientKey` 掩码）；`/ui-next` 静态资源安全服务与数据面 `out.headers` 透传；六大功能区前端（Dashboard / Providers / Models & Routing / Clients / Observability / Security & Settings）与共享草稿/409 事务；浏览器验收 14/14；DSH 真实客户端 × 本地 Mock 的 Chat、Responses 桥、原生 Responses 三条路径 PASS。
+
+验证：`npm test` 28/28 隔离套件；`npm run check` 0（含 15 个 UI 模块语法）；`npm run docs:check` PASS；`node scripts/check-metadata.mjs` PASS (21)；浏览器证据见 [验收报告](roadmap/2026-11-09-integration-candidate-report.md)。
+
+未验证/阻断：真实上游与真实客户端计费调用（未获本轮授权，BLOCKED）；Codex CLI 因宿主 bwrap user namespace 不可用（BLOCKED，未使用跳过沙箱参数）；DSH 工具调用本轮未复跑；Web 备份/恢复无后端 API（NOT_SUPPORTED）。生产 8787、systemd、真实 Key 与用户私有配置均未触碰。
+
 ## 当前状态（2026-11-09 第三批/真实链路验证收口）
 
 分支 `dev/gateway-audit-20261108`。第一批三个提交：`33853d2`（契约基线 + P1 卡）、`522da4a`（旧套件隔离 + 日志脱敏性能）、`9a41547`（指标口径）。第二批（2026-11-09）：`5498c1a`（MG-002 预算/取消/背压 + 契约 + deadline 测试）、`42f06cd`（MG-009 投影契约/fixture/托盘文档）、`81b37e6`（MG-009 服务端投影清洗、Key 白名单、面板版本）、`027a97f`（MG-015 Responses 契约草案）。

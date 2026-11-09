@@ -2,6 +2,29 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-09 整合候选版 /ui-next 控制台（未发布，integration/modelgate-next）
+
+### Added
+- **全新 `/ui-next` 控制台**（`src/ui-next/`，零第三方依赖）：Dashboard、Providers、Models & Routing、Clients、Observability、Security & Settings 六个功能区；共享 API 客户端（内存令牌、统一错误与 401 锁定）、状态 store、hash 路由、组件库（表格/对话框/图表/toast）、版本化配置草稿与差异预览、409 冲突重载、Provider/模型/虚拟模型 CRUD、独立 Key 通道、探活与模型测试的费用确认、客户端模板与验证等级、日志过滤与真实派生分类、配置导出脱敏。旧 `/` 与 `/admin` 保留。
+- `/ui-next/**` 只读静态服务：扩展名白名单、编码穿越与隐藏文件拒绝、严格 CSP（`default-src 'none'; script-src 'self'`）、nosniff、no-referrer。
+- 浏览器验收夹具与工具：`scripts/test/ui-fixture.mjs`（隔离配置 + 本地 mock 上游 + 可复现流量）、`scripts/test/ui-browser-check.mjs`（零依赖 CDP：桌面/平板/手机、明暗主题、409、XSS、鉴权、控制台健康）。证据见 `docs/evidence/2026-11-09-integration/`。
+
+### Fixed
+- `GET /api/config` 未回显虚拟模型 `expiresAt/note` → 前端一次“读→改→保存”会清空元数据；现从 `keys.__mg_vm_meta_<name>` 投影并在 `offline/ui-contract.test.mjs` 回归。
+- `GET /api/config` 的 `defaults.clientKey` 只检查明文 defaults，永远回显空串；现同时检查加密 `__mg_client` 并回显 `********`。
+- 数据面 JSON 分发忽略 `out.headers`，429 `Retry-After` 无法到达客户端；两处分发已合并 `out.headers`。
+
+### 已验证
+- `npm test`：28/28 隔离套件通过；`npm run check` 0（含 UI 模块 15/15）；docs:check PASS；metadata 21 项 PASS。
+- 浏览器：14/14 检查通过（锁定页、真实指标、六个路由、对话框 Esc、409、XSS 文本化、主题、1440/1024/768/390 无横向溢出、错误令牌、0 未捕获异常）。
+- DSH 0.2.2-rc.1 × 本地 mock：Chat、Responses Chat 桥、原生 Responses 三条路径均 exit 0；真实上游未调用。
+
+### 未验证 / 阻断
+- Codex CLI：宿主 `bwrap: No permissions to create a new namespace`，未使用跳过沙箱参数，BLOCKED。
+- 真实上游与真实客户端计费调用：本轮无逐次费用授权，BLOCKED；工具调用未复跑。
+- Web 备份/恢复：后端无 API，界面明确 NOT_SUPPORTED。
+- 嵌入/重排内联链的 429 仍按旧逻辑计熔断；流式重连对工具请求的重发边界未改。
+
 ## 2026-11-09 429 归因 / Retry-After / 非幂等不重放治理（未发布，G1 移植）
 
 ### Added
