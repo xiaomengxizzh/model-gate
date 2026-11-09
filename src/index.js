@@ -318,6 +318,17 @@ function withConfigWriteLock(fn) {
 // —— 配置结构校验单一入口（MG-003）——
 // 形状与保留键在这里判完再进入语义校验；任何一步失败都不写盘、不改内存。
 const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+// —— 投影字段剥离（MG-009 D-2）——
+// /api/status 把配置与运行时统计合并在同一投影里返回；面板原样回送保存时，统计/探针字段
+// 曾会被写进 gateway.local.json（probe/requests/errors/...）。这里以**显式 denylist** 剥离：
+// 未识别的扩展字段仍然保留（不透明袋要求，见 docs/contracts/management-ui-projection-v1.md §3.2/§3.3）。
+const PROVIDER_RUNTIME_FIELDS = new Set(['hasKey', 'keySource', 'keyOk', 'st', 'probe'])
+const MODEL_RUNTIME_FIELDS = new Set(['probe', 'requests', 'errors', 'tokens', 'today', 'hitRate', 'affinity', 'avgMs', 'inTokens', 'outTokens', 'latencySum', 'latencyCount'])
+function stripRuntimeFields(obj, deny) {
+  const out = {}
+  for (const [k, v] of Object.entries(obj || {})) if (!deny.has(k)) out[k] = v
+  return out
+}
 function isPlainObject(v) { return !!v && typeof v === 'object' && !Array.isArray(v) }
 function reservedKeyIn(obj, label) {
   for (const k of Object.keys(obj || {})) if (RESERVED_KEYS.has(k)) return { error: label + ' 含保留键名：' + k }
@@ -401,7 +412,10 @@ async function doSaveConfig(state, body) {
     return { error: 'defaults.proxyMode 仅支持 auto（按配置）/direct（全直连）/global（全走代理）' }
   }
   const clean = {}
-  for (const [id, p] of Object.entries(providers || {})) { const { keyOk, keySource, ...rest } = p || {}; clean[id] = rest }
+  for (const [id, p] of Object.entries(providers || {})) clean[id] = stripRuntimeFields(p, PROVIDER_RUNTIME_FIELDS)
+  // 模型：同样剥离运行时统计/探针字段后再落盘（未知扩展字段保留）
+  const cleanModels = {}
+  for (const [name, m] of Object.entries(models || {})) cleanModels[name] = stripRuntimeFields(m, MODEL_RUNTIME_FIELDS)
   // —— virtualModels 强校验（面板保存路径；loadConfig 另有容错规范化，手改坏配置不宕机）——
   const vmsIn = body.virtualModels !== undefined ? body.virtualModels : (cur.virtualModels || [])
   const vmNames = new Set()
@@ -461,7 +475,7 @@ async function doSaveConfig(state, body) {
   for (const n of Object.keys(cur.models || {})) if (!Object.prototype.hasOwnProperty.call(models || {}, n)) removedModels.add(n)
   for (const id of Object.keys(providers || {})) removedProviders.delete(id)
   for (const n of Object.keys(models || {})) removedModels.delete(n)
-  const localOut = { configVersion: newVersion, providers: clean, models, defaults, virtualModels: cleanVms }
+  const localOut = { configVersion: newVersion, providers: clean, models: cleanModels, defaults, virtualModels: cleanVms }
   if (removedProviders.size || removedModels.size) localOut._removed = { providers: [...removedProviders], models: [...removedModels] }
   writeJsonAtomic(state.paths.local, localOut)
   reloadConfig(state)
@@ -475,6 +489,17 @@ async function doSaveKeys(state, body) {
   if (!keyId) return { error: '缺少 provider id' }
   if (RESERVED_KEYS.has(keyId)) return { error: '非法的 Key 标识：' + keyId }
   const keys = Object.assign({}, readKeysFresh(state.paths.keys))
+  // Key 标识白名单（MG-009 §8.3）：投影里能表达的凭据身份才能写，避免留下 UI 无法删除的孤儿键。
+  // 允许并集 = 当前上游 id ∪ 当前虚拟模型 __mg_vm_<name> ∪ 内部键 ∪ keys 库已存在条目（用于清理历史孤儿键）。
+  const allowedKeyIds = new Set([
+    ...Object.keys(state.cfg.providers || {}),
+    ...(state.cfg.virtualModels || []).map((v) => '__mg_vm_' + v.name),
+    '__mg_client', '__mg_admin',
+    ...Object.keys(keys),
+  ])
+  if (!allowedKeyIds.has(keyId)) return { error: '未知的 Key 标识：' + keyId }
+  // 内部元数据条目（__mg_vm_meta_*）只允许删除/清理，不允许把对象覆盖成字符串 Key
+  if (keyId.startsWith('__mg_vm_meta_') && body.key) return { error: '内部元数据条目不可经 /api/keys 写入：' + keyId }
   if (body.key) keys[keyId] = body.key
   else delete keys[keyId]
   const enc = keysEncrypt(keys)

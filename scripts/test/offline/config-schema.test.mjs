@@ -107,11 +107,12 @@ test('MG-003 删除语义：删除的上游/模型重启后不复活，重新加
   assert.deepEqual(st.providers.map((p) => p.id), ['p1'])
 })
 
-test('MG-003 keys 标识：保留键与空 id 被拒', { timeout: 25000 }, async (t) => {
+test('MG-003/MG-009 keys 标识：保留键、空 id 与未知标识被拒', { timeout: 25000 }, async (t) => {
   const gw = await startGateway({ name: 'schema-keys' })
   t.after(() => gw.stop())
   assert.equal((await gw.post('/api/keys', { id: '   ', key: 'k' })).status, 400)
   assert.equal((await gw.post('/api/keys', { id: '__proto__', key: 'k' })).status, 400)
   assert.equal((await gw.post('/api/keys', { id: 'constructor', key: 'k' })).status, 400)
-  assert.equal((await gw.post('/api/keys', { id: 'p1', key: 'k' })).status, 200)
+  // MG-009 §8.3：未配置的上游/虚拟模型标识不再允许（防孤儿键；白名单见 admin-projection.test.mjs）
+  assert.equal((await gw.post('/api/keys', { id: 'p1', key: 'k' })).status, 400)
 })

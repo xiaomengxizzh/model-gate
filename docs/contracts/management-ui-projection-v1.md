@@ -1,6 +1,6 @@
 # 管理面 UI 投影契约 v1（MG-009 草案，未冻结）
 
-适用提交：`dev/gateway-audit-20261108` / HEAD `b2283ae`（2026-11-09）。本文件是 [管理 API v1 基线](management-api-v1.md)（MG-016）之上的**前端读写契约**，不修改、不替代基线；与基线冲突时以基线为准，本文件只补充"状态投影如何被 UI 读取、配置如何被 UI 回存"。
+适用提交：`dev/gateway-audit-20261108` / MG-002 `5498c1a` + 本卡工作树（2026-11-09）。**服务端 D-2/D-7 与 §8 白名单已实现**（见 §5.3、§8.4 的状态标注），面板 D-3/D-7 已修，浏览器与托盘实跑仍未执行。本文件是 [管理 API v1 基线](management-api-v1.md)（MG-016）之上的**前端读写契约**，不修改、不替代基线；与基线冲突时以基线为准，本文件只补充"状态投影如何被 UI 读取、配置如何被 UI 回存"。
 
 源码依据：`src/index.js` 的 `buildStatus`（174–229）、`doSaveConfig`（331–454）、`doSaveKeys`（456–474）、`makeHandler`（552 起）；`src/admin.html` 的 `buildCfrom`（632–635）、`ingestStatus`（637–641）、`saveAll`（730–733）。行号是 HEAD `b2283ae` 的快照；源码并行演进后以函数名检索为准。既有回归见 [admin-contract.test.mjs](../../scripts/test/offline/admin-contract.test.mjs)。
 
@@ -162,13 +162,13 @@ POST /api/config/save
 
 | 编号 | 偏离 | 影响 | 归属 |
 | --- | --- | --- | --- |
-| D-1 | `admin.html` 的 `buildCfrom` 用白名单重建 `providers/models`，未知字段被丢弃 | 保存即静默洗掉扩展字段 | F2 用不透明袋修复 |
-| D-2 | `buildCfrom` 把 `probe/requests/errors/avgMs` 放进 `C.models`，`saveAll` 原样回传；服务端不剥离 `models[*]` 运行时字段 | 统计/探针字段被写进 `gateway.local.json`，配置污染 | F2 剥离 + F1 服务端按 schema 清洗（需改 src，另行授权） |
-| D-3 | `ingestStatus` 每 3 秒把 `ST.configVersion` 更新为服务端最新值，即使 `dirty` | 他处保存后，本页下一次保存会用新版本号覆盖，409 保护失效 | F2 在 `dirty` 时冻结 `baseVersion`，轮询只更新统计 |
+| D-1 | `admin.html` 的 `buildCfrom` 用白名单重建 `providers/models`，未知字段被丢弃 | 保存即静默洗掉扩展字段 | F2 用不透明袋修复（未做） |
+| D-2 | **已修复（2026-11-09）**：服务端 `doSaveConfig` 以显式 denylist 剥离 `providers[*]`（hasKey/keySource/keyOk/st/probe）与 `models[*]`（probe/requests/errors/tokens/today/hitRate/affinity/avgMs/inTokens/outTokens/latencySum/latencyCount）后再落盘；未知扩展字段保留。面板仍会回送投影字段，但已不再污染配置 | — | 已实现，回归见 `scripts/test/offline/admin-projection.test.mjs` |
+| D-3 | **已修复（2026-11-09，面板侧）**：`markDirty` 首次脏化时冻结 `baseVersion`，`ingestStatus` 在 `dirty` 且已冻结时不覆盖 `ST.configVersion`；保存/409/重载成功后清空 | — | 静态回归见 admin-projection.test.mjs；浏览器实跑 NOT EXECUTED |
 | D-4 | `providers/models` 无服务端 PATCH/合并；只有整体替换 | 客户端必须自己保证完整视图，升级后旧视图可能删掉新字段 | F1 评估 PATCH 语义（v1.1） |
 | D-5 | `virtualModels` 未知字段被 `cleanVms` 丢弃 | 扩展项不能放在 VM 条目上 | 契约接受；扩展项放 `defaults` |
 | D-6 | 没有 `GET /api/config` 只读配置投影 | UI 只能从 `/api/status` 反推配置，易把统计带进表单 | F1 新增只读配置投影（需改 src） |
-| D-7 | 当前 `admin.html` 的上游 Key 弹窗调用 `/api/keys` 时不带 `version`（虚拟模型 Key 路径带） | 并发 Key 修改不会触发 409，配置版本仍会 +1，冲突语义不一致 | F2 所有 Key 写入都带 `baseVersion`；回读后更新 |
+| D-7 | **已修复（2026-11-09）**：`admin.html` 新增 `postKey()`，上游 Key 保存/删除与虚拟模型 Key 均带 `baseVersion ?? ST.configVersion`，409 提示后加载最新；服务端 `doSaveKeys` 本就有 `versionConflict`。服务端缺省 `version` 仍放行以兼容旧客户端 | — | 回归见 admin-projection.test.mjs（409/当前/缺省三态） |
 
 ## 6. 409 版本冲突与刷新反馈
 
@@ -268,11 +268,11 @@ POST /api/config/save
 - 内部键 `__mg_client`、`__mg_admin`；
 - **keys 库中已存在的条目**（用于清理历史孤儿键，避免白名单锁死）。
 
-拒绝时建议 `400 {error:"未知的 Key 标识"}`；是否附带稳定 `code` 待定。另需决定：删除 provider 时是否同步删除其 Key（建议是）；重命名是否允许（当前无重命名 API，按删除+新建处理）。
+拒绝返回 `400 {error:'未知的 Key 标识：<id>'}`（沿用管理面 `{error:string}` 信封，未新增 `code`）。删除 provider 时同步删除其 Key **仍未实现**（白名单通过“keys 库已有条目可删除”保留人工清理路径）；重命名按删除+新建处理。
 
 ### 8.4 状态
 
-**PENDING**：本卡只记录契约与决策依据，不改 `src`、不实现白名单。归属：MG-003 余项 + MG-009；最终由 Lead 决定并在 v1 冻结前落地。UI 在实现前只能对投影中存在的上游与当前 VM 发 `/api/keys`，不得提供"任意 id"入口。
+**IMPLEMENTED（2026-11-09，MG-009）**：`doSaveKeys` 采纳上面并集规则；内部元数据条目 `__mg_vm_meta_*` 只允许删除、不允许把对象覆盖成字符串 Key。回归见 `scripts/test/offline/admin-projection.test.mjs`（允许集/拒绝集/删除路径）。Provider 删除联动清理与 `code` 字段仍未落地，留待 v1 冻结前决定。
 
 ## 9. Fixture 与 F0
 

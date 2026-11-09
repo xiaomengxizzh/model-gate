@@ -2,6 +2,26 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-09 管理面投影清洗与 Key 标识白名单（未发布，MG-009）
+
+### Fixed
+
+- **配置保存把投影统计字段写进 `gateway.local.json`（D-2）**：`/api/status` 的 `providers`/`models` 混有 `st`/`probe`/`requests`/`errors`/`tokens` 等运行时字段，旧面板原样回送时被整体替换落盘，配置被污染。`doSaveConfig` 现以显式 denylist 剥离 `providers[*]`（hasKey/keySource/keyOk/st/probe）与 `models[*]`（probe/requests/errors/tokens/today/hitRate/affinity/avgMs/inTokens/outTokens/latencySum/latencyCount）后再写入；**未识别的扩展字段仍保留**（不透明袋约定）。
+- **Key 保存无版本校验（D-7，面板侧）**：`admin.html` 上游 Key 保存/删除与虚拟模型 Key 统一走 `postKey()`，携带 `baseVersion ?? ST.configVersion`；409 提示后加载最新，不再静默覆盖。
+- **dirty 时 3s 轮询洗掉保存基准版本（D-3）**：首次脏化冻结 `baseVersion`，`ingestStatus` 在脏状态不覆盖 `ST.configVersion`；保存/409/重载成功后清空。
+- **`/api/keys` 可写任意 id（§8）**：未配置的上游/虚拟模型标识不再接受，避免产生 UI 无法删除的孤儿键。
+
+### Added
+
+- `/api/keys` 标识白名单（MG-009 §8.3）：允许并集 = 当前 `providers` 键 ∪ 当前虚拟模型 `__mg_vm_<name>` ∪ `__mg_client`/`__mg_admin` ∪ keys 库已存在条目（保留历史键清理路径）；未知标识返回 `400 {error:'未知的 Key 标识：<id>'}`；`__mg_vm_meta_*` 只允许删除，不允许写字符串。
+- 管理面 UI 投影契约与前端 F0 fixture（`docs/contracts/management-ui-projection-v1.md`、`docs/contracts/fixtures/v1/`）与托盘部署说明（`docs/how-to/tray-deployment.md`）。
+- 回归：`scripts/test/offline/admin-projection.test.mjs`（D-2 剥离与扩展字段保留、白名单允许/拒绝/删除、Key 版本三态、面板 D-3 静态检查）；`config-schema` 的未知 `id` 断言同步改为 400。
+
+### 验证
+
+- `npm run check` 0；`npm test` 15/15 隔离套件；`MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs` 27/27 文件；`npm run docs:check` PASS。
+- 未验证：浏览器真实鉴权/保存回读/双标签 409、托盘实跑、Windows/macOS、Node 18/20、真实上游与计费。
+
 ## 2026-11-09 请求生命周期预算与 SSE 背压（未发布，MG-002）
 
 ### Fixed

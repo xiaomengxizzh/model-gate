@@ -297,6 +297,8 @@ const INTERVAL=3000,LOG_INTERVAL=2200;
 let timerA=null,timerB=null,liveOn=true;
 const prev={requests:0,errors:0,retries:0,interrupts:0};
 let startedAt=Date.now(),logCounter=0,dirty=false,Cinit=false,modalOpen=false;
+// MG-009 D-3：首次进入脏状态时冻结保存基准版本，避免 3s 轮询把 configVersion 推走导致 409 保护失效
+let baseVersion=null;
 let TOKEN=localStorage.getItem('mg-token')||'';
 let gwStartedAt=0; // 当前网关实例的启动时间戳（与 localStorage mg-startedAt 比对，判断是否重启过）
 let C={providers:{},models:{},defaults:{provider:null,retry:{},timeout:{}},virtualModels:[]};
@@ -389,13 +391,15 @@ document.querySelectorAll('#msCard .ms-tabs button').forEach(function(b){ b.oncl
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function gem(id){const i=(id||'').toLowerCase();return i.includes('deepseek')?'deepseek':i.includes('relay')?'relay':i.includes('local')?'local':'generic'}
 function toast(msg,type){const t=$('#toast');t.textContent=msg;t.className='toast show '+(type||'');clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),2200)}
-function markDirty(){dirty=true}
+function markDirty(){dirty=true;if(baseVersion==null)baseVersion=ST.configVersion}
 function getTemplates(){try{return JSON.parse(localStorage.getItem('mg-templates')||'{}')||{}}catch(e){return{}}}
 function setTemplates(m){localStorage.setItem('mg-templates',JSON.stringify(m||{}))}
 
 /* 鉴权 fetch */
 async function japi(path,opts={}){const h=Object.assign({'Content-Type':'application/json'},opts.headers||{});if(TOKEN)h['Authorization']='Bearer '+TOKEN;const r=await fetch(path,Object.assign({},opts,{headers:h}));if(r.status===401){openToken('需要管理令牌');throw new Error('unauthorized')}return r}
 async function jpost(path,body){const r=await japi(path,{method:'POST',body:JSON.stringify(body||{})});return{ok:r.ok,status:r.status,d:await r.json().catch(()=>({}))}}
+// MG-009 D-7：Key 保存带版本；409 视为他处已更新，提示后加载最新（不自动重试）
+async function postKey(id,key){const r=await jpost('/api/keys',{id,key,version:(baseVersion==null?ST.configVersion:baseVersion)});if(r.status===409){if(confirm('配置已被他处更新（版本过期），加载最新后请重设 Key。')){dirty=false;baseVersion=null;await pollStatus()}}else if(r.ok){toast('Key 已'+(key?'更新':'清除'),'ok')}else{toast((r.d&&r.d.error)||'Key 保存失败','err')}return r}
 function openToken(hint){if(modalOpen)return;modalOpen=true;openModal(hint||'管理令牌','<div class="field"><label>管理令牌（MG_ADMIN_TOKEN）</label><input class="inp" id="tokV" type="password" placeholder="留空=关闭保护"></div><div class="hint2">设置后写入服务端（加密存储）并立即生效，未授权请求将被拒绝；留空则关闭保护。若启动时设了 MG_ADMIN_TOKEN 环境变量，以环境变量为准。</div>',async()=>{const t=(v('tokV')||'').trim();const r=await jpost('/api/admin-token',{token:t});if(r.ok){TOKEN=t;localStorage.setItem('mg-token',TOKEN);localStorage.setItem('mg-startedAt',String(gwStartedAt));modalOpen=false;toast(t?'管理令牌已启用':'管理令牌已关闭','ok');pollStatus()}else{toast('设置失败：'+((r.d&&r.d.error)||'未知错误'),'err')}})}
 $('#tokenBtn').addEventListener('click',()=>{TOKEN&&void 0;openToken(TOKEN?'修改管理令牌':'设置管理令牌')}); // 点击即弹输入
 
@@ -605,8 +609,8 @@ function bindVmEvents(box){
     const role=t.dataset.vrole
     if(role==='name'){const nn=t.value.trim();if(_vmOpen.has(v.name)){_vmOpen.delete(v.name);_vmOpen.add(nn)}v.name=nn;markDirty()}
     else if(role==='mode'&&t.closest('.diritem')){v.directory[+t.closest('.diritem').dataset.di].mode=t.value;markDirty()}
-    else if(role==='vmkey'){const val=t.value.trim();const r=await jpost('/api/keys',{id:'__mg_vm_'+v.name,key:val,version:ST.configVersion})
-      if(r.status===409){if(confirm('配置已被他处更新，加载最新后请重设 Key。')){dirty=false;await pollStatus()}}
+    else if(role==='vmkey'){const val=t.value.trim();const r=await jpost('/api/keys',{id:'__mg_vm_'+v.name,key:val,version:(baseVersion==null?ST.configVersion:baseVersion)})
+      if(r.status===409){if(confirm('配置已被他处更新，加载最新后请重设 Key。')){dirty=false;baseVersion=null;await pollStatus()}}
       else if(r.ok){toast('独立 Key 已'+(val?'更新':'清除'),'ok');delete _vmKeyDraft[v.name];t.value='';pollStatus()}
       else toast((r.d&&r.d.error)||'Key 保存失败','err')}
   }
@@ -634,7 +638,10 @@ function buildCfrom(s){C.providers={};for(const p of s.providers||[])C.providers
   C.defaults={provider:(s.defaults&&s.defaults.provider)||null,model:(s.defaults&&s.defaults.model)||'',clientKey:(s.defaults&&s.defaults.clientKey)||'',directory:(s.defaults&&s.defaults.directory)||[],retry:(s.defaults&&s.defaults.retry)||{},timeout:(s.defaults&&s.defaults.timeout)||{},concurrency:(s.defaults&&s.defaults.concurrency)||{},extraHeaders:(s.defaults&&s.defaults.extraHeaders)||{},proxy:(s.defaults&&s.defaults.proxy)||'',proxyMode:(s.defaults&&s.defaults.proxyMode)||'auto'};
   C.virtualModels=(s.virtualModels||[]).map(v=>({name:v.name,directory:v.directory||[],quota:v.quota||0,dailyQuota:v.dailyQuota||0,maxContext:v.maxContext||0,maxConcurrent:v.maxConcurrent||0,qps:v.qps||0,keySet:!!v.keySet,expiresAt:v.expiresAt||'',note:v.note||''}));
   Cinit=true}
-function ingestStatus(s){if(s.startedAt)startedAt=s.startedAt;(s.needAuth!=null)&&(ST.needAuth=s.needAuth);ST.configVersion=s.configVersion||0;ST.global=s.global||{};ST.server=s.server||{};ST.dialogues=s.dialogues||[];ST.byP={};for(const p of s.providers||[])ST.byP[p.id]=p.st;
+function ingestStatus(s){if(s.startedAt)startedAt=s.startedAt;(s.needAuth!=null)&&(ST.needAuth=s.needAuth);
+  // D-3：脏状态期间不覆盖已冻结的基准版本（否则每 3s 轮询会把 409 保护洗掉）；另存服务端版本用于展示
+  ST.serverVersion=s.configVersion||0;
+  if(!dirty||baseVersion==null)ST.configVersion=s.configVersion||0;ST.global=s.global||{};ST.server=s.server||{};ST.dialogues=s.dialogues||[];ST.byP={};for(const p of s.providers||[])ST.byP[p.id]=p.st;
   ST.byM={};for(const mn of s.models||[])ST.byM[mn.name]=mn;
   if(!Cinit){buildCfrom(s)}
   else{for(const p of s.providers||[]){if(C.providers[p.id]){C.providers[p.id].keyOk=p.hasKey;C.providers[p.id].keySource=p.keySource}}} // 每次轮询同步 Key 来源，保证删/存后徽标即时更新
@@ -706,8 +713,8 @@ document.addEventListener('click',(e)=>{const t=e.target.closest('[data-act]');i
     if(act==='edit'){const p=C.providers[id];openModal('编辑 · 上游',formProvider(id,p),()=>{const base=v('fBase').trim();if(!base){toast('Base URL 不能为空','err');return};C.providers[id]={baseUrl:base,apiKeyEnv:v('fEnv').trim(),pathPrefix:v('fPrefix').trim(),extraHeaders:parseHeaders(v('fHeaders')),api:v('fApi')||'openai',circuit:circuitOf(),proxy:v('fProxy').trim()};closeModal();saveAll()})}
     if(act==='del'){if(confirm('确定删除上游「'+id+'」？引用它的模型需改上游。')){const used=Object.keys(C.models).filter(m=>C.models[m].provider===id||(C.models[m].fallbacks||[]).includes(id));if(used.length){toast('该上游仍被 '+used.length+' 个模型引用，无法删除','err');return}delete C.providers[id];saveAll()}}
     if(act==='test'){(async()=>{toast('测试上游「'+id+'」…');try{const r=await jpost('/api/probe',{id});if(r.ok&&r.d.status)ingestStatus(r.d.status);const rr=r.d&&r.d.results&&r.d.results[0];renderProviders();toast(rr&&rr.ok?('已连通 · '+rr.ms+'ms'):('连接失败：'+((rr&&(rr.err||'HTTP '+rr.code))||'未知')),rr&&rr.ok?'ok':'err')}catch(e){toast('测试失败：'+e.message,'err')}})()}
-    if(act==='key'){openModal('设置 API Key · '+id,'<div class="field"><label>API Key（输入并确定=保存）</label><input class="inp" id="kVal" type="password" placeholder="sk-…"><div class="hint2">保存到本机 keys.local.json（加密，不入 git）</div></div><div class="hint2">当前来源：'+((C.providers[id].keySource==='keys')?'面板存储':'环境变量 '+(C.providers[id].apiKeyEnv||'未设')+'')+(C.providers[id].keyOk?' ·已配':' ·未配')+'</div><button class="dlk" id="delKeyBtn" type="button">删除存储的 Key，回退到环境变量</button>',async()=>{const key=v('kVal');await jpost('/api/keys',{id,key});closeModal();await pollStatus();toast('Key 已'+(key?'更新':'清除'),'ok')});
-      const _dk=$('#delKeyBtn');if(_dk&&_dk.addEventListener)_dk.addEventListener('click',async()=>{await jpost('/api/keys',{id,key:''});closeModal();await pollStatus();toast('已删除存储的 Key，回退到环境变量','ok')});}
+    if(act==='key'){openModal('设置 API Key · '+id,'<div class="field"><label>API Key（输入并确定=保存）</label><input class="inp" id="kVal" type="password" placeholder="sk-…"><div class="hint2">保存到本机 keys.local.json（加密，不入 git）</div></div><div class="hint2">当前来源：'+((C.providers[id].keySource==='keys')?'面板存储':'环境变量 '+(C.providers[id].apiKeyEnv||'未设')+'')+(C.providers[id].keyOk?' ·已配':' ·未配')+'</div><button class="dlk" id="delKeyBtn" type="button">删除存储的 Key，回退到环境变量</button>',async()=>{const key=v('kVal');await postKey(id,key);closeModal();await pollStatus()});
+      const _dk=$('#delKeyBtn');if(_dk&&_dk.addEventListener)_dk.addEventListener('click',async()=>{await postKey(id,'');closeModal();await pollStatus()});}
   }
   if(t.closest('#models')){
     const name=id;
@@ -727,9 +734,9 @@ $('#testAllModels').addEventListener('click',async()=>{const names=Object.keys(C
 
 function refresh(){renderProviders();renderModels();renderParams();renderStatsPanel();renderRoute();renderVirtualModels();renderModelStats()}
 
-async function saveAll(){const r=await jpost('/api/config/save',{providers:C.providers,models:C.models,defaults:C.defaults,virtualModels:C.virtualModels,version:ST.configVersion});
-  if(r.ok){dirty=false;if(r.d.status)ingestStatus(r.d.status);toast('配置已保存并生效','ok')}
-  else if(r.status===409){if(confirm('配置已被他处更新（版本过期）。加载最新配置将丢弃当前未保存修改，继续？')){dirty=false;await pollStatus();toast('已加载最新配置，请重新修改','ok')}}
+async function saveAll(){const r=await jpost('/api/config/save',{providers:C.providers,models:C.models,defaults:C.defaults,virtualModels:C.virtualModels,version:(baseVersion==null?ST.configVersion:baseVersion)});
+  if(r.ok){dirty=false;baseVersion=null;if(r.d.status)ingestStatus(r.d.status);toast('配置已保存并生效','ok')}
+  else if(r.status===409){if(confirm('配置已被他处更新（版本过期）。加载最新配置将丢弃当前未保存修改，继续？')){dirty=false;baseVersion=null;await pollStatus();toast('已加载最新配置，请重新修改','ok')}}
   else toast((r.d&&r.d.error)||'保存失败','err')}
 $('#saveAll').addEventListener('click',saveAll);
 $('#reloadCfg').addEventListener('click',async()=>{if(dirty&&!confirm('面板有未保存修改，确定丢弃并从文件重载？'))return;const r=await jpost('/api/config/reload',{});if(r.ok){dirty=false;await pollStatus();toast('已从配置文件重载','ok')}});

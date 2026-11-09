@@ -6,8 +6,8 @@
 
 分支 `dev/gateway-audit-20261108`。第一批三个提交：`33853d2`（契约基线 + P1 卡）、`522da4a`（旧套件隔离 + 日志脱敏性能）、`9a41547`（指标口径）；第二批为本轮未提交工作树（MG-002 实现 + 契约/测试，Lead 统一提交）。
 
-已闭环：MG-016、MG-001、MG-003、MG-005、MG-007、MG-006、MG-004、MG-010（工程侧）、MG-008（适配器半边）、**MG-002（请求生命周期预算/取消/SSE 背压）**。
-仍待办：MG-009（管理面投影与前端 fixture）、MG-015（Responses/Codex）、MG-011～MG-014（Embedding/Rerank/Audio-Image/Video）、MG-008 余项（探测/预热/failback 模型解析一致性、错误信封映射）。
+已闭环：MG-016、MG-001、MG-003、MG-005、MG-007、MG-006、MG-004、MG-010（工程侧）、MG-008（适配器半边）、**MG-002（请求生命周期预算/取消/SSE 背压）**、**MG-009（服务端投影清洗/Key 白名单/面板版本，浏览器实跑待 F2）**。
+仍待办：MG-015（Responses/Codex）、MG-011～MG-014（Embedding/Rerank/Audio-Image/Video）、MG-008 余项（探测/预热/failback 模型解析一致性、错误信封映射）、MG-009 余项（不透明袋 D-1、只读配置投影 D-6、browser/托盘实跑）。
 
 验证（本机 Node v24.22.2，全部离线 mock，未触真实上游）：
 
@@ -44,6 +44,7 @@
 | MG-006 | 指标口径分离：一次请求只计一次对话请求（token/缓存回调只累加数值）、状态字典按当前配置裁剪、对话/模型统计硬上限 | offline/metrics.test.mjs（2 组）；src/index.js、src/forward.js |
 | MG-007 | 统一关闭接口 close()（定时器清理 → 排空连接 → 原子落盘）、SIGTERM/SIGINT 优雅退出、损坏 stats 先备份再重建 | offline/lifecycle.test.mjs（2 组）；src/index.js |
 | MG-010 | Node 18/20/22 CI 矩阵（仅手动触发、零下载探测 runner 自带 node）、元数据核对脚本、LICENSE、部署/回滚与兼容矩阵文档 | scripts/check-metadata.mjs（21 项 PASS）；.github/workflows/check.yml；远程 CI **未执行** |
+| MG-009（服务端+面板） | D-2 保存剥离投影运行时字段（未知扩展保留）；`/api/keys` id 白名单（§8.3 并集 + meta 写保护）；D-7 Key 保存带版本；D-3 dirty 冻结 baseVersion | offline/admin-projection.test.mjs（4 组）；npm test 15/15；live 27/27 |
 | MG-002 | 新增 `src/budget.js`（请求级 deadline + AbortSignal 单一来源）；预算覆盖读 body/全部排队（QPS、provider/模型并发、429 退避）/代理 CONNECT/等头/非流式读体/SSE 中继与续传，并钳制 `loopMs`；排队 waiter 可取消（移除 + 归还 QPS 令牌 + release 恰好一次）；SSE 背压（write=false 暂停读上游、等待 drain，30s/8MiB 上限）；预算耗尽 504 `request_timeout`（流式则 `code=REQUEST_TIMEOUT` 错误事件 + `[DONE]`）；客户端断开始终取消且不熔断 | offline/deadline.test.mjs（13 用例，AC-1..AC-7）；docs/contracts/request-lifecycle-v1.md；npm test 14/14；npm run check 0 |
 
 ## 与既有计划的映射
@@ -79,7 +80,7 @@ MG-002 已闭环（离线故障注入），其余条目均为 **TODO**；下列�
 | --- | --- | --- | --- |
 | MG-015 / P1 | 审计 Draft PR #2，统一 /v1/responses 到现有治理，按模型配置原生 Responses 或 Chat 桥 | MG-002、MG-004、MG-016 | 工具 call_id/arguments/custom tool、SSE 顺序、完成/失败、取消/usage/权限/配额全部 wire 测试；真实 Codex CLI/桌面与 DSH 对照单独授权；不改官方 auth.json |
 | MG-008 / P2 | 适配器层已闭环（wire fixture 22 例 + 有损清单；sse 同帧 finish、空 tools 判定已修）；剩余：探测/预热/failback 的模型解析一致性、错误信封映射、真实上游对照（MG-015/单独授权） | MG-002、MG-004、MG-006 | 固定 wire fixtures；分片/断流/重连/多 tool-call 索引测试；显式列出有损转换；探测、预热、failback 采用一致模型解析 |
-| MG-009 / P2 | 契约与 fixture 已先行（`docs/contracts/management-ui-projection-v1.md`、`docs/contracts/fixtures/v1/`、`docs/how-to/tray-deployment.md`）；实现待开卡：`/api/keys` id 白名单与孤儿键清理、服务端剥离 models 运行时投影字段（D-2）、dirty 时冻结 baseVersion 防 409 失效（D-3）、上游 Key 保存带 version（D-7） | MG-003、MG-005 | 浏览器真实鉴权和保存回读；未知字段保留；无静默洗配置；Linux/Windows 托盘有单独 smoke 记录，价格为用户输入。静态检查已过；浏览器/托盘实跑 **NOT EXECUTED** |
+| MG-009 / P2 | 契约、fixture 与服务端实现已闭环：D-2 投影字段剥离、D-7 Key 版本、D-3 baseVersion、`/api/keys` 白名单（§8.3）；剩余：浏览器真实鉴权/保存回读（F2）、未知字段不透明袋 D-1、只读配置投影 D-6、provider 删除联动清 Key、托盘 smoke | MG-003、MG-005 | 浏览器真实鉴权和保存回读；未知字段保留；无静默洗配置；Linux/Windows 托盘有单独 smoke 记录，价格为用户输入。离线回归已过；浏览器/托盘实跑 **NOT EXECUTED** |
 | MG-010 / P2 | 已交付：CI 矩阵 18/20/22（手动触发、零下载探测 runner 自带 node）、元数据核对脚本、LICENSE、部署/回滚与兼容矩阵文档 | MG-004、MG-007 | 本地 21 项元数据 PASS + 启动/关闭/恢复实测；**远程 CI 未执行**；Windows/macOS 与 Node 18/20 实跑未验证 |
 
 ## 第三阶段：能力扩展（按卡启动，不一次铺开）
