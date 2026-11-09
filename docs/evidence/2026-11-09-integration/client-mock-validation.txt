@@ -1,0 +1,46 @@
+DSH × ModelGate local-mock validation (2026-11-09, integration/modelgate-next)
+================================================================================
+
+Environment: DSH CLI 0.2.2-rc.1, isolated fixture gateway on 127.0.0.1:8788
+(scripts/test/ui-fixture.mjs), local mock upstream. No real upstream request,
+no real API key, no cost. DSH_HOME/DSH_AGENTS_HOME were temporary paths.
+
+1) Chat path (api: openai-completions)
+   Overlay: provider=modelgate, model=deepseek-fixture,
+            baseURL=http://127.0.0.1:8788/v1
+   Command: dsh mg-mock --patch <chat-overlay.yml> "Reply with exactly: DSH_MOCK_OK"
+   Result: EXIT 0
+   Output: ModelGate fixture stream
+   Verdict: PASS (real DSH client -> gateway Chat entry -> mock upstream; stream)
+
+2) Responses via Chat bridge (api: openai-responses, model api not "responses")
+   Overlay: model=deepseek-fixture, api=openai-responses
+   Command: dsh mg-mock --patch <responses-overlay.yml> "Reply with exactly: DSH_RESP_OK"
+   Result: EXIT 0
+   Output: ModelGate fixture stream
+   Verdict: PASS (real DSH client -> /v1/responses -> Chat bridge -> mock upstream)
+
+3) Native Responses passthrough (model api: "responses")
+   Overlay: model=native-responses-fixture, api=openai-responses
+   Command: dsh mg-mock --patch <native-overlay.yml> "Reply with exactly: DSH_NATIVE_OK"
+   Result: EXIT 0
+   Output: native responses fixture
+   Verdict: PASS (real DSH client -> /v1/responses -> byte passthrough -> mock upstream SSE:
+   response.created/in_progress/output_item.added/content_part.added/
+   output_text.delta/done/content_part.done/output_item.done/completed)
+
+4) Codex CLI mock attempt: BLOCKED by host sandbox, not by gateway code.
+   Command: codex --version (and codex exec)
+   Output: bwrap: No permissions to create a new namespace, likely because the
+           kernel does not allow non-privileged user namespaces.
+   Bypassing requires an explicit skip-sandbox approval flag; per AGENTS.md this
+   was not used without owner authorization. No Codex request reached the gateway.
+
+5) Real upstream (OpenCode Go / DeepSeek) validation: BLOCKED.
+   No per-call spend authorization was provided for this round; cent count and
+   budget were not confirmed. Prior audit-branch evidence remains in
+   docs/roadmap/2026-11-09-dsh-cli-live-verification-report.md but is not claimed
+   as re-executed here.
+
+Tool calling: NOT_RUN in this round for the DSH mock fixture (text/stream only).
+Prior real tool-call evidence on the audit branch is cited, not re-verified.
