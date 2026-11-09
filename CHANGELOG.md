@@ -2,6 +2,23 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-09 真实客户端链路验证（未发布，DSH CLI × ModelGate）
+
+### Added
+- 用户级环境变量兜底的**离线回归** `scripts/test/offline/user-env.test.mjs`（5 用例）：来源优先级 keys→env→env-registry→无、60s TTL 正/负缓存与清缓存重查、变量名白名单（非法名不触达读取器）、`environment.d` 排序覆盖与注释/非法行、双引号转义还原。为可测性给 `src/router.js` 增加 `__setUserEnvReaderForTest()`/`__clearUserEnvCache()` 注入点（注入后仍复用同一份缓存与白名单）与 `readEnvironmentDir(name, baseDir?)` 可选目录参数；**运行时行为不变**。
+- 文档 `docs/roadmap/2026-11-09-dsh-cli-live-verification-report.md`：DSH CLI 作为真实客户端经网关调 OpenCode 上游的端到端证据（流式/工具调用/同 SID 续传）、Linux Key 链路两种启动方式、错误路径对照；全掩码，无 Key/正文/私有配置。
+
+### Fixed
+- **Linux 兜底的文档口径过期**：本节历史条目写「仅 Windows 生效（其他平台维持进程环境行为）」，与代码事实不符——`resolveKey` 在 Linux/POSIX 已走 `systemctl --user show-environment` 再回落 `~/.config/environment.d/*.conf`（同一份 60s TTL 正/负缓存）。[配置参考](docs/reference/configuration.md)补 `apiKeyEnv` 的三段解析顺序，并写明「网关的用户级兜底不替客户端进程补 Key，客户端缺变量报的是客户端侧 `MISSING_CREDENTIAL`」。
+
+### 已验证（真实链路；真实上游消耗按最小必要）
+- DSH CLI `0.2.2-rc.1` → 隔离网关 8788 → OpenCode 上游：3 回合（纯文本流式、`read`/`glob`/`bash` 工具调用、同 SID 续传）全部 exit 0、`turn_end.reason.kind=completed`、final 非空；网关 `requests`/`tokens` 与回合进程一致。
+- `reasoning_effort=high` 由 CLI 发出、被网关原样透传到上游（本地 mock 上游对照取证，零成本）；客户端显式 `low` 不被网关覆盖。
+- 错误路径（未知模型 / 上游 400 / 上游 500 / 首字节超时 / 缺 Key）：状态码与错误信封正确、CLI 报错可读、不泄露上游 Key。
+
+### 未验证
+- 生产 8787 与 systemd 服务（按约束未触碰）；真实上游故障注入（改用本地 mock 复现）；Windows/macOS 与 Node 18/20；`live.mjs` 27 套件本轮未重跑（与本轮改动无交集）。
+
 ## 2026-11-09 管理面 D-1/D-6 收尾（未发布，MG-009 余项）
 
 ### Added

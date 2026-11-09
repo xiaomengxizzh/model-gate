@@ -2,7 +2,7 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
-## 当前状态（2026-11-09 第二批收口）
+## 当前状态（2026-11-09 第三批/真实链路验证收口）
 
 分支 `dev/gateway-audit-20261108`。第一批三个提交：`33853d2`（契约基线 + P1 卡）、`522da4a`（旧套件隔离 + 日志脱敏性能）、`9a41547`（指标口径）。第二批（2026-11-09）：`5498c1a`（MG-002 预算/取消/背压 + 契约 + deadline 测试）、`42f06cd`（MG-009 投影契约/fixture/托盘文档）、`81b37e6`（MG-009 服务端投影清洗、Key 白名单、面板版本）、`027a97f`（MG-015 Responses 契约草案）。
 
@@ -21,7 +21,25 @@
 
 未验证：GitHub Actions 远程执行、真实上游与计费、生产 8787 重启、Windows/macOS、Node 18/20 实跑。
 
-已知遗留：`user-env-fallback` 的 Windows 分支在 Linux 上打印 N/A；`/api/keys` 的 id 仍无完整白名单（随 MG-009）；前端 F0–F5 全部 TODO，本轮只到契约基线。
+### 第三批（2026-11-09）真实客户端链路验证
+
+**真实链路已跑通（不再是 UNVERIFIED 的那一格）**：DSH CLI `0.2.2-rc.1` 作为真实客户端，经隔离网关 8788 调 OpenCode 上游 `deepseek-v4.1-flash`（`reasoning_effort=high`）——流式文本、`read`/`glob`/`bash` 工具调用、同 SID 续传三回合全部 exit 0、`turn_end.reason.kind=completed`、final 非空；错误路径（未知模型/上游 400/上游 500/首字节超时/缺 Key）两端可读且不泄露 Key。证据与边界见[验证报告](roadmap/2026-11-09-dsh-cli-live-verification-report.md)。
+
+本轮命令结果（本机 Node v24.22.2）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm run check` | 退出码 0 |
+| `npm test` | **25/25** 隔离套件通过（新增 offline/user-env.test.mjs 5 用例） |
+| `npm run docs:check` | PASS |
+| `node scripts/check-metadata.mjs` | PASS (21) |
+| `MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs` | **NOT_EXECUTED**（本轮未重跑；与本轮改动无交集，但不跑即不算通过） |
+
+本轮代码改动：`src/router.js` 增加用户级环境读取的测试注入点与 `readEnvironmentDir(name, baseDir?)`（运行时行为不变），回归见 `scripts/test/offline/user-env.test.mjs`。
+
+仍未验证：真实上游故障注入（本轮用本地 mock 复现错误路径，未为制造故障消耗额度）、生产 8787/systemd 服务重启、`/responses` 通道与虚拟共用名 `gatemodel` 的真实上游往返、Windows/macOS 与 Node 18/20、GitHub Actions。
+
+已知遗留：`user-env-fallback` 的 Windows 分支仍未在 Windows 实跑（Linux 分支已由 `offline/user-env.test.mjs` 覆盖）；`/api/keys` 的 id 仍无完整白名单（随 MG-009）；前端 F0–F5 全部 TODO，本轮只到契约基线；网关 502 信封「已循环兜底约 120s」文案与实际耗时不符（待单独立卡）。
 
 ## 本轮完成
 

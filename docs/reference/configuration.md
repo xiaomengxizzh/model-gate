@@ -174,6 +174,10 @@ model-gateway/
 | `MG_CONFIG_DIR` | keys/local/stats 隔离目录；未指定时为 cwd/config |
 | `MG_GW` | 旧测试目标；需显式指定可丢弃的本地实例，禁用生产端口 8787 |
 
+**`apiKeyEnv` 的解析顺序**（`resolveKey`，转发/探测/预热/回切与 `/api/status` 同源）：① 面板 Key（加密 `keys.local.json`）→ ② **网关进程**环境变量 → ③ **用户级**环境变量。③ 在 Linux/POSIX 上先查 `systemctl --user show-environment`（其中已含 `~/.config/environment.d/*.conf`），未命中再直接解析 `~/.config/environment.d/*.conf`（按文件名排序，后者覆盖前者，支持双引号转义），因此改完环境变量最多约 60s 生效，无需重启网关或 `daemon-reload`；Windows 对应 `HKCU\Environment`。读取结果按变量名带 **60s TTL 正/负缓存**（避免每请求 `spawnSync` 空查），变量名先过标识符白名单（防注入）。
+
+注意这条兜底只解决**网关进程自己**取 Key：由其它程序启动的客户端（如 DSH CLI headless）里，`apiKeyEnv` 指向的变量仍必须存在于**该客户端自己的启动环境**，网关的用户级兜底不会替客户端补 Key；客户端缺变量时报的是客户端侧的 `MISSING_CREDENTIAL`。
+
 
 ## HTTP 边界
 

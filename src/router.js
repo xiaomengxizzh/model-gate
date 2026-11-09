@@ -94,6 +94,11 @@ export function loadConfig(opts = {}) {
 // （找不到也缓存，避免高频空查）。改完变量最多 ~60s 生效。
 const _userEnvCache = new Map() // name -> { value: string|null, at: number }
 const USER_ENV_TTL_MS = 60000
+// 离线测试注入点：默认 null，走真实 systemctl/注册表/environment.d。测试注入后仍复用同一份
+// TTL 缓存与变量名白名单，因此"缓存与负缓存"语义可以被确定性覆盖，不需要等待 60s 或触碰真实 Key。
+let _userEnvReaderForTest = null
+export function __setUserEnvReaderForTest(fn) { _userEnvReaderForTest = typeof fn === 'function' ? fn : null }
+export function __clearUserEnvCache() { _userEnvCache.clear() }
 // systemd show-environment 对环境值做 shell 兼容转义（含空格/引号时包双引号并转义内部字符），此处还原
 function unquoteEnvValue(raw) {
   const s = String(raw).trim()
@@ -101,8 +106,8 @@ function unquoteEnvValue(raw) {
   return s
 }
 // 直接解析 ~/.config/environment.d/*.conf（按文件名排序，后者覆盖前者），作为 user manager 未刷新的兜底
-function readEnvironmentDir(name) {
-  const dir = join(homedir(), '.config', 'environment.d')
+export function readEnvironmentDir(name, baseDir) {
+  const dir = baseDir || join(homedir(), '.config', 'environment.d')
   let files
   try { files = readdirSync(dir).filter((f) => f.endsWith('.conf')).sort() } catch { return null }
   let value = null
@@ -127,7 +132,9 @@ function readUserEnv(name) {
   if (cached && now - cached.at < USER_ENV_TTL_MS) return cached.value
   let value = null
   try {
-    if (process.platform === 'win32') {
+    if (_userEnvReaderForTest) {
+      value = _userEnvReaderForTest(name)
+    } else if (process.platform === 'win32') {
       const r = spawnSync('reg', ['query', 'HKCU\\Environment', '/v', name], { encoding: 'utf8', timeout: 3000 })
       const line = (r.stdout || '').split(/\r?\n/).find((l) => l.includes('REG_SZ') || l.includes('REG_EXPAND_SZ'))
       if (line) {
