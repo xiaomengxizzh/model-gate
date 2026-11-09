@@ -6,8 +6,8 @@
 
 分支 `dev/gateway-audit-20261108`。第一批三个提交：`33853d2`（契约基线 + P1 卡）、`522da4a`（旧套件隔离 + 日志脱敏性能）、`9a41547`（指标口径）。第二批（2026-11-09）：`5498c1a`（MG-002 预算/取消/背压 + 契约 + deadline 测试）、`42f06cd`（MG-009 投影契约/fixture/托盘文档）、`81b37e6`（MG-009 服务端投影清洗、Key 白名单、面板版本）、`027a97f`（MG-015 Responses 契约草案）。
 
-已闭环：MG-016、MG-001、MG-003、MG-005、MG-007、MG-006、MG-004、MG-010（工程侧）、**MG-002（请求生命周期预算/取消/SSE 背压）**、**MG-009（服务端投影清洗/Key 白名单/面板版本，浏览器实跑待 F2）**、**MG-008（适配器半边 + 模型解析一致性 + 错误信封映射）**。
-仍待办：MG-015 原生 responses 透传与真实客户端对照（Chat 桥已闭环）、MG-011～MG-014（Embedding/Rerank/Audio-Image/Video）、MG-009 余项（不透明袋 D-1、只读配置投影 D-6、browser/托盘实跑）、MG-008 真实上游对照（单独授权）。MG-002 二次复核：H1/M1–M3 PASS，M4 边界（已完成流误判超时）已修并补 AC-4e。
+已闭环：MG-016、MG-001、MG-003、MG-005、MG-007、MG-006、MG-004、MG-010（工程侧）、**MG-002（请求生命周期预算/取消/SSE 背压）**、**MG-009（服务端投影清洗/Key 白名单/面板版本，浏览器实跑待 F2）**、**MG-008（适配器半边 + 模型解析一致性 + 错误信封映射）**、**MG-011（capability 声明 + Embedding，chat/embedding 双向隔离、Gemini 适配、记账/探测/发现）**。
+仍待办：MG-012 Rerank、MG-013 Audio/Image、MG-014 Video 异步任务池、MG-015 原生 responses 透传与真实客户端对照（Chat 桥已闭环）、MG-009 余项（不透明袋 D-1、只读配置投影 D-6、browser/托盘实跑）、MG-008/MG-011 真实上游对照（单独授权）。MG-002 二次复核：H1/M1–M3 PASS，M4 边界（已完成流误判超时）已修并补 AC-4e。
 
 验证（本机 Node v24.22.2，全部离线 mock，未触真实上游）：
 
@@ -39,6 +39,7 @@
 | MG-001 | 管理面来源策略：Host/DNS 重绑定白名单、跨源 Origin 拒绝、无令牌时仅本机可管理、非回环绑定告警 | offline/admin-origin.test.mjs（4 组，含局域网对端实测）；docs/reference/configuration.md |
 | MG-003 | 配置结构校验单一入口、保留键拦截、删除墓碑（重启不复活）、并发版本冲突 | offline/config-schema.test.mjs（4 组）；src/index.js、src/router.js |
 | MG-005 | 日志脱敏词表随配置热更新、代理内嵌凭据与 Bearer 兜底、端到端验证错误摘要不落明文 | offline/logger-secrets.test.mjs；src/logger.js、src/index.js（collectSecrets） |
+| MG-011 | capability 声明（chat/embedding）+ `/v1/embeddings`：OpenAI 透传、Gemini batchEmbedContents 适配、Anthropic 拒绝；双向能力隔离；usage 记账、/v1/models 与 /api/status 暴露 capability、/api/model-test 按能力探测；批量上限/dimensions/fallback/预算测试 | offline/embeddings.test.mjs（7 用例）；docs/reference/configuration.md；npm test 19/19 |
 | MG-015（Chat 桥） | `/v1/responses` 入口：responsesToChat 请求映射 + 拒绝矩阵、chatToResponse 非流式整形、流式事件桥（复用 relayStream 续传/预算/背压）、降级单帧；原生 responses 透传与真实客户端对照仍待 | offline/responses-mapping.test.mjs（17）+ responses-endpoint.test.mjs（6）；docs/contracts/responses-v1.md §9 |
 | MG-008（余项） | 模型解析单一入口 `modelTarget`（转发/探测/预热/failback 一致）；warm/probeChat 按 api+providerModels 整形 path/body/鉴权头；非 OpenAI 原生错误信封映射为 OpenAI 形状 | offline/model-resolution.test.mjs（7 用例）；docs/reference/protocol-bridge.md §5；npm test 16/16 |
 | MG-008（协议桥半边） | format.js 11 项修复（tool_result 合并、Gemini usage/finish/thought 过滤、tool_choice 等）+ 22 例 wire 测试 + 有损转换清单；sse.js 同帧 finish、forward.js 空 tools 判定 | offline/wire-format.test.mjs；docs/reference/protocol-bridge.md |
@@ -89,7 +90,7 @@ MG-002 已闭环（离线故障注入），其余条目均为 **TODO**；下列�
 
 | ID / 优先级 | 交付范围 | 依赖 | 验收标准 |
 | --- | --- | --- | --- |
-| MG-011 / P3 | 统一 capability 声明与 Embedding | 第一阶段、MG-008 | 新入口、适配器、provider 能力、记账、探测、模型发现六处完整；批量输入、维度、错误回退测试 |
+| MG-011 / P3 | **已闭环（2026-11-09）**：`models.<名>.capability`（chat/embedding）；`/v1/embeddings` 入口、OpenAI 透传 + Gemini batchEmbedContents 适配、Anthropic 拒绝；记账/探测/模型发现六处打通；虚拟模型不支持 embeddings | 第一阶段、MG-008 | offline/embeddings.test.mjs（批量上限、dimensions、fallback、能力隔离、预算） |
 | MG-012 / P3 | Rerank | MG-011 | 排序分数/索引稳定；批量限制、模型路由和预算测试；兼容现有 Chat |
 | MG-013 / P3 | Audio、Image | MG-011、MG-002 | 单能力单卡；multipart/二进制体积、超时、计费单位和取消契约；对不支持的桥接明确拒绝 |
 | MG-014 / P3 | Video 异步任务池与持久化 | MG-007、MG-013 | 先 ADR 决定存储与 Node 版本要求；幂等创建、状态轮询、取消、重启恢复、GC；真实预算与外部发布单独授权 |
@@ -103,7 +104,8 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 1. ~~**MG-008 余项**（P2）：模型解析一致性、错误信封映射~~ **已闭环（2026-11-09）**。
 2. **MG-009**（P2）：管理面配置编辑与状态投影分离、`/api/keys` id 白名单、前端 fixture；契约与 fixture 已先行（docs/contracts/management-ui-projection-v1.md、docs/contracts/fixtures/v1/），实现写集 src/index.js、src/admin.html。
 3. ~~**MG-015**（P1）：Responses/Codex 接入~~ **Chat 桥已闭环（2026-11-09）**；剩余原生响应透传与真实客户端对照。
-4. **MG-011**（P3）：统一 capability 声明与 Embedding（下一张卡）。
+4. ~~**MG-011**（P3）：capability 声明与 Embedding~~ **已闭环（2026-11-09）**。
+5. **MG-012**（P3）：Rerank（下一张卡）——新增 capability `rerank`、`/v1/rerank` 入口与 provider 适配，复用 capability/记账/探测/发现与预算。
 
 同一时刻一个文件一个作者：MG-008 与 MG-009 都改 src/index.js，必须串行；MG-015 的 format.js/router.js 写集与二者不重叠。全部完成后由 Lead 统一提交并更新本表。
 

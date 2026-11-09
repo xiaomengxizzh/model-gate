@@ -4,7 +4,7 @@ import net from 'node:net'
 import tls from 'node:tls'
 import { URL } from 'node:url'
 import { gunzipSync } from 'node:zlib'
-import { adapterFor } from './format.js'
+import { adapterFor, embeddingAdapterFor } from './format.js'
 import { abortedError, sleepWith } from './budget.js'
 
 // 上游连接复用（keep-alive）：减少每次 TLS/TCP 握手，改善连接体验与延迟
@@ -24,7 +24,7 @@ function applyProviderHeaders(headers, provider) {
 }
 // 协议鉴权头（探测/预热/failback/模型测试共用）：Anthropic 认 x-api-key + anthropic-version，
 // Gemini 认 x-goog-api-key，其余走 Bearer。与 forward.js buildHeaders 的协议头规则保持一致。
-function protocolHeaders(headers, provider, api) {
+export function protocolHeaders(headers, provider, api) {
   if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
   if (api === 'anthropic') {
     if (!headers['anthropic-version']) headers['anthropic-version'] = '2023-06-01'
@@ -35,7 +35,7 @@ function protocolHeaders(headers, provider, api) {
   return headers
 }
 // 按协议整形最小请求：api 非 openai 时用适配器生成 path/body（模型名与字段跟着协议走）。
-function protocolRequest(api, openaiBody) {
+export function protocolRequest(api, openaiBody) {
   const adapter = adapterFor(api)
   return adapter ? adapter.build(openaiBody) : { path: '/v1/chat/completions', body: openaiBody }
 }
@@ -360,6 +360,38 @@ export function probeChat(provider, model, message, opts = {}, log) {
     })
     req.setTimeout(to.connectMs, () => req.destroy(Object.assign(new Error('failback probe timeout'), { code: 'ETIMEDOUT' })))
     req.on('error', (err) => finish(false, null, err.code || err.message))
+    req.write(payload)
+    req.end()
+  })
+}
+
+// embedding 模型连通测试（MG-011）：向 embeddings 端点发单条 input，2xx 即通；用于 /api/model-test。
+export function probeEmbedding(provider, model, api = provider.api || 'openai', upstreamModel = model) {
+  // embeddings 与 chat 的路径/请求体不同：有适配器用适配器，否则 OpenAI /v1/embeddings
+  const adapter = embeddingAdapterFor(api)
+  const spec = adapter ? adapter.build({ model: upstreamModel, input: ['ping'] }) : { path: '/v1/embeddings', body: { model: upstreamModel, input: ['ping'] } }
+  const url = upstreamUrl(provider, spec.path)
+  const headers = protocolHeaders(applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }, provider), provider, api)
+  const payload = Buffer.from(JSON.stringify(spec.body))
+  headers['content-length'] = payload.length
+  const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
+  return new Promise((resolve) => {
+    const started = Date.now()
+    let settled = false
+    const done = (o) => { if (!settled) { settled = true; resolve(o) } }
+    const req = mod.request(reqOpts, (res) => {
+      res.setTimeout(90000, () => res.destroy())
+      const c = []; let total = 0
+      res.on('data', (d) => { total += d.length; if (total > 1024 * 1024) { try { res.destroy() } catch {} ; done({ ok: false, code: res.statusCode, ms: Date.now() - started, err: 'embedding probe response too large' }); return } c.push(d) })
+      res.on('end', () => {
+        const text = Buffer.concat(c).toString('utf8').trim()
+        const ok = res.statusCode >= 200 && res.statusCode < 300
+        done({ ok, code: res.statusCode, ms: Date.now() - started, err: ok ? null : (text.slice(0, 120) || ('HTTP ' + res.statusCode)) })
+      })
+      res.on('error', (e) => done({ ok: false, code: res.statusCode, ms: Date.now() - started, err: (e && e.code) || (e && e.message) || 'response error' }))
+    })
+    req.setTimeout(90000, () => req.destroy(Object.assign(new Error('probe timeout'), { code: 'ETIMEDOUT' })))
+    req.on('error', (err) => done({ ok: false, code: null, ms: Date.now() - started, err: err.code || err.message }))
     req.write(payload)
     req.end()
   })

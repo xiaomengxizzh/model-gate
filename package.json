@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/index.js",
     "test": "node scripts/test/run.mjs",
-    "check": "node --check src/index.js && node --check src/router.js && node --check src/request.js && node --check src/sse.js && node --check src/format.js && node --check src/forward.js && node --check src/logger.js && node --check src/budget.js && node --check src/responses.js && node --check src/responses-stream.js",
+    "check": "node --check src/index.js && node --check src/router.js && node --check src/request.js && node --check src/sse.js && node --check src/format.js && node --check src/forward.js && node --check src/logger.js && node --check src/budget.js && node --check src/responses.js && node --check src/responses-stream.js && node --check src/embeddings.js",
     "test:live": "node scripts/test/live.mjs",
     "docs:check": "node scripts/check-docs.mjs"
   },

@@ -2,6 +2,22 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-09 能力声明与 Embedding（未发布，MG-011）
+
+### Added
+
+- `models.<名>.capability`：`chat`（默认）/`embedding` 能力声明；保存接口校验未知值（400），`/v1/models` 与 `/api/status` 暴露该字段，模型编辑器可切换。
+- `POST /v1/embeddings`：OpenAI 兼容请求（`model`/`input` 字符串或字符串数组/`dimensions`/`encoding_format`，批量上限 2048）；OpenAI 兼容上游原样透传；Gemini 经 `:batchEmbedContents` 适配（`dimensions → outputDimensionality`，`embeddings[].values → data[].embedding`）；Anthropic 无此能力 → 502 且不触上游。复用 provider `fallbacks`、熔断、`defaults.timeout`/`overallMs` 预算、`maxBodyBytes` 与并发信号量。
+- 能力隔离（双向）：embedding 模型从对话入口调用返回 400 `unsupported_model`；chat 模型从 embeddings 入口调用返回 400；虚拟模型/默认共用名不支持 embeddings。
+- 记账与探测：embedding usage token 计入模型/日/全局/上游账本；`/api/model-test` 按 capability 选择 embeddings 端点；`/v1/models` 暴露 capability。
+- 回归 `scripts/test/offline/embeddings.test.mjs`（7 用例：OpenAI 透传与记账、双向隔离、Gemini 路径/请求体/协议头/响应归一、Anthropic 拒绝、fallback、能力探测、预算 504）；文档见配置参考与协议桥 §7。
+
+### Changed
+- `npm run check` 覆盖 `src/embeddings.js`。
+
+### 未验证
+- 真实 OpenAI/Gemini embeddings 上游与计费、token-id 输入、base64 编码输出透传行为；Windows/macOS、Node 18/20。
+
 ## 2026-11-09 Responses 入口与 Chat 桥（未发布，MG-015）
 
 ### Added

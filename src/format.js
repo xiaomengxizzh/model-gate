@@ -240,6 +240,35 @@ export function adapterFor(api) {
 // 仅映射可识别的原生形状，其余（含已经是 OpenAI 形状的代理）原样透传：
 //   Anthropic: { type:"error", error:{ type, message } }
 //   Gemini:    { error:{ code:number, message, status } }
+// ================= Embeddings（MG-011）=================
+// OpenAI 透传；Gemini 走 :batchEmbedContents（OpenAI input 字符串数组 → requests[].content.parts[].text）。
+// Anthropic 无 embeddings 能力，由调用方在 capability/协议层拒绝，不做伪桥接。
+const geminiEmbedding = {
+  build(openaiBody) {
+    const model = String(openaiBody.model || 'model')
+    const inputs = typeof openaiBody.input === 'string' ? [openaiBody.input] : (Array.isArray(openaiBody.input) ? openaiBody.input : [])
+    const requests = inputs.map((text) => {
+      const req = { model: 'models/' + model, content: { parts: [{ text: String(text) }] } }
+      if (openaiBody.dimensions != null) req.outputDimensionality = Number(openaiBody.dimensions)
+      return req
+    })
+    return { path: '/v1beta/models/' + encodeURIComponent(model) + ':batchEmbedContents', body: { requests } }
+  },
+  fromUpstream(o) {
+    const list = (o && Array.isArray(o.embeddings)) ? o.embeddings : []
+    return {
+      object: 'list',
+      data: list.map((e, i) => ({ object: 'embedding', index: i, embedding: (e && e.values) || [] })),
+      model: '',
+      // Gemini batchEmbedContents 不返回 token usage：不臆造计费数值（usage 计 0）
+      usage: { prompt_tokens: 0, total_tokens: 0 },
+    }
+  },
+}
+export function embeddingAdapterFor(api) { return api === 'gemini' ? geminiEmbedding : null }
+// 上游协议是否提供 embeddings：OpenAI 兼容 / Gemini 原生；Anthropic 无此能力。
+export function supportsEmbeddings(api) { return api === 'openai' || api === 'gemini' }
+
 export function mapErrorEnvelope(api, status, buf) {
   if (!buf || !buf.length) return null
   if (api !== 'anthropic' && api !== 'gemini') return null

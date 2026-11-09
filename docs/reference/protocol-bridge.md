@@ -141,9 +141,23 @@ OpenAI 客户端只接受 `stop / length / tool_calls / content_filter` 四个�
 
 **未验证范围**：真实 Anthropic/Gemini 上游行为（含 `stop: []`、`stop_sequences`、thinking 预算上限、Gemini 末帧时序）、Windows、生产端口 8787、SSE 断流/重连（属 `sse.js` 既有测试与 MG-002/MG-004）。本文件不能作为真实上游验收证据。
 
-## 7. 模型解析与错误信封（MG-008 余项）
+## 7. Embeddings 映射（MG-011）
 
-### 7.1 单一模型解析入口
+入口：`POST /v1/embeddings`（OpenAI 形状）。本层只描述上游适配；能力声明、记账与隔离见配置参考。
+
+| 项 | OpenAI 兼容上游 | Gemini 上游 |
+| --- | --- | --- |
+| 路径 | `/v1/embeddings`（透传） | `/v1beta/models/{model}:batchEmbedContents` |
+| 请求体 | 原样（model/input/dimensions/encoding_format） | `requests[].{model:"models/<名>", content:{parts:[{text}]}, outputDimensionality?}` |
+| 鉴权 | `Authorization: Bearer` | `x-goog-api-key`（extraHeaders 照常合并） |
+| 响应 | 原样，model 回写客户端请求名 | `embeddings[].values → data[].embedding`，index 按顺序重建；无 usage 时计 0（不臆造） |
+| 不支持 | — | Anthropic 无 embeddings：入口直接 502 `all_providers_failed`，不发起上游请求 |
+
+有损/限制：批量上限 2048；仅文本 input（token-id 数组暂不支持）；`encoding_format=base64` 依赖上游支持，网关不转码；Gemini 不返回 usage，token 账本记 0。回归：`scripts/test/offline/embeddings.test.mjs`。
+
+## 8. 模型解析与错误信封（MG-008 余项）
+
+### 8.1 单一模型解析入口
 
 `modelTarget(cfg, modelName, pid)`（src/router.js）返回 `{ servingName, api, effortFormat, maxTokensMax }`：
 
@@ -153,7 +167,7 @@ OpenAI 客户端只接受 `stop / length / tool_calls / content_filter` 四个�
 - 预热与 failback 还按协议生成 path/body 与鉴权头：Anthropic `/v1/messages` + `x-api-key`/`anthropic-version`；Gemini `:generateContent`/`:streamGenerateContent?alt=sse` + `x-goog-api-key`。Anthropic/Gemini 的预热消息会补一条 user 消息（协议要求至少一条非 system 消息）。
 - 回归：`scripts/test/offline/model-resolution.test.mjs`。
 
-### 7.2 上游错误信封映射
+### 8.2 上游错误信封映射
 
 非 OpenAI 上游的**非 2xx 原生错误信封**在数据面返回前统一映射为 OpenAI 形状（状态码保留）：
 

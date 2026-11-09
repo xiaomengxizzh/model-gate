@@ -6,13 +6,14 @@ import { gunzipSync } from 'node:zlib'
 import { isIP } from 'node:net'
 import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh, modelTarget } from './router.js'
 import { createLogger } from './logger.js'
-import { forward, probe, probeModel, probeChat, warm } from './request.js'
-import { adapterFor, cacheHitMiss } from './format.js'
+import { forward, probe, probeModel, probeChat, warm, probeEmbedding } from './request.js'
+import { adapterFor, cacheHitMiss, mapErrorEnvelope } from './format.js'
 import { isStreamResponse, writeUpstreamHeaders, relayStream, endInterruptedStream } from './sse.js'
-import { forwardChain, routeLimit, virtualQuotaExceeded } from './forward.js'
+import { forwardChain, routeLimit, virtualQuotaExceeded, acquireProvider } from './forward.js'
 import { createBudget, abortedError } from './budget.js'
 import { responsesToChat, chatToResponse } from './responses.js'
 import { createResponsesStream } from './responses-stream.js'
+import { validateEmbeddingRequest, buildEmbeddingRequest, embeddingHeaders, normalizeEmbeddingResponse, supportsEmbeddings, MAX_EMBEDDING_INPUTS } from './embeddings.js'
 import { todayKey } from './shared.js'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
@@ -216,7 +217,7 @@ function buildStatus(state) {
     const m = (s.byModel && s.byModel[name]) || { requests: 0, errors: 0 }
     const dk = (s.daily && s.daily[name] && s.daily[name][todayKey()]) || { tokens: 0, hit: 0, miss: 0 }
     const hitRate = (dk.hit + dk.miss) > 0 ? Math.round((dk.hit / (dk.hit + dk.miss)) * 1000) / 10 : null
-    return { name, provider: d.provider, alias: d.alias || [], fallbacks: d.fallbacks || [], maxConcurrent: d.maxConcurrent || 0, qps: d.qps || 0, reasoning: d.reasoning || '', effortOptions: d.effortOptions || [], effortFormat: d.effortFormat || '', dailyQuota: d.dailyQuota || 0, quota: d.quota || 0, maxContext: d.maxContext || 0, maxTokensMax: d.maxTokensMax || 0, api: d.api || '', providerModels: d.providerModels || {}, forceNoStream: !!d.forceNoStream, probe: m.probe || null, requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate, affinity: state.affinity[name] || null, avgMs: m.latencyCount ? Math.round(m.latencySum / m.latencyCount) : null }
+    return { name, provider: d.provider, alias: d.alias || [], fallbacks: d.fallbacks || [], capability: d.capability || 'chat', maxConcurrent: d.maxConcurrent || 0, qps: d.qps || 0, reasoning: d.reasoning || '', effortOptions: d.effortOptions || [], effortFormat: d.effortFormat || '', dailyQuota: d.dailyQuota || 0, quota: d.quota || 0, maxContext: d.maxContext || 0, maxTokensMax: d.maxTokensMax || 0, api: d.api || '', providerModels: d.providerModels || {}, forceNoStream: !!d.forceNoStream, probe: m.probe || null, requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate, affinity: state.affinity[name] || null, avgMs: m.latencyCount ? Math.round(m.latencySum / m.latencyCount) : null }
   })
   const defaults = state.cfg.defaults || {}
   const todayTotal = models.reduce((a, m) => a + (m.today || 0), 0)
@@ -254,7 +255,7 @@ function readLogTail(logFile, lines) {
   } catch { return [] }
 }
 function staticModels(cfg) {
-  const data = Object.keys(cfg.models || {}).map((id) => ({ id, object: 'model', owned_by: 'model-gateway' }))
+  const data = Object.keys(cfg.models || {}).map((id) => ({ id, object: 'model', owned_by: 'model-gateway', capability: ((cfg.models && cfg.models[id] && cfg.models[id].capability) || 'chat') }))
   const vm = (cfg.defaults && cfg.defaults.model) || ''
   if (vm && !data.some((m) => m.id === vm)) data.push({ id: vm, object: 'model', owned_by: 'model-gateway' })
   for (const v of cfg.virtualModels || []) if (!data.some((m) => m.id === v.name)) data.push({ id: v.name, object: 'model', owned_by: 'model-gateway' })
@@ -386,6 +387,8 @@ async function doSaveConfig(state, body) {
     for (const pOv of Object.keys(m.providerModels || {})) if (RESERVED_KEYS.has(pOv)) return { error: '模型「' + mn + '」的 providerModels 含保留键名：' + pOv }
     if (m.providerModels && typeof m.providerModels === 'object') for (const [pOv, nm] of Object.entries(m.providerModels)) { if (!providers[pOv]) return { error: '模型「' + mn + '」的 providerModels 引用了不存在的上游 ' + pOv }; if (typeof nm !== 'string' || !nm) return { error: '模型「' + mn + '」的 providerModels[' + pOv + '] 须为非空字符串' } }
     if (m.forceNoStream != null && typeof m.forceNoStream !== 'boolean') return { error: '模型「' + mn + '」的 forceNoStream 须为布尔值' }
+    // 能力声明（MG-011）：chat（默认）/embedding；未知值拦截，避免拼写错误静默变成 chat
+    if (m.capability != null && m.capability !== '' && !['chat', 'embedding'].includes(String(m.capability))) return { error: '模型「' + mn + '」的 capability 仅支持 chat/embedding' }
   }
   // 单上游代理（名单）：留空/undefined=继承全局；direct/false=强制直连；否则须为合法 http(s):// 地址
   for (const [pid, p] of Object.entries(providers || {})) {
@@ -532,7 +535,10 @@ async function doProbeModel(state, model) {
   try { prov = buildProvider(state.cfg, def.provider) } catch (e) { return { id: model, ok: false, err: e.message } }
   if (prov._def.apiKeyEnv && !prov.keyOk && !prov.apiKey) return { id: model, ok: false, err: '上游未配置 Key，无法鉴权' }
   const target = modelTarget(state.cfg, model, def.provider)
-  const r = await probeModel(prov, model, target.api, target.servingName)
+  // 能力感知探测（MG-011）：embedding 模型走 embeddings 端点，chat 模型走 chat 补全
+  const r = (def.capability === 'embedding')
+    ? await probeEmbedding(prov, model, target.api, target.servingName)
+    : await probeModel(prov, model, target.api, target.servingName)
   const o = (state.stats.byModel[model] = state.stats.byModel[model] || { requests: 0, errors: 0 })
   o.probe = { at: Date.now(), ok: r.ok, code: r.code, ms: r.ms, err: r.err || null }
   return { id: model, ok: r.ok, code: r.code, ms: r.ms, err: r.err || null }
@@ -745,6 +751,68 @@ function makeHandler(state) {
       }
 
       if (req.method === 'GET' && (path === '/v1/models' || path === '/models')) { sendJson(res, 200, staticModels(state.cfg)); return }
+
+      // —— MG-011：POST /v1/embeddings（能力声明 + 上游适配 + 记账 + 熔断/回退） ——
+      if (path === '/v1/embeddings') {
+        if (req.method !== 'POST') { sendJson(res, 405, { error: { message: '仅支持 POST /v1/embeddings', type: 'invalid_request_error' } }); return }
+        const ebuf = await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024), { budget, signal: budget.signal })
+        const ebody = tryParse(ebuf)
+        const verr = validateEmbeddingRequest(ebody)
+        if (verr) { sendJson(res, 400, { error: { message: verr.error, type: 'invalid_request_error' } }); return }
+        const hit = state.router.resolve(ebody.model)
+        if (!hit.known && (state.cfg.virtualModels || []).length) { sendJson(res, 404, { error: { message: '未知模型名: ' + ebody.model + '。可用虚拟模型见 GET /v1/models', type: 'unknown_model' } }); return }
+        const edef = hit.def || null
+        if (!edef || edef.isVirtualModel || edef.virtual) { sendJson(res, 400, { error: { message: '虚拟模型/默认共用名不支持 embeddings', type: 'unsupported_model' } }); return }
+        const cap = edef.capability || 'chat'
+        if (cap !== 'embedding') { sendJson(res, 400, { error: { message: '模型 ' + hit.canonicalName + ' 不是 embedding 模型（capability=' + cap + '）', type: 'unsupported_model' } }); return }
+        const candidates = [edef.provider, ...(edef.fallbacks || [])].filter(Boolean)
+        let lastErr = null
+        for (const pid of candidates) {
+          if (!state.cfg.providers[pid]) continue
+          const prov = buildProvider(state.cfg, pid)
+          if (!healthy(ensureHst(state, pid), Date.now())) { lastErr = new Error('provider ' + pid + ' 熔断中'); continue }
+          if (prov._def.apiKeyEnv && !prov.keyOk) { lastErr = new Error('provider ' + pid + ' 未配置 Key'); continue }
+          const target = modelTarget(state.cfg, hit.canonicalName, pid)
+          if (!supportsEmbeddings(target.api)) { lastErr = new Error('上游协议 ' + target.api + ' 不支持 embeddings'); continue }
+          const spec = buildEmbeddingRequest(target.api, Object.assign({}, ebody, { model: target.servingName }))
+          const payload = Buffer.from(JSON.stringify(spec.body))
+          const headers = embeddingHeaders(state.cfg, prov, target.api, payload)
+          let release = null
+          try {
+            release = await acquireProvider(state, pid, state.cfg, budget.signal)
+            const up = await forward(prov, spec.path, 'POST', headers, payload, state.cfg.defaults || {}, log, { budget, signal: budget.signal })
+            const outBuf = await collectBody(up.stream, undefined, { budget, signal: budget.signal, destroyOnAbort: true })
+            if (up.ok) {
+              const j = tryParse(outBuf)
+              const norm = normalizeEmbeddingResponse(target.api, j, hit.canonicalName)
+              const usage = (j && j.usage) || (norm && norm.usage) || {}
+              const tokens = Number(usage.total_tokens) > 0 ? Number(usage.total_tokens) : (Number(usage.prompt_tokens) > 0 ? Number(usage.prompt_tokens) : 0)
+              state.st.counters.requests += 1
+              agg(state, pid, 'requests', 1)   // agg 同时累加 global 与 provider，避免重复计数
+              const sg = state.stats.byModel[hit.canonicalName] = state.stats.byModel[hit.canonicalName] || { requests: 0, errors: 0 }
+              sg.requests = (sg.requests || 0) + 1
+              if (tokens > 0) { sg.tokens = (sg.tokens || 0) + tokens; agg(state, pid, 'tokens', tokens); tallyDaily(state, hit.canonicalName, tokens, 0, 0, tokens, 0) }
+              markOk(state, pid); noteAffinity(state, hit.canonicalName, pid)
+              res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(norm)); return
+            }
+            const mapped = mapErrorEnvelope(target.api, up.status, outBuf) || outBuf
+            // 402/403/404/429/5xx 视为该上游不可用 → 记录并切 fallback；其余 4xx 是请求参数/模型级确定性错误，直接回
+            if (up.status === 402 || up.status === 403 || up.status === 404 || up.status === 429 || up.status >= 500) {
+              lastErr = new Error('upstream ' + up.status)
+              agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+              markFail(state, pid, prov.circuit)
+              continue
+            }
+            res.writeHead(up.status || 502, { 'content-type': 'application/json; charset=utf-8' }); res.end(mapped); return
+          } catch (err) {
+            if (err && err.aborted) throw err
+            lastErr = err
+            agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+            markFail(state, pid, prov.circuit)
+          } finally { if (release) release() }
+        }
+        sendJson(res, 502, { error: { message: 'embeddings 上游失败：' + (lastErr ? lastErr.message : 'all providers failed'), type: 'all_providers_failed' } }); return
+      }
       const isChat = CHAT_PATHS.has(path)
       const isResponses = RESPONSES_PATHS.has(path)
       if (!path.startsWith('/v1') && !isChat && !isResponses) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
