@@ -10,7 +10,7 @@
 - `fromUpstream(obj) → OpenAI chat.completion`：非流式响应还原；`makeOA` 负责统一信封（`chatcmpl-` 随机 id、`chat.completion`、秒级 `created`、单 `choice`）。
 - `extractStreamContent(dataStr) / extractStreamFinish(dataStr)`：从一条 SSE data 帧抽取正文与结束原因。**事件顺序、`[DONE]`、续传、keepalive、错误事件由 [src/sse.js](../../src/sse.js) 的 `relayStream` 负责**，适配器不排序、不补帧。
 - 上游错误信封、鉴权头、重试/降级、响应 `model` 回写由 [src/forward.js](../../src/forward.js)、[src/request.js](../../src/request.js)、[src/index.js](../../src/index.js) 负责；**适配器不映射错误体**。
-- 明确不在本层：Responses/Codex（MG-015）、Embedding/Audio/Image/Video（MG-011/013/014）、图片下载或转码（遵守[资源规则](../../RESOURCE_APPROVAL.md)与隐私边界，网关不代抓调用方 URL）。
+- 明确不在本层：Responses/Codex（MG-015，入口与 Chat 桥在 `src/responses.js`/`src/responses-stream.js`；将来原生 responses 协议如接入需新增适配器并在此登记）、Embedding/Audio/Image/Video（MG-011/013/014）、图片下载或转码（遵守[资源规则](../../RESOURCE_APPROVAL.md)与隐私边界，网关不代抓调用方 URL）。
 
 ## 2. 请求映射
 

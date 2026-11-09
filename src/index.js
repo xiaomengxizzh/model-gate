@@ -11,10 +11,13 @@ import { adapterFor, cacheHitMiss } from './format.js'
 import { isStreamResponse, writeUpstreamHeaders, relayStream, endInterruptedStream } from './sse.js'
 import { forwardChain, routeLimit, virtualQuotaExceeded } from './forward.js'
 import { createBudget, abortedError } from './budget.js'
+import { responsesToChat, chatToResponse } from './responses.js'
+import { createResponsesStream } from './responses-stream.js'
 import { todayKey } from './shared.js'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
+const RESPONSES_PATHS = new Set(['/v1/responses', '/responses'])
 const ADMIN_PAGE = new URL('./admin.html', import.meta.url)
 
 const FAIL_OPEN_THRESHOLD = 5       // 连续失败熔断阈值（放宽：平台偶发慢/抖不轻易熔断）
@@ -610,6 +613,9 @@ function makeHandler(state) {
     const url = req.url || '/'
     const isApi = path === '/api' || path.startsWith('/api/')
     let budget = null
+    let responsesMode = false
+    let responsesMeta = null
+    let responsesSession = null
     try {
       // 来源校验：先 Host（DNS 重绑定），再 Origin（跨源网页）。两者都只放行显式声明的部署形态。
       if (!hostAllowed(req, state.cfg)) { denyOrigin(res, path, 'Host 不被接受：' + String(req.headers.host || '') + '（DNS 重绑定防护；反向代理/自定义域名请加入 server.allowedHosts）'); return }
@@ -723,7 +729,7 @@ function makeHandler(state) {
       if (!globalAuthorized) {
         let vm = null
         const vms = state.cfg.virtualModels || []
-        if (vms.length && CHAT_PATHS.has(path) && (req.method === 'POST' || req.method === 'PUT')) {
+        if (vms.length && (CHAT_PATHS.has(path) || RESPONSES_PATHS.has(path)) && (req.method === 'POST' || req.method === 'PUT')) {
           req.__mgBodyBuf = await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024, { budget, signal: budget.signal })
           req.__mgBody = tryParse(req.__mgBodyBuf)
           const model = req.__mgBody && req.__mgBody.model
@@ -740,38 +746,65 @@ function makeHandler(state) {
 
       if (req.method === 'GET' && (path === '/v1/models' || path === '/models')) { sendJson(res, 200, staticModels(state.cfg)); return }
       const isChat = CHAT_PATHS.has(path)
-      if (!path.startsWith('/v1') && !isChat) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
+      const isResponses = RESPONSES_PATHS.has(path)
+      if (!path.startsWith('/v1') && !isChat && !isResponses) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
+      if (isResponses && req.method !== 'POST') { sendJson(res, 405, { error: { message: '仅支持 POST /v1/responses', type: 'invalid_request_error' } }); return }
 
       // —— 数据面转发（二阶段鉴权已收集 body 时直接复用，流不可二次读取） ——
       let bodyBuf = req.__mgBodyBuf || null
       if (!bodyBuf && (req.method === 'POST' || req.method === 'PUT')) bodyBuf = await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024), { budget, signal: budget.signal })
-      const body = req.__mgBody || (bodyBuf && bodyBuf.length ? tryParse(bodyBuf) : null)
-      if (isChat && (!body || typeof body !== 'object' || Array.isArray(body))) {
+      let body = req.__mgBody || (bodyBuf && bodyBuf.length ? tryParse(bodyBuf) : null)
+      if ((isChat || isResponses) && (!body || typeof body !== 'object' || Array.isArray(body))) {
         sendJson(res, 400, { error: { message: '请求体必须为 JSON 对象', type: 'invalid_request_error' } })
         return
       }
-      // 入口路径别名：把不带 /v1 的 Chat 兼容路径规范化为 /v1/chat/completions，使 base URL 填 http://127.0.0.1:8787 也被正确代理
-      const fPath = (isChat && path !== '/v1/chat/completions') ? '/v1/chat/completions' : path
+      // —— MG-015：/v1/responses 入口（Chat 桥）。原生 api:"responses" 透传尚未实现，见契约 §3 ——
+      if (isResponses) {
+        const conv = responsesToChat(body)
+        if (conv.rejected) {
+          sendJson(res, 400, { error: { message: conv.rejected.message, type: conv.rejected.code || 'unsupported_parameter' } })
+          return
+        }
+        responsesMode = true
+        responsesMeta = {
+          model: body.model,
+          stream: !!body.stream,
+          customToolNames: (Array.isArray(body.tools) ? body.tools : []).filter((t) => t && t.type === 'custom' && typeof t.name === 'string').map((t) => t.name),
+          lossy: conv.lossy || [],
+        }
+        if (responsesMeta.lossy.length) log && log.info('responses 有损转换', responsesMeta.lossy.slice(0, 20).join(','))
+        // 关键：既换内存 body，也换 bodyBuf —— forwardChain 对 OpenAI 上游默认透传原始 bodyBuf
+        body = conv.body
+        bodyBuf = Buffer.from(JSON.stringify(body))
+      }
+      // 入口路径别名：把不带 /v1 的 Chat 兼容路径/Responses 桥统一规范化为 /v1/chat/completions 发给上游
+      const fPath = ((isChat || isResponses) && path !== '/v1/chat/completions') ? '/v1/chat/completions' : path
       const fUrl = (fPath === path) ? url : (fPath + url.slice(path.length))
+      // 中继参数（Chat 与 Responses 共用）：token/缓存记账按 meta 里的实际上游/模型归属
+      const relayOptsFor = (m, reconnect) => ({
+        idleMs: (state.cfg.defaults && state.cfg.defaults.timeout && state.cfg.defaults.timeout.idleMs) || 0,
+        maxReconnects: 2, log, reconnect, signal: budget.signal, budget,
+        protocol: m.api || 'openai', extract: (m.api && m.api !== 'openai') ? adapterFor(m.api).extractStreamContent : undefined, extractFinish: (m.api && m.api !== 'openai') ? adapterFor(m.api).extractStreamFinish : undefined,
+        rewriteModel: m.rewriteModel || null, // 「名字没对上」：响应 model 回写为客户端请求名
+        onTokens: (n, usage) => {
+          const _u = usage || {}; const _inTk = (typeof _u.prompt_tokens === 'number' && _u.prompt_tokens > 0 ? _u.prompt_tokens : 0) || (typeof _u.input_tokens === 'number' && _u.input_tokens > 0 ? _u.input_tokens : 0); const _outTk = (typeof _u.completion_tokens === 'number' && _u.completion_tokens > 0 ? _u.completion_tokens : 0) || (typeof _u.output_tokens === 'number' && _u.output_tokens > 0 ? _u.output_tokens : 0); const total = (typeof _u.total_tokens === 'number' && _u.total_tokens > 0 ? _u.total_tokens : 0) || (_inTk + _outTk) || n
+          // 输入/输出 token：流末 usage 有则取（多数 OpenAI 兼容上游流末帧带），无则记 0（不臆造）；命中+未命中=输入
+          if (total > 0) { agg(state, m.pid, 'tokens', total); const sm = m.serving || m.modelName; const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }; sg.tokens = (sg.tokens || 0) + total; sg.inTokens = (sg.inTokens || 0) + _inTk; sg.outTokens = (sg.outTokens || 0) + _outTk; tallyDaily(state, sm, total, 0, 0, _inTk, _outTk); tallyVirtual(state, m.modelName, m.serving, total, _inTk, _outTk); tallyDialogue(state, m.dialogueId, total, 0, 0) }
+        },
+        onUsage: (u) => { const c = cacheHitMiss(m.api, u); if (c.hit > 0 || c.miss > 0) { const sm = m.serving || m.modelName; noteCacheStat(state, sm, m.pid, c.hit, c.miss); tallyDaily(state, sm, 0, c.hit, c.miss); tallyDialogue(state, m.dialogueId, 0, c.hit, c.miss) } },
+        // onEnd 的 markOk/markFail/streamDrops/中断统计已移入 forward.js 流式分支（按 relay 结局决策是否切下一上游/模型）
+      })
       // 流式中继注入：forward.js 在模型链循环内等待 relay 结局，未回传内容的断流可继续切下一上游/模型
       const streamRelay = async (result, meta) => {
         const m = meta || {}
+        if (responsesMode) {
+          if (!responsesSession) responsesSession = createResponsesStream(res, { model: responsesMeta.model })
+          const opts = relayOptsFor(m, m.reconnect)
+          opts.rewriteModel = null // Responses 的 model 由 writer/响应对象回写
+          return responsesSession.relay(result.stream, opts)
+        }
         if (!res.headersSent) writeUpstreamHeaders(res, result) // 切换上游后的第二次 relay：响应头已随首个上游发出，不可重写
-        const r = await relayStream(res, result.stream, {
-          idleMs: (state.cfg.defaults && state.cfg.defaults.timeout && state.cfg.defaults.timeout.idleMs) || 0,
-          maxReconnects: 2, log, reconnect: m.reconnect, signal: budget.signal, budget,
-          protocol: m.api || 'openai', extract: (m.api && m.api !== 'openai') ? adapterFor(m.api).extractStreamContent : undefined, extractFinish: (m.api && m.api !== 'openai') ? adapterFor(m.api).extractStreamFinish : undefined,
-          rewriteModel: m.rewriteModel || null, // 「名字没对上」：响应 model 回写为客户端请求名
-          onTokens: (n, usage) => {
-            const _u = usage || {}; const _inTk = (typeof _u.prompt_tokens === 'number' && _u.prompt_tokens > 0 ? _u.prompt_tokens : 0) || (typeof _u.input_tokens === 'number' && _u.input_tokens > 0 ? _u.input_tokens : 0); const _outTk = (typeof _u.completion_tokens === 'number' && _u.completion_tokens > 0 ? _u.completion_tokens : 0) || (typeof _u.output_tokens === 'number' && _u.output_tokens > 0 ? _u.output_tokens : 0); const total = (typeof _u.total_tokens === 'number' && _u.total_tokens > 0 ? _u.total_tokens : 0) || (_inTk + _outTk) || n
-            // 输入/输出 token：流末 usage 有则取（多数 OpenAI 兼容上游流末帧带），无则记 0（不臆造）；命中+未命中=输入
-            const inTk = _inTk
-            const outTk = _outTk
-            if (total > 0) { agg(state, m.pid, 'tokens', total); const sm = m.serving || m.modelName; const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }; sg.tokens = (sg.tokens || 0) + total; sg.inTokens = (sg.inTokens || 0) + inTk; sg.outTokens = (sg.outTokens || 0) + outTk; tallyDaily(state, sm, total, 0, 0, inTk, outTk); tallyVirtual(state, m.modelName, m.serving, total, inTk, outTk); tallyDialogue(state, m.dialogueId, total, 0, 0) }
-          },
-          onUsage: (u) => { const c = cacheHitMiss(m.api, u); if (c.hit > 0 || c.miss > 0) { const sm = m.serving || m.modelName; noteCacheStat(state, sm, m.pid, c.hit, c.miss); tallyDaily(state, sm, 0, c.hit, c.miss); tallyDialogue(state, m.dialogueId, 0, c.hit, c.miss) } },
-          // onEnd 的 markOk/markFail/streamDrops/中断统计已移入 forward.js 流式分支（按 relay 结局决策是否切下一上游/模型）
-        })
+        const r = await relayStream(res, result.stream, relayOptsFor(m, m.reconnect))
         return Object.assign({}, r, { finish: (note) => endInterruptedStream(res, note, r ? r.reconnects : 0) })
       }
       const out = await forwardChain(FWD_DEPS, state, req, fUrl, fPath, req.method, bodyBuf, body, log, streamRelay, budget)
@@ -779,10 +812,10 @@ function makeHandler(state) {
       const reqModel = (body && body.model) || '-'
       const _chain = (n) => n || ''
       if (out.kind === 'stream-done' || out.kind === 'stream-interrupted' || out.kind === 'stream') {
-        log.info('data ' + req.method + ' ' + fPath + ' model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-') + ' chain=' + _chain(out.chain) + ' stream')
+        log.info('data ' + req.method + ' ' + path + ' model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-') + ' chain=' + _chain(out.chain) + ' stream')
         state.st.lastServing = { model: out.serving || out.modelName || '-', provider: out.pid || '-', at: Date.now() }
       } else {
-        log.info('data ' + req.method + ' ' + fPath + ' -> ' + (out.status || '-') + ' model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-') + ' chain=' + _chain(out.chain))
+        log.info('data ' + req.method + ' ' + path + ' -> ' + (out.status || '-') + ' model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-') + ' chain=' + _chain(out.chain))
         if (out.status >= 200 && out.status < 300) state.st.lastServing = { model: out.serving || out.modelName || '-', provider: out.pid || '-', at: Date.now() }
         if (out.kind === 'json' && out.status >= 200 && out.status < 300 && out.body && out.body.length) {
           const _j = tryParse(out.body)
@@ -790,6 +823,36 @@ function makeHandler(state) {
           const _has = _cs.some((c) => { const m = c && c.message; return m && typeof m.content === 'string' && m.content.length })
           if (!_has) log.warn('data 2xx 无正文内容 model=' + reqModel + ' serving=' + (out.serving || out.modelName || '-') + ' provider=' + (out.pid || '-'))
         }
+      }
+      // —— MG-015：Responses 结果整形（非流式对象 / 降级单帧 / 流式终态 / 错误） ——
+      if (responsesMode) {
+        if (out.kind === 'aborted') return
+        if (out.kind === 'stream-done') return
+        if (out.kind === 'stream-interrupted') {
+          if (responsesSession) { responsesSession.fail(out.note || '上游流式响应中断', { timeout: !!out.timeout }); return }
+          sendJson(res, 502, { error: { message: out.note || '上游流式响应中断', type: 'stream_interrupted' } }); return
+        }
+        if (out.kind === 'stream') {
+          // 兼容路径（未注入 streamRelay 的异常分支）：直接桥接上游流
+          if (!responsesSession) responsesSession = createResponsesStream(res, { model: responsesMeta.model })
+          await responsesSession.relay(out.res.stream, Object.assign(relayOptsFor(out, out.reconnect), { rewriteModel: null }))
+          return
+        }
+        if (out.kind === 'json') {
+          const chat = tryParse(out.body)
+          if (out.status >= 200 && out.status < 300) {
+            if (responsesMeta.stream) {
+              // 客户端要流式但上游给的是 JSON（forceNoStream/降级）：以单帧事件交付
+              if (!responsesSession) responsesSession = createResponsesStream(res, { model: responsesMeta.model })
+              responsesSession.oneShot(chat, { customToolNames: responsesMeta.customToolNames })
+              return
+            }
+            const resp = chatToResponse(chat, { model: responsesMeta.model, customToolNames: responsesMeta.customToolNames })
+            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(resp)); return
+          }
+          res.writeHead(out.status || 502, { 'content-type': out.contentType || 'application/json; charset=utf-8' }); res.end(out.body); return
+        }
+        return
       }
       if (out.kind === 'aborted') return   // 客户端已断开/请求已取消：连接不可写，不产生响应
       if (out.kind === 'stream') {
@@ -871,7 +934,8 @@ function makeHandler(state) {
           sendJson(res, 504, { error: { message: '请求超时：超出整体预算 ' + (_to2.overallMs || 0) + 'ms（defaults.timeout.overallMs）', type: 'request_timeout' } })
           if (!req.complete) res.once('finish', () => setImmediate(() => { try { req.destroy() } catch {} }))   // 慢 body：响应后释放半截连接
         } else if (!res.writableEnded && !res.destroyed) {
-          endInterruptedStream(res, '请求超出整体预算', 0, { type: 'stream_interrupted', code: 'REQUEST_TIMEOUT' })
+          if (responsesMode && responsesSession) responsesSession.fail('请求超出整体预算 ' + ((state.cfg.defaults && state.cfg.defaults.timeout && state.cfg.defaults.timeout.overallMs) || 0) + 'ms（defaults.timeout.overallMs）', { timeout: true })
+          else endInterruptedStream(res, '请求超出整体预算', 0, { type: 'stream_interrupted', code: 'REQUEST_TIMEOUT' })
         }
         return
       }

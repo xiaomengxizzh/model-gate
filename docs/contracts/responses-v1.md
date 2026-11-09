@@ -1,6 +1,6 @@
 # Responses / Codex 接入契约 v0（MG-015）
 
-状态：**设计草案，未冻结，未实现**。本文件定义 `/v1/responses` 的入口、路由、wire 映射与验收边界，是 MG-015 的实现依据；实现前先补失败复现与 wire fixture。依赖 MG-002（请求生命周期预算，已闭环）、MG-004（测试隔离，已闭环）、MG-016（管理面契约基线，已闭环）。
+状态：**Chat 桥已实现（2026-11-09），原生 `api:"responses"` 透传与真实客户端对照未实现，未冻结**。实现：`src/responses.js`（纯映射）、`src/responses-stream.js`（Chat SSE → Responses 事件桥）、`src/index.js` 入口接线；回归 `scripts/test/offline/responses-mapping.test.mjs`（17 用例）与 `responses-endpoint.test.mjs`（6 用例）。本文件定义 `/v1/responses` 的入口、路由、wire 映射与验收边界，是 MG-015 的实现依据；实现前先补失败复现与 wire fixture。依赖 MG-002（请求生命周期预算，已闭环）、MG-004（测试隔离，已闭环）、MG-016（管理面契约基线，已闭环）。
 
 > 审计边界：Draft PR #2 与真实 Codex CLI/桌面、DSH 对照**未审计、未执行**（本机无网络与 `gh`，未做任何 PR 内容推断）。本文只依据本仓库现有实现（`src/router.js`、`src/format.js`、`src/forward.js`、`docs/reference/protocol-bridge.md`）与 OpenAI Responses 公开语义撰写。
 
@@ -110,13 +110,31 @@ Responses 响应最小形状：
 | 拒绝项 | 托管工具/background/previous_response_id/store → 400 且未触上游 | 集成 |
 | 真实对照 | Codex CLI/桌面、DSH 三家；记录版本与 SHA | **单独授权后才做**，不在离线套件 |
 
-## 9. 未验证与待决
+## 9. 实现状态（2026-11-09）
+
+### 9.1 已实现
+
+- 入口：`POST /v1/responses` 与 `/responses`；非 POST → 405；鉴权/虚拟模型 Key/配额/熔断/亲和/统计/日志脱敏全部复用 Chat 路径（同一 `forwardChain`）。
+- 请求映射：`responsesToChat()` 覆盖 §4 表格；拒绝矩阵（store/previous_response_id/background/include/truncation/托管工具）返回 `400 {error:{message,type:'unsupported_parameter'}}` 且不触上游。
+- 非流式：上游 Chat JSON → `chatToResponse()`（`resp_*` id、`model` 回写、output/output_text、usage 映射、incomplete_details）。
+- 流式：`createResponsesStream()` 复用 `relayStream`（续传/空闲看门狗/MG-002 预算/背压），把 Chat SSE 帧翻译为 §6 事件序列；不发 `[DONE]`；预算耗尽/断流以 `response.failed`（`code=REQUEST_TIMEOUT`/`STREAM_INTERRUPTED`）收尾。
+- 降级：客户端 `stream:true` 但上游返回 JSON（forceNoStream/混合协议降级）时以单帧事件序列交付。
+- 回归：`responses-mapping.test.mjs` 17 用例 + `responses-endpoint.test.mjs` 6 用例（非流式、拒绝、SSE 顺序、工具分片、错误透传、405），并随 `npm test` 运行。
+
+### 9.2 未实现 / 未验证
+
+- **原生 `api:"responses"` 透传未实现**：当前 `models.api` 校验只允许 openai/anthropic/gemini；配置 `responses` 会被保存校验拒绝。若上游原生支持，需先在配置校验/`modelTarget`/`format.js` 增加协议并定义透传与错误映射。
+- **真实 Codex CLI/桌面与 DSH 对照：UNVERIFIED**（本机无网络/未做真实客户端测试）。
+- **Draft PR #2 审计：UNVERIFIED**（未联网，未做任何内容推断）。
+- 工具流的并行多调用以“收尾时逐条补发完整参数”呈现，不是逐调用并行 delta；custom tool 回程默认 function_call（`ctx.customToolNames` 才还原）。
+
+## 10. 未验证与待决
 
 - **UNVERIFIED**：Draft PR #2 内容与 SHA（本机无网络/无 `gh`，未执行 `git fetch`/API 查询）；真实 Codex/DSH 行为与字段版本兼容性。
 - 待决：原生 Responses 上游列表（哪些 provider 实际支持、是否需要 per-provider 开关）、`strict`/structured outputs 的桥接深度、是否提供 `GET /v1/responses/:id`（当前设计为不提供，且不存响应）。
 - 实现顺序：先 `src/responses.js` 纯映射 + fixture，再接 `src/router.js` 路径与 `src/format.js` 适配器，最后在 `forward.js/index.js` 接线（必须等 MG-008 余项收口，避免同文件多作者）。
 
-## 10. 验收（实现时）
+## 11. 验收（实现时）
 
 1. 全部 §8 离线用例通过，且默认套件（含 legacy 27 文件）不回归；
 2. 拒绝项不触上游、不产生 5xx；

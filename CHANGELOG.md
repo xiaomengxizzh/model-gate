@@ -2,6 +2,24 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-09 Responses 入口与 Chat 桥（未发布，MG-015）
+
+### Added
+
+- `/v1/responses`（与 `/responses` 别名）入口：将 Responses 请求映射为 Chat Completions 走既有治理（虚拟模型/Key/配额/熔断/亲和/统计/日志脱敏/MG-002 预算），再把上游结果重建为 Responses JSON 或 SSE 事件。非 POST 返回 405。
+- `src/responses.js`：纯函数映射 `responsesToChat`（input/instructions/tools function|custom/tool_choice/reasoning/max_output_tokens；custom tool 自由文本编码为 `{input}`；**拒绝** store=true、previous_response_id、background=true、非空 include、truncation≠disabled、托管工具，400 且不触上游）、`chatToResponse`（`resp_*`、model 回写、output/output_text、usage/incomplete_details）、`makeSSEWriter`（§6 事件顺序、sequence 单调、不发 [DONE]）。
+- `src/responses-stream.js`：Chat SSE → Responses 事件桥，复用 `relayStream` 的断流续传/空闲看门狗/预算/背压；流式终态 `response.completed` 或 `response.failed`（预算耗尽 `REQUEST_TIMEOUT`）；上游降级为 JSON 时以单帧事件交付。
+- 回归：`scripts/test/offline/responses-mapping.test.mjs`（17 用例）与 `responses-endpoint.test.mjs`（6 用例：非流式整形、拒绝矩阵、SSE 顺序/无 [DONE]、工具参数分片、错误透传、405）。
+
+### Changed
+- `npm run check` 覆盖新增的 `src/budget.js`、`src/responses.js`、`src/responses-stream.js`。
+
+### 未实现 / 未验证
+- 原生 `api:"responses"` 透传（配置校验仍只允许 openai/anthropic/gemini）、真实 Codex CLI/桌面与 DSH 对照、Draft PR #2 审计均 **UNVERIFIED**；工具并行多调用以收尾时逐条补发完整参数呈现，不是逐调用并行 delta。
+
+### 验证
+- `npm run check` 0；`npm test` 18/18 隔离套件；`MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs` 27/27 文件；`npm run docs:check` PASS。
+
 ## 2026-11-09 模型解析一致性与错误信封（未发布，MG-008 余项）
 
 ### Fixed
