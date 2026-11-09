@@ -150,17 +150,56 @@ PATTERN_DONE suspects=0
 | --- | --- |
 | `npm run check` | 退出码 0 |
 | `npm test` | **25/25** 隔离套件通过（新增 user-env 1 套件；其余 24 套不变） |
-| `npm run docs:check` | 见收口记录 |
-| `node scripts/check-metadata.mjs` | 见收口记录 |
+| `MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs` | 27/27 旧套件文件通过（133 断言，无 SKIP） |
+| `npm run docs:check` | PASS |
+| `node scripts/check-metadata.mjs` | PASS (21) |
 
 **未执行 / 未验证（不得当通过）**：
 - 生产 8787 与 systemd 服务的启动/验收（按约束未触碰）。
 - 真实上游的失败类路径（4xx/5xx/超时全部用本地 mock 复现，未消耗上游额度去制造故障）。
-- Windows/macOS 与 Node 18/20 实跑；`live.mjs` 27 套件本轮未重跑（与本轮改动无交集，但未执行即未执行）。
+- Windows/macOS 与 Node 18/20 实跑（本机未执行）。
 - DSH 侧真实 `/responses` 通道、`gatemodel` 虚拟名的真实上游往返（虚拟名配方只在 mock 网关验证）。
 
-## 6. 下一步建议
+## 6. 任务 C 补充：候选缺陷的源码核查与最小复现（2026-11-09 追加）
+
+本节由「只读源码核查 + 本地零成本最小复现」组成。仅标注**已复现**的条目作为事实；其余只有代码证据的列为候选，**本轮不改代码**（改 pi-ai 需走 patch-package，属该仓库规则内的独立工作）。源码事实卡的 file:line 明细在私有证据目录（research/dsh-cli-source-facts.md），不入库。
+
+### 6.1 已复现
+
+**D1 · 流式 tool_call 参数「整串重发」被重复拼接（DSH 侧缺陷，已复现）**
+
+- 场景：mock 上游在相邻两帧分别发 `arguments: '{"file_path":'` 与完整串 `'{"file_path":"seed.txt"}'`（常见聚合/翻译网关行为）。
+- 期望：以完整串替换，参数解析为 `{"file_path":"seed.txt"}`。
+- 实际：`rc=1`，`turn_end.reason.kind=error`，`code=MALFORMED_RESPONSE`，message 为
+  `Tool call "read": Expected ',' or '}' after property value in JSON at position 37`，并回显拼坏的
+  `{"file_path":{"file_path":"seed.txt"}`；`final` 为空。
+- 归因（源码）：`@earendil-works/pi-ai/dist/api/openai-completions.js:440-443` 只做字符串 append；同包 `utils/streaming-json.js:429-437` 的 `replace()` 在该路径**从未被调用**。
+- 影响面：任何会重发完整 arguments 的网关/翻译层。**ModelGate 的 OpenAI chat 路径是逐字节透传，本次不受影响**；只有网关自己做帧聚合/重排时才会踩到。
+- 建议修法（未改）：append 前判断新片段是否已是可解析的完整 JSON（或以 `{` 开头且长度不小于旧值）→ 改为 replace；或按 `index` 记录上次值做前缀去重。补一条 mock SSE 回归。
+
+**D2 · reasoningEffort 白名单两侧必须一致（已复现，两端结论一致）**
+
+- CLI：`reasoningEffort: medium` 且不覆盖模型目录 → `rc=1`、`UNSUPPORTED_REASONING_EFFORT: provider "opencode-go" model "deepseek-v4.1-flash" does not support reasoning effort "medium"`；请求未发出（mock 无新请求）。
+- 网关：同一模型 `effortOptions=[low,high,max]`，`reasoning_effort=medium|xhigh` → 本地 `400`，错误信封 `type=UnsupportedParamsError`、message 列出允许档位，`/api/status` 计数不变（无上游调用）。
+- 结论：本机两侧白名单**一致**，档位错误在本地即可诊断；换 provider/模型时要同时改 CLI 目录与网关 `effortOptions`。
+
+### 6.2 未复现（仅代码证据，候选）
+
+- **D3 `thinking:{type:"enabled"}` 被严格网关 400**：本链路**未发生**。CLI 确实同时发 `reasoning_effort` 与 `thinking`（mock 抓包可见），但 ModelGate 按模型 `effortFormat=reasoning_effort` 整形后，出站体只剩 `reasoning_effort`；真实上游 3 回合均 200。这反过来是网关归一化的一次正向价值。
+- D4 手工声明模型被当作「标准 OpenAI」（`store:false`、`developer` 角色）：未观察到拒绝，本机网关不校验这些字段。
+- D5 缺 `finish_reason` 硬失败、D6 `data: [DONE] ` 带尾随空格不识别：本轮 mock 都发了 `finish_reason` 与严格 `[DONE]`，故未构造。
+- D7 空 text + 退 0 与退 1 在 stdout 上难区分、D8 续传被 cwd 锁死、D9 最坏 5×600s 无总时限、D11 headless 关凭据库、D12 `--dump-config` 也写盘、D13 错误分类正则误判、D14 usage 口径、D15 `patches/` 为空却宣称有 shim：均只有代码证据，本轮未验证。
+- 与本轮实测**一致**的源码结论：baseURL 不做 `/v1` 去重（实测请求就是 `/v1/chat/completions`）；退出码仅 `completed` 为 0（实测 error/缺 Key 均 rc=1 且 final 空）；缺 Key 只回 credential-ref 名（实测无值无长度）；`--dump-config` 会写 `cordis.yml`（runbook 已记，实测也不能当零写入）。
+
+### 6.3 DSH 仓库文档漂移（未改，仅记录）
+
+- `harness/deepseek/source/package.json` 为 `0.2.2-rc.1`，但 `AGENTS.md` 仍写「精确锁 0.2.1-rc.2」、`docs/FOR-MODELS.md` 写 `0.1.5-rc.1`。
+- `source/patches/` 为空目录，而 `AGENTS.md`/`FOR-MODELS.md` 宣称用 patch-package 维护 dsh-session shim。
+
+## 7. 下一步建议
 
 1. 若要长期用隔离实例验证，建议把 `systemd-run --user --pipe --wait --collect` 的启动封装写进 `harness/deepseek/docs/` 的操作脚本（本轮只写文档，不新增脚本）。
 2. 把「每回合额外低档位请求」写进网关/CLI 的对接说明，避免排障时误判为重复请求。
-3. 网关 502 文案按 §4.4 调整（属 MG-002/008 文案层，需单独卡片）。
+3. 网关 502 文案按 §4 第 4 条调整（属 MG-002/008 文案层，需单独卡片）。
+4. D1 建议在 DSH 仓库按 patch-package 流程单独立卡（含 mock SSE 回归），本轮只留复现与修法建议，不硬改 vendored 依赖。
+5. DSH 仓库的版本号/patches 文档漂移（§6.3）单独清理，别与本轮网关改动混在一批。

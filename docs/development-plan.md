@@ -33,11 +33,13 @@
 | `npm test` | **25/25** 隔离套件通过（新增 offline/user-env.test.mjs 5 用例） |
 | `npm run docs:check` | PASS |
 | `node scripts/check-metadata.mjs` | PASS (21) |
-| `MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs` | **NOT_EXECUTED**（本轮未重跑；与本轮改动无交集，但不跑即不算通过） |
+| `MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs` | 27/27 旧套件文件通过（133 断言，无 SKIP） |
 
 本轮代码改动：`src/router.js` 增加用户级环境读取的测试注入点与 `readEnvironmentDir(name, baseDir?)`（运行时行为不变），回归见 `scripts/test/offline/user-env.test.mjs`。
 
 仍未验证：真实上游故障注入（本轮用本地 mock 复现错误路径，未为制造故障消耗额度）、生产 8787/systemd 服务重启、`/responses` 通道与虚拟共用名 `gatemodel` 的真实上游往返、Windows/macOS 与 Node 18/20、GitHub Actions。
+
+另记：本轮复现了 **DSH 侧**流式 tool_call 参数「整串重发被重复拼接」导致的 `MALFORMED_RESPONSE`（归因、最小复现与修法建议见报告 §6.1），以及 CLI/网关两侧档位白名单必须一致（§6.2）；两项都不属本仓库代码，网关 OpenAI chat 路径逐字节透传，不受影响。
 
 已知遗留：`user-env-fallback` 的 Windows 分支仍未在 Windows 实跑（Linux 分支已由 `offline/user-env.test.mjs` 覆盖）；`/api/keys` 的 id 仍无完整白名单（随 MG-009）；前端 F0–F5 全部 TODO，本轮只到契约基线；网关 502 信封「已循环兜底约 120s」文案与实际耗时不符（待单独立卡）。
 
