@@ -182,7 +182,10 @@ function single(provider, url, method, headers, bodyBuf, timeout, ctl = {}) {
       req.setTimeout(effIdle, () => req.destroy(Object.assign(new Error('upstream idle'), { code: 'ETIMEDOUT' })))
       resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, headers: res.headers, stream: res, retryAfter: parseRetryAfter(res.headers) })
     })
-    firstByteTimer = setTimeout(() => req.destroy(new Error('first-byte timeout')), effFirstByte)
+    // 若第一阶段上限实际由请求预算钳制（预算更小），超时必须按预算中止语义上报（504 request_timeout），
+    // 否则 firstByte 定时器会先于预算定时器触发，被当成普通网络超时 → 502 provider 失败。
+    const budgetBoundFirstByte = budget && Number.isFinite(remaining) && remaining <= Number(timeout.firstByteMs)
+    firstByteTimer = setTimeout(() => req.destroy(budgetBoundFirstByte ? abortedError(reasonOf(budget), 'overall timeout') : new Error('first-byte timeout')), effFirstByte)
     // 建连+等响应头阶段：总时长由 firstByteTimer 墙钟兜底，socket 静默上限对齐 firstByteMs，
     // 避免慢思考上游被更短的 connect 空闲定时器提前掐断
     req.setTimeout(effFirstByte, () => req.destroy(Object.assign(new Error('connect timeout'), { code: 'ETIMEDOUT' })))

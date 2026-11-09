@@ -1,4 +1,5 @@
 import http from 'node:http'
+import { pipeline } from 'node:stream'
 import { readFileSync, chmodSync, existsSync, writeFileSync, copyFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
@@ -384,7 +385,7 @@ async function doSaveConfig(state, body) {
     if (m.effortFormat != null && m.effortFormat !== '' && !['reasoning_effort', 'thinking'].includes(m.effortFormat)) return { error: '模型「' + mn + '」的 effortFormat 仅支持 reasoning_effort/thinking' }
     // 协议（改革：per-model protocol）：未设置/留空 = 继承上游的 api；显式设置时须为已知协议。
     // 同一上游的不同模型可各走不同协议（如 OpenCode Zen 的 union-alpha 走 anthropic、其余走 openai）。
-    if (m.api != null && m.api !== '' && !['openai', 'anthropic', 'gemini', 'cohere'].includes(String(m.api))) return { error: '模型「' + mn + '」的 api 仅支持 openai/anthropic/gemini/cohere（留空=继承上游）' }
+    if (m.api != null && m.api !== '' && !['openai', 'anthropic', 'gemini', 'cohere', 'responses'].includes(String(m.api))) return { error: '模型「' + mn + '」的 api 仅支持 openai/anthropic/gemini/cohere/responses（留空=继承上游）' }
     // per-上游模型名覆盖：{ <providerId>: <该上游侧的模型名> }
     if (m.providerModels != null && m.providerModels !== '' && (typeof m.providerModels !== 'object' || Array.isArray(m.providerModels))) return { error: '模型「' + mn + '」的 providerModels 须为 { 上游ID: 该上游模型名 } 对象' }
     for (const pOv of Object.keys(m.providerModels || {})) if (RESERVED_KEYS.has(pOv)) return { error: '模型「' + mn + '」的 providerModels 含保留键名：' + pOv }
@@ -782,6 +783,88 @@ async function cancelVideoTask(state, task, log) {
   return task
 }
 
+// —— MG-015 原生 Responses 透传：模型显式 api:"responses" 时，不做 Chat 桥转换 ——
+// 非流式：JSON 原样透传并把响应 model 回写客户端请求名；流式：上游 SSE 原样管道（不翻译事件、不改 model）。
+// 仍复用 forward 的 retry/timeout 与请求预算；错误体原样/映射透传。
+async function proxyNativeResponses(state, budget, log, opts) {
+  const { body, modelName, def, wantStream, res } = opts
+  const candidates = [def.provider, ...(def.fallbacks || [])].filter(Boolean)
+  const upstreamPath = (typeof def.responsesPath === 'string' && def.responsesPath) ? def.responsesPath : '/v1/responses'
+  let lastErr = null
+  for (const pid of candidates) {
+    if (!state.cfg.providers[pid]) continue
+    const prov = buildProvider(state.cfg, pid)
+    if (!healthy(ensureHst(state, pid), Date.now())) { lastErr = new Error('provider ' + pid + ' 熔断中'); continue }
+    if (prov._def.apiKeyEnv && !prov.keyOk) { lastErr = new Error('provider ' + pid + ' 未配置 Key'); continue }
+    const target = modelTarget(state.cfg, modelName, pid)
+    const payload = Buffer.from(JSON.stringify(Object.assign({}, body, { model: target.servingName })))
+    const headers = videoJsonHeaders(state, prov, payload.length)
+    let release = null
+    try {
+      release = await acquireProvider(state, pid, state.cfg, budget.signal)
+      const up = await forward(prov, upstreamPath, 'POST', headers, payload, state.cfg.defaults || {}, log, { budget, signal: budget.signal })
+      if (up.ok) {
+        state.st.counters.requests += 1
+        agg(state, pid, 'requests', 1)
+        const sg = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
+        sg.requests = (sg.requests || 0) + 1
+        markOk(state, pid); noteAffinity(state, modelName, pid)
+        const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
+        if (/text\/event-stream/i.test(ct)) {
+          writeUpstreamHeaders(res, up)
+          await streamRawResponses(res, up.stream, budget)
+          return { streamed: true }
+        }
+        const buf = await collectBody(up.stream, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024) * 4, { budget, signal: budget.signal, destroyOnAbort: true })
+        const j = tryParse(buf)
+        if (j && typeof j === 'object') {
+          if (typeof j.model === 'string') j.model = body.model
+          const usage = j.usage || {}
+          const tokens = Number(usage.total_tokens) > 0 ? Number(usage.total_tokens) : (Number(usage.input_tokens) > 0 || Number(usage.output_tokens) > 0 ? (Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0) : 0)
+          if (tokens > 0) { sg.tokens = (sg.tokens || 0) + tokens; agg(state, pid, 'tokens', tokens); tallyDaily(state, modelName, tokens, 0, 0, tokens, 0) }
+          return { status: up.status, contentType: ct, buf: Buffer.from(JSON.stringify(j)) }
+        }
+        return { status: up.status, contentType: ct, buf }
+      }
+      const ebuf = await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
+      const mapped = mapErrorEnvelope(target.api, up.status, ebuf) || ebuf
+      if (up.status === 402 || up.status === 403 || up.status === 404 || up.status === 429 || up.status >= 500) {
+        lastErr = new Error('upstream ' + up.status)
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        markFail(state, pid, prov.circuit)
+        continue
+      }
+      return { status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: mapped }
+    } catch (err) {
+      if (err && err.aborted) throw err
+      lastErr = err
+      agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+      markFail(state, pid, prov.circuit)
+    } finally { if (release) release() }
+  }
+  return { status: 502, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: 'responses 上游失败：' + (lastErr ? lastErr.message : 'all providers failed'), type: 'all_providers_failed' } })) }
+}
+
+// 原生 Responses 流：逐字节管道（pipeline 负责背压），预算中止/客户端断开时销毁上游。
+function streamRawResponses(res, upstreamStream, budget) {
+  return new Promise((resolve) => {
+    let done = false
+    const finish = () => { if (!done) { done = true; cleanup(); resolve() } }
+    const onAbort = () => { try { upstreamStream.destroy() } catch {} ; finish() }
+    const onClose = () => { try { upstreamStream.destroy() } catch {} ; finish() }
+    const cleanup = () => {
+      try { res.removeListener('close', onClose) } catch {}
+      if (budget && budget.signal) { try { budget.signal.removeEventListener('abort', onAbort) } catch {} }
+    }
+    if (budget && budget.signal) {
+      if (budget.signal.aborted) { onAbort(); return }
+      try { budget.signal.addEventListener('abort', onAbort, { once: true }) } catch {}
+    }
+    try { res.once('close', onClose) } catch {}
+    pipeline(upstreamStream, res, () => finish())
+  })
+}
+
 const FWD_DEPS = { ensureHst, markFail, markOk, healthy, effState: (h, now) => (h.state === 'open' && h.openUntil <= now) ? 'half' : h.state, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tallyDialogueRequest, tryParse, collectBody }
 function makeHandler(state) {
   const log = state.log
@@ -1156,6 +1239,19 @@ function makeHandler(state) {
       }
       // —— MG-015：/v1/responses 入口（Chat 桥）。原生 api:"responses" 透传尚未实现，见契约 §3 ——
       if (isResponses) {
+        // 原生 Responses 透传（MG-015）：模型显式 api:"responses" 时不做 Chat 桥转换
+        // resolve 在缺 model 且无 defaults.provider 时会抛错：此处静默回落到 Chat 桥，由 forwardChain 给出统一错误
+        let nHit = null
+        try { nHit = state.router.resolve(body.model) } catch { nHit = null }
+        const nDef = nHit && nHit.def
+        if (nDef && !nDef.isVirtualModel && !nDef.virtual && nDef.api === 'responses') {
+          const nconv = responsesToChat(body)   // 仅复用拒绝矩阵/校验，不采用其 Chat body
+          if (nconv.rejected) { sendJson(res, 400, { error: { message: nconv.rejected.message, type: nconv.rejected.code || 'unsupported_parameter' } }); return }
+          if ((nDef.capability || 'chat') !== 'chat') { sendJson(res, 400, { error: { message: '模型 ' + nHit.canonicalName + ' 的能力不是 chat，不能用于 /v1/responses', type: 'unsupported_model' } }); return }
+          const nout = await proxyNativeResponses(state, budget, log, { body, modelName: nHit.canonicalName, def: nDef, wantStream: !!body.stream, res })
+          if (nout && nout.streamed) return
+          res.writeHead(nout.status, { 'content-type': nout.contentType }); res.end(nout.buf); return
+        }
         const conv = responsesToChat(body)
         if (conv.rejected) {
           sendJson(res, 400, { error: { message: conv.rejected.message, type: conv.rejected.code || 'unsupported_parameter' } })

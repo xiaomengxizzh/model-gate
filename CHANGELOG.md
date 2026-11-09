@@ -2,6 +2,19 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-09 原生 Responses 透传（未发布，MG-015 收尾）
+
+### Added
+
+- `models.<名>.api="responses"`（保存校验已允许）时，`/v1/responses` 走原生透传而非 Chat 桥：请求原样发往 `responsesPath`（默认 `/v1/responses`），`providerModels` 覆盖名生效；非流式 JSON 透传并把 `model` 回写客户端请求名，流式 SSE 逐字节管道（复用背压与预算中止）。拒绝矩阵（store/previous_response_id/background/include/truncation/托管工具）与能力隔离仍生效；上游错误体/状态透传。
+- 回归 `scripts/test/offline/responses-native.test.mjs`（4 用例：非流式请求/响应/记账、SSE 原样、拒绝与能力隔离、错误与预算 504）；协议桥/契约/配置参考同步。
+
+### Fixed
+- 请求预算小于 `firstByteMs` 时，first-byte 定时器会先触发并被当作普通网络超时（502 `provider` 失败）；现按预算中止语义上报 504 `request_timeout`（影响所有入口的预算测试稳定性）。
+
+### 未验证
+- 真实 Codex CLI/桌面与 DSH 对照、Draft PR #2 审计；原生流式不改 model 字段（有损，已在契约 §7/§9 记录）。
+
 ## 2026-11-09 Video 异步任务池（未发布，MG-014）
 
 ### Added

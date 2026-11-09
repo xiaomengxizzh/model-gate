@@ -1,6 +1,6 @@
 # Responses / Codex 接入契约 v0（MG-015）
 
-状态：**Chat 桥已实现（2026-11-09），原生 `api:"responses"` 透传与真实客户端对照未实现，未冻结**。实现：`src/responses.js`（纯映射）、`src/responses-stream.js`（Chat SSE → Responses 事件桥）、`src/index.js` 入口接线；回归 `scripts/test/offline/responses-mapping.test.mjs`（17 用例）与 `responses-endpoint.test.mjs`（6 用例）。本文件定义 `/v1/responses` 的入口、路由、wire 映射与验收边界，是 MG-015 的实现依据；实现前先补失败复现与 wire fixture。依赖 MG-002（请求生命周期预算，已闭环）、MG-004（测试隔离，已闭环）、MG-016（管理面契约基线，已闭环）。
+状态：**Chat 桥与原生 `api:"responses"` 透传均已实现（2026-11-09），真实 Codex/DSH 客户端对照未执行，未冻结**。实现：`src/responses.js`（纯映射）、`src/responses-stream.js`（Chat SSE → Responses 事件桥）、`src/index.js` 入口接线；回归 `scripts/test/offline/responses-mapping.test.mjs`（17 用例）与 `responses-endpoint.test.mjs`（6 用例）。本文件定义 `/v1/responses` 的入口、路由、wire 映射与验收边界，是 MG-015 的实现依据；实现前先补失败复现与 wire fixture。依赖 MG-002（请求生命周期预算，已闭环）、MG-004（测试隔离，已闭环）、MG-016（管理面契约基线，已闭环）。
 
 > 审计边界：Draft PR #2 与真实 Codex CLI/桌面、DSH 对照**未审计、未执行**（本机无网络与 `gh`，未做任何 PR 内容推断）。本文只依据本仓库现有实现（`src/router.js`、`src/format.js`、`src/forward.js`、`docs/reference/protocol-bridge.md`）与 OpenAI Responses 公开语义撰写。
 
@@ -123,7 +123,7 @@ Responses 响应最小形状：
 
 ### 9.2 未实现 / 未验证
 
-- **原生 `api:"responses"` 透传未实现**：当前 `models.api` 校验只允许 openai/anthropic/gemini；配置 `responses` 会被保存校验拒绝。若上游原生支持，需先在配置校验/`modelTarget`/`format.js` 增加协议并定义透传与错误映射。
+- **原生透传已实现（2026-11-09）**：`models.<名>.api="responses"`（保存校验已允许）时，`/v1/responses` 不做 Chat 桥转换：请求原样发往 `responsesPath`（默认 `/v1/responses`，支持 `providerModels` 覆盖名），非流式 JSON 透传并把 `model` 回写客户端请求名，流式 SSE 逐字节管道（不翻译事件；**原生流不改 model 字段**，见 §7 有损）。拒绝矩阵与能力隔离仍然生效。回归 `scripts/test/offline/responses-native.test.mjs`（4 用例）。
 - **真实 Codex CLI/桌面与 DSH 对照：UNVERIFIED**（本机无网络/未做真实客户端测试）。
 - **Draft PR #2 审计：UNVERIFIED**（未联网，未做任何内容推断）。
 - 工具流的并行多调用以“收尾时逐条补发完整参数”呈现，不是逐调用并行 delta；custom tool 回程默认 function_call（`ctx.customToolNames` 才还原）。

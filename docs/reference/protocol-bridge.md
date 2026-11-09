@@ -195,9 +195,13 @@ OpenAI 客户端只接受 `stop / length / tool_calls / content_filter` 四个�
 
 有损：无法识别的上游状态保持当前状态并在 24h 后过期；结果只保存上游 JSON/URL，不做文件转存；不支持 webhook。
 
-## 11. 模型解析与错误信封（MG-008 余项）
+## 11. 原生 Responses 透传（MG-015）
 
-### 11.1 单一模型解析入口
+`models.<名>.api="responses"` 时，`/v1/responses` 不做 Chat 桥：请求原样转发到 `responsesPath`（默认 `/v1/responses`，支持 providerModels 覆盖名）；非流式 JSON 透传并按客户端请求名回写 `model`，流式 SSE 逐字节管道（不翻译事件、原生流不改 model）。拒绝矩阵与能力隔离仍在入口层生效；预算/取消/背压由 forward 与 res 管道复用。回归：`scripts/test/offline/responses-native.test.mjs`。
+
+## 12. 模型解析与错误信封（MG-008 余项）
+
+### 12.1 单一模型解析入口
 
 `modelTarget(cfg, modelName, pid)`（src/router.js）返回 `{ servingName, api, effortFormat, maxTokensMax }`：
 
@@ -207,7 +211,7 @@ OpenAI 客户端只接受 `stop / length / tool_calls / content_filter` 四个�
 - 预热与 failback 还按协议生成 path/body 与鉴权头：Anthropic `/v1/messages` + `x-api-key`/`anthropic-version`；Gemini `:generateContent`/`:streamGenerateContent?alt=sse` + `x-goog-api-key`。Anthropic/Gemini 的预热消息会补一条 user 消息（协议要求至少一条非 system 消息）。
 - 回归：`scripts/test/offline/model-resolution.test.mjs`。
 
-### 11.2 上游错误信封映射
+### 12.2 上游错误信封映射
 
 非 OpenAI 上游的**非 2xx 原生错误信封**在数据面返回前统一映射为 OpenAI 形状（状态码保留）：
 
