@@ -29,6 +29,7 @@
    - 空/其它值 → **Chat 桥**：把 Responses 请求转换为 Chat Completions 请求发给上游，再把上游 JSON/SSE 重建为 Responses JSON/事件。
 3. 默认必须是 Chat 桥；不得因为上游"看起来支持"就自动切原生（避免半兼容上游静默丢工具/推理字段）。
 4. 只支持文本与 function/custom tool；托管工具、`background:true`、`previous_response_id` 续轮、`store:true` 在原生/桥两条路径都必须**显式拒绝**（`400 unsupported_parameter`），不允许静默忽略。
+4.1 `include` 例外：真实客户端（Codex CLI、DSH headless）固定发 `include:["reasoning.encrypted_content"]`。网关本就不产生加密推理，该项在语义上等于"没有可返回的东西"，整条拒绝会让 Responses 入口对真实客户端完全不可用（2026-11-09 实测 DSH 0.2.2-rc.1 因此 400）。因此**只接受丢弃后不影响正确性的项**（`reasoning.encrypted_content`、`output_text.logprobs`）并记 `lossy: include_dropped:<项>`；图片/托管产物/未知项仍旧显式拒绝，避免静默丢掉客户端要求的产物。
 
 ## 4. 请求映射（Chat 桥）
 
@@ -47,7 +48,9 @@
 | `reasoning.effort` | `reasoning_effort` | 复用 `canonEffort` 与 per-route `effortFormat` 整形 |
 | `stream` | `stream` | 桥路径始终向上游请求流式（除非模型 `forceNoStream`），再按客户端 `stream` 决定是否聚合 |
 | `metadata`, `user` | 丢弃 | 有损；网关不向上游透传调用方任意元数据 |
-| `previous_response_id`, `store`, `background`, `include`, `truncation` | **拒绝** | 见 §3.4 |
+| `previous_response_id`, `store`, `background`, `truncation` | **拒绝** | 见 §3.4 |
+| `include`（仅 `reasoning.encrypted_content` / `output_text.logprobs`） | 接受并**记有损** | 见 §3.4 |
+| `include`（其它项） | **拒绝** | 见 §3.4 |
 
 ## 5. 响应映射（Chat 桥，非流式）
 
@@ -93,6 +96,7 @@ Responses 响应最小形状：
 | `allowed_tools` / `parallel_tool_calls` 约束 | 请求 | Chat 无法表达细粒度允许列表；`parallel_tool_calls:false` 只能尽量提示 |
 | `reasoning` 的 summary/encrypted content | 请求/响应 | Chat 无对应字段；只保留 effort 档位 |
 | `store/previous_response_id/background` | 请求 | 明确拒绝，不静默降级 |
+| `include: reasoning.encrypted_content / output_text.logprobs` | 请求 | 接受但丢弃（按契约 §3.4 4.1 记 `lossy: include_dropped:<项>`）；客户端拿不到加密推理与 logprobs |
 | 托管工具（web_search 等） | 请求 | 明确拒绝 |
 | 图片/文件/音频输入 | 请求 | 与现有 Chat 桥一致：丢弃非文本 part（见 protocol-bridge 有损清单） |
 | 上游专有 `finish_reason` | 响应 | 收敛为四个 OpenAI 值（复用现有映射） |
@@ -115,7 +119,7 @@ Responses 响应最小形状：
 ### 9.1 已实现
 
 - 入口：`POST /v1/responses` 与 `/responses`；非 POST → 405；鉴权/虚拟模型 Key/配额/熔断/亲和/统计/日志脱敏全部复用 Chat 路径（同一 `forwardChain`）。
-- 请求映射：`responsesToChat()` 覆盖 §4 表格；拒绝矩阵（store/previous_response_id/background/include/truncation/托管工具）返回 `400 {error:{message,type:'unsupported_parameter'}}` 且不触上游。
+- 请求映射：`responsesToChat()` 覆盖 §4 表格；拒绝矩阵（store/previous_response_id/background/truncation/托管工具、以及不可丢弃的 `include` 项）返回 `400 {error:{message,type:'unsupported_parameter'}}` 且不触上游。
 - 非流式：上游 Chat JSON → `chatToResponse()`（`resp_*` id、`model` 回写、output/output_text、usage 映射、incomplete_details）。
 - 流式：`createResponsesStream()` 复用 `relayStream`（续传/空闲看门狗/MG-002 预算/背压），把 Chat SSE 帧翻译为 §6 事件序列；不发 `[DONE]`；预算耗尽/断流以 `response.failed`（`code=REQUEST_TIMEOUT`/`STREAM_INTERRUPTED`）收尾。
 - 降级：客户端 `stream:true` 但上游返回 JSON（forceNoStream/混合协议降级）时以单帧事件序列交付。

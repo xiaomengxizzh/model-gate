@@ -141,7 +141,20 @@ export function responsesToChat(input) {
   if (req.store === true) return reject('store 不支持：网关不保存响应（store=true）')
   if (req.previous_response_id != null && String(req.previous_response_id).trim() !== '') return reject('previous_response_id 不支持：网关不维护响应续轮')
   if (req.background === true) return reject('background 不支持：网关不提供后台任务')
-  if (req.include != null && (!Array.isArray(req.include) || req.include.length > 0)) return reject('include 不支持：不返回加密推理/托管产物')
+  if (req.include != null) {
+    // 真实客户端（Codex/DSH）固定发 include:["reasoning.encrypted_content"]。网关本就不产生加密推理，
+    // 该项语义上等于"没有可返回的东西"——整条拒绝会让 Responses 桥对真实客户端完全不可用
+    // （2026-11-09 实测 DSH 0.2.2-rc.1 因此 400）。因此只接受"丢弃后不影响正确性"的项并记 lossy；
+    // 其余（图片/托管产物/未知项）仍旧显式拒绝，避免静默丢掉客户端要求的产物。
+    if (!Array.isArray(req.include)) return reject('include 必须是字符串数组')
+    const DROPPABLE_INCLUDE = ['reasoning.encrypted_content', 'output_text.logprobs']
+    for (const item of req.include) {
+      if (typeof item !== 'string' || !DROPPABLE_INCLUDE.includes(item)) {
+        return reject('include 不支持: ' + String(item) + '（仅接受可安全丢弃的 ' + DROPPABLE_INCLUDE.join(' / ') + '）')
+      }
+    }
+    if (req.include.length) lossy.push('include_dropped:' + req.include.join(','))
+  }
   if (req.truncation != null && req.truncation !== 'disabled') return reject('truncation 不支持：网关不截断对话（仅接受 disabled）')
 
   const messages = []

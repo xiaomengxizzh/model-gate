@@ -158,7 +158,7 @@ PATTERN_DONE suspects=0
 - 生产 8787 与 systemd 服务的启动/验收（按约束未触碰）。
 - 真实上游的失败类路径（4xx/5xx/超时全部用本地 mock 复现，未消耗上游额度去制造故障）。
 - Windows/macOS 与 Node 18/20 实跑（本机未执行）。
-- DSH 侧真实 `/responses` 通道、`gatemodel` 虚拟名的真实上游往返（虚拟名配方只在 mock 网关验证）。
+- ~~DSH 侧真实 /responses 通道、gatemodel 虚拟名的真实上游往返~~ → 已在第二批闭环（§7）完成：DSH `api: openai-responses` 与 `gatemodel` 虚拟名均真实往返成功。
 
 ## 6. 任务 C 补充：候选缺陷的源码核查与最小复现（2026-11-09 追加）
 
@@ -196,7 +196,41 @@ PATTERN_DONE suspects=0
 - `harness/deepseek/source/package.json` 为 `0.2.2-rc.1`，但 `AGENTS.md` 仍写「精确锁 0.2.1-rc.2」、`docs/FOR-MODELS.md` 写 `0.1.5-rc.1`。
 - `source/patches/` 为空目录，而 `AGENTS.md`/`FOR-MODELS.md` 宣称用 patch-package 维护 dsh-session shim。
 
-## 7. 下一步建议
+## 7. 剩余测试闭环（第二批，2026-11-09）
+
+用户指示「暂时不做多端适配」，其余可执行的验证本轮一次跑完；下表是**唯一口径**。
+
+| 项目 | 结果 | 证据 |
+| --- | --- | --- |
+| MG-015 DSH 真客户端 · Chat | **PASS** | §3 B2（3 回合 completed） |
+| MG-015 DSH 真客户端 · Responses | **PASS**（修复 `include` 后） | `api: openai-responses` → 网关 `POST /v1/responses`，`rc=0`、`completed`、final `RESP_CLIENT_OK` |
+| MG-015 `/v1/responses` 真上游（非流式/流式） | **PASS** | 200 + `object=response` + 归一 usage；SSE 8 类事件（created → … → completed），按契约不发 `[DONE]` |
+| MG-015 虚拟共用名 `gatemodel` | **PASS** | 网关日志 `model=gatemodel serving=deepseek-v4.1-flash provider=opencodego`，final `GATEMODEL_OK` |
+| MG-015 真实 Codex CLI 0.167 | **BLOCKED** | 桥返回 400 `不支持的托管工具: namespace`；抓包 toolTypes = function×7 + `namespace(multi_agent_v1)` + `web_search` |
+| MG-015 Draft PR #2 审计 | **DONE** | 结论见 §7.2：**不合并原样** |
+| MG-008 anthropic 协议真上游 | **BLOCKED（上游 402）** | openrouter `union-alpha` 返回 `402 billing_error`（账户无额度）→ 目录链切 `deepseek-v4.1-flash` 返回 200：**真实 402 兜底 PASS**，但 anthropic 适配未被真实调用覆盖 |
+| MG-011/012/013/014 真上游 | **NOT_EXECUTED** | `/v1/models` 的 7 个模型全部 `capability=chat`；没有 embedding/rerank/audio/image/video 模型，新增属「模型+计费」决策 |
+| MG-009 双标签 409（API 层） | **PASS** | 带 `version` 且过期 → `409` + `currentVersion`，配置未变；不带 `version` 按契约「旧客户端宽容放行」 |
+| MG-009 托盘 Linux 实跑 | **NOT_EXECUTED** | 需 `gir1.2-ayatanaappindicator3`（未安装；按资源门禁不自行安装），`tkinter` 亦不可用 |
+| Windows/macOS | **SKIPPED** | 按用户 2026-11-09 指示本轮不做多端适配 |
+| Node 18/20 | **NOT_EXECUTED** | 本机仅 v24.22.2；装第二运行时需授权 |
+
+### 7.1 本轮唯一代码改动：`include` 兼容
+
+真实客户端（Codex/DSH）在 Responses 请求里固定发 `include:["reasoning.encrypted_content"]`。原实现整条拒绝 → 真实 DSH 直接 400（`b1-responses` 复现：`4xx: {"message":"include 不支持…","type":"unsupported_parameter"}`）。现改为：**只接受丢弃后不影响正确性的项**（`reasoning.encrypted_content` / `output_text.logprobs`）并记 `lossy: include_dropped:<项>`；图片、托管产物与未知项仍显式拒绝。契约 §3.3/§4/§7、回归 `offline/responses-mapping.test.mjs` 同步。
+
+### 7.2 Draft PR #2 审计（`xiaomengxizzh/model-gate `PR #2，draft，未实机验收）
+
+结论：**不合并原样**，理由均为可复核的代码事实：
+
+1. **旁路治理链**：PR 在数据面入口处直接 `await handleCodexResponses(...); return`，不走 `forwardChain` → 没有 MG-002 预算/取消、没有 MG-003/011 的额度与虚拟模型、没有 SSE 背压；它自带的测试 `decline governance bypass for quota-controlled model` 直接把这些治理配置判成 422。已合并实现（`src/responses.js` + `responses-stream.js` + `forwardChain`）已经把 `/v1/responses` 纳入同一条链，合并 PR 会回退 MG-002/006/008/015。
+2. **两套 Responses 实现**：`codex-responses.js` 与已合并的 `responses.js` 写同一套事件序列，路由 `/v1/responses` 只能有一个主人，合并即冲突。
+3. **配置面分叉**：新增 provider 级 `codexWire/opencodeSession/omitStreamOptions/omitReasoningEffort`。本轮真实上游对照显示 `opencodego` 接受 `stream_options` 与 `reasoning_effort`（3 回合 200），没有证据表明需要这些开关。
+4. **无 budget/AbortSignal**：PR 内 `forward(..., { retry: { maxAttempts: 1 }, noRetry429: true })` 不带 MG-002 的 signal，客户端断开/超时不会取消上游。
+5. **唯一值得移植的点**：`noRetry429`（429 原样透传 + `Retry-After`，不做内部再重试）。这正好是 MG-002 余项「统一 attempt budget 与 429 Retry-After」，建议单独立卡在统一链内实现，而不是合并整个旁路入口。
+6. **可取的诚实度**：PR 文档自标 `Draft / NOT_RUN_LIVE`，与它自己的证据口径一致；这条值得保留为其它草稿的写法。
+
+## 8. 下一步建议
 
 1. 若要长期用隔离实例验证，建议把 `systemd-run --user --pipe --wait --collect` 的启动封装写进 `harness/deepseek/docs/` 的操作脚本（本轮只写文档，不新增脚本）。
 2. 把「每回合额外低档位请求」写进网关/CLI 的对接说明，避免排障时误判为重复请求。

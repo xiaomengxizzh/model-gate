@@ -43,6 +43,26 @@
 
 已知遗留：`user-env-fallback` 的 Windows 分支仍未在 Windows 实跑（Linux 分支已由 `offline/user-env.test.mjs` 覆盖）；`/api/keys` 的 id 仍无完整白名单（随 MG-009）；前端 F0–F5 全部 TODO，本轮只到契约基线；网关 502 信封「已循环兜底约 120s」文案与实际耗时不符（待单独立卡）。
 
+### 第三批续（2026-11-09 晚）：剩余验证闭环
+
+用户指示「暂时不做多端适配」，其余可执行项本轮跑完。唯一口径见[验证报告](roadmap/2026-11-09-dsh-cli-live-verification-report.md) §7，摘要：
+
+| 项目 | 结果 |
+| --- | --- |
+| MG-015 DSH 真客户端 `/v1/responses`（修复 `include` 后） | **PASS**（rc=0、completed、final 非空） |
+| MG-015 `/v1/responses` 真上游 非流式 + 流式 | **PASS**（200；SSE created→…→completed，无 `[DONE]`） |
+| MG-015 虚拟共用名 `gatemodel` | **PASS**（`model=gatemodel serving=deepseek-v4.1-flash`） |
+| MG-015 真实 Codex CLI 0.167 | **BLOCKED**：桥 400 `不支持的托管工具: namespace`（抓包还含 `web_search`） |
+| MG-015 Draft PR #2 审计 | **DONE**：不合并原样（旁路 forwardChain/预算/治理；仅 `noRetry429` 值得移植） |
+| MG-008 anthropic 协议真上游 | **BLOCKED（上游 402 余额）**；同轮证明真实 402 → 目录链兜底 200 正常 |
+| MG-011/012/013/014 真上游 | **NOT_EXECUTED**：现有 7 个模型全是 `capability=chat`，新增媒体/向量模型属「模型+计费」决策 |
+| MG-009 双标签 409（API 层） | **PASS**（带 `version` 过期 → 409 + currentVersion，配置不变） |
+| MG-009 托盘 Linux 实跑 | **NOT_EXECUTED**：缺 `gir1.2-ayatanaappindicator3`（按资源门禁不自行安装） |
+| Windows/macOS | **SKIPPED**（用户指示） |
+| Node 18/20 | **NOT_EXECUTED**：本机仅 v24.22.2，装第二运行时需授权 |
+
+本轮代码改动：Responses 桥对 `include` 只接受可安全丢弃项（`reasoning.encrypted_content` / `output_text.logprobs`）并记 lossy，其余仍显式拒绝；否则真实 Codex/DSH 无法使用 `/v1/responses`。契约与 `offline/responses-mapping.test.mjs` 同步。
+
 ## 本轮完成
 
 | ID | 交付 | 验收证据 |

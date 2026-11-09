@@ -133,7 +133,9 @@ test('§4 拒绝矩阵：store/previous_response_id/background/include/truncatio
     [{ store: true }, /store/],
     [{ previous_response_id: 'resp_123' }, /previous_response_id/],
     [{ background: true }, /background/],
-    [{ include: ['reasoning.encrypted_content'] }, /include/],
+    [{ include: ['message.input_image.image_url'] }, /include/],
+    [{ include: ['reasoning.encrypted_content', 'file_search_call.results'] }, /include/],
+    [{ include: 'reasoning.encrypted_content' }, /include 必须是字符串数组/],
     [{ truncation: 'auto' }, /truncation/],
     [{ tools: [{ type: 'web_search' }] }, /托管工具/],
     [{ tools: [{ type: 'file_search', vector_store_ids: [] }] }, /托管工具/],
@@ -149,6 +151,10 @@ test('§4 拒绝矩阵：store/previous_response_id/background/include/truncatio
     assert.match(r.rejected.message, re)
     assert.ok(Array.isArray(r.lossy))
   }
+  // 真实客户端（Codex/DSH）固定发的 include 项必须可用，但显式记 lossy
+  const inc = responsesToChat({ model: 'demo', input: 'hi', include: ['reasoning.encrypted_content', 'output_text.logprobs'] })
+  assert.equal(inc.rejected, null, 'include 里的可丢弃项不得整条拒绝（Codex/DSH 默认请求形态）')
+  assert.ok(lossyHas(inc.lossy, 'include_dropped:reasoning.encrypted_content'), '丢弃 include 必须记 lossy')
   // 无操作等价形态不应误伤：store:false / background:false / include:[] / truncation:'disabled'
   for (const patch of [{ store: false }, { background: false }, { include: [] }, { truncation: 'disabled' }]) {
     const r = responsesToChat(Object.assign({ model: 'demo', input: 'hi' }, patch))
