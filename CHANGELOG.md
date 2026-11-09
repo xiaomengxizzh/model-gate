@@ -2,6 +2,17 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-09 管理面 D-1/D-6 收尾（未发布，MG-009 余项）
+
+### Added
+
+- `GET /api/config` 只读配置投影（D-6）：返回 `{configVersion, providers, models, defaults, virtualModels}`，形状与 `POST /api/config/save` 请求体一致；剥离 providers/models 运行时字段、不返回 `_keys`/`_paths`、`defaults.clientKey` 掩码；未知扩展字段保留；鉴权/错误信封同管理 GET。
+- 面板未知字段不透明袋（D-1）：`admin.html` 的 `buildCfrom` 把未识别字段存入 `_extra`，provider/model 编辑用 `Object.assign` 保留，`saveAll` 通过 `serializeMap` 合并回送，不再静默洗掉插件/新版本字段。
+- 回归 `scripts/test/offline/config-projection.test.mjs`（3 组：投影形状与脱敏/鉴权与保存回读/面板 `_extra` 静态检查）；管理 API 契约与投影契约同步。
+
+### 未验证
+- 浏览器真实鉴权与保存回读、双标签 409、Linux/Windows 托盘实跑（本机无 Chrome/桌面环境，**NOT EXECUTED**）；provider 删除联动清 Key 仍未实现。
+
 ## 2026-11-09 原生 Responses 透传（未发布，MG-015 收尾）
 
 ### Added

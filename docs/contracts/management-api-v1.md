@@ -16,7 +16,7 @@
 | --- | --- | --- | --- | --- |
 | `GET /api/auth` | 200 | 200（公开） | 200（公开） | 200 |
 | `POST /api/admin-token` | 200（本地初始化） | 403 | 401 | 200 |
-| `GET /api/status`、`GET /api/logs`、`GET /api/model-stats` | 200 | 403 | 401 | 200 |
+| `GET /api/status`、`GET /api/config`、`GET /api/logs`、`GET /api/model-stats` | 200 | 403 | 401 | 200 |
 | `POST /api/config/save`、`POST /api/config/reload`、`POST /api/keys` | 200 | 403 | 401 | 200 |
 | `POST /api/route-preview`、`POST /api/probe`、`POST /api/model-test` | 200 | 403 | 401 | 200 |
 | 其他 `/api/*` 未知路径 | 404 | 404 | 404 | 404 |
@@ -48,6 +48,10 @@
 
 ### `GET /api/status`
 响应即状态快照，字段见第 4 节。所有模型/上游统计与掩码 Key 元数据都在此聚合，前端只读。
+
+### `GET /api/config`
+
+只读配置投影（MG-009 D-6）：返回 `{ configVersion, providers, models, defaults, virtualModels }`，形状与 `POST /api/config/save` 的请求体一致，可直接“读 → 改 → 保存”。不含运行时统计/探针字段（providers 的 hasKey/keySource/keyOk/st/probe、models 的 probe/requests/errors/tokens/today/hitRate/affinity/avgMs 等），不返回 `_keys`/`_paths`；`defaults.clientKey` 有值时固定回显 `********`；未知扩展字段按原样返回。鉴权与错误信封同其它管理 GET（401/403）。回归见 `scripts/test/offline/config-projection.test.mjs`。
 
 ### `POST /api/config/save`
 请求（均可选）：`{version?: number, providers?: object, models?: object, defaults?: object, virtualModels?: array}`。
@@ -146,7 +150,7 @@ POST /api/probe {"id":"mock"} → 200 {"ok":true,"results":[{"id":"mock","ok":tr
 
 ## 7. 前端兼容矩阵
 
-`src/admin.html` 实际调用：`/api/auth`、`/api/status`、`/api/model-stats?days=`、`/api/logs?lines=250`、`/api/config/save`（带 `version`，整体回传 `providers/models/defaults/virtualModels`）、`/api/config/reload`、`/api/keys`（含 `__mg_vm_*`）、`/api/route-preview`、`/api/probe`、`/api/model-test`、`/api/admin-token`。面板用 `Authorization: Bearer`；401 时弹令牌输入框。
+`src/admin.html` 实际调用：`/api/auth`、`/api/status`、`/api/model-stats?days=`、`/api/logs?lines=250`、`/api/config/save`（带 `version`，整体回传 `providers/models/defaults/virtualModels`）、`/api/config/reload`；`GET /api/config` 已提供但面板尚未改用（F1/F2 迁移点）、`/api/keys`（含 `__mg_vm_*`）、`/api/route-preview`、`/api/probe`、`/api/model-test`、`/api/admin-token`。面板用 `Authorization: Bearer`；401 时弹令牌输入框。
 
 已知读写不一致（MG-009）：面板把 `status.providers/models` 数组映射为 `C.providers/C.models` 映射再整体回存，映射规则散落在面板脚本里，缺少服务端 fixture 校验。
 

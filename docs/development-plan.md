@@ -6,8 +6,8 @@
 
 分支 `dev/gateway-audit-20261108`。第一批三个提交：`33853d2`（契约基线 + P1 卡）、`522da4a`（旧套件隔离 + 日志脱敏性能）、`9a41547`（指标口径）。第二批（2026-11-09）：`5498c1a`（MG-002 预算/取消/背压 + 契约 + deadline 测试）、`42f06cd`（MG-009 投影契约/fixture/托盘文档）、`81b37e6`（MG-009 服务端投影清洗、Key 白名单、面板版本）、`027a97f`（MG-015 Responses 契约草案）。
 
-已闭环：MG-016、MG-001、MG-003、MG-005、MG-007、MG-006、MG-004、MG-010（工程侧）、**MG-002（请求生命周期预算/取消/SSE 背压）**、**MG-009（服务端投影清洗/Key 白名单/面板版本，浏览器实跑待 F2）**、**MG-008（适配器半边 + 模型解析一致性 + 错误信封映射）**、**MG-011（capability 声明 + Embedding，chat/embedding 双向隔离、Gemini 适配、记账/探测/发现）**、**MG-012（Rerank：/v1/rerank、OpenAI/Cohere 适配与稳定排序）**、**MG-013（Audio/Image：multipart 原样转发、二进制响应、体积/预算/取消）**、**MG-014（Video 异步任务池：创建/幂等/轮询/取消/重启恢复/GC，ADR-0001）**、**MG-015（Chat 桥 + 原生 responses 透传；真实客户端对照 UNVERIFIED）**。
-仍待办：MG-009 余项（不透明袋 D-1、只读配置投影 D-6、browser/托盘实跑）、MG-015 真实 Codex/DSH 客户端对照（代码已闭环，需授权）、MG-008/MG-011/MG-012/MG-013/MG-014 真实上游对照（单独授权）。MG-002 二次复核：H1/M1–M3 PASS，M4 边界（已完成流误判超时）已修并补 AC-4e。
+已闭环：MG-016、MG-001、MG-003、MG-005、MG-007、MG-006、MG-004、MG-010（工程侧）、**MG-002（请求生命周期预算/取消/SSE 背压）**、**MG-009（服务端投影清洗/Key 白名单/面板版本，浏览器实跑待 F2）**、**MG-008（适配器半边 + 模型解析一致性 + 错误信封映射）**、**MG-011（capability 声明 + Embedding，chat/embedding 双向隔离、Gemini 适配、记账/探测/发现）**、**MG-012（Rerank：/v1/rerank、OpenAI/Cohere 适配与稳定排序）**、**MG-013（Audio/Image：multipart 原样转发、二进制响应、体积/预算/取消）**、**MG-014（Video 异步任务池：创建/幂等/轮询/取消/重启恢复/GC，ADR-0001）**、**MG-015（Chat 桥 + 原生 responses 透传；真实客户端对照 UNVERIFIED）**、**MG-009 余项（D-1 不透明袋 + D-6 只读配置投影；浏览器/托盘实跑仍 NOT EXECUTED）**。
+代码侧全部卡片已闭环。剩余仅为需要授权/环境的验证：MG-009 浏览器真实鉴权/保存回读/托盘实跑（NOT EXECUTED）、MG-015 真实 Codex/DSH 对照与 Draft PR #2 审计（UNVERIFIED）、MG-008/011/012/013/014 真实上游对照与计费（需单独授权）、Windows/macOS 与 Node 18/20 实跑。MG-002 二次复核：H1/M1–M3 PASS，M4 边界（已完成流误判超时）已修并补 AC-4e。
 
 验证（本机 Node v24.22.2，全部离线 mock，未触真实上游）：
 
@@ -39,6 +39,7 @@
 | MG-001 | 管理面来源策略：Host/DNS 重绑定白名单、跨源 Origin 拒绝、无令牌时仅本机可管理、非回环绑定告警 | offline/admin-origin.test.mjs（4 组，含局域网对端实测）；docs/reference/configuration.md |
 | MG-003 | 配置结构校验单一入口、保留键拦截、删除墓碑（重启不复活）、并发版本冲突 | offline/config-schema.test.mjs（4 组）；src/index.js、src/router.js |
 | MG-005 | 日志脱敏词表随配置热更新、代理内嵌凭据与 Bearer 兜底、端到端验证错误摘要不落明文 | offline/logger-secrets.test.mjs；src/logger.js、src/index.js（collectSecrets） |
+| MG-009 余项 | `GET /api/config` 只读配置投影（D-6：五大业务键+configVersion、剥离运行时字段、不返回 keys/paths、clientKey 掩码）；admin.html `_extra` 不透明袋（D-1：未知字段编辑/保存不丢，`serializeMap` 合并回送） | offline/config-projection.test.mjs（3 组：投影形状/鉴权与保存回读/面板静态检查）；management-api-v1.md、management-ui-projection-v1.md |
 | MG-015（原生透传） | `models.api="responses"` 时 `/v1/responses` 不经 Chat 桥：请求原样转发到 `responsesPath`、providerModels 覆盖、非流式 JSON 透传+model 回写、流式 SSE 逐字节管道（不翻译）；拒绝矩阵/能力隔离仍生效；预算与错误透传 | offline/responses-native.test.mjs（4 用例）；docs/contracts/responses-v1.md §9 |
 | MG-014 | Video 异步任务池：capability `video`；`POST /v1/videos`（Idempotency-Key 幂等）、`GET /v1/videos/:id`（惰性+后台轮询）、`POST /v1/videos/:id/cancel`、列表；任务持久化 `<config>/videos.json`（原子写）、状态机与终态幂等、重启恢复、7 天保留/500 上限/24h 过期 GC；上游路径可配置；只桥接 OpenAI 兼容 | offline/video.test.mjs（6 用例：创建轮询、幂等、取消、重启+GC、隔离/协议、校验/预算）；docs/explanation/adr-0001-video-task-pool.md；npm test 22/22 |
 | MG-013 | capability `audio`/`image` + 四个媒体入口：speech（JSON→二进制）、transcriptions（multipart 原样转发）、images/generations（JSON）、images/edits（multipart）；multipart 只解析 model 字段、per-上游覆盖名替换、文件字节不动；响应 content-type/字节透传；请求体 maxBodyBytes、响应体 mediaMaxResponseBytes（超限 media_too_large）；能力隔离/fallback/预算/记账；不支持的协议显式 502 | offline/media.test.mjs（8 用例）；docs/reference/configuration.md；npm test 21/21 |
@@ -87,7 +88,7 @@ MG-002 已闭环（离线故障注入），其余条目均为 **TODO**；下列�
 | --- | --- | --- | --- |
 | MG-015 / P1 | **代码已闭环（2026-11-09）**：Chat 桥（映射 + SSE 事件桥）+ 原生 `api:"responses"` 透传（JSON model 回写/SSE 逐字节）；剩余真实 Codex/DSH 对照与 Draft PR #2 审计（均 **UNVERIFIED**，需授权/联网） | MG-002、MG-004、MG-016 | 工具 call_id/arguments/custom tool、SSE 顺序、完成/失败、取消/usage/权限/配额全部 wire 测试；真实 Codex CLI/桌面与 DSH 对照单独授权；不改官方 auth.json |
 | MG-008 / P2 | 已闭环（2026-11-09）：适配器 wire 保真（22 例）+ 模型解析单一入口 + 错误信封映射；剩余真实上游对照（MG-015/单独授权） | MG-002、MG-004、MG-006 | 固定 wire fixtures；分片/断流/重连/多 tool-call 索引测试；显式列出有损转换；探测、预热、failback 采用一致模型解析 |
-| MG-009 / P2 | 契约、fixture 与服务端实现已闭环：D-2 投影字段剥离、D-7 Key 版本、D-3 baseVersion、`/api/keys` 白名单（§8.3）；剩余：浏览器真实鉴权/保存回读（F2）、未知字段不透明袋 D-1、只读配置投影 D-6、provider 删除联动清 Key、托盘 smoke | MG-003、MG-005 | 浏览器真实鉴权和保存回读；未知字段保留；无静默洗配置；Linux/Windows 托盘有单独 smoke 记录，价格为用户输入。离线回归已过；浏览器/托盘实跑 **NOT EXECUTED** |
+| MG-009 / P2 | **代码闭环（2026-11-09）**：D-2 投影字段剥离、D-7 Key 版本、D-3 baseVersion、`/api/keys` 白名单（§8.3）、D-1 面板不透明袋、D-6 只读配置投影 `GET /api/config`；剩余浏览器真实鉴权/保存回读与托盘 smoke（**NOT EXECUTED**，本机无 Chrome/桌面）、provider 删除联动清 Key | MG-003、MG-005 | 浏览器真实鉴权和保存回读；未知字段保留；无静默洗配置；Linux/Windows 托盘有单独 smoke 记录，价格为用户输入。离线回归已过；浏览器/托盘实跑 **NOT EXECUTED** |
 | MG-010 / P2 | 已交付：CI 矩阵 18/20/22（手动触发、零下载探测 runner 自带 node）、元数据核对脚本、LICENSE、部署/回滚与兼容矩阵文档 | MG-004、MG-007 | 本地 21 项元数据 PASS + 启动/关闭/恢复实测；**远程 CI 未执行**；Windows/macOS 与 Node 18/20 实跑未验证 |
 
 ## 第三阶段：能力扩展（按卡启动，不一次铺开）
@@ -112,7 +113,9 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 5. ~~**MG-012**（P3）：Rerank~~ **已闭环（2026-11-09）**。
 6. ~~**MG-013**（P3）：Audio / Image~~ **已闭环（2026-11-09）**。
 7. ~~**MG-014**（P3）：Video 异步任务池与持久化~~ **已闭环（2026-11-09，ADR-0001）**。
-8. **MG-015 原生 responses 透传 / MG-009 余项**（下一张卡）：`api:"responses"` 原生转发、D-6 只读配置投影、D-1 不透明袋、浏览器/托盘实跑。
+8. ~~**MG-015 原生 responses 透传 / MG-009 余项**~~ **代码闭环（2026-11-09）**。
+
+下一阶段只剩**需要授权或真实环境**的验证，不再新增功能卡：真实 Codex/DSH 与 PR #2 审计、真实上游/计费、浏览器与托盘实跑、Windows/macOS、Node 18/20。
 
 同一时刻一个文件一个作者：MG-008 与 MG-009 都改 src/index.js，必须串行；MG-015 的 format.js/router.js 写集与二者不重叠。全部完成后由 Lead 统一提交并更新本表。
 

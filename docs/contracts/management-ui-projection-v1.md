@@ -162,12 +162,12 @@ POST /api/config/save
 
 | 编号 | 偏离 | 影响 | 归属 |
 | --- | --- | --- | --- |
-| D-1 | `admin.html` 的 `buildCfrom` 用白名单重建 `providers/models`，未知字段被丢弃 | 保存即静默洗掉扩展字段 | F2 用不透明袋修复（未做） |
+| D-1 | **已修复（2026-11-09，面板侧）**：`buildCfrom` 把未知字段放进 `_extra`，编辑时 `Object.assign` 保留，`saveAll` 用 `serializeMap` 合并回送 | — | 静态回归见 config-projection.test.mjs；浏览器实跑 NOT EXECUTED |
 | D-2 | **已修复（2026-11-09）**：服务端 `doSaveConfig` 以显式 denylist 剥离 `providers[*]`（hasKey/keySource/keyOk/st/probe）与 `models[*]`（probe/requests/errors/tokens/today/hitRate/affinity/avgMs/inTokens/outTokens/latencySum/latencyCount）后再落盘；未知扩展字段保留。面板仍会回送投影字段，但已不再污染配置 | — | 已实现，回归见 `scripts/test/offline/admin-projection.test.mjs` |
 | D-3 | **已修复（2026-11-09，面板侧）**：`markDirty` 首次脏化时冻结 `baseVersion`，`ingestStatus` 在 `dirty` 且已冻结时不覆盖 `ST.configVersion`；保存/409/重载成功后清空 | — | 静态回归见 admin-projection.test.mjs；浏览器实跑 NOT EXECUTED |
 | D-4 | `providers/models` 无服务端 PATCH/合并；只有整体替换 | 客户端必须自己保证完整视图，升级后旧视图可能删掉新字段 | F1 评估 PATCH 语义（v1.1） |
 | D-5 | `virtualModels` 未知字段被 `cleanVms` 丢弃 | 扩展项不能放在 VM 条目上 | 契约接受；扩展项放 `defaults` |
-| D-6 | 没有 `GET /api/config` 只读配置投影 | UI 只能从 `/api/status` 反推配置，易把统计带进表单 | F1 新增只读配置投影（需改 src） |
+| D-6 | **已实现（2026-11-09）**：`GET /api/config` 返回只读配置投影（五大业务键 + configVersion；剥离运行时字段、不返回 keys/paths、clientKey 掩码） | — | 面板仍走 status，F1/F2 迁移到该端点 |
 | D-7 | **已修复（2026-11-09）**：`admin.html` 新增 `postKey()`，上游 Key 保存/删除与虚拟模型 Key 均带 `baseVersion ?? ST.configVersion`，409 提示后加载最新；服务端 `doSaveKeys` 本就有 `versionConflict`。服务端缺省 `version` 仍放行以兼容旧客户端 | — | 回归见 admin-projection.test.mjs（409/当前/缺省三态） |
 
 ## 6. 409 版本冲突与刷新反馈

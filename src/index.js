@@ -81,6 +81,21 @@ function sendJson(res, status, obj) {
 }
 function tryParse(buf) { try { return JSON.parse(buf.toString('utf8')) } catch { return null } }
 
+// —— MG-009 D-6：只读配置投影（GET /api/config）——
+// 与 /api/status 不同：只返回可编辑配置（五大业务键 + configVersion），不含运行时统计/探针/Key 明文，
+// 供前端/脚本直接“读配置 → 改 → 保存”，避免从 status 反推把统计带回配置。
+function configProjection(state) {
+  const cfg = state.cfg
+  const providers = {}
+  for (const [id, p] of Object.entries(cfg.providers || {})) providers[id] = stripRuntimeFields(p, PROVIDER_RUNTIME_FIELDS)
+  const models = {}
+  for (const [n, m] of Object.entries(cfg.models || {})) models[n] = stripRuntimeFields(m, MODEL_RUNTIME_FIELDS)
+  const defaults = Object.assign({}, cfg.defaults || {})
+  if (defaults.clientKey) defaults.clientKey = '********'
+  const virtualModels = (cfg.virtualModels || []).map((v) => ({ name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps }))
+  return { configVersion: cfg.configVersion || 0, providers, models, defaults, virtualModels }
+}
+
 function pct(arr, p) { if (!arr || !arr.length) return null; const a = [...arr].sort((x, y) => x - y); const i = Math.min(a.length - 1, Math.max(0, Math.ceil(a.length * p / 100) - 1)); return Math.round(a[i]) }
 function safeTokenCmp(a, b) {
   if (!a || !b || a.length !== b.length) return false
@@ -946,6 +961,7 @@ function makeHandler(state) {
         sendJson(res, 200, { ok: true, hit: { type: hit.known ? 'model' : 'unknown', name: hit.canonicalName, provider: hit.def.provider || null, note: hit.known ? null : (vms.length ? '将返回 404（已配置虚拟模型）' : '将走默认上游兜底') } }); return
       }
       if (path === '/api/logs' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const lines = parseInt(new URL(url, 'http://x').searchParams.get('lines') || '200', 10) || 200; sendJson(res, 200, { lines: readLogTail((log && log.file) ? log.file() : logFile(), lines) }); return }
+      if (path === '/api/config' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; sendJson(res, 200, configProjection(state)); return }
       if (path === '/api/config/reload' && req.method === 'POST') { if (!await requireAdmin(req, res)) return; reloadConfig(state); sendJson(res, 200, { ok: true }); return }
       if (path === '/api/config/save' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
