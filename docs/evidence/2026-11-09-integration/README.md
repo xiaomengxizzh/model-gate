@@ -13,6 +13,7 @@
 | `ui-observability.png` | 监控与诊断（真实指标、Provider 表、日志） |
 | `ui-settings.png` | 安全与设置（实例、令牌、韧性参数） |
 | `ui-conflict-409.png` | 双写入 409 冲突提示与重新加载 |
+| `ui-dashboard-tablet.png` | 820×1180 平板布局 |
 | `ui-dashboard-mobile.png` | 390×844 手机布局 |
 | `browser-acceptance.txt` | CDP 浏览器验收原始输出（14/14） |
 | `client-mock-validation.txt` | DSH 0.2.2-rc.1 × 本地 mock 的 Chat / Responses 桥 / 原生 Responses 结果与阻断说明 |
