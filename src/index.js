@@ -24,14 +24,29 @@ import { todayKey } from './shared.js'
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
 const RESPONSES_PATHS = new Set(['/v1/responses', '/responses'])
 const ADMIN_PAGE = new URL('./admin.html', import.meta.url)
-// Isolated F1 preview: exact allowlist; old '/' and '/admin' remain unchanged.
-const UI_NEXT_ASSETS = Object.freeze({
-  '/ui-next': ['index.html', 'text/html; charset=utf-8'],
-  '/ui-next/': ['index.html', 'text/html; charset=utf-8'],
-  '/ui-next/index.html': ['index.html', 'text/html; charset=utf-8'],
-  '/ui-next/styles.css': ['styles.css', 'text/css; charset=utf-8'],
-  '/ui-next/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+// Isolated /ui-next console: serve only the frozen asset tree, no directory listing,
+// no path traversal, no symlink following. Old '/' and '/admin' remain unchanged.
+const UI_NEXT_TYPES = Object.freeze({
+  '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml',
+  '.png': 'image/png', '.json': 'application/json; charset=utf-8',
 })
+function uiNextAsset(path) {
+  let rel
+  if (path === '/ui-next' || path === '/ui-next/') rel = 'index.html'
+  else if (path.startsWith('/ui-next/')) rel = path.slice('/ui-next/'.length)
+  else return null
+  try { rel = decodeURIComponent(rel) } catch { return null }
+  if (!rel || rel.startsWith('/') || rel.includes('\\') || rel.includes('\0')) return null
+  const parts = rel.split('/')
+  if (parts.some((p) => !p || p === '.' || p === '..')) return null
+  if (!/^[A-Za-z0-9._/-]+$/.test(rel)) return null
+  const name = parts[parts.length - 1]
+  const ext = name.slice(name.lastIndexOf('.')).toLowerCase()
+  const type = UI_NEXT_TYPES[ext]
+  if (!type) return null
+  return { rel, type }
+}
 
 const FAIL_OPEN_THRESHOLD = 5       // 连续失败熔断阈值（放宽：平台偶发慢/抖不轻易熔断）
 const FAIL_OPEN_COOLDOWN = 10000    // 熔断冷却 ms
@@ -99,8 +114,15 @@ function configProjection(state) {
   const models = {}
   for (const [n, m] of Object.entries(cfg.models || {})) models[n] = stripRuntimeFields(m, MODEL_RUNTIME_FIELDS)
   const defaults = Object.assign({}, cfg.defaults || {})
-  if (defaults.clientKey) defaults.clientKey = '********'
-  const virtualModels = (cfg.virtualModels || []).map((v) => ({ name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps }))
+  // clientKey 实际存于加密 keys 库（__mg_client）；只检查 defaults 会永远回显空串，
+  // 前端无法判断「已设置」并可能在保存时误清空。两者任一存在即掩码。
+  if (defaults.clientKey || (cfg._keys && cfg._keys.__mg_client)) defaults.clientKey = '********'
+  // expiresAt/note 存于 keys 库的 __mg_vm_meta_<name> 元数据；投影必须回显，否则 UI
+  // 一次「读→改→保存」会把它们当作已删除而清空（与虚拟模型 Key 的孤儿风险同类）。
+  const virtualModels = (cfg.virtualModels || []).map((v) => {
+    const meta = (cfg._keys && cfg._keys['__mg_vm_meta_' + v.name]) || {}
+    return { name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps, expiresAt: meta.expiresAt || '', note: meta.note || '' }
+  })
   return { configVersion: cfg.configVersion || 0, providers, models, defaults, virtualModels }
 }
 
@@ -919,14 +941,17 @@ function makeHandler(state) {
         denyOrigin(res, path, '跨源请求被拒绝：' + String(req.headers.origin || '') + '（同源或 server.allowedOrigins 白名单之外）')
         return
       }
-      if ((req.method === 'GET' || req.method === 'HEAD') && Object.hasOwn(UI_NEXT_ASSETS, path)) {
-        const [name, contentType] = UI_NEXT_ASSETS[path]
-        const data = readFileSync(new URL('./ui-next/' + name, import.meta.url))
+      if ((req.method === 'GET' || req.method === 'HEAD') && (path === '/ui-next' || path.startsWith('/ui-next/'))) {
+        const asset = uiNextAsset(path)
+        let data = null
+        if (asset) { try { data = readFileSync(new URL('./ui-next/' + asset.rel, import.meta.url)) } catch { data = null } }
+        if (!data) { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }); res.end('not found'); return }
         res.writeHead(200, {
-          'content-type': contentType,
+          'content-type': asset.type,
           'cache-control': 'no-store',
           'x-content-type-options': 'nosniff',
-          'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+          'referrer-policy': 'no-referrer',
+          'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
         })
         if (req.method === 'HEAD') res.end()
         else res.end(data)
@@ -1379,7 +1404,7 @@ function makeHandler(state) {
             const resp = chatToResponse(chat, { model: responsesMeta.model, customToolNames: responsesMeta.customToolNames })
             res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(resp)); return
           }
-          res.writeHead(out.status || 502, { 'content-type': out.contentType || 'application/json; charset=utf-8' }); res.end(out.body); return
+          res.writeHead(out.status || 502, Object.assign({ 'content-type': out.contentType || 'application/json; charset=utf-8' }, out.headers || {})); res.end(out.body); return
         }
         return
       }
@@ -1452,7 +1477,7 @@ function makeHandler(state) {
         if (!res.writableEnded && !res.destroyed) endInterruptedStream(res, '上游响应中断（流已开始后无法回写状态码 ' + out.status + '）', 0)
         return
       }
-      res.writeHead(out.status, { 'content-type': out.contentType }); res.end(out.body)
+      res.writeHead(out.status, Object.assign({ 'content-type': out.contentType }, out.headers || {})); res.end(out.body)
     } catch (err) {
       if (err && err.aborted) {
         // 预算耗尽/客户端断开：不算网关路由失败，按契约 §4 收尾

@@ -51,7 +51,7 @@
 
 ### `GET /api/config`
 
-只读配置投影（MG-009 D-6）：返回 `{ configVersion, providers, models, defaults, virtualModels }`，形状与 `POST /api/config/save` 的请求体一致，可直接“读 → 改 → 保存”。不含运行时统计/探针字段（providers 的 hasKey/keySource/keyOk/st/probe、models 的 probe/requests/errors/tokens/today/hitRate/affinity/avgMs 等），不返回 `_keys`/`_paths`；`defaults.clientKey` 有值时固定回显 `********`；未知扩展字段按原样返回。鉴权与错误信封同其它管理 GET（401/403）。回归见 `scripts/test/offline/config-projection.test.mjs`。
+只读配置投影（MG-009 D-6）：返回 `{ configVersion, providers, models, defaults, virtualModels }`，形状与 `POST /api/config/save` 的请求体一致，可直接“读 → 改 → 保存”。不含运行时统计/探针字段（providers 的 hasKey/keySource/keyOk/st/probe、models 的 probe/requests/errors/tokens/today/hitRate/affinity/avgMs 等），不返回 `_keys`/`_paths`；`defaults.clientKey` 在 `keys.__mg_client` 或旧明文存在时固定回显 `********`（只检查 defaults 会导致永远为空、前端误判未设置）；`virtualModels[*]` 回显 `expiresAt`/`note`（存于 `keys.__mg_vm_meta_<name>`，不回显则一次保存会误清空）；未知扩展字段按原样返回。鉴权与错误信封同其它管理 GET（401/403）。回归见 `scripts/test/offline/config-projection.test.mjs`、`scripts/test/offline/ui-contract.test.mjs`。
 
 ### `POST /api/config/save`
 请求（均可选）：`{version?: number, providers?: object, models?: object, defaults?: object, virtualModels?: array}`。
