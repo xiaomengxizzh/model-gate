@@ -7,7 +7,7 @@
 分支 `dev/gateway-audit-20261108`。第一批三个提交：`33853d2`（契约基线 + P1 卡）、`522da4a`（旧套件隔离 + 日志脱敏性能）、`9a41547`（指标口径）。第二批（2026-11-09）：`5498c1a`（MG-002 预算/取消/背压 + 契约 + deadline 测试）、`42f06cd`（MG-009 投影契约/fixture/托盘文档）、`81b37e6`（MG-009 服务端投影清洗、Key 白名单、面板版本）、`027a97f`（MG-015 Responses 契约草案）。
 
 已闭环：MG-016、MG-001、MG-003、MG-005、MG-007、MG-006、MG-004、MG-010（工程侧）、MG-008（适配器半边）、**MG-002（请求生命周期预算/取消/SSE 背压）**、**MG-009（服务端投影清洗/Key 白名单/面板版本，浏览器实跑待 F2）**。
-仍待办：MG-015 实现（契约草案已先行）、MG-011～MG-014（Embedding/Rerank/Audio-Image/Video）、MG-008 余项（探测/预热/failback 模型解析一致性、错误信封映射）、MG-009 余项（不透明袋 D-1、只读配置投影 D-6、browser/托盘实跑）、MG-002 二次 review（修复后复核）待做。
+仍待办：MG-015 实现（契约草案已先行）、MG-011～MG-014（Embedding/Rerank/Audio-Image/Video）、MG-008 余项（探测/预热/failback 模型解析一致性、错误信封映射）、MG-009 余项（不透明袋 D-1、只读配置投影 D-6、browser/托盘实跑）。MG-002 二次复核：H1/M1–M3 PASS，M4 边界（已完成流误判超时）已修并补 AC-4e。
 
 验证（本机 Node v24.22.2，全部离线 mock，未触真实上游）：
 
@@ -65,7 +65,7 @@ MG-002 已闭环（离线故障注入），其余条目均为 **TODO**；下列�
 | --- | --- | --- | --- |
 | MG-016 / P1、先做 G0 | 契约基线与离线回归已闭环（逐路径 schema、鉴权矩阵、错误信封、敏感字段、前端调用矩阵、偏离清单）；PR #2 仅核对元数据、未审计实现；前端 fixture 归 MG-009/F0 | 无（已完成，待 MG-001/003/005 后冻结 v1） | 每个管理路径鉴权/默认值/错误/409/敏感字段契约测试；前端确认 fixture；明确 PR SHA 和真实 vs mock 边界 |
 | MG-001 / P1 | 已闭环：Host 只收 IP 字面量/白名单；跨源 Origin 403；未设令牌时仅本机可管理；非回环绑定且无令牌打 error 级告警 | 无 | offline/admin-origin.test.mjs；迁移说明见配置参考「管理面来源策略」 |
-| MG-002 / P1 | **已闭环**：`src/budget.js` 单一 deadline/AbortSignal 贯穿读 body、排队、代理 CONNECT、等头、读体、SSE 与续传；队列可取消并归还令牌；SSE 尊重 write 背压（drain 等待 + 8MiB 上限）。独立 review 已完成：H1（取消/超时混淆）、M1–M4 已修并补 AC-1b/4c/4d/6e | 无 | offline/deadline.test.mjs（16 用例）；契约见 docs/contracts/request-lifecycle-v1.md；余项：修复后二次 review、真实上游对照 |
+| MG-002 / P1 | **已闭环**：`src/budget.js` 单一 deadline/AbortSignal 贯穿读 body、排队、代理 CONNECT、等头、读体、SSE 与续传；队列可取消并归还令牌；SSE 尊重 write 背压（drain 等待 + 8MiB 上限）。独立 review 与二次复核已完成：H1（取消/超时混淆）、M1–M4（含已完成流边界）已修并补 AC-1b/4c/4d/4e/6e | 无 | offline/deadline.test.mjs（17 用例）；契约见 docs/contracts/request-lifecycle-v1.md；余项：修复后二次 review、真实上游对照 |
 | MG-003 / P1 | 已闭环：形状/保留键单一入口；删除墓碑；并发 409 | 无 | offline/config-schema.test.mjs；余项：/api/keys 的 id 白名单（低频，待 MG-009 一起定） |
 | MG-004 / P1 | 已闭环：旧套件全部隔离（27/27 文件、133 PASS、无 SKIP）；`user-env-fallback` Windows 分支仍未在 Windows 实跑 | 无 | affinity/circuit/concurrency/QPS/SSE/配额/日志/加密全部迁移 OS 临时目录+动态回环端口；无 SKIP；失败清理；默认套件禁止外部网络 |
 | MG-005 / P1 | 已闭环：secrets 词表随 reloadConfig 刷新；代理 userinfo 与 Bearer 兜底；错误摘要脱敏端到端验证；URL 凭据脱敏改线性扫描（128KB 单行 6.8s → 0ms，1MB 2ms） | MG-003 | 动态凭据、extraHeaders、代理用户信息均脱敏；植入测试秘密后扫描日志/状态无明文；最小必要错误信息 |

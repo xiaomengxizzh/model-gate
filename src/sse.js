@@ -230,7 +230,7 @@ export async function relayStream(client, firstUpstream, opts) {
   if (typeof client.on === 'function') { try { client.on('close', onClientClose); client.on('error', onClientError) } catch {} }
   // 预算中止立即掐上游（不必等下一个 chunk 到达）：慢流/挂起流也能在预算内结束
   const onBudgetAbort = () => {
-    if (budgetTimedOut()) { budgetHit = true; destroyUpstream() }
+    if (budgetTimedOut()) { if (!done) { budgetHit = true; destroyUpstream() } }
     else markClientGone('canceled')
   }
   if (signal) { try { if (signal.aborted) onBudgetAbort(); else signal.addEventListener('abort', onBudgetAbort, { once: true }) } catch {} }
@@ -309,7 +309,8 @@ export async function relayStream(client, firstUpstream, opts) {
   // 这里补一次缓存命中统计，否则 anthropic/gemini 流式下命中率与 token 记账全都是空的。
   if (!usageReported && lastUsage && opts.onUsage) { usageReported = true; try { opts.onUsage(lastUsage) } catch {} }
   if (opts.onTokens) { try { opts.onTokens(contentChars, lastUsage) } catch {} }
-  const timedOut = budgetHit
+  // 已完成流（收到 [DONE]）即使预算恰在终止帧写入时到期，也不得判为超时（否则会漏 markOk/亲和）
+  const timedOut = budgetHit && !done
   if (opts.onEnd) { try { opts.onEnd({ interrupted: !done, reconnects: retries, clientGone: clientGoneAt.t != null, timedOut }) } catch {} }
   if (typeof client.removeListener === 'function') { try { client.removeListener('close', onClientClose); client.removeListener('error', onClientError) } catch {} }
   if (signal && onBudgetAbort) { try { signal.removeEventListener('abort', onBudgetAbort) } catch {} }

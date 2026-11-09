@@ -555,7 +555,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
             log && log.info('sse 客户端已断开/停止消费，结束该请求', 'model=' + sm, 'provider=' + pid)
             return { kind: 'aborted' }
           }
-          if (relay && relay.timedOut) {
+          if (relay && relay.timedOut && !relay.completed) {
             // 整体预算在流式阶段耗尽：不再续传/切上游，以流内错误事件收尾（客户端可感知）
             log && log.warn('请求超出整体预算（流式阶段）', 'model=' + sm, 'provider=' + pid, 'overallMs=' + overallMsCfg)
             return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, timeout: true, chain: chainModels.join('>'), note: '请求超出整体预算 ' + overallMsCfg + 'ms（defaults.timeout.overallMs）', reconnects: relay.reconnects || 0 }

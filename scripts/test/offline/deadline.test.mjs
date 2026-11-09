@@ -634,6 +634,24 @@ test('AC-6e 背压等待期间 noEventMs 看门狗生效：快速中止而非等
 })
 
 // ============================================================================
+// AC-4e（契约 §4.2 / §6）：已完成流（[DONE]）即使终止帧写入瞬间预算到期，也不得判 timedOut。
+// ============================================================================
+test('AC-4e 已完成流不判超时：终止帧写入瞬间预算到期仍为 completed', { timeout: 15000 }, async () => {
+  const b = createBudget({ overallMs: 0 })
+  const client = fakeClient(true)
+  const origWrite = client.write
+  client.write = (chunk) => {
+    const ok = origWrite.call(client, chunk)
+    if (String(chunk).includes('[DONE]')) b.abort('request_timeout') // 模拟终止帧写入瞬间预算截止
+    return ok
+  }
+  const stream = fakeUpstream({ n: 0 }, [SSE_DATA(0), SSE_DONE])
+  const res = await withTimeout(relayStream(client, stream, { idleMs: 0, maxReconnects: 0, signal: b.signal, budget: b }), 3000, '契约 §6：终止帧写入后中继没有结束')
+  assert.equal(res.completed, true, '契约 §6：已收到 [DONE] 必须为 completed')
+  assert.equal(res.timedOut, false, '契约 §6：已完成流不得判为 timedOut')
+})
+
+// ============================================================================
 // AC-4d（分类）：客户端断开与预算耗尽必须区分——client_closed 不得记为 timedOut。
 // ============================================================================
 test('AC-4d 分类：client_closed 与 request_timeout 不混淆（单元）', { timeout: 15000 }, async () => {
