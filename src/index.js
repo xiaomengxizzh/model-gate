@@ -713,6 +713,7 @@ function makeHandler(state) {
       budget = createBudget({ overallMs: _to.overallMs || 0 })
       const onClientGone = () => { if (!res.writableEnded) budget.abort('client_closed') }
       try { res.on('close', onClientGone); req.on('aborted', onClientGone) } catch {}
+      if (res.destroyed || req.aborted) budget.abort('client_closed')   // 注册监听前已断开：立即取消
 
       // Global credentials grant access to every model. A virtual credential only
       // grants its named entry, including when no global credential is configured.

@@ -11,7 +11,7 @@
 | 整体预算 | 由 `defaults.timeout.overallMs` 声明的单次数据面请求墙钟上限；`0`（默认）= 不设全局上限 |
 | deadlineAt | 请求进入网关时刻 + 整体预算；预算为 0 时为 `null` |
 | 预算耗尽 | `Date.now() >= deadlineAt` |
-| 取消 | 客户端断开或预算耗尽导致的中止；两种原因不得混淆 |
+| 取消 | 客户端断开或预算耗尽导致的中止；两种原因不得混淆（实现：`budget.reason` 只有 `client_closed`/`request_timeout`，调用方用 `cancelled()`/`timedOut()` 区分；`expired()` 仅表示「已中止」） |
 | 排队 | 429 rateUntil 等待、provider 并发信号量、模型并发信号量、QPS 令牌等待 |
 | 流式阶段 | 上游响应头已到达、SSE 中继进行中（含断流续传） |
 

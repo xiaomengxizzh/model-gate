@@ -27,8 +27,9 @@ export function createBudget(opts = {}) {
     if (timer) { clearTimeout(timer); timer = null }
     if (parent && parentListener) { try { parent.removeEventListener('abort', parentListener) } catch {} parentListener = null }
   }
+  let disposed = false
   const abort = (why) => {
-    if (reason) return
+    if (reason || disposed) return
     reason = why === ABORT_CLIENT ? ABORT_CLIENT : ABORT_TIMEOUT
     detach()
     try { ac.abort() } catch {}
@@ -51,10 +52,14 @@ export function createBudget(opts = {}) {
     startedAt,
     deadlineAt,
     get reason() { return reason },
+    // expired() 表示「已中止（任一原因）」；超时与客户端断开必须分别用 timedOut()/cancelled() 判断，
+    // 否则 client_closed 会被误记为 "超出整体预算"（SSE 收尾/日志/记账全部错位）。
     expired() { return reason !== null || (deadlineAt != null && now() >= deadlineAt) },
+    timedOut() { return reason === ABORT_TIMEOUT || (reason === null && deadlineAt != null && now() >= deadlineAt) },
+    cancelled() { return reason === ABORT_CLIENT },
     remaining() { return deadlineAt == null ? Infinity : Math.max(0, deadlineAt - now()) },
     abort,
-    dispose() { detach(); try { ac.abort() } catch {} },
+    dispose() { detach(); disposed = true; try { ac.abort() } catch {} },
   }
 }
 

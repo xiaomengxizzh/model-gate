@@ -45,7 +45,8 @@
 ### 验证
 
 - `npm run check` 退出码 0；`npm test` 14/14 隔离套件（含 deadline 13 用例）通过；`MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs` 27/27 文件通过；`npm run docs:check` PASS；`node scripts/check-metadata.mjs` PASS (21)。
-- 未验证：真实上游与计费、生产 8787 重启、Windows/macOS、Node 18/20 实跑；MG-002 尚未做作者自检之外的独立 review。
+- 独立 review（只读，2026-11-09）发现 H1（`expired()` 把 `client_closed` 误判为预算耗尽）与 M1–M4，已修复并补测试：新增 `budget.timedOut()/cancelled()`、SSE 按 `timedOut()` 分支；客户端断开/写停滞不再计入上游中断与错误（M1）；QPS 令牌在取消且未发上游时归还（M2）；背压等待响应 `noEventMs` 看门狗（M3）；已完成流不判超时（M4）；另修 dispose 晚到 abort、唤醒后取消的下一位 waiter、写后缓冲复核、极早期断开。
+- 未验证：真实上游与计费、生产 8787 重启、Windows/macOS、Node 18/20 实跑；审查修复后的二次 review 尚未执行。
 
 ## 2026-11-08 审计修复（未发布）
 

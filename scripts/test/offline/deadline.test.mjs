@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import { EventEmitter } from 'node:events'
 import { relayStream } from '../../../src/sse.js'
+import { createBudget } from '../../../src/budget.js'
 import { startGateway, startScriptedUpstream, startHangingProxy } from './harness.mjs'
 
 const CHAT_OK = JSON.stringify({
@@ -148,6 +149,43 @@ test('AC-1 满队列（QPS 令牌）+ 小 overallMs：排队请求 504、不触�
   // 契约 §3：被移除的 waiter 不得在后续 release/旧定时器唤醒时继续执行
   await sleep(400)
   assert.equal(upstream.hits.length, 2, '契约 §3：取消后的 waiter 不得在旧定时器触发后补发上游请求')
+})
+
+// ============================================================================
+// AC-1b（契约 §3）：客户端在 QPS 排队中断开——已预留令牌必须归还（不靠 overallMs）。
+// ============================================================================
+test('AC-1b 客户端在 QPS 排队中断开：预留令牌归还、队列可继续', { timeout: 45000 }, async (t) => {
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    res.setHeader('content-type', 'application/json')
+    res.end(CHAT_OK)
+  })
+  const gw = await startGateway({
+    name: 'mg002-ac1b',
+    config: config({
+      overallMs: 0,
+      providers: { mock: { baseUrl: upstream.base } },
+      models: jsonModels({ qps: 1 }),
+    }),
+  })
+  t.after(async () => { await gw.stop(); await upstream.stop() })
+
+  const a = await postChat(gw.base, chatBody())
+  assert.equal(a.status, 200, 'AC-1b 前置：A 消耗唯一令牌')
+
+  // B 进入 QPS 等待后客户端断开（无 overallMs，纯取消路径）
+  const bReq = http.request(gw.base + '/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' } })
+  bReq.on('error', () => {})
+  bReq.end(JSON.stringify(chatBody()))
+  await sleep(150)
+  assert.equal(upstream.hits.length, 1, 'AC-1b 前置：B 仍在 QPS 等待，未触达上游')
+  bReq.destroy()
+  await sleep(1050) // 让令牌按 1 QPS 自然回填一次
+
+  const c0 = Date.now()
+  const c = await postChat(gw.base, chatBody(), { timeoutMs: 3000 })
+  assert.equal(c.status, 200, 'AC-1b：取消未破坏队列')
+  assert.ok(Date.now() - c0 < 800, '契约 §3：取消请求预留的 QPS 令牌已归还（否则 C 还要再等约 1s），实际 ' + (Date.now() - c0) + 'ms')
+  assert.equal(upstream.hits.length, 2, 'AC-1b：只有 A/C 触达上游')
 })
 
 // ============================================================================
@@ -396,6 +434,10 @@ test('AC-4c 客户端在流式中途断开：上游 socket 关闭、不续传', 
   await waitFor(() => upstream.hits[0].closedAt !== null, 2500, 'AC-4c / 契约 §3：流式中途客户端断开后必须销毁上游流')
   await sleep(400)
   assert.equal(upstream.hits.length, 1, 'AC-4c / 契约 §2.7：客户端已断开，不得续传重连')
+  // M1：客户端断开不得计入上游中断/错误（健康面板与错误率不被污染）
+  const st = await (await gw.get('/api/status')).json()
+  assert.equal(st.global.errors, 0, '契约 §3：客户端断开不计上游错误')
+  assert.equal(st.counters.interrupts, 0, '契约 §3：客户端断开不计流中断')
 })
 
 // ============================================================================
@@ -573,6 +615,47 @@ test('AC-6d SSE 背压：等待 drain 期间客户端断开 → 立即中止（�
   const r = await withTimeout(p, 3000, '契约 §5：背压等待中客户端断开后中继没有结束')
   assert.equal(stream.destroyed, true, '契约 §5：背压等待期间必须响应客户端断开并销毁上游')
   assert.equal(r && r.clientGone, true, '契约 §3：按 client_closed 记账')
+})
+
+// ============================================================================
+// AC-6e（契约 §5）：背压等待期间仍需响应 noEventMs 看门狗，不能死等 30s 写入超时。
+// ============================================================================
+test('AC-6e 背压等待期间 noEventMs 看门狗生效：快速中止而非等满 writeTimeoutMs', { timeout: 15000 }, async () => {
+  const pulls = { n: 0 }
+  const client = fakeClient(false) // 永不 drain
+  const stream = fakeUpstream(pulls, [SSE_DATA(0), SSE_DATA(1), SSE_DONE])
+  const t0 = Date.now()
+  await withTimeout(relayStream(client, stream, {
+    idleMs: 0, noEventMs: 150, maxReconnects: 0, writeTimeoutMs: 5000,
+  }), 3000, '契约 §5：背压等待中看门狗没有打断 drain 等待')
+  const elapsed = Date.now() - t0
+  assert.ok(elapsed < 1500, '契约 §5：backpressure 等待应被 noEventMs(150) 打断，实际 ' + elapsed + 'ms（若接近 5000 说明未响应）')
+  assert.equal(stream.destroyed, true, '契约 §5：看门狗判死后销毁上游流')
+})
+
+// ============================================================================
+// AC-4d（分类）：客户端断开与预算耗尽必须区分——client_closed 不得记为 timedOut。
+// ============================================================================
+test('AC-4d 分类：client_closed 与 request_timeout 不混淆（单元）', { timeout: 15000 }, async () => {
+  // 客户端断开
+  const b1 = createBudget({ overallMs: 0 })
+  const c1 = fakeClient(false)
+  const s1 = fakeUpstream({ n: 0 }, [SSE_DATA(0), SSE_DONE])
+  const p1 = relayStream(c1, s1, { idleMs: 0, maxReconnects: 0, signal: b1.signal, budget: b1, writeTimeoutMs: 5000 })
+  await sleep(50)
+  b1.abort('client_closed')
+  const r1 = await withTimeout(p1, 3000, '契约 §3：客户端断开后中继没有结束')
+  assert.equal(r1.clientGone, true, '契约 §3：客户端断开按 clientGone 记账')
+  assert.equal(r1.timedOut, false, '契约 §3：客户端断开不得误记为预算耗尽')
+
+  // 预算耗尽
+  const b2 = createBudget({ overallMs: 60 })
+  const c2 = fakeClient(false)
+  const s2 = fakeUpstream({ n: 0 }, [SSE_DATA(0), SSE_DONE])
+  const p2 = relayStream(c2, s2, { idleMs: 0, maxReconnects: 0, signal: b2.signal, budget: b2, writeTimeoutMs: 5000 })
+  const r2 = await withTimeout(p2, 3000, '契约 §4.2：预算耗尽后中继没有结束')
+  assert.equal(r2.timedOut, true, '契约 §4.2：预算耗尽按 timedOut 记账')
+  assert.equal(r2.clientGone, false, '契约 §4.2：预算耗尽不得误记为客户端断开')
 })
 
 // ============================================================================
