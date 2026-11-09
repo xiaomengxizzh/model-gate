@@ -15,6 +15,7 @@ import { responsesToChat, chatToResponse } from './responses.js'
 import { createResponsesStream } from './responses-stream.js'
 import { validateEmbeddingRequest, buildEmbeddingRequest, embeddingHeaders, normalizeEmbeddingResponse, supportsEmbeddings, MAX_EMBEDDING_INPUTS } from './embeddings.js'
 import { validateRerankRequest, buildRerankRequest, rerankHeaders, normalizeRerankResponse, supportsRerank } from './rerank.js'
+import { supportsMedia, parseMultipartField, replaceMultipartField, isMultipart, validateSpeechRequest, validateImageRequest, mediaResponseLimit } from './media.js'
 import { todayKey } from './shared.js'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
@@ -389,7 +390,7 @@ async function doSaveConfig(state, body) {
     if (m.providerModels && typeof m.providerModels === 'object') for (const [pOv, nm] of Object.entries(m.providerModels)) { if (!providers[pOv]) return { error: '模型「' + mn + '」的 providerModels 引用了不存在的上游 ' + pOv }; if (typeof nm !== 'string' || !nm) return { error: '模型「' + mn + '」的 providerModels[' + pOv + '] 须为非空字符串' } }
     if (m.forceNoStream != null && typeof m.forceNoStream !== 'boolean') return { error: '模型「' + mn + '」的 forceNoStream 须为布尔值' }
     // 能力声明（MG-011）：chat（默认）/embedding；未知值拦截，避免拼写错误静默变成 chat
-    if (m.capability != null && m.capability !== '' && !['chat', 'embedding', 'rerank'].includes(String(m.capability))) return { error: '模型「' + mn + '」的 capability 仅支持 chat/embedding/rerank' }
+    if (m.capability != null && m.capability !== '' && !['chat', 'embedding', 'rerank', 'audio', 'image'].includes(String(m.capability))) return { error: '模型「' + mn + '」的 capability 仅支持 chat/embedding/rerank/audio/image' }
   }
   // 单上游代理（名单）：留空/undefined=继承全局；direct/false=强制直连；否则须为合法 http(s):// 地址
   for (const [pid, p] of Object.entries(providers || {})) {
@@ -536,8 +537,10 @@ async function doProbeModel(state, model) {
   try { prov = buildProvider(state.cfg, def.provider) } catch (e) { return { id: model, ok: false, err: e.message } }
   if (prov._def.apiKeyEnv && !prov.keyOk && !prov.apiKey) return { id: model, ok: false, err: '上游未配置 Key，无法鉴权' }
   const target = modelTarget(state.cfg, model, def.provider)
-  // 能力感知探测（MG-011/012）：embedding → /v1/embeddings，rerank → /v1|v2/rerank，其余走 chat 补全
+  // 能力感知探测（MG-011/012/013）：embedding → /v1/embeddings，rerank → /v1|v2/rerank；
+  // audio/image 会真实产生计费媒体，明确不做在线探测；其余走 chat 补全
   const cap = def.capability || 'chat'
+  if (cap === 'audio' || cap === 'image') return { id: model, ok: false, err: '该能力不提供在线探测（避免产生计费媒体生成）' }
   const r = cap === 'embedding' ? await probeEmbedding(prov, model, target.api, target.servingName)
     : cap === 'rerank' ? await probeRerank(prov, model, target.api, target.servingName)
     : await probeModel(prov, model, target.api, target.servingName)
@@ -599,6 +602,73 @@ function ensureSt(state, pid) {
 function keysFileEncrypted(path) { try { return readFileSync(path, 'utf8').trimStart().startsWith('MG1:') } catch { return false } }
 // 数据面客户端 Key：环境变量优先，其次加密 keys 库（__mg_client），最后兼容旧 defaults.clientKey
 function currentClientKey(state) { return process.env.MG_CLIENT_KEY || (state.cfg._keys && state.cfg._keys.__mg_client) || (state.cfg.defaults && state.cfg.defaults.clientKey) || '' }
+
+// —— MG-013 媒体上游代理：multipart 原样转发 / 二进制响应 / 体积上限 / 预算与取消 / fallback ——
+async function handleMediaProxy(state, budget, log, opts) {
+  const { path, modelName, def, binary, makePayload, contentType } = opts
+  const limit = mediaResponseLimit(state.cfg)
+  const candidates = [def.provider, ...(def.fallbacks || [])].filter(Boolean)
+  let lastErr = null
+  for (const pid of candidates) {
+    if (!state.cfg.providers[pid]) continue
+    const prov = buildProvider(state.cfg, pid)
+    if (!healthy(ensureHst(state, pid), Date.now())) { lastErr = new Error('provider ' + pid + ' 熔断中'); continue }
+    if (prov._def.apiKeyEnv && !prov.keyOk) { lastErr = new Error('provider ' + pid + ' 未配置 Key'); continue }
+    const target = modelTarget(state.cfg, modelName, pid)
+    if (!supportsMedia(target.api)) { lastErr = new Error('上游协议 ' + target.api + ' 不支持媒体桥接'); continue }
+    const payload = makePayload(target)
+    const headers = { 'content-type': contentType, 'user-agent': 'model-gateway/0.1', accept: binary ? '*/*' : 'application/json', 'accept-encoding': 'identity' }
+    const extra = Object.assign({}, (state.cfg.defaults && state.cfg.defaults.extraHeaders) || {}, prov.extraHeaders || {})
+    for (const [k, v] of Object.entries(extra)) headers[String(k).toLowerCase()] = v
+    if (prov.apiKey) headers.authorization = 'Bearer ' + prov.apiKey
+    headers['content-length'] = payload.length
+    let release = null
+    try {
+      release = await acquireProvider(state, pid, state.cfg, budget.signal)
+      const up = await forward(prov, path, 'POST', headers, payload, state.cfg.defaults || {}, log, { budget, signal: budget.signal })
+      if (up.ok) {
+        let buf
+        try {
+          buf = await collectBody(up.stream, limit, { budget, signal: budget.signal, destroyOnAbort: true })
+        } catch (e) {
+          if (e && e.aborted) throw e
+          if (/too large/i.test(String(e && e.message))) {
+            return { status: 502, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: '媒体响应超过上限 ' + limit + ' bytes', type: 'media_too_large' } })) }
+          }
+          throw e
+        }
+        const ct = (up.headers && up.headers['content-type']) || (binary ? 'application/octet-stream' : 'application/json; charset=utf-8')
+        state.st.counters.requests += 1
+        agg(state, pid, 'requests', 1)
+        const sg = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
+        sg.requests = (sg.requests || 0) + 1
+        if (!binary) {
+          const j = tryParse(buf)
+          const usage = (j && j.usage) || {}
+          const tokens = Number(usage.total_tokens) > 0 ? Number(usage.total_tokens) : (Number(usage.prompt_tokens) > 0 ? Number(usage.prompt_tokens) : 0)
+          if (tokens > 0) { sg.tokens = (sg.tokens || 0) + tokens; agg(state, pid, 'tokens', tokens); tallyDaily(state, modelName, tokens, 0, 0, tokens, 0) }
+        }
+        markOk(state, pid); noteAffinity(state, modelName, pid)
+        return { status: up.status, contentType: ct, buf }
+      }
+      const ebuf = await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
+      const mapped = mapErrorEnvelope(target.api, up.status, ebuf) || ebuf
+      if (up.status === 402 || up.status === 403 || up.status === 404 || up.status === 429 || up.status >= 500) {
+        lastErr = new Error('upstream ' + up.status)
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        markFail(state, pid, prov.circuit)
+        continue
+      }
+      return { status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: mapped }
+    } catch (err) {
+      if (err && err.aborted) throw err
+      lastErr = err
+      agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+      markFail(state, pid, prov.circuit)
+    } finally { if (release) release() }
+  }
+  return { status: 502, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: '媒体上游失败：' + (lastErr ? lastErr.message : 'all providers failed'), type: 'all_providers_failed' } })) }
+}
 
 const FWD_DEPS = { ensureHst, markFail, markOk, healthy, effState: (h, now) => (h.state === 'open' && h.openUntil <= now) ? 'half' : h.state, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tallyDialogueRequest, tryParse, collectBody }
 function makeHandler(state) {
@@ -875,6 +945,50 @@ function makeHandler(state) {
           } finally { if (release) release() }
         }
         sendJson(res, 502, { error: { message: 'rerank 上游失败：' + (rLastErr ? rLastErr.message : 'all providers failed'), type: 'all_providers_failed' } }); return
+      }
+
+      // —— MG-013：Audio / Image 媒体桥接（multipart 原样转发、二进制响应、体积/预算/取消） ——
+      if (path === '/v1/audio/speech' || path === '/v1/audio/transcriptions' || path === '/v1/images/generations' || path === '/v1/images/edits') {
+        if (req.method !== 'POST') { sendJson(res, 405, { error: { message: '仅支持 POST ' + path, type: 'invalid_request_error' } }); return }
+        const multipartPath = path.endsWith('/transcriptions') || path.endsWith('/edits')
+        const ctype = String(req.headers['content-type'] || (multipartPath ? '' : 'application/json'))
+        const maxBody = (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024
+        let raw = null
+        let body = null
+        let modelName = ''
+        if (multipartPath) {
+          if (!isMultipart(ctype)) { sendJson(res, 400, { error: { message: '需要 multipart/form-data（含 model 字段与文件）', type: 'invalid_request_error' } }); return }
+          raw = await collectBody(req, maxBody, { budget, signal: budget.signal })
+          modelName = parseMultipartField(raw, ctype, 'model') || ''
+          if (!modelName) { sendJson(res, 400, { error: { message: 'multipart 缺少 model 字段', type: 'invalid_request_error' } }); return }
+        } else {
+          raw = await collectBody(req, maxBody, { budget, signal: budget.signal })
+          body = tryParse(raw)
+          const verr = path === '/v1/audio/speech' ? validateSpeechRequest(body) : validateImageRequest(body)
+          if (verr) { sendJson(res, 400, { error: { message: verr.error, type: 'invalid_request_error' } }); return }
+          modelName = body.model
+        }
+        const mhit = state.router.resolve(modelName)
+        if (!mhit.known && (state.cfg.virtualModels || []).length) { sendJson(res, 404, { error: { message: '未知模型名: ' + modelName + '。可用虚拟模型见 GET /v1/models', type: 'unknown_model' } }); return }
+        const mdef = mhit.def || null
+        if (!mdef || mdef.isVirtualModel || mdef.virtual) { sendJson(res, 400, { error: { message: '虚拟模型/默认共用名不支持媒体能力', type: 'unsupported_model' } }); return }
+        const wantCap = path.startsWith('/v1/audio/') ? 'audio' : 'image'
+        const haveCap = mdef.capability || 'chat'
+        if (haveCap !== wantCap) { sendJson(res, 400, { error: { message: '模型 ' + mhit.canonicalName + ' 的能力是 ' + haveCap + '，不能用于 ' + wantCap + ' 入口', type: 'unsupported_model' } }); return }
+        const binary = path === '/v1/audio/speech'
+        const result = await handleMediaProxy(state, budget, log, {
+          path,
+          modelName: mhit.canonicalName,
+          def: mdef,
+          binary,
+          contentType: ctype || 'application/json',
+          // per-上游模型名覆盖：JSON 重建；multipart 只替换 model 字段，文件字节不动
+          makePayload: (target) => multipartPath
+            ? (replaceMultipartField(raw, ctype, 'model', target.servingName) || raw)
+            : Buffer.from(JSON.stringify(Object.assign({}, body, { model: target.servingName }))),
+        })
+        res.writeHead(result.status, { 'content-type': result.contentType, 'content-length': result.buf.length })
+        res.end(result.buf); return
       }
       const isChat = CHAT_PATHS.has(path)
       const isResponses = RESPONSES_PATHS.has(path)

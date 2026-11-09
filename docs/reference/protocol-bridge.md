@@ -168,9 +168,22 @@ OpenAI 客户端只接受 `stop / length / tool_calls / content_filter` 四个�
 
 有损/限制：`documents` 上限 2048；仅字符串文档；Anthropic/Gemini 无 rerank（502 不触上游）；Gemini/Cohere 不返回 OpenAI usage 时 token 记 0；`document` 形状按上游原样保留。回归：`scripts/test/offline/rerank.test.mjs`。
 
-## 9. 模型解析与错误信封（MG-008 余项）
+## 9. Audio / Image 媒体桥接（MG-013）
 
-### 9.1 单一模型解析入口
+只支持 OpenAI 兼容上游；入口在 `src/index.js`，校验与 multipart 字段解析在 `src/media.js`。
+
+| 入口 | 请求 | 上游/响应 |
+| --- | --- | --- |
+| `/v1/audio/speech` | JSON `{model,input,voice?,response_format?,speed?}` | 原样 POST 到同路径；响应二进制与 `content-type` 逐字节透传 |
+| `/v1/audio/transcriptions` | multipart（`file` + `model` 等） | 原样转发（只替换 `model` 字段以支持 providerModels）；JSON 响应透传 |
+| `/v1/images/generations` | JSON `{model,prompt,n?,size?,quality?,response_format?}` | 原样转发；JSON 响应透传；usage token 计入账本 |
+| `/v1/images/edits` | multipart（`image` + `prompt` + `model`） | 原样转发；JSON 响应透传 |
+
+边界：请求体受 `server.maxBodyBytes`；响应体受 `defaults.mediaMaxResponseBytes`（默认 64MiB，超限 502 `media_too_large`）；multipart 只解析 `model`，不重编码文件；Anthropic/Gemini/Cohere 无媒体桥接 → 502 且不触上游；audio/image 不做在线探测（避免计费）。回归：`scripts/test/offline/media.test.mjs`。
+
+## 10. 模型解析与错误信封（MG-008 余项）
+
+### 10.1 单一模型解析入口
 
 `modelTarget(cfg, modelName, pid)`（src/router.js）返回 `{ servingName, api, effortFormat, maxTokensMax }`：
 
@@ -180,7 +193,7 @@ OpenAI 客户端只接受 `stop / length / tool_calls / content_filter` 四个�
 - 预热与 failback 还按协议生成 path/body 与鉴权头：Anthropic `/v1/messages` + `x-api-key`/`anthropic-version`；Gemini `:generateContent`/`:streamGenerateContent?alt=sse` + `x-goog-api-key`。Anthropic/Gemini 的预热消息会补一条 user 消息（协议要求至少一条非 system 消息）。
 - 回归：`scripts/test/offline/model-resolution.test.mjs`。
 
-### 9.2 上游错误信封映射
+### 10.2 上游错误信封映射
 
 非 OpenAI 上游的**非 2xx 原生错误信封**在数据面返回前统一映射为 OpenAI 形状（状态码保留）：
 

@@ -2,6 +2,21 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-09 Audio/Image 媒体能力（未发布，MG-013）
+
+### Added
+
+- `capability=audio|image` 与四个媒体入口：`POST /v1/audio/speech`（JSON → 二进制音频，content-type/字节透传）、`POST /v1/audio/transcriptions`（multipart）、`POST /v1/images/generations`（JSON）、`POST /v1/images/edits`（multipart）。只桥接 OpenAI 兼容上游；Anthropic/Gemini/Cohere 显式 502 且不触上游。
+- multipart 处理：只解析 `model` 字段用于路由与 per-上游覆盖名替换（`replaceMultipartField`），文件字节原样转发；请求体受 `server.maxBodyBytes`；响应体受 `defaults.mediaMaxResponseBytes`（默认 64MiB，超限 → 502 `media_too_large`）。
+- 媒体能力隔离（与 chat/embedding/rerank 互斥）；复用 provider `fallbacks`、熔断、并发信号量与 `overallMs` 预算/取消；usage token（图片 JSON 响应等）计入账本，无 usage 记 0；audio/image 不提供在线探测（避免计费媒体）；admin 编辑器 capability 增加 audio/image。
+- 回归 `scripts/test/offline/media.test.mjs`（8 用例：speech 二进制、transcription 与 edits 的 multipart 原样转发、图片 JSON 与 usage 记账、能力隔离、Anthropic 拒绝、响应体积上限、预算 504 与 multipart 缺 model 400）；文档见配置参考与协议桥 §9。
+
+### Changed
+- `npm run check` 覆盖 `src/media.js`。
+
+### 未验证
+- 真实 OpenAI 音频/图像上游与计费、大文件（>32MiB）上传/下载、multipart 多文件与 `response_format=base64` 的真实行为；Windows/macOS、Node 18/20。
+
 ## 2026-11-09 Rerank 能力（未发布，MG-012）
 
 ### Added
