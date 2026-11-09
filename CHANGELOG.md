@@ -6,15 +6,17 @@
 
 ### Fixed
 - **`/v1/responses` 桥拒绝真实客户端固定发送的 `include` 项**：Codex CLI（0.167）与 DSH headless（0.2.2-rc.1）在 Responses 请求里固定带 `include:["reasoning.encrypted_content"]`，原实现整条拒绝 → 真实客户端直接 400 `unsupported_parameter`（本轮 DSH 复现）。现只接受**丢弃后不影响正确性**的项（`reasoning.encrypted_content`、`output_text.logprobs`）并记 `lossy: include_dropped:<项>`；图片/托管产物/未知项仍显式拒绝，避免静默丢产物。契约 §3.3/§4/§7 与 `offline/responses-mapping.test.mjs` 同步。
+- **Responses 桥对托管工具/`namespace` 整条拒绝 → Codex CLI 完全不可用**：Codex 0.167 已取消 `wire_api="chat"`（openai/codex discussions#7782 明确要求统一 `responses`），且每轮固定发 `type:"namespace"`（`multi_agent_v1`）与 `type:"web_search"`；原实现按契约整条 400，等于永不支持 Codex。现桥方向**丢弃 Chat 无法表达的工具类型**并逐项记 `lossy: tool_dropped:<type>`，`tool_choice` 点名被丢弃工具时降级 `auto` 并记 `tool_choice_dropped:<name>`；`store/previous_response_id/background/truncation` 的显式拒绝不变，原生 `api:"responses"` 透传不受影响。回归 `offline/responses-mapping.test.mjs`（丢弃 + tool_choice 降级）与 `offline/responses-endpoint.test.mjs`（丢弃后仍 200 且上游只收到 function tool）。
 
 ### 已验证（真实客户端/真实上游）
 - DSH 0.2.2-rc.1 以 `api: openai-responses` 经 `/v1/responses` 完成真实回合（rc=0、completed、final 非空）；`/v1/responses` 真上游非流式与流式均 200，流式按契约发出 created→…→completed 且不发 `[DONE]`。
 - 虚拟共用名 `gatemodel` 经 `defaults.directory` 链真实往返成功（日志 `model=gatemodel serving=deepseek-v4.1-flash`）。
 - 真实上游 402（openrouter 余额不足）按模型级拒绝继续目录链，最终 200——真实 402 兜底口径成立。
 - 管理面并发保存：带 `version` 且过期返回 409 + `currentVersion` 且配置不变（API 层；面板双标签 UI 交互仍未实跑）。
+- **真实 Codex CLI 0.167 经网关完成真实回合**：`wire_api="responses"` 指向 `127.0.0.1:8788/v1`，rc=0、输出 `CODEX_OK`、tokens used 8,468；并完成一次真实工具往返（`exec_command pwd` → `function_call_output` → 第二回合输出目录）。网关日志可见有损项：`include_dropped:reasoning.encrypted_content, tool_dropped:namespace, tool_dropped:web_search, reasoning_summary, unknown_field:prompt_cache_key, unknown_field:client_metadata`。
 
 ### 未完成（不得当通过）
-- **真实 Codex CLI 对照 BLOCKED**：Codex 0.167 在 `tools` 里发 `type:"namespace"`（multi_agent_v1）与 `type:"web_search"`，按契约 §3.3 属托管控件 → 桥 400。需先决定「namespace 作为声明式分组接受并记 lossy」或让客户端关闭对应工具，再重跑。
+- **真实 Codex CLI 对照已 PASS**（见上「已验证」）；代价是 Codex 的 `web_search`/`multi_agent` 工具经网关不可用（有损，日志逐项可见）。若将来要支持它们，只能走原生 `api:"responses"` 上游，不能在 Chat 桥里伪装。
 - **Draft PR #2 不合并原样**：它把 `/v1/responses` 旁路到独立 handler，绕过 `forwardChain`（无预算/取消/额度/虚拟模型/SSE 背压），且与已合并的两套事件序列冲突；仅 `noRetry429`（429 原样透传 + `Retry-After`）值得并入 MG-002 余项。审计见验证报告 §7.2。
 - anthropic 协议适配的真实上游对照仍缺（openrouter 账户 402）；embeddings/rerank/audio/image/video 没有对应 capability 模型，需先做「模型 + 计费」决策。
 - MG-009 托盘实跑缺 `gir1.2-ayatanaappindicator3`（按资源门禁不自行安装）；Windows/macOS 按用户指示本轮不做；Node 18/20 本机无第二运行时。

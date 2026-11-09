@@ -90,9 +90,14 @@ function mapTools(tools, lossy) {
       if (t.format != null) lossy.push('custom_tool_format')
       continue
     }
-    throw new Error('不支持的托管工具: ' + type)
+    // Chat 协议只能表达 function tool。托管工具（web_search / file_search / code_interpreter / mcp /
+    // computer_* / image_generation / local_shell …）与命名空间分组（Codex 0.167 每轮固定发的
+    // namespace，如 multi_agent_v1）在桥方向无法表达。整条拒绝会让真实客户端完全不可用——Codex 已
+    // 取消 chat/completions 支持（openai/codex discussions#7782），只能打 responses。因此这里丢弃并
+    // 逐项记 lossy，由客户端按"该工具不可用"自行降级；原生 responses 透传路径不经过本函数，上游自己处理。
+    lossy.push('tool_dropped:' + String(type))
   }
-  return out
+  return out.length ? out : undefined
 }
 
 function mapToolChoice(choice, lossy) {
@@ -214,6 +219,11 @@ export function responsesToChat(input) {
   try { tools = mapTools(req.tools, lossy) } catch (e) { return reject(e.message) }
   let toolChoice
   try { toolChoice = mapToolChoice(req.tool_choice, lossy) } catch (e) { return reject(e.message) }
+  // tool_choice 点名了被丢弃的工具时不能原样下发（上游没有该名字 → 400），降级为 auto 并记有损
+  if (toolChoice && typeof toolChoice === 'object' && toolChoice.function) {
+    const kept = new Set((tools || []).map((x) => x.function.name))
+    if (!kept.has(toolChoice.function.name)) { lossy.push('tool_choice_dropped:' + toolChoice.function.name); toolChoice = 'auto' }
+  }
 
   const body = { messages }
   if (req.model != null) body.model = req.model

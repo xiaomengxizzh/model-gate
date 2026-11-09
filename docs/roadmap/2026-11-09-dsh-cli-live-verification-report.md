@@ -206,7 +206,7 @@ PATTERN_DONE suspects=0
 | MG-015 DSH 真客户端 · Responses | **PASS**（修复 `include` 后） | `api: openai-responses` → 网关 `POST /v1/responses`，`rc=0`、`completed`、final `RESP_CLIENT_OK` |
 | MG-015 `/v1/responses` 真上游（非流式/流式） | **PASS** | 200 + `object=response` + 归一 usage；SSE 8 类事件（created → … → completed），按契约不发 `[DONE]` |
 | MG-015 虚拟共用名 `gatemodel` | **PASS** | 网关日志 `model=gatemodel serving=deepseek-v4.1-flash provider=opencodego`，final `GATEMODEL_OK` |
-| MG-015 真实 Codex CLI 0.167 | **BLOCKED** | 桥返回 400 `不支持的托管工具: namespace`；抓包 toolTypes = function×7 + `namespace(multi_agent_v1)` + `web_search` |
+| MG-015 真实 Codex CLI 0.167 | **PASS**（修复工具丢弃后） | `wire_api="responses"` → 8788/v1；rc=0、输出 `CODEX_OK`、tokens used 8,468；另有一次真实工具往返（`exec_command pwd`）。日志有损：`tool_dropped:namespace, tool_dropped:web_search, reasoning_summary, unknown_field:prompt_cache_key, unknown_field:client_metadata` |
 | MG-015 Draft PR #2 审计 | **DONE** | 结论见 §7.2：**不合并原样** |
 | MG-008 anthropic 协议真上游 | **BLOCKED（上游 402）** | openrouter `union-alpha` 返回 `402 billing_error`（账户无额度）→ 目录链切 `deepseek-v4.1-flash` 返回 200：**真实 402 兜底 PASS**，但 anthropic 适配未被真实调用覆盖 |
 | MG-011/012/013/014 真上游 | **NOT_EXECUTED** | `/v1/models` 的 7 个模型全部 `capability=chat`；没有 embedding/rerank/audio/image/video 模型，新增属「模型+计费」决策 |
@@ -215,11 +215,19 @@ PATTERN_DONE suspects=0
 | Windows/macOS | **SKIPPED** | 按用户 2026-11-09 指示本轮不做多端适配 |
 | Node 18/20 | **NOT_EXECUTED** | 本机仅 v24.22.2；装第二运行时需授权 |
 
-### 7.1 本轮唯一代码改动：`include` 兼容
+### 7.1 代码改动①：`include` 兼容
 
 真实客户端（Codex/DSH）在 Responses 请求里固定发 `include:["reasoning.encrypted_content"]`。原实现整条拒绝 → 真实 DSH 直接 400（`b1-responses` 复现：`4xx: {"message":"include 不支持…","type":"unsupported_parameter"}`）。现改为：**只接受丢弃后不影响正确性的项**（`reasoning.encrypted_content` / `output_text.logprobs`）并记 `lossy: include_dropped:<项>`；图片、托管产物与未知项仍显式拒绝。契约 §3.3/§4/§7、回归 `offline/responses-mapping.test.mjs` 同步。
 
-### 7.2 Draft PR #2 审计（`xiaomengxizzh/model-gate `PR #2，draft，未实机验收）
+### 7.1b 代码改动②：托管工具/`namespace` 丢弃放行（让 Codex 真正可用）
+
+调研结论（外部一手来源）：**Codex 0.167 已取消 `wire_api="chat"`**，配置它会直接报错 `wire_api = "chat" is no longer supported` 并指向 [openai/codex discussions#7782](https://github.com/openai/codex/discussions/7782)（该讨论明确写 chat/completions 支持将于 2026-02 彻底移除，自定义 provider 必须改成 `wire_api = "responses"`）。所以"让 Codex 走网关的 chat 入口"这条路已被上游封死，网关必须能吞下 Codex 的 Responses 请求。
+
+Codex 的 Responses 请求形态（本轮抓包）：`keys = client_metadata, include, input, model, parallel_tool_calls, prompt_cache_key, reasoning, store, stream, tool_choice, tools`；`tools` 类型为 `function×7 + namespace(multi_agent_v1) + web_search`。Chat 协议只能表达 function tool，因此桥方向**丢弃不可表达的类型**并逐项记 `lossy: tool_dropped:<type>`；`tool_choice` 点名被丢弃工具时降级 `auto`（否则上游按"无名工具"400）。`store/previous_response_id/background/truncation` 的显式拒绝保持不变，原生 `api:"responses"` 透传路径不经过该映射。
+
+真实结果：Codex rc=0、输出 `CODEX_OK`、tokens used 8,468；随后一次真实工具往返（`exec_command pwd` → `function_call_output` → 第二回合给出真实目录）同样成功。这同时关闭了 MG-015「真实 Codex 对照」与「工具调用循环」两项。
+
+### 7.2 Draft PR #2 审计（`xiaomengxizzh/model-gate` PR #2，draft，未实机验收）
 
 结论：**不合并原样**，理由均为可复核的代码事实：
 

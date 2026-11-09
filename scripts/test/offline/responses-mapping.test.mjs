@@ -137,10 +137,6 @@ test('§4 拒绝矩阵：store/previous_response_id/background/include/truncatio
     [{ include: ['reasoning.encrypted_content', 'file_search_call.results'] }, /include/],
     [{ include: 'reasoning.encrypted_content' }, /include 必须是字符串数组/],
     [{ truncation: 'auto' }, /truncation/],
-    [{ tools: [{ type: 'web_search' }] }, /托管工具/],
-    [{ tools: [{ type: 'file_search', vector_store_ids: [] }] }, /托管工具/],
-    [{ tools: [{ type: 'code_interpreter', container: 'x' }] }, /托管工具/],
-    [{ tools: [{ type: 'mcp', server_label: 'x' }] }, /托管工具/],
     [{ input: [{ type: 'item_reference', id: 'x' }] }, /input item/],
   ]
   for (const [patch, re] of cases) {
@@ -151,6 +147,31 @@ test('§4 拒绝矩阵：store/previous_response_id/background/include/truncatio
     assert.match(r.rejected.message, re)
     assert.ok(Array.isArray(r.lossy))
   }
+  // 托管工具 / 命名空间分组无法在 Chat 协议表达：丢弃并逐项记 lossy，不得整条拒绝
+  // （Codex 0.167 每轮固定发 type:"namespace" 的 multi_agent_v1 与 web_search；Codex 已取消
+  //  chat/completions 支持，见 openai/codex discussions#7782，拒绝即等于不支持 Codex）
+  {
+    const r = responsesToChat({
+      model: 'demo',
+      input: 'hi',
+      tools: [
+        { type: 'function', name: 'exec_command', parameters: { type: 'object', properties: {} } },
+        { type: 'namespace', name: 'multi_agent_v1' },
+        { type: 'web_search' },
+      ],
+    })
+    assert.equal(r.rejected, null, '托管工具/namespace 不得整条拒绝真实客户端请求')
+    assert.equal(r.body.tools.length, 1, '只保留可表达的 function tool')
+    assert.equal(r.body.tools[0].function.name, 'exec_command')
+    assert.ok(lossyHas(r.lossy, 'tool_dropped:namespace'), '必须记 namespace 丢弃')
+    assert.ok(lossyHas(r.lossy, 'tool_dropped:web_search'), '必须记 web_search 丢弃')
+    // tool_choice 点名被丢弃的工具 → 降级 auto 并记有损（否则上游 400 无名工具）
+    const tc = responsesToChat({ model: 'demo', input: 'hi', tools: [{ type: 'namespace', name: 'ns1' }], tool_choice: { type: 'function', name: 'ns1' } })
+    assert.equal(tc.rejected, null)
+    assert.equal(tc.body.tool_choice, 'auto')
+    assert.ok(lossyHas(tc.lossy, 'tool_choice_dropped:ns1'))
+  }
+
   // 真实客户端（Codex/DSH）固定发的 include 项必须可用，但显式记 lossy
   const inc = responsesToChat({ model: 'demo', input: 'hi', include: ['reasoning.encrypted_content', 'output_text.logprobs'] })
   assert.equal(inc.rejected, null, 'include 里的可丢弃项不得整条拒绝（Codex/DSH 默认请求形态）')

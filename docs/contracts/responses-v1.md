@@ -28,8 +28,9 @@
    - `models.<名>.api = "responses"` 或 `providers.<id>.api = "responses"` → **原生转发**：路径 `/v1/responses`，鉴权头按上游协议注入，请求/响应尽量透传（只剥离管理凭据与逐跳头）。
    - 空/其它值 → **Chat 桥**：把 Responses 请求转换为 Chat Completions 请求发给上游，再把上游 JSON/SSE 重建为 Responses JSON/事件。
 3. 默认必须是 Chat 桥；不得因为上游"看起来支持"就自动切原生（避免半兼容上游静默丢工具/推理字段）。
-4. 只支持文本与 function/custom tool；托管工具、`background:true`、`previous_response_id` 续轮、`store:true` 在原生/桥两条路径都必须**显式拒绝**（`400 unsupported_parameter`），不允许静默忽略。
+4. Chat 桥只支持文本与 function/custom tool；`background:true`、`previous_response_id` 续轮、`store:true`、`truncation` 在两条路径都必须**显式拒绝**（`400 unsupported_parameter`），不允许静默忽略。托管工具与命名空间分组见 4.2。
 4.1 `include` 例外：真实客户端（Codex CLI、DSH headless）固定发 `include:["reasoning.encrypted_content"]`。网关本就不产生加密推理，该项在语义上等于"没有可返回的东西"，整条拒绝会让 Responses 入口对真实客户端完全不可用（2026-11-09 实测 DSH 0.2.2-rc.1 因此 400）。因此**只接受丢弃后不影响正确性的项**（`reasoning.encrypted_content`、`output_text.logprobs`）并记 `lossy: include_dropped:<项>`；图片/托管产物/未知项仍旧显式拒绝，避免静默丢掉客户端要求的产物。
+4.2 托管工具与 `namespace` 分组：Chat 协议只能表达 function/custom tool，托管工具（`web_search` / `file_search` / `code_interpreter` / `mcp` / `computer_*` / `image_generation` / `local_shell`）与命名空间分组（Codex 的 `type:"namespace"`，如 `multi_agent_v1`）在桥方向**丢弃并逐项记 `lossy: tool_dropped:<type>`**；`tool_choice` 点名被丢弃的工具时降级为 `auto` 并记 `tool_choice_dropped:<name>`（否则上游会因"无名工具"400）。理由：Codex 0.167 已取消 `wire_api="chat"`（openai/codex discussions#7782 要求统一 `responses`），而它每轮固定发送 `namespace` 与 `web_search`；按 4. 整条拒绝等于"不支持 Codex"，与 MG-015 目标冲突。原生 `api:"responses"` 透传不经过桥映射，工具原样交给上游。
 
 ## 4. 请求映射（Chat 桥）
 
@@ -51,6 +52,7 @@
 | `previous_response_id`, `store`, `background`, `truncation` | **拒绝** | 见 §3.4 |
 | `include`（仅 `reasoning.encrypted_content` / `output_text.logprobs`） | 接受并**记有损** | 见 §3.4 |
 | `include`（其它项） | **拒绝** | 见 §3.4 |
+| 托管工具 / `namespace` 分组 | 丢弃 + 记 `tool_dropped:<type>` | 见 §3.2 4.2 |
 
 ## 5. 响应映射（Chat 桥，非流式）
 
@@ -97,7 +99,7 @@ Responses 响应最小形状：
 | `reasoning` 的 summary/encrypted content | 请求/响应 | Chat 无对应字段；只保留 effort 档位 |
 | `store/previous_response_id/background` | 请求 | 明确拒绝，不静默降级 |
 | `include: reasoning.encrypted_content / output_text.logprobs` | 请求 | 接受但丢弃（按契约 §3.4 4.1 记 `lossy: include_dropped:<项>`）；客户端拿不到加密推理与 logprobs |
-| 托管工具（web_search 等） | 请求 | 明确拒绝 |
+| 托管工具（`web_search` / `file_search` / `code_interpreter` / `mcp` / `computer_*` / `image_generation` / `local_shell`）与 `namespace` 分组 | 请求 | **丢弃并记 `tool_dropped:<type>`**；`tool_choice` 点名被丢弃工具 → 降级 `auto` + `tool_choice_dropped:<name>`（见 §3.2 4.2） |
 | 图片/文件/音频输入 | 请求 | 与现有 Chat 桥一致：丢弃非文本 part（见 protocol-bridge 有损清单） |
 | 上游专有 `finish_reason` | 响应 | 收敛为四个 OpenAI 值（复用现有映射） |
 | 事件级 `sequence_number` | 响应 | 原生路径透传上游值；桥路径由网关生成，与上游原始序号不可比 |

@@ -61,8 +61,12 @@ test('Responses 非流式：Chat 桥请求整形 + response 对象 + usage 映�
   assert.ok(!hit.body.stream, '非流式请求上游 stream=false')
 })
 
-test('Responses 拒绝矩阵：store/previous_response_id/background/托管工具 400 且不触上游', { timeout: 30000 }, async (t) => {
-  const upstream = await startScriptedUpstream(async (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(CHAT_OK)) })
+test('Responses 拒绝矩阵：store/previous_response_id/background 400 且不触上游（托管工具改为丢弃放行）', { timeout: 30000 }, async (t) => {
+  const upstream = await startScriptedUpstream(async (req, res, rec) => {
+    rec.body = await readBody(req)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(CHAT_OK))
+  })
   const gw = await startGateway({ name: 'mg015-reject', config: { providers: { mock: { baseUrl: upstream.base } }, models: { demo: { provider: 'mock' } } } })
   t.after(async () => { await gw.stop(); await upstream.stop() })
 
@@ -70,7 +74,6 @@ test('Responses 拒绝矩阵：store/previous_response_id/background/托管工�
     { model: 'demo', input: 'hi', store: true },
     { model: 'demo', input: 'hi', previous_response_id: 'resp_x' },
     { model: 'demo', input: 'hi', background: true },
-    { model: 'demo', input: 'hi', tools: [{ type: 'web_search' }] },
   ]) {
     const res = await post(gw, body)
     assert.equal(res.status, 400, JSON.stringify(body))
@@ -79,6 +82,14 @@ test('Responses 拒绝矩阵：store/previous_response_id/background/托管工�
     assert.ok(j.error.message.length > 0)
   }
   assert.equal(upstream.hits.length, 0, '拒绝项不得触达上游')
+
+  // 托管工具（Codex 固定发送 web_search / namespace）不再整条拒绝：丢弃后照常转发
+  const ok = await post(gw, { model: 'demo', input: 'hi', tools: [{ type: 'function', name: 'f1', parameters: { type: 'object', properties: {} } }, { type: 'web_search' }, { type: 'namespace', name: 'ns' }] })
+  assert.equal(ok.status, 200, '托管工具应丢弃放行，不得 400')
+  assert.equal(upstream.hits.length, 1, '丢弃后仍应正常触达上游一次')
+  const sent = upstream.hits[0].body
+  assert.equal(sent.tools.length, 1, '上游只收到可表达的 function tool')
+  assert.equal(sent.tools[0].function.name, 'f1')
 })
 
 test('Responses 流式：SSE 事件序列、无 [DONE]、文本完整', { timeout: 30000 }, async (t) => {

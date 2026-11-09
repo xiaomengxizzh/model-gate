@@ -52,7 +52,7 @@
 | MG-015 DSH 真客户端 `/v1/responses`（修复 `include` 后） | **PASS**（rc=0、completed、final 非空） |
 | MG-015 `/v1/responses` 真上游 非流式 + 流式 | **PASS**（200；SSE created→…→completed，无 `[DONE]`） |
 | MG-015 虚拟共用名 `gatemodel` | **PASS**（`model=gatemodel serving=deepseek-v4.1-flash`） |
-| MG-015 真实 Codex CLI 0.167 | **BLOCKED**：桥 400 `不支持的托管工具: namespace`（抓包还含 `web_search`） |
+| MG-015 真实 Codex CLI 0.167 | **PASS**：`wire_api="responses"` + 丢弃不可表达工具后，真实回合 rc=0、输出 `CODEX_OK`，并有真实工具往返（`exec_command pwd`） |
 | MG-015 Draft PR #2 审计 | **DONE**：不合并原样（旁路 forwardChain/预算/治理；仅 `noRetry429` 值得移植） |
 | MG-008 anthropic 协议真上游 | **BLOCKED（上游 402 余额）**；同轮证明真实 402 → 目录链兜底 200 正常 |
 | MG-011/012/013/014 真上游 | **NOT_EXECUTED**：现有 7 个模型全是 `capability=chat`，新增媒体/向量模型属「模型+计费」决策 |
