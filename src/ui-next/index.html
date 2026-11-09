@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="ModelGate Next — 本地优先的模型网关管理控制台预览">
+  <title>ModelGate — Control Center (Preview)</title>
+  <link rel="stylesheet" href="/ui-next/styles.css">
+  <script type="module" src="/ui-next/app.js"></script>
+</head>
+<body>
+  <div class="shell" id="shell">
+    <aside class="sidebar" aria-label="主导航">
+      <a class="brand" href="/ui-next" aria-label="ModelGate 首页">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span><strong>ModelGate</strong><small>CONTROL CENTER</small></span>
+        <span class="brand-beta">NEXT</span>
+      </a>
+      <div class="nav-label">WORKSPACE</div>
+      <nav class="nav" aria-label="功能导航">
+        <button class="nav-link is-active" type="button" data-view="overview" aria-current="page"><span class="nav-glyph">◫</span><span>总览</span></button>
+        <button class="nav-link" type="button" data-view="providers"><span class="nav-glyph">⌘</span><span>上游供应商</span></button>
+        <button class="nav-link" type="button" data-view="models"><span class="nav-glyph">◈</span><span>模型与路由</span></button>
+        <button class="nav-link" type="button" data-view="clients"><span class="nav-glyph">⇆</span><span>客户端接入</span></button>
+        <button class="nav-link" type="button" data-view="diagnostics"><span class="nav-glyph">▤</span><span>监控与诊断</span></button>
+        <button class="nav-link" type="button" data-view="settings"><span class="nav-glyph">⚙</span><span>安全与设置</span></button>
+      </nav>
+      <div class="sidebar-fill"></div>
+      <div class="sidebar-info">
+        <div class="sidebar-info-title"><span class="pulse pulse-unknown" id="side-pulse"></span><span id="side-status">尚未连接</span></div>
+        <p>独立预览 · 只读模式</p>
+        <a class="sidebar-old" href="/" target="_blank" rel="noopener noreferrer">打开原管理台 <span aria-hidden="true">↗</span></a>
+      </div>
+      <div class="sidebar-footer">MG / LOCAL FIRST <span>v0.1 PREVIEW</span></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="topbar-left"><span class="eyebrow">WORKSPACE</span><span class="crumb-sep">/</span><strong id="current-view-name">总览</strong></div>
+        <div class="top-actions">
+          <span class="readonly-chip" title="不修改配置、密钥、额度或上游数据"><span class="chip-dot"></span>只读预览</span>
+          <button type="button" class="icon-btn" id="theme-toggle" aria-label="切换明暗主题" title="切换明暗主题">◐</button>
+          <button type="button" class="button button-primary" id="refresh"><span aria-hidden="true">↻</span> 刷新数据</button>
+        </div>
+      </header>
+      <main id="view-content" class="main-content" tabindex="-1" aria-live="polite">
+        <div class="loading-screen"><span class="spinner"></span><p>正在建立本地控制面连接…</p></div>
+      </main>
+    </div>
+  </div>
+  <div id="auth-overlay" class="auth-overlay" hidden>
+    <form id="auth-form" class="auth-card">
+      <div class="auth-mark" aria-hidden="true">▦</div>
+      <p class="eyebrow">SECURE ACCESS</p>
+      <h1>连接管理控制面</h1>
+      <p class="muted">当前网关要求管理员令牌。令牌只保存在本标签页内存中，刷新后需要重新输入。</p>
+      <label for="admin-token">管理员令牌</label>
+      <input id="admin-token" type="password" required autocomplete="off" spellcheck="false" placeholder="输入 MG_ADMIN_TOKEN">
+      <p id="auth-error" class="error-text" role="alert" aria-live="assertive"></p>
+      <button type="submit" class="button button-primary full">解锁控制面 →</button>
+    </form>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

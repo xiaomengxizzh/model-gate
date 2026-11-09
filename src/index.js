@@ -24,6 +24,14 @@ import { todayKey } from './shared.js'
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
 const RESPONSES_PATHS = new Set(['/v1/responses', '/responses'])
 const ADMIN_PAGE = new URL('./admin.html', import.meta.url)
+// Isolated F1 preview: exact allowlist; old '/' and '/admin' remain unchanged.
+const UI_NEXT_ASSETS = Object.freeze({
+  '/ui-next': ['index.html', 'text/html; charset=utf-8'],
+  '/ui-next/': ['index.html', 'text/html; charset=utf-8'],
+  '/ui-next/index.html': ['index.html', 'text/html; charset=utf-8'],
+  '/ui-next/styles.css': ['styles.css', 'text/css; charset=utf-8'],
+  '/ui-next/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+})
 
 const FAIL_OPEN_THRESHOLD = 5       // 连续失败熔断阈值（放宽：平台偶发慢/抖不轻易熔断）
 const FAIL_OPEN_COOLDOWN = 10000    // 熔断冷却 ms
@@ -909,6 +917,19 @@ function makeHandler(state) {
       if (!hostAllowed(req, state.cfg)) { denyOrigin(res, path, 'Host 不被接受：' + String(req.headers.host || '') + '（DNS 重绑定防护；反向代理/自定义域名请加入 server.allowedHosts）'); return }
       if ((isApi && !originAllowed(req, state.cfg)) || (req.method !== 'GET' && req.method !== 'HEAD' && req.headers.origin && !originAllowed(req, state.cfg))) {
         denyOrigin(res, path, '跨源请求被拒绝：' + String(req.headers.origin || '') + '（同源或 server.allowedOrigins 白名单之外）')
+        return
+      }
+      if ((req.method === 'GET' || req.method === 'HEAD') && Object.hasOwn(UI_NEXT_ASSETS, path)) {
+        const [name, contentType] = UI_NEXT_ASSETS[path]
+        const data = readFileSync(new URL('./ui-next/' + name, import.meta.url))
+        res.writeHead(200, {
+          'content-type': contentType,
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+          'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        })
+        if (req.method === 'HEAD') res.end()
+        else res.end(data)
         return
       }
       if ((req.method === 'GET' || req.method === 'HEAD') && path === '/healthz') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok'); return }
