@@ -300,9 +300,11 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       return { kind: 'json', status: 404, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '未知模型名: ' + body.model + '。可用虚拟模型见 GET /v1/models', type: 'unknown_model' } })) }
     }
     requestModel = hit.canonicalName
-    // 能力隔离（MG-011）：embedding 模型不得从对话入口调用（反之由 embeddings 入口拒绝）
-    if (!hit.def.isVirtualModel && !hit.def.virtual && (hit.def.capability || 'chat') === 'embedding') {
-      return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '模型 ' + (hit.def.name || hit.canonicalName) + ' 是 embedding 模型，不能用于对话（请调用 /v1/embeddings）', type: 'unsupported_model' } })) }
+    // 能力隔离（MG-011/012）：非 chat 能力不得从对话入口调用（embedding/rerank 各有专属入口）
+    if (!hit.def.isVirtualModel && !hit.def.virtual && (hit.def.capability || 'chat') !== 'chat') {
+      const _cap = hit.def.capability || 'chat'
+      const _where = _cap === 'embedding' ? '请调用 /v1/embeddings' : (_cap === 'rerank' ? '请调用 /v1/rerank' : '请使用对应能力入口')
+      return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '模型 ' + (hit.def.name || hit.canonicalName) + ' 的能力是 ' + _cap + '，不能用于对话（' + _where + '）', type: 'unsupported_model' } })) }
     }
     maxModel = hit.def.maxConcurrent || 0
     qps = hit.def.qps || 0

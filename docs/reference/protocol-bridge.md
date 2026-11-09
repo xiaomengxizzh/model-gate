@@ -155,9 +155,22 @@ OpenAI 客户端只接受 `stop / length / tool_calls / content_filter` 四个�
 
 有损/限制：批量上限 2048；仅文本 input（token-id 数组暂不支持）；`encoding_format=base64` 依赖上游支持，网关不转码；Gemini 不返回 usage，token 账本记 0。回归：`scripts/test/offline/embeddings.test.mjs`。
 
-## 8. 模型解析与错误信封（MG-008 余项）
+## 8. Rerank 映射（MG-012）
 
-### 8.1 单一模型解析入口
+入口：`POST /v1/rerank`（OpenAI/Jina 风格）。上游按模型协议选择：
+
+| 项 | api=openai（默认，Jina/SiliconFlow 等兼容） | api=cohere |
+| --- | --- | --- |
+| 路径 | `/v1/rerank` | `/v2/rerank` |
+| 请求体 | `{model, query, documents, top_n?, return_documents?}` | 同左 |
+| 鉴权 | `Authorization: Bearer`（extraHeaders 合并） | 同左 |
+| 响应 | 原样 results；网关稳定排序 + top_n 裁剪 + model 回写 | 同左；`meta.billed_units` 原样保留 |
+
+有损/限制：`documents` 上限 2048；仅字符串文档；Anthropic/Gemini 无 rerank（502 不触上游）；Gemini/Cohere 不返回 OpenAI usage 时 token 记 0；`document` 形状按上游原样保留。回归：`scripts/test/offline/rerank.test.mjs`。
+
+## 9. 模型解析与错误信封（MG-008 余项）
+
+### 9.1 单一模型解析入口
 
 `modelTarget(cfg, modelName, pid)`（src/router.js）返回 `{ servingName, api, effortFormat, maxTokensMax }`：
 
@@ -167,7 +180,7 @@ OpenAI 客户端只接受 `stop / length / tool_calls / content_filter` 四个�
 - 预热与 failback 还按协议生成 path/body 与鉴权头：Anthropic `/v1/messages` + `x-api-key`/`anthropic-version`；Gemini `:generateContent`/`:streamGenerateContent?alt=sse` + `x-goog-api-key`。Anthropic/Gemini 的预热消息会补一条 user 消息（协议要求至少一条非 system 消息）。
 - 回归：`scripts/test/offline/model-resolution.test.mjs`。
 
-### 8.2 上游错误信封映射
+### 9.2 上游错误信封映射
 
 非 OpenAI 上游的**非 2xx 原生错误信封**在数据面返回前统一映射为 OpenAI 形状（状态码保留）：
 

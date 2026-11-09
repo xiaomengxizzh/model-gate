@@ -6,7 +6,7 @@ import { gunzipSync } from 'node:zlib'
 import { isIP } from 'node:net'
 import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh, modelTarget } from './router.js'
 import { createLogger } from './logger.js'
-import { forward, probe, probeModel, probeChat, warm, probeEmbedding } from './request.js'
+import { forward, probe, probeModel, probeChat, warm, probeEmbedding, probeRerank } from './request.js'
 import { adapterFor, cacheHitMiss, mapErrorEnvelope } from './format.js'
 import { isStreamResponse, writeUpstreamHeaders, relayStream, endInterruptedStream } from './sse.js'
 import { forwardChain, routeLimit, virtualQuotaExceeded, acquireProvider } from './forward.js'
@@ -14,6 +14,7 @@ import { createBudget, abortedError } from './budget.js'
 import { responsesToChat, chatToResponse } from './responses.js'
 import { createResponsesStream } from './responses-stream.js'
 import { validateEmbeddingRequest, buildEmbeddingRequest, embeddingHeaders, normalizeEmbeddingResponse, supportsEmbeddings, MAX_EMBEDDING_INPUTS } from './embeddings.js'
+import { validateRerankRequest, buildRerankRequest, rerankHeaders, normalizeRerankResponse, supportsRerank } from './rerank.js'
 import { todayKey } from './shared.js'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
@@ -381,14 +382,14 @@ async function doSaveConfig(state, body) {
     if (m.effortFormat != null && m.effortFormat !== '' && !['reasoning_effort', 'thinking'].includes(m.effortFormat)) return { error: '模型「' + mn + '」的 effortFormat 仅支持 reasoning_effort/thinking' }
     // 协议（改革：per-model protocol）：未设置/留空 = 继承上游的 api；显式设置时须为已知协议。
     // 同一上游的不同模型可各走不同协议（如 OpenCode Zen 的 union-alpha 走 anthropic、其余走 openai）。
-    if (m.api != null && m.api !== '' && !['openai', 'anthropic', 'gemini'].includes(String(m.api))) return { error: '模型「' + mn + '」的 api 仅支持 openai/anthropic/gemini（留空=继承上游）' }
+    if (m.api != null && m.api !== '' && !['openai', 'anthropic', 'gemini', 'cohere'].includes(String(m.api))) return { error: '模型「' + mn + '」的 api 仅支持 openai/anthropic/gemini/cohere（留空=继承上游）' }
     // per-上游模型名覆盖：{ <providerId>: <该上游侧的模型名> }
     if (m.providerModels != null && m.providerModels !== '' && (typeof m.providerModels !== 'object' || Array.isArray(m.providerModels))) return { error: '模型「' + mn + '」的 providerModels 须为 { 上游ID: 该上游模型名 } 对象' }
     for (const pOv of Object.keys(m.providerModels || {})) if (RESERVED_KEYS.has(pOv)) return { error: '模型「' + mn + '」的 providerModels 含保留键名：' + pOv }
     if (m.providerModels && typeof m.providerModels === 'object') for (const [pOv, nm] of Object.entries(m.providerModels)) { if (!providers[pOv]) return { error: '模型「' + mn + '」的 providerModels 引用了不存在的上游 ' + pOv }; if (typeof nm !== 'string' || !nm) return { error: '模型「' + mn + '」的 providerModels[' + pOv + '] 须为非空字符串' } }
     if (m.forceNoStream != null && typeof m.forceNoStream !== 'boolean') return { error: '模型「' + mn + '」的 forceNoStream 须为布尔值' }
     // 能力声明（MG-011）：chat（默认）/embedding；未知值拦截，避免拼写错误静默变成 chat
-    if (m.capability != null && m.capability !== '' && !['chat', 'embedding'].includes(String(m.capability))) return { error: '模型「' + mn + '」的 capability 仅支持 chat/embedding' }
+    if (m.capability != null && m.capability !== '' && !['chat', 'embedding', 'rerank'].includes(String(m.capability))) return { error: '模型「' + mn + '」的 capability 仅支持 chat/embedding/rerank' }
   }
   // 单上游代理（名单）：留空/undefined=继承全局；direct/false=强制直连；否则须为合法 http(s):// 地址
   for (const [pid, p] of Object.entries(providers || {})) {
@@ -535,9 +536,10 @@ async function doProbeModel(state, model) {
   try { prov = buildProvider(state.cfg, def.provider) } catch (e) { return { id: model, ok: false, err: e.message } }
   if (prov._def.apiKeyEnv && !prov.keyOk && !prov.apiKey) return { id: model, ok: false, err: '上游未配置 Key，无法鉴权' }
   const target = modelTarget(state.cfg, model, def.provider)
-  // 能力感知探测（MG-011）：embedding 模型走 embeddings 端点，chat 模型走 chat 补全
-  const r = (def.capability === 'embedding')
-    ? await probeEmbedding(prov, model, target.api, target.servingName)
+  // 能力感知探测（MG-011/012）：embedding → /v1/embeddings，rerank → /v1|v2/rerank，其余走 chat 补全
+  const cap = def.capability || 'chat'
+  const r = cap === 'embedding' ? await probeEmbedding(prov, model, target.api, target.servingName)
+    : cap === 'rerank' ? await probeRerank(prov, model, target.api, target.servingName)
     : await probeModel(prov, model, target.api, target.servingName)
   const o = (state.stats.byModel[model] = state.stats.byModel[model] || { requests: 0, errors: 0 })
   o.probe = { at: Date.now(), ok: r.ok, code: r.code, ms: r.ms, err: r.err || null }
@@ -812,6 +814,67 @@ function makeHandler(state) {
           } finally { if (release) release() }
         }
         sendJson(res, 502, { error: { message: 'embeddings 上游失败：' + (lastErr ? lastErr.message : 'all providers failed'), type: 'all_providers_failed' } }); return
+      }
+
+      // —— MG-012：POST /v1/rerank（capability=rerank；OpenAI 兼容 /v1/rerank 与 Cohere /v2/rerank） ——
+      if (path === '/v1/rerank' || path === '/rerank') {
+        if (req.method !== 'POST') { sendJson(res, 405, { error: { message: '仅支持 POST /v1/rerank', type: 'invalid_request_error' } }); return }
+        const rbuf = await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024), { budget, signal: budget.signal })
+        const rbody = tryParse(rbuf)
+        const rerr = validateRerankRequest(rbody)
+        if (rerr) { sendJson(res, 400, { error: { message: rerr.error, type: 'invalid_request_error' } }); return }
+        const rhit = state.router.resolve(rbody.model)
+        if (!rhit.known && (state.cfg.virtualModels || []).length) { sendJson(res, 404, { error: { message: '未知模型名: ' + rbody.model, type: 'unknown_model' } }); return }
+        const rdef = rhit.def || null
+        if (!rdef || rdef.isVirtualModel || rdef.virtual) { sendJson(res, 400, { error: { message: '虚拟模型/默认共用名不支持 rerank', type: 'unsupported_model' } }); return }
+        const rcap = rdef.capability || 'chat'
+        if (rcap !== 'rerank') { sendJson(res, 400, { error: { message: '模型 ' + rhit.canonicalName + ' 不是 rerank 模型（capability=' + rcap + '）', type: 'unsupported_model' } }); return }
+        const rcands = [rdef.provider, ...(rdef.fallbacks || [])].filter(Boolean)
+        let rLastErr = null
+        for (const pid of rcands) {
+          if (!state.cfg.providers[pid]) continue
+          const prov = buildProvider(state.cfg, pid)
+          if (!healthy(ensureHst(state, pid), Date.now())) { rLastErr = new Error('provider ' + pid + ' 熔断中'); continue }
+          if (prov._def.apiKeyEnv && !prov.keyOk) { rLastErr = new Error('provider ' + pid + ' 未配置 Key'); continue }
+          const target = modelTarget(state.cfg, rhit.canonicalName, pid)
+          if (!supportsRerank(target.api)) { rLastErr = new Error('上游协议 ' + target.api + ' 不支持 rerank'); continue }
+          const spec = buildRerankRequest(target.api, Object.assign({}, rbody, { model: target.servingName }))
+          const payload = Buffer.from(JSON.stringify(spec.body))
+          const headers = rerankHeaders(state.cfg, prov, target.api, payload)
+          let release = null
+          try {
+            release = await acquireProvider(state, pid, state.cfg, budget.signal)
+            const up = await forward(prov, spec.path, 'POST', headers, payload, state.cfg.defaults || {}, log, { budget, signal: budget.signal })
+            const outBuf = await collectBody(up.stream, undefined, { budget, signal: budget.signal, destroyOnAbort: true })
+            if (up.ok) {
+              const j = tryParse(outBuf)
+              const norm = normalizeRerankResponse(target.api, j, rhit.canonicalName, { topN: rbody.top_n })
+              const usage = (j && j.usage) || {}
+              const tokens = Number(usage.total_tokens) > 0 ? Number(usage.total_tokens) : (Number(usage.prompt_tokens) > 0 ? Number(usage.prompt_tokens) : 0)
+              state.st.counters.requests += 1
+              agg(state, pid, 'requests', 1)
+              const sg = state.stats.byModel[rhit.canonicalName] = state.stats.byModel[rhit.canonicalName] || { requests: 0, errors: 0 }
+              sg.requests = (sg.requests || 0) + 1
+              if (tokens > 0) { sg.tokens = (sg.tokens || 0) + tokens; agg(state, pid, 'tokens', tokens); tallyDaily(state, rhit.canonicalName, tokens, 0, 0, tokens, 0) }
+              markOk(state, pid); noteAffinity(state, rhit.canonicalName, pid)
+              res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(norm)); return
+            }
+            const mapped = mapErrorEnvelope(target.api, up.status, outBuf) || outBuf
+            if (up.status === 402 || up.status === 403 || up.status === 404 || up.status === 429 || up.status >= 500) {
+              rLastErr = new Error('upstream ' + up.status)
+              agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+              markFail(state, pid, prov.circuit)
+              continue
+            }
+            res.writeHead(up.status || 502, { 'content-type': 'application/json; charset=utf-8' }); res.end(mapped); return
+          } catch (err) {
+            if (err && err.aborted) throw err
+            rLastErr = err
+            agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+            markFail(state, pid, prov.circuit)
+          } finally { if (release) release() }
+        }
+        sendJson(res, 502, { error: { message: 'rerank 上游失败：' + (rLastErr ? rLastErr.message : 'all providers failed'), type: 'all_providers_failed' } }); return
       }
       const isChat = CHAT_PATHS.has(path)
       const isResponses = RESPONSES_PATHS.has(path)

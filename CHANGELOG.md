@@ -2,6 +2,22 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-09 Rerank 能力（未发布，MG-012）
+
+### Added
+
+- `capability=rerank` 与 `POST /v1/rerank`（兼容 `/rerank`）：OpenAI 兼容上游走 `/v1/rerank`，`api=cohere` 上游走 `/v2/rerank`；请求校验（query 非空、documents 非空字符串数组且 ≤2048、top_n 正整数、return_documents 布尔）。
+- 响应归一：`results[]` 保留 `index/relevance_score/document`，按 score 降序、同分按 index 升序稳定排序，`top_n` 再次裁剪，`model` 回写客户端请求名；上游 `meta`/`usage` 原样保留；usage token 计入模型/日/全局/上游账本。
+- 能力隔离：rerank 模型不能进 chat/embeddings，chat/embedding 模型不能进 rerank；虚拟模型不支持 rerank；Anthropic/Gemini 无 rerank → 502 且不触上游。
+- 复用 provider `fallbacks`、熔断、并发信号量、`overallMs` 预算与 `maxBodyBytes`；`/api/model-test` 按 capability 走 rerank 探测；模型编辑器 capability 增加 rerank 选项。
+- 回归 `scripts/test/offline/rerank.test.mjs`（6 用例：OpenAI 透传/排序/记账、Cohere 路径与 meta、能力隔离、fallback、校验、探测与预算）；文档见配置参考与协议桥 §8。
+
+### Changed
+- `npm run check` 覆盖 `src/rerank.js`；模型 `api` 校验新增 `cohere`。
+
+### 未验证
+- 真实 Cohere/Jina/SiliconFlow rerank 上游与计费；`return_documents` 与上游 `document` 形状差异；Windows/macOS、Node 18/20。
+
 ## 2026-11-09 能力声明与 Embedding（未发布，MG-011）
 
 ### Added

@@ -365,14 +365,11 @@ export function probeChat(provider, model, message, opts = {}, log) {
   })
 }
 
-// embedding 模型连通测试（MG-011）：向 embeddings 端点发单条 input，2xx 即通；用于 /api/model-test。
-export function probeEmbedding(provider, model, api = provider.api || 'openai', upstreamModel = model) {
-  // embeddings 与 chat 的路径/请求体不同：有适配器用适配器，否则 OpenAI /v1/embeddings
-  const adapter = embeddingAdapterFor(api)
-  const spec = adapter ? adapter.build({ model: upstreamModel, input: ['ping'] }) : { path: '/v1/embeddings', body: { model: upstreamModel, input: ['ping'] } }
-  const url = upstreamUrl(provider, spec.path)
+// 非 chat 能力探测的通用 POST（MG-011/012）：路径/请求体由调用方给出，2xx 即通，响应体上限 1MiB。
+function probeJsonUpstream(provider, api, path, bodyObj) {
+  const url = upstreamUrl(provider, path)
   const headers = protocolHeaders(applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }, provider), provider, api)
-  const payload = Buffer.from(JSON.stringify(spec.body))
+  const payload = Buffer.from(JSON.stringify(bodyObj))
   headers['content-length'] = payload.length
   const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
   return new Promise((resolve) => {
@@ -382,7 +379,7 @@ export function probeEmbedding(provider, model, api = provider.api || 'openai', 
     const req = mod.request(reqOpts, (res) => {
       res.setTimeout(90000, () => res.destroy())
       const c = []; let total = 0
-      res.on('data', (d) => { total += d.length; if (total > 1024 * 1024) { try { res.destroy() } catch {} ; done({ ok: false, code: res.statusCode, ms: Date.now() - started, err: 'embedding probe response too large' }); return } c.push(d) })
+      res.on('data', (d) => { total += d.length; if (total > 1024 * 1024) { try { res.destroy() } catch {} ; done({ ok: false, code: res.statusCode, ms: Date.now() - started, err: 'probe response too large' }); return } c.push(d) })
       res.on('end', () => {
         const text = Buffer.concat(c).toString('utf8').trim()
         const ok = res.statusCode >= 200 && res.statusCode < 300
@@ -395,6 +392,19 @@ export function probeEmbedding(provider, model, api = provider.api || 'openai', 
     req.write(payload)
     req.end()
   })
+}
+
+// embedding 模型连通测试（MG-011）：向 embeddings 端点发单条 input，2xx 即通；用于 /api/model-test。
+export function probeEmbedding(provider, model, api = provider.api || 'openai', upstreamModel = model) {
+  const adapter = embeddingAdapterFor(api)
+  const spec = adapter ? adapter.build({ model: upstreamModel, input: ['ping'] }) : { path: '/v1/embeddings', body: { model: upstreamModel, input: ['ping'] } }
+  return probeJsonUpstream(provider, api, spec.path, spec.body)
+}
+
+// rerank 模型连通测试（MG-012）：query/documents 各一条，2xx 即通。
+export function probeRerank(provider, model, api = provider.api || 'openai', upstreamModel = model) {
+  const path = api === 'cohere' ? '/v2/rerank' : '/v1/rerank'
+  return probeJsonUpstream(provider, api, path, { model: upstreamModel, query: 'ping', documents: ['ping'] })
 }
 
 // 模型连通测试：向该模型所属上游发一个极小量的真实 chat 请求（max_tokens=1），验证"这个模型名能真正被调用"
