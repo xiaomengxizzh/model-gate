@@ -78,7 +78,7 @@ MG-002 已闭环（离线故障注入），其余条目均为 **TODO**；下列�
 
 | ID / 优先级 | 交付范围 | 依赖 | 验收标准 |
 | --- | --- | --- | --- |
-| MG-015 / P1 | 审计 Draft PR #2，统一 /v1/responses 到现有治理，按模型配置原生 Responses 或 Chat 桥 | MG-002、MG-004、MG-016 | 工具 call_id/arguments/custom tool、SSE 顺序、完成/失败、取消/usage/权限/配额全部 wire 测试；真实 Codex CLI/桌面与 DSH 对照单独授权；不改官方 auth.json |
+| MG-015 / P1 | 契约草案已先行（`docs/contracts/responses-v1.md`，未冻结/未实现）；实现待开卡：`src/responses.js` 纯映射 + fixture → router/format 适配 → forward/index 接线（须等 MG-008 余项）。Draft PR #2 审计 **UNVERIFIED**（本机无网络） | MG-002、MG-004、MG-016 | 工具 call_id/arguments/custom tool、SSE 顺序、完成/失败、取消/usage/权限/配额全部 wire 测试；真实 Codex CLI/桌面与 DSH 对照单独授权；不改官方 auth.json |
 | MG-008 / P2 | 适配器层已闭环（wire fixture 22 例 + 有损清单；sse 同帧 finish、空 tools 判定已修）；剩余：探测/预热/failback 的模型解析一致性、错误信封映射、真实上游对照（MG-015/单独授权） | MG-002、MG-004、MG-006 | 固定 wire fixtures；分片/断流/重连/多 tool-call 索引测试；显式列出有损转换；探测、预热、failback 采用一致模型解析 |
 | MG-009 / P2 | 契约、fixture 与服务端实现已闭环：D-2 投影字段剥离、D-7 Key 版本、D-3 baseVersion、`/api/keys` 白名单（§8.3）；剩余：浏览器真实鉴权/保存回读（F2）、未知字段不透明袋 D-1、只读配置投影 D-6、provider 删除联动清 Key、托盘 smoke | MG-003、MG-005 | 浏览器真实鉴权和保存回读；未知字段保留；无静默洗配置；Linux/Windows 托盘有单独 smoke 记录，价格为用户输入。离线回归已过；浏览器/托盘实跑 **NOT EXECUTED** |
 | MG-010 / P2 | 已交付：CI 矩阵 18/20/22（手动触发、零下载探测 runner 自带 node）、元数据核对脚本、LICENSE、部署/回滚与兼容矩阵文档 | MG-004、MG-007 | 本地 21 项元数据 PASS + 启动/关闭/恢复实测；**远程 CI 未执行**；Windows/macOS 与 Node 18/20 实跑未验证 |
