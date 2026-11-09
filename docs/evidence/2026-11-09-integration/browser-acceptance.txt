@@ -15,4 +15,4 @@ PASS  responsive: 1440/1024/768/390 without horizontal overflow — 1440px ok, 1
 PASS  auth: reload locks console; wrong token rejected; right token unlocks — wrong token rejected, correct token unlocks
 PASS  console: no uncaught exceptions during the whole run — 0 exceptions
 
-14/14 checks passed; screenshots: /home/xiaomengxizi/ai/tmp/mg-ui-evidence
+14/14 checks passed; screenshots: /home/xiaomengxizi/ai/tmp/mg-ui-final3

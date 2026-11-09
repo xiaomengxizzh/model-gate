@@ -284,8 +284,11 @@ function openProviderDialog(draft, providerId, rerender) {
     const pathPrefix = pathInput.value.trim()
     if (pathPrefix) target.pathPrefix = pathPrefix
     else if (has(target, 'pathPrefix')) delete target.pathPrefix
-    target.apiKeyEnv = envInput.value.trim()
-    target.proxy = proxy
+    const apiKeyEnv = envInput.value.trim()
+    if (apiKeyEnv) target.apiKeyEnv = apiKeyEnv
+    else if (has(target, 'apiKeyEnv')) target.apiKeyEnv = ''
+    if (proxy) target.proxy = proxy
+    else if (has(target, 'proxy')) target.proxy = ''
     if (maxFailures == null && openDurationMs == null) {
       if (has(target, 'circuit')) delete target.circuit
     } else {
@@ -296,7 +299,8 @@ function openProviderDialog(draft, providerId, rerender) {
       else circuit.openDurationMs = openDurationMs
     }
     const headers = parseKv(headersArea.value)
-    target.extraHeaders = headers
+    if (Object.keys(headers).length) target.extraHeaders = headers
+    else if (has(target, 'extraHeaders')) target.extraHeaders = {}
 
     d.close()
     reviewAndSave(draft, { onSaved: () => { setDraft(null); rerender() }, onError: () => rerender() })
@@ -423,6 +427,9 @@ async function deleteProvider(draft, id, rerender) {
   for (const vm of draft.virtualModels || []) {
     for (const e of asArray(vm && vm.directory)) if (e && asArray(e.providers).includes(id)) refs.push('虚拟模型「' + vm.name + '」目录')
   }
+  const defaults = draft.defaults || {}
+  if (defaults.provider === id) refs.push('defaults.provider 默认上游')
+  for (const e of asArray(defaults.directory)) if (e && asArray(e.providers).includes(id)) refs.push('默认兜底目录')
   const refMsg = refs.length
     ? ' 仍有 ' + refs.length + ' 处引用：' + refs.slice(0, 6).join('；') + (refs.length > 6 ? ' …' : '') + '。若保存前不移除这些引用，配置校验会拒绝保存。'
     : ' 没有模型或虚拟模型引用它。'

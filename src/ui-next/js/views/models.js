@@ -388,17 +388,25 @@ function openModelDialog(draft, modelName, rerender) {
 
     const applyTo = (target) => {
       target.provider = provider
-      target.alias = alias
-      target.fallbacks = fallbacks
       target.capability = capability
-      target.api = apiValue
+      if (alias.length || has(target, 'alias')) target.alias = alias
+      if (fallbacks.length || has(target, 'fallbacks')) target.fallbacks = fallbacks
+      if (apiValue) target.api = apiValue
+      else if (has(target, 'api')) target.api = ''
       if (Object.keys(providerModels).length) target.providerModels = providerModels
       else if (has(target, 'providerModels')) delete target.providerModels
-      for (const key of NUMERIC_FIELDS) target[key] = numeric[key]
-      target.reasoning = reasoning
-      target.effortOptions = effortOptions
-      target.effortFormat = effortFormat
-      target.forceNoStream = !!noStream.checked
+      for (const key of NUMERIC_FIELDS) {
+        if (numeric[key] !== 0 || has(target, key)) target[key] = numeric[key]
+      }
+      if (reasoning) target.reasoning = reasoning
+      else if (has(target, 'reasoning')) target.reasoning = ''
+      if (effortOptions.length) target.effortOptions = effortOptions
+      else if (has(target, 'effortOptions')) target.effortOptions = []
+      if (effortFormat) target.effortFormat = effortFormat
+      else if (has(target, 'effortFormat')) target.effortFormat = ''
+      const wantNoStream = !!noStream.checked
+      if (wantNoStream) target.forceNoStream = true
+      else if (has(target, 'forceNoStream')) target.forceNoStream = false
     }
     if (isEdit) applyTo(draft.models[modelName])
     else {
