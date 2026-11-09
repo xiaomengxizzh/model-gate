@@ -19,7 +19,7 @@
 | 理解项目术语 | [术语表](reference/glossary.md) |
 | 理解模块边界和数据流 | [架构说明](explanation/architecture.md) |
 | 查视频异步任务池的存储/恢复决策 | [ADR-0001 Video 任务池](explanation/adr-0001-video-task-pool.md) |
-| 确定当前已修复项及验证限制 | [2026-11-08 审计](audit-20261108.md) |
+| 确定当前已修复项及验证限制 | [2026-11-08 审计](audit-20261108.md)、[2026-11-09 浏览器 smoke](audit-20261109-browser-smoke.md) |
 | 安排后续工作 | [开发计划](development-plan.md) |
 
 [旧上下文入口](project-context.md) 已迁移为导航；[archive/2026-08](archive/2026-08/README.md) 只保留历史，不定义当前开发顺序。
