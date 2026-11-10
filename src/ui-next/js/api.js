@@ -64,6 +64,7 @@ export const api = {
   config: () => request('/api/config'),
   logs: (lines = 200) => request('/api/logs?lines=' + encodeURIComponent(lines)),
   modelStats: (days = 7) => request('/api/model-stats?days=' + encodeURIComponent(days)),
+  nativeUsage: (days = 7) => request('/api/native-usage?days=' + encodeURIComponent(days)),
   routePreview: (model) => request('/api/route-preview', { method: 'POST', body: { model }, authEvent: false }),
   saveConfig: (body) => request('/api/config/save', { method: 'POST', body }),
   reloadConfig: () => request('/api/config/reload', { method: 'POST', body: {} }),

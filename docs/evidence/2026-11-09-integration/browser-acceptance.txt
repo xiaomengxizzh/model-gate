@@ -1,7 +1,7 @@
 
 UI browser acceptance (http://127.0.0.1:8788)
 PASS  boot: locked screen before auth — locked UI shown, no data fetched
-PASS  dashboard: login and real metrics — {"hero":"ModelGate · 本地控制面","metrics":["29","9","401","3 ms"],"cards":["请求延迟趋势","上游健康","最近路由","需要关注","上游请求分布","实例信息"],"status":"网关在线"}
+PASS  dashboard: login and real metrics — {"hero":"ModelGate · 本地控制面","metrics":["27","9","401","4 ms"],"cards":["请求延迟趋势","上游健康","最近路由","需要关注","上游请求分布","实例信息"],"status":"网关在线"}
 PASS  dashboard: no runtime errors so far — 0 page exceptions
 PASS  providers: list, status and dialog — providers rendered, dialog + Esc
 PASS  models: catalog, capability tags, virtual model, route preview — catalog + virtual model visible
@@ -15,4 +15,4 @@ PASS  responsive: 1440/1024/768/390 without horizontal overflow — 1440px ok, 1
 PASS  auth: reload locks console; wrong token rejected; right token unlocks — wrong token rejected, correct token unlocks
 PASS  console: no uncaught exceptions during the whole run — 0 exceptions
 
-14/14 checks passed; screenshots: /home/xiaomengxizi/ai/tmp/mg-ui-final3
+14/14 checks passed; screenshots: /home/xiaomengxizi/ai/tmp/mg-ui-native

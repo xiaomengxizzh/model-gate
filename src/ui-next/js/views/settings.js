@@ -146,6 +146,18 @@ export function render(root, ctx = {}) {
     { foot: h('span', { text: '保存会推进 configVersion；并发修改返回 409，不会静默覆盖。' }) })
   root.append(h('div', { class: 'mt-4' }, params))
 
+  const nativeSave = h('button', { class: 'btn btn-primary', type: 'button', text: '保存采集路径' })
+  nativeSave.addEventListener('click', () => reviewAndSave(d, { onSaved: () => { setDraft(null); rerender() }, onError: () => draftChanged(d) }))
+  const nu = s.nativeUsage || {}
+  const nativeCard = card('原生 / 直连用量采集（只读）', '只汇总 Codex 本地会话日志的 token 计数；不读取消息内容，也不代理原生流量',
+    h('div', null,
+      callout('info', h('strong', { text: '为什么需要它：' }), ' 原生 ChatGPT/直连流量不经过网关，网关无法统计。开启后从 Codex sessions 日志只读汇总，并在「监控与诊断」中与代理流量分开展示。'),
+      textField(d, d.data.defaults, 'nativeUsageDir', 'Codex sessions 目录', '例如 ~/.codex/sessions；留空或 off 关闭。只读取 session_meta/turn_context/token_count，不读取消息正文。', '~/.codex/sessions'),
+      h('div', { class: 'flex flex-wrap mt-2' }, nativeSave),
+      h('p', { class: 'hint', text: '当前生效：' + (nu.enabled ? '已启用 · ' + (nu.dirLabel || '—') : '未启用') + '。保存后需重新读取状态。' })),
+    { foot: h('span', { text: '该目录由网关进程用户读取；不要指向包含凭据的目录。' }) })
+  root.append(h('div', { class: 'mt-4' }, nativeCard))
+
   const tx = card('配置事务与导出', '当前可编辑配置投影，不含明文 Key',
     h('div', null,
       callout('info', 'GET /api/config 只返回可编辑字段与 configVersion；运行时统计与凭据不在其中。保存时必须携带读取时的版本号。'),

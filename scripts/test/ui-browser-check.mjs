@@ -162,6 +162,8 @@ await check('observability: real stats, logs and derived failure counts', async 
   assert.match(text, /429|限流/)
   assert.match(text, /日志/)
   assert.match(text, /派生|非持久化/)
+  assert.match(text, /原生 \/ 直连用量/)
+  assert.match(text, /直连 Token|只读采集/)
   await shot('05-observability')
   return 'stats + logs + derived classification'
 })
@@ -174,6 +176,7 @@ await check('settings: instance facts and versioned save', async () => {
   assert.match(text, /配置版本/)
   assert.match(text, /管理令牌/)
   assert.match(text, /备份/)
+  assert.match(text, /原生 \/ 直连用量采集/)
   await shot('06-settings')
   return 'settings rendered'
 })

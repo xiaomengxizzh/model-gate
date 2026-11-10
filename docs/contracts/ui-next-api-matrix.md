@@ -73,6 +73,7 @@
 | 日志窗口 | `GET /api/logs?lines=250|500|1000` | 尾部读取，非全量检索；前端仅本地过滤 | PASS |
 | 429 / 超时 / 5xx 分类 | 从当前日志窗口派生 | 明确标注“派生，不是持久化分类指标”；无日志即空状态 | PARTIAL（后端暂无按状态码持久化统计 API） |
 | 路由 / 会话结果 | `GET /api/status` | `lastServing,dialogues` | PASS |
+| 原生/直连用量（只读） | `GET /api/native-usage?days=1|7|30|90` | 只读 Codex sessions 的 token 计数；不读取消息正文，不计入代理指标 | PASS（默认关闭，可在设置启用） |
 
 ## 7. Security & Settings｜安全与设置
 
@@ -85,6 +86,7 @@
 | 保存前差异 | 前端 | `diffObjects` | — | PASS |
 | 409 冲突 | 前端 | — | 显示冲突对话框；可重新加载远端，禁止静默覆盖 | PASS（浏览器实测） |
 | 重新加载配置 | `POST /api/config/reload` | 无 | 200 | PASS |
+| 原生用量采集目录 | 草稿 + `POST /api/config/save` | `defaults.nativeUsageDir`（`~/.codex/sessions` 或 off） | 只读采集；保存后重新加载状态 | PASS |
 | 导出脱敏配置 | 前端 | 掩码 header / 代理凭据 / clientKey | — | PASS |
 | 备份/恢复 | 无后端 API | — | 界面明确 NOT_SUPPORTED，指导停机窗口文件备份 | NOT_SUPPORTED（有意不伪造） |
 
@@ -94,6 +96,7 @@
 2. **`GET /api/config` 的 `defaults.clientKey` 永远为空**：只检查 `cfg.defaults.clientKey`，而实际值在加密 keys 库 `__mg_client`。前端无法判断“已设置”，可能误清空。已改为两者任一存在即回显 `********`。
 3. **数据面 JSON 分发丢弃 `out.headers`**：429 的 `Retry-After` 无法到客户端。已在 `src/index.js` 两处分发合并 `out.headers`，由 `retry-governance.test.mjs` 严格断言 wire header。
 4. **静态资源白名单只覆盖三个文件**：改为只读 `/ui-next/**` 安全解析（扩展名白名单、拒绝 `..`/编码穿越/隐藏文件），保留旧 `/` 与 `/admin`。
+5. **原生流量不可见**：新增 `GET /api/native-usage` 与 `src/native-usage.js`，只读汇总 Codex 本地 session 日志的 token 计数；默认关闭，设置 `defaults.nativeUsageDir` 后启用。只解析 `session_meta/turn_context/token_count`，不读取消息正文。
 
 ## 9. 尚未适配 / 明确不支持
 

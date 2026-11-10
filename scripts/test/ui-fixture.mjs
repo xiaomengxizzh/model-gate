@@ -4,7 +4,7 @@
 //   node scripts/test/ui-fixture.mjs --port 8788
 // Prints the URL and admin token, then stays alive until SIGINT/SIGTERM.
 import http from 'node:http'
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -109,6 +109,16 @@ async function main () {
       expiresAt: '2026-12-31', note: 'ui-fixture',
     }],
   }
+  // Synthetic Codex session log for the read-only native usage card (fixture only).
+  const nativeDir = join(dir, 'codex-sessions')
+  await mkdir(nativeDir, { recursive: true })
+  const t = new Date().toISOString()
+  await writeFile(join(nativeDir, 'rollout-fixture-native.jsonl'), [
+    { timestamp: t, type: 'session_meta', payload: { session_id: 'fixture-native', model_provider: 'openai' } },
+    { timestamp: t, type: 'turn_context', payload: { model: 'gpt-6.1-sol' } },
+    { timestamp: t, type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 1200, cached_input_tokens: 800, output_tokens: 300, reasoning_output_tokens: 100, total_tokens: 1500 } } } },
+  ].map((x) => JSON.stringify(x)).join('\n') + '\n')
+  config.defaults.nativeUsageDir = nativeDir
   await writeFile(join(dir, 'gateway.json'), JSON.stringify(config, null, 2))
   const child = spawn(process.execPath, ['src/index.js'], {
     cwd: root,

@@ -18,9 +18,11 @@ const view = {
   lines: 500,
   filter: '',
   stats: { key: '', loading: false, data: null, error: '', at: 0 },
+  native: { key: '', loading: false, data: null, error: '', at: 0 },
   logs: { key: '', loading: false, lines: [], error: '', at: 0 },
 }
 let statsSeq = 0
+let nativeSeq = 0
 let logsSeq = 0
 
 function daysLabel(days) {
@@ -35,6 +37,10 @@ function resetStats() {
 function resetLogs() {
   logsSeq += 1
   view.logs = { key: '', loading: false, lines: [], error: '', at: 0 }
+}
+function resetNative() {
+  nativeSeq += 1
+  view.native = { key: '', loading: false, data: null, error: '', at: 0 }
 }
 
 async function loadStats(ctx) {
@@ -54,6 +60,28 @@ async function loadStats(ctx) {
   } finally {
     if (seq === statsSeq) {
       view.stats.loading = false
+      if (ctx && typeof ctx.rerender === 'function') ctx.rerender()
+    }
+  }
+}
+
+async function loadNative(ctx) {
+  const seq = ++nativeSeq
+  view.native.key = String(view.days)
+  view.native.loading = true
+  view.native.error = ''
+  try {
+    const data = await api.nativeUsage(view.days)
+    if (seq !== nativeSeq) return
+    view.native.data = data
+    view.native.at = Date.now()
+  } catch (e) {
+    if (seq !== nativeSeq) return
+    view.native.error = e && e.message ? e.message : '读取失败'
+    view.native.at = Date.now()
+  } finally {
+    if (seq === nativeSeq) {
+      view.native.loading = false
       if (ctx && typeof ctx.rerender === 'function') ctx.rerender()
     }
   }
@@ -84,6 +112,7 @@ async function loadLogs(ctx) {
 
 function ensureData(ctx) {
   if (!view.stats.loading && view.stats.key !== String(view.days)) loadStats(ctx)
+  if (!view.native.loading && view.native.key !== String(view.days)) loadNative(ctx)
   if (!view.logs.loading && view.logs.key !== String(view.lines)) loadLogs(ctx)
 }
 
@@ -103,6 +132,7 @@ function refreshAll(ctx) {
       toast('状态刷新失败：' + (e && e.message ? e.message : '未知错误'), 'error')
     }
     resetStats()
+    resetNative()
     resetLogs()
     if (ctx && typeof ctx.rerender === 'function') ctx.rerender()
   })()
@@ -436,6 +466,60 @@ function routingCard(s, dialogues) {
   })
 }
 
+function nativeUsageCard(ctx) {
+  const n = view.native
+  let body
+  if (n.error) {
+    body = h('div', null,
+      callout('danger', h('strong', { text: '原生用量读取失败：' }), n.error),
+      retryButton('重新读取', () => { view.native.key = ''; view.native.error = ''; loadNative(ctx); if (ctx && typeof ctx.rerender === 'function') ctx.rerender() }))
+  } else if (n.loading && !n.data) {
+    body = h('p', { class: 'muted', text: '正在只读扫描 Codex 会话日志…' })
+  } else if (!n.data) {
+    body = empty('暂无数据', '尚未读取 /api/native-usage。')
+  } else if (!n.data.enabled) {
+    body = h('div', null,
+      callout('info', h('strong', { text: '未启用。' }), ' 在「安全与设置」填写 Codex sessions 目录（例如 ~/.codex/sessions）后，这里会显示原生/直连流量的只读汇总。'),
+      h('button', { class: 'btn', type: 'button', text: '前往设置启用', onclick: () => { location.hash = '#/settings' } }))
+  } else if (n.data.error) {
+    body = h('div', null,
+      callout('warn', h('strong', { text: '采集目录不可用：' }), n.data.error + '（' + (n.data.dirLabel || '未配置') + '）'),
+      h('button', { class: 'btn', type: 'button', text: '前往设置修改', onclick: () => { location.hash = '#/settings' } }))
+  } else {
+    const t = n.data.totals || {}
+    const scanned = n.data.scanned || {}
+    const byModel = Array.isArray(n.data.byModel) ? n.data.byModel : []
+    const byDay = Array.isArray(n.data.byDay) ? n.data.byDay : []
+    const rows = byModel.map((r) => ({
+      provider: r.provider || 'unknown', model: r.model || 'unknown', tokens: r.totalTokens || 0,
+      input: r.inputTokens || 0, cached: r.cachedInputTokens || 0, output: r.outputTokens || 0,
+      reasoning: r.reasoningOutputTokens || 0, turns: r.turns || 0,
+    }))
+    const points = byDay.map((d) => ({ t: Date.parse(d.date + 'T00:00:00'), v: d.totalTokens || 0 })).filter((p) => Number.isFinite(p.t))
+    body = h('div', null,
+      callout('info', h('strong', { text: '口径：' }), ' 只读汇总 Codex 本地会话日志的 token 计数，不读取消息内容；这些请求不经过网关，因此不计入上方代理指标。'),
+      h('div', { class: 'grid grid-4' },
+        metric('直连 Token', fmtCompact(t.totalTokens), '来自 Codex 会话 token_count'),
+        metric('输入 / 缓存', fmtCompact(t.inputTokens) + ' / ' + fmtCompact(t.cachedInputTokens), '缓存命中是输入的子集'),
+        metric('输出 / 推理', fmtCompact(t.outputTokens) + ' / ' + fmtCompact(t.reasoningOutputTokens), '推理 token 为输出子集'),
+        metric('回合 / 会话', fmtInt(t.turns) + ' / ' + fmtInt(scanned.sessions), 'token_count 事件数 / 会话文件数')),
+      points.length > 1 ? h('div', { class: 'mt-4' }, barChart(points, { label: '原生/直连每日 Token', title: (p) => new Date(p.t).toLocaleDateString('zh-CN') + ' · ' + fmtCompact(p.v) })) : null,
+      rows.length ? table([
+        { label: 'Provider / 模型', render: (r) => h('div', null, h('div', { class: 'mono', text: r.model }), h('div', { class: 'hint', text: r.provider })) },
+        { label: 'Token', className: 'num', render: (r) => fmtCompact(r.tokens) },
+        { label: '输入', className: 'num', render: (r) => fmtCompact(r.input) },
+        { label: '缓存', className: 'num', render: (r) => fmtCompact(r.cached) },
+        { label: '输出', className: 'num', render: (r) => fmtCompact(r.output) },
+        { label: '推理', className: 'num', render: (r) => fmtCompact(r.reasoning) },
+        { label: '回合', className: 'num', render: (r) => fmtInt(r.turns) },
+      ], rows, { emptyTitle: '窗口内没有原生用量' }) : empty('窗口内没有原生用量', '目录可读，但最近窗口没有 token_count 事件。'),
+      h('p', { class: 'hint', text: '来源 ' + (n.data.dirLabel || '—') + ' · 文件 ' + fmtInt(scanned.files) + ' · 会话 ' + fmtInt(scanned.sessions) + ' · 解析错误 ' + fmtInt(scanned.parseErrors) + ' · 读取于 ' + (n.at ? fmtTime(n.at) : '—') }))
+  }
+  return card('原生 / 直连用量（只读采集）', 'Codex 本地会话日志汇总；与经过网关的代理指标分开', body, {
+    foot: '来源 /api/native-usage · 不读取消息内容 · 不代理原生流量',
+  })
+}
+
 export function render(root, ctx = {}) {
   const s = state.status || {}
   const g = s.global || {}
@@ -477,10 +561,11 @@ export function render(root, ctx = {}) {
 
   root.append(providerCard(providers))
   root.append(statsCard(ctx))
+  root.append(nativeUsageCard(ctx))
   root.append(h('div', { class: 'grid grid-main' }, failureCard(), routingCard(s, dialogues)))
   root.append(logsCard(ctx))
 
-  root.append(h('p', { class: 'page-note', text: '数据来源：/api/status、/api/model-stats、/api/logs。本页不触发模型测试或探活；缺失数据会显示空状态，而不是占位数字。' }))
+  root.append(h('p', { class: 'page-note', text: '数据来源：/api/status、/api/model-stats、/api/native-usage、/api/logs。本页不触发模型测试或探活；缺失数据会显示空状态，而不是占位数字。' }))
 
   ensureData(ctx)
 }
