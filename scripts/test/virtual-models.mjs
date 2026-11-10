@@ -3,14 +3,18 @@
 import { check, count } from './utils.mjs'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
+import { mkdtemp } from 'node:fs/promises'
 import path from 'node:path'
 import http from 'node:http'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { killAndWait, reservePort } from './isolate.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..', '..')
-const TMP = path.join(ROOT, '.tmp-test-vm')
-const PORT = 8795
+// MG-004：OS 临时目录 + 动态回环端口（原来是仓库内 .tmp-test-vm + 固定 8795）
+const TMP = await mkdtemp(path.join(tmpdir(), 'modelgate-vm-'))
+const PORT = await reservePort()
 const BASE = 'http://127.0.0.1:' + PORT
 const ADMIN = { 'Authorization': 'Bearer devtoken', 'Content-Type': 'application/json' }
 const CH = { 'Authorization': 'Bearer testkey123', 'Content-Type': 'application/json' }
@@ -23,15 +27,14 @@ const mock = http.createServer((req, res) => {
     res.end(JSON.stringify({ id: 'm1', object: 'chat.completion', model: 'm-mock', choices: [{ index: 0, message: { role: 'assistant', content: 'pong' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } }))
   })
 })
-await new Promise(r => mock.listen(9897, r))
+await new Promise(r => mock.listen(0, '127.0.0.1', r))
+const MOCK = 'http://127.0.0.1:' + mock.address().port
 
 // —— 隔离配置：mock provider/model + 两个虚拟模型（目录区分）——
-fs.rmSync(TMP, { recursive: true, force: true })
-fs.mkdirSync(TMP, { recursive: true })
 const gatewayCfg = {
-  server: { host: '127.0.0.1', port: PORT },
+  server: { host: '127.0.0.1', port: PORT, logFile: path.join(TMP, 'gateway.log') },
   defaults: { provider: 'p-mock', model: 'gatemodel', clientKey: '', directory: [{ model: 'm-mock', mode: 'afterAll', providers: [] }], retry: { maxAttempts: 1 }, timeout: { connectMs: 3000, firstByteMs: 5000, idleMs: 5000 } },
-  providers: { 'p-mock': { baseUrl: 'http://127.0.0.1:9897', apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' } },
+  providers: { 'p-mock': { baseUrl: MOCK, apiKeyEnv: '', pathPrefix: '', extraHeaders: {}, api: 'openai' } },
   models: { 'm-mock': { provider: 'p-mock', alias: [], fallbacks: [], maxConcurrent: 0, qps: 0, reasoning: '', effortOptions: [], dailyQuota: 0, quota: 0, maxContext: 0 } },
   virtualModels: [
     { name: 'gate-a', directory: [{ model: 'm-mock', mode: 'afterAll', providers: [] }] },
@@ -132,7 +135,7 @@ if (!ready) {
   check('status 暴露虚拟模型 meta', (s.virtualModels || []).every(v => 'expiresAt' in v && 'note' in v && 'keySet' in v))
 }
 } finally {
-  try { child.kill() } catch {}
+  try { await killAndWait(child) } catch {}
   try { mock.close() } catch {}
   try { fs.rmSync(TMP, { recursive: true, force: true }) } catch {}
 }

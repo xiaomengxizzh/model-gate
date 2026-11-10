@@ -9,7 +9,7 @@
 ## 必读（按顺序）
 
 1. AGENTS.md、RESOURCE_APPROVAL.md、README.md、package.json。
-2. docs/roadmap/2026-11-07-gateway-platform-plan.md（主任务书），docs/roadmap/2026-11-07-frontend-rebuild-plan.md（前端协作边界），docs/phased-execution-plan.md、docs/project-context.md。
+2. docs/roadmap/2026-11-07-gateway-platform-plan.md（主任务书），docs/roadmap/2026-11-07-frontend-rebuild-plan.md（前端协作边界），docs/archive/2026-08/phased-execution-plan.md、docs/project-context.md。
 3. src/index.js、router.js、forward.js、request.js、format.js、sse.js、logger.js、scripts/test/**。
 4. 远端所有 open PR（尤其 Draft PR #2: feature/codex-opencode-go-adapter-20261107）以及其文档 docs/codex-opencode-go-adapter-20261107.md；读取实际 diff、SHAs、已验证和未验证项目。
 5. 核实实际 Codex / OpenCode Go / DSH 供应商接口的最新官方文档或源代码；不要假设记忆中的 URL、协议参数、模型 ID 永远准确。

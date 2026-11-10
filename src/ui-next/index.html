@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="ModelGate 控制台 — 本地优先的多模型 API 网关管理面">
+  <title>ModelGate · 控制台</title>
+  <link rel="stylesheet" href="/ui-next/styles.css">
+  <script type="module" src="/ui-next/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#view-root">跳到主内容</a>
+  <div class="app-shell" id="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <a class="brand" href="#/overview" aria-label="ModelGate 总览">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span class="brand-copy"><strong>ModelGate</strong><small>MODEL CONTROL PLANE</small></span>
+        <span class="brand-tag">NEXT</span>
+      </a>
+      <nav class="nav" aria-label="功能分区">
+        <p class="nav-label">工作区</p>
+        <button class="nav-link" type="button" data-route="overview">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3h6v6H3zM11 3h6v4h-6zM11 9h6v8h-6zM3 11h6v6H3z"/></svg><span>总览</span>
+        </button>
+        <button class="nav-link" type="button" data-route="providers">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2l7 4v8l-7 4-7-4V6z"/><path d="M10 10l7-4M10 10v8M10 10L3 6"/></svg><span>上游供应商</span>
+        </button>
+        <button class="nav-link" type="button" data-route="models">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h5v5H4zM11 11h5v5h-5zM11 4h5v5h-5zM4 11h5v5H4z"/></svg><span>模型与路由</span>
+        </button>
+        <button class="nav-link" type="button" data-route="clients">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14v9H3z"/><path d="M7 3h6v3H7zM8 17h4"/></svg><span>客户端接入</span>
+        </button>
+        <button class="nav-link" type="button" data-route="observability">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 17V8M8 17V4M13 17v-6M18 17V9"/><path d="M2 17h17"/></svg><span>监控与诊断</span>
+        </button>
+        <button class="nav-link" type="button" data-route="settings">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3"/><path d="M10 2v3M10 15v3M2 10h3M15 10h3M4.3 4.3l2.1 2.1M13.6 13.6l2.1 2.1M15.7 4.3l-2.1 2.1M6.4 13.6l-2.1 2.1"/></svg><span>安全与设置</span>
+        </button>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-status" id="sidebar-status">
+        <div class="sidebar-status-head"><span class="pulse" id="side-pulse"></span><strong id="side-status">尚未连接</strong></div>
+        <p id="side-detail">正在读取本地控制面…</p>
+        <a class="sidebar-link" href="/" target="_blank" rel="noopener noreferrer">旧管理台（保留）<span aria-hidden="true">↗</span></a>
+      </div>
+      <p class="sidebar-foot">MG / LOCAL FIRST <span id="side-version">—</span></p>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="crumbs">
+          <span class="eyebrow">MODELGATE</span><span class="crumb-sep">/</span><strong id="current-view">总览</strong>
+        </div>
+        <div class="top-actions">
+          <span class="conn-chip" id="conn-chip"><span class="dot"></span><span id="conn-text">未连接</span></span>
+          <button class="icon-btn" type="button" id="theme-toggle" aria-label="切换明暗主题" title="切换明暗主题">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2a8 8 0 108 8 6.5 6.5 0 01-8-8z"/></svg>
+          </button>
+          <button class="btn" type="button" id="refresh"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 10a6 6 0 11-2-4.5M16 3v4h-4"/></svg>刷新</button>
+        </div>
+      </header>
+      <main class="main" id="view-root" tabindex="-1" aria-live="polite">
+        <div class="boot"><span class="spinner" aria-hidden="true"></span><p>正在连接本地控制面…</p></div>
+      </main>
+      <footer class="page-footer"><span id="foot-note">只读与写入均通过同源管理 API；令牌仅保存在本标签页内存。</span><span id="foot-time"></span></footer>
+    </div>
+  </div>
+
+  <div class="auth-overlay" id="auth-overlay" hidden>
+    <form class="auth-card" id="auth-form" aria-labelledby="auth-title">
+      <div class="auth-glyph" aria-hidden="true">▦</div>
+      <p class="eyebrow">SECURE ACCESS</p>
+      <h1 id="auth-title">解锁管理控制面</h1>
+      <p class="muted">当前实例启用了管理员令牌。令牌只保存在本标签页内存，刷新页面后需重新输入；不会写入 localStorage。</p>
+      <label for="admin-token">管理员令牌</label>
+      <input id="admin-token" type="password" required autocomplete="off" spellcheck="false" placeholder="输入 MG_ADMIN_TOKEN">
+      <p class="field-error" id="auth-error" role="alert" aria-live="assertive"></p>
+      <button class="btn btn-primary btn-block" type="submit">解锁控制面</button>
+      <p class="auth-foot">也可以通过 <code>Authorization: Bearer</code> 在本机 CLI 调用管理 API。</p>
+    </form>
+  </div>
+
+  <div class="toast-stack" id="toasts" role="status" aria-live="polite"></div>
+  <div class="dialog-backdrop" id="dialog-root" hidden></div>
+  <noscript><div class="noscript">ModelGate 控制台需要 JavaScript。CLI 管理 API 仍然可用。</div></noscript>
+</body>
+</html>

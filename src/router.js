@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, chmodSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, chmodSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
@@ -8,7 +8,7 @@ export function configPaths() {
   // MG_CONFIG_DIR：可选。多实例隔离时为实例指定独立配置目录（keys/stats 随之独立）；未设置=cwd/config（单实例零配置）
   const envDir = (process.env.MG_CONFIG_DIR || '').trim()
   const dir = envDir || join(process.cwd(), 'config')
-  return { dir, local: join(dir, 'gateway.local.json'), keys: join(dir, 'keys.local.json'), stats: join(dir, 'stats.json') }
+  return { dir, local: join(dir, 'gateway.local.json'), keys: join(dir, 'keys.local.json'), stats: join(dir, 'stats.json'), videos: join(dir, 'videos.json') }
 }
 
 export function readJson(path, dflt = {}) {
@@ -47,6 +47,17 @@ function normalizeVirtualModels(vms, base) {
   return out
 }
 
+// 模型解析单一入口（MG-008 余项）：探测/预热/failback/转发必须得到同一组
+// { servingName(上游模型名), api(协议), effortFormat, maxTokensMax }，否则同一模型在不同路径
+// 会打不同上游名/协议（典型：providerModels 覆盖只在转发生效，预热却发网关模型名 → 404）。
+export function modelTarget(cfg, modelName, pid) {
+  const md = (modelName && cfg && cfg.models && cfg.models[modelName]) || null
+  const prov = (cfg && cfg.providers && cfg.providers[pid]) || null
+  const servingName = (md && md.providerModels && md.providerModels[pid]) || modelName
+  const api = (md && md.api) || (prov && prov.api) || 'openai'
+  return { servingName, api, effortFormat: (md && md.effortFormat) || 'reasoning_effort', maxTokensMax: Number((md && md.maxTokensMax) || 0) || 0 }
+}
+
 export function loadConfig(opts = {}) {
   const p = configPaths()
   let mainFile = opts.configFile || (process.env.MG_CONFIG && existsSync(process.env.MG_CONFIG) ? process.env.MG_CONFIG : null)
@@ -57,6 +68,11 @@ export function loadConfig(opts = {}) {
     const patch = readJson(p.local)
     base.providers = Object.assign({}, base.providers, patch.providers)
     base.models = Object.assign({}, base.models, patch.models)
+    // 删除墓碑：patch 只做合并，缺键无法表达"删除"，因此保存时显式记录被删的上游/模型名（MG-003）
+    if (patch._removed && typeof patch._removed === 'object') {
+      for (const id of (Array.isArray(patch._removed.providers) ? patch._removed.providers : [])) delete base.providers[id]
+      for (const n of (Array.isArray(patch._removed.models) ? patch._removed.models : [])) delete base.models[n]
+    }
     base.defaults = Object.assign({}, base.defaults, patch.defaults)
     base.configVersion = Number(patch.configVersion) || 0
     if (patch.virtualModels !== undefined) base.virtualModels = patch.virtualModels
@@ -68,9 +84,89 @@ export function loadConfig(opts = {}) {
 }
 
 // key 解析：面板 keys.local.json 优先，其次环境变量
+// 用户级环境变量实时读取（绕过进程启动快照）：
+// 进程 env 是启动时的副本，用户之后新增的变量对已运行进程不可见；这里实时查用户级环境拿最新值。
+//  - Windows：查注册表 HKCU\Environment（reg query）
+//  - Linux/POSIX：先查 systemd 用户管理器环境（systemctl --user show-environment，其中已含
+//    ~/.config/environment.d/*.conf 的内容）；未命中再直接解析 environment.d 文件，使
+//    「改完配置文件即生效」不必依赖 daemon-reload 或重启网关。
+// 带 TTL 缓存——spawnSync/读盘有毫秒级开销且 resolveKey 在每请求路径上，不能裸调；正负值都缓存
+// （找不到也缓存，避免高频空查）。改完变量最多 ~60s 生效。
+const _userEnvCache = new Map() // name -> { value: string|null, at: number }
+const USER_ENV_TTL_MS = 60000
+// 离线测试注入点：默认 null，走真实 systemctl/注册表/environment.d。测试注入后仍复用同一份
+// TTL 缓存与变量名白名单，因此"缓存与负缓存"语义可以被确定性覆盖，不需要等待 60s 或触碰真实 Key。
+let _userEnvReaderForTest = null
+export function __setUserEnvReaderForTest(fn) { _userEnvReaderForTest = typeof fn === 'function' ? fn : null }
+export function __clearUserEnvCache() { _userEnvCache.clear() }
+// systemd show-environment 对环境值做 shell 兼容转义（含空格/引号时包双引号并转义内部字符），此处还原
+function unquoteEnvValue(raw) {
+  const s = String(raw).trim()
+  if (s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"') return s.slice(1, -1).replace(/\\(["\\$`])/g, '$1')
+  return s
+}
+// 直接解析 ~/.config/environment.d/*.conf（按文件名排序，后者覆盖前者），作为 user manager 未刷新的兜底
+export function readEnvironmentDir(name, baseDir) {
+  const dir = baseDir || join(homedir(), '.config', 'environment.d')
+  let files
+  try { files = readdirSync(dir).filter((f) => f.endsWith('.conf')).sort() } catch { return null }
+  let value = null
+  for (const f of files) {
+    let text
+    try { text = readFileSync(join(dir, f), 'utf8') } catch { continue }
+    for (const line of text.split(/\r?\n/)) {
+      const t = line.trim()
+      if (!t || t.startsWith('#')) continue
+      const eq = t.indexOf('=')
+      if (eq <= 0 || t.slice(0, eq).trim() !== name) continue
+      const v = unquoteEnvValue(t.slice(eq + 1))
+      if (v) value = v
+    }
+  }
+  return value
+}
+function readUserEnv(name) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return null // 变量名白名单字符，防注入
+  const now = Date.now()
+  const cached = _userEnvCache.get(name)
+  if (cached && now - cached.at < USER_ENV_TTL_MS) return cached.value
+  let value = null
+  try {
+    if (_userEnvReaderForTest) {
+      value = _userEnvReaderForTest(name)
+    } else if (process.platform === 'win32') {
+      const r = spawnSync('reg', ['query', 'HKCU\\Environment', '/v', name], { encoding: 'utf8', timeout: 3000 })
+      const line = (r.stdout || '').split(/\r?\n/).find((l) => l.includes('REG_SZ') || l.includes('REG_EXPAND_SZ'))
+      if (line) {
+        const idx = line.indexOf('REG_')
+        const raw = line.slice(line.indexOf('SZ', idx) + 2).trim()
+        if (raw) value = raw
+      }
+    } else {
+      const r = spawnSync('systemctl', ['--user', 'show-environment'], { encoding: 'utf8', timeout: 3000 })
+      if (r.status === 0 && r.stdout) {
+        const pfx = name + '='
+        const line = r.stdout.split('\n').find((l) => l.startsWith(pfx))
+        if (line) value = unquoteEnvValue(line.slice(pfx.length))
+      }
+      if (!value) value = readEnvironmentDir(name)
+    }
+  } catch { value = null }
+  _userEnvCache.set(name, { value, at: now })
+  return value
+}
+
 export function resolveKey(cfg, def, id) {
   if (cfg._keys && cfg._keys[id]) return { key: cfg._keys[id], source: 'keys' }
-  if (def.apiKeyEnv && process.env[def.apiKeyEnv]) return { key: process.env[def.apiKeyEnv], source: 'env' }
+  if (def.apiKeyEnv) {
+    const envVal = process.env[def.apiKeyEnv]
+    if (envVal) return { key: envVal, source: 'env' }
+    // 进程环境没有 → fallback 实时读注册表用户级变量：进程 env 是启动快照，用户在系统里
+    // 新增的变量（如新接上游的 API key）对已运行进程不可见，此前只能重启网关（且须连托盘一起
+    // 重启，否则拉活的网关继承托盘旧环境）才能生效。实时查注册表让「配完 key 就能用」。
+    const regVal = readUserEnv(def.apiKeyEnv)
+    if (regVal) return { key: regVal, source: 'env-registry' }
+  }
   return { key: '', source: null }
 }
 

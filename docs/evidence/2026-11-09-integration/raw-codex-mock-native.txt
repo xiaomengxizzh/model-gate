@@ -1,0 +1,21 @@
+Reading additional input from stdin...
+OpenAI Codex v0.167.0
+--------
+workdir: /home/xiaomengxizi/ai/tmp/mg-codex-cwd
+model: native-responses-fixture
+provider: modelgate
+approval: never
+sandbox: read-only
+reasoning effort: none
+reasoning summaries: none
+session id: 01a1c010-5f16-7c13-9d78-db1f09b524d7
+--------
+user
+Reply with exactly: CODEX_NATIVE_OK
+warning: Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces.
+warning: Model metadata for `native-responses-fixture` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+codex
+native responses fixture
+tokens used
+12
+native responses fixture

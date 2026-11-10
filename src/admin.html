@@ -297,6 +297,8 @@ const INTERVAL=3000,LOG_INTERVAL=2200;
 let timerA=null,timerB=null,liveOn=true;
 const prev={requests:0,errors:0,retries:0,interrupts:0};
 let startedAt=Date.now(),logCounter=0,dirty=false,Cinit=false,modalOpen=false;
+// MG-009 D-3：首次进入脏状态时冻结保存基准版本，避免 3s 轮询把 configVersion 推走导致 409 保护失效
+let baseVersion=null;
 let TOKEN=localStorage.getItem('mg-token')||'';
 let gwStartedAt=0; // 当前网关实例的启动时间戳（与 localStorage mg-startedAt 比对，判断是否重启过）
 let C={providers:{},models:{},defaults:{provider:null,retry:{},timeout:{}},virtualModels:[]};
@@ -389,13 +391,15 @@ document.querySelectorAll('#msCard .ms-tabs button').forEach(function(b){ b.oncl
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function gem(id){const i=(id||'').toLowerCase();return i.includes('deepseek')?'deepseek':i.includes('relay')?'relay':i.includes('local')?'local':'generic'}
 function toast(msg,type){const t=$('#toast');t.textContent=msg;t.className='toast show '+(type||'');clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),2200)}
-function markDirty(){dirty=true}
+function markDirty(){dirty=true;if(baseVersion==null)baseVersion=ST.configVersion}
 function getTemplates(){try{return JSON.parse(localStorage.getItem('mg-templates')||'{}')||{}}catch(e){return{}}}
 function setTemplates(m){localStorage.setItem('mg-templates',JSON.stringify(m||{}))}
 
 /* 鉴权 fetch */
 async function japi(path,opts={}){const h=Object.assign({'Content-Type':'application/json'},opts.headers||{});if(TOKEN)h['Authorization']='Bearer '+TOKEN;const r=await fetch(path,Object.assign({},opts,{headers:h}));if(r.status===401){openToken('需要管理令牌');throw new Error('unauthorized')}return r}
 async function jpost(path,body){const r=await japi(path,{method:'POST',body:JSON.stringify(body||{})});return{ok:r.ok,status:r.status,d:await r.json().catch(()=>({}))}}
+// MG-009 D-7：Key 保存带版本；409 视为他处已更新，提示后加载最新（不自动重试）
+async function postKey(id,key){const r=await jpost('/api/keys',{id,key,version:(baseVersion==null?ST.configVersion:baseVersion)});if(r.status===409){if(confirm('配置已被他处更新（版本过期），加载最新后请重设 Key。')){dirty=false;baseVersion=null;await pollStatus()}}else if(r.ok){toast('Key 已'+(key?'更新':'清除'),'ok')}else{toast((r.d&&r.d.error)||'Key 保存失败','err')}return r}
 function openToken(hint){if(modalOpen)return;modalOpen=true;openModal(hint||'管理令牌','<div class="field"><label>管理令牌（MG_ADMIN_TOKEN）</label><input class="inp" id="tokV" type="password" placeholder="留空=关闭保护"></div><div class="hint2">设置后写入服务端（加密存储）并立即生效，未授权请求将被拒绝；留空则关闭保护。若启动时设了 MG_ADMIN_TOKEN 环境变量，以环境变量为准。</div>',async()=>{const t=(v('tokV')||'').trim();const r=await jpost('/api/admin-token',{token:t});if(r.ok){TOKEN=t;localStorage.setItem('mg-token',TOKEN);localStorage.setItem('mg-startedAt',String(gwStartedAt));modalOpen=false;toast(t?'管理令牌已启用':'管理令牌已关闭','ok');pollStatus()}else{toast('设置失败：'+((r.d&&r.d.error)||'未知错误'),'err')}})}
 $('#tokenBtn').addEventListener('click',()=>{TOKEN&&void 0;openToken(TOKEN?'修改管理令牌':'设置管理令牌')}); // 点击即弹输入
 
@@ -406,7 +410,7 @@ function renderProviders(){
   const ids=Object.keys(C.providers);
   if(!ids.length){box.innerHTML='<div class="empty">暂无上游，点「＋ 新增」添加</div>';return}
   box.innerHTML=ids.map(id=>{const p=C.providers[id],st=ST.byP[id]||{};
-    const b=!p.keyOk?'<span class="badge off" data-act="key" data-id="'+esc(id)+'">设 Key</span>':'<span class="badge" data-act="key" data-id="'+esc(id)+'">Key·'+(p.keySource==='keys'?'存储':'环境')+'</span>';
+    const b=!p.keyOk?'<span class="badge off" data-act="key" data-id="'+esc(id)+'">设 Key</span>':'<span class="badge" data-act="key" data-id="'+esc(id)+'">Key·'+(p.keySource==='keys'?'存储':p.keySource==='env-registry'?'环境·注册表':'环境')+'</span>';
     const pfx=p.pathPrefix?'<span class="badge pfx">前缀 '+esc(p.pathPrefix)+'</span>':'';
     const src='';const apiTag=(p.api&&p.api!=='openai')?'<span class="tag">'+esc(p.api)+'</span>':'';
     let cb='';if(st.state==='open')cb='<span class="badge open">熔断</span>';else if(st.state==='half')cb='<span class="badge half">探测</span>';
@@ -427,6 +431,8 @@ function renderModels(){
     const tags=[];
     if(m.alias&&m.alias.length)tags.push('<span class="tag">别名 '+esc(m.alias.slice(0,2).join(' / '))+(m.alias.length>2?'…':'')+'</span>');
     if(m.fallbacks&&m.fallbacks.length)tags.push('<span class="tag">降级 '+esc(m.fallbacks.join('·'))+'</span>');
+    if(m.api&&m.api!=='openai')tags.push('<span class="tag">协议 '+esc(m.api)+'</span>');
+    if(m.forceNoStream)tags.push('<span class="tag">流式降级</span>');
     if(m.reasoning)tags.push('<span class="tag">思 '+esc(m.reasoning)+'</span>');
     if(m.maxConcurrent)tags.push('<span class="tag">并发 '+m.maxConcurrent+'</span>');
     if(m.qps)tags.push('<span class="tag">QPS '+m.qps+'</span>');
@@ -483,8 +489,6 @@ function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
   ctrl.innerHTML='<div class="dirrow apiRow" title="OpenAI 兼容格式：各 Agent 的 Base URL 填这里"><label>API 地址</label><input class="input" id="apiBase" value="'+esc(apiUrl)+'" readonly><span class="apiTag">OpenAI 格式</span></div>'
    +'<div class="dirrow"><label>客户端接入 Key</label><input class="input" id="vmKey" value="'+esc(C.defaults.clientKey||'')+'" placeholder="留空=不鉴权"></div>'
    +'<div class="dirrow"><label>虚拟共用模型名</label><input class="input" id="vmName" value="'+esc(C.defaults.model||'')+'" placeholder="如 auto"></div>'
-   +'<div class="dirrow" title="上游 HTTP 代理（Clash 等）。留空=直连；形如 http://user:pass@127.0.0.1:7890；单上游可在其配置里覆盖，回环上游自动直连"><label>网络代理</label><input class="input" id="vmProxy" value="'+esc(C.defaults.proxy||'')+'" placeholder="留空=直连，如 http://127.0.0.1:7890"></div>'
-   +'<div class="dirrow" title="代理模式：自动=按上游配置（回环直连+配置了代理的走代理）；直连=全部上游强制直连（断代理排查）；全局=非回环上游全部强制走上面的代理地址"><label>代理模式</label><select class="select" id="vmProxyMode" style="flex:1"><option value="auto"'+(C.defaults.proxyMode!=='direct'&&C.defaults.proxyMode!=='global'?' selected':'')+'>自动（按配置）</option><option value="direct"'+(C.defaults.proxyMode==='direct'?' selected':'')+'>直连（全部不走代理）</option><option value="global"'+(C.defaults.proxyMode==='global'?' selected':'')+'>全局（全部走代理）</option></select></div>'
    +'<div class="dirrow" title="把当前「默认上游目录」保存为模板，可快速切换/删除"><label>模板</label><select class="select" id="tplSel" style="flex:1"><option value="">— 选模板 —</option>'+(Object.keys(getTemplates()).map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''))+'</select><input class="input" id="tplName" value="'+esc(_tplName)+'" placeholder="模板名" style="flex:1"><button class="mini" id="tplSave" title="保存当前目录为新模板">存</button><button class="mini" id="tplApply" title="应用所选模板">用</button><button class="mini del" id="tplDel" title="删除所选模板">×</button></div>'
    +'<div class="dirrow"><label>加入已有模型</label><select class="select" id="dirAdd"><option value="">— 选择 —</option>'+(Object.keys(C.models).filter(n=>!dir.some(e=>e.model===n)).map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''))+'</select></div>';
   // 目录条目
@@ -501,8 +505,6 @@ function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
     +'</div>'}).join('')}
   const vmN=$('#vmName');if(vmN){vmN.oninput=()=>{C.defaults.model=vmN.value.trim();markDirty()};vmN.onchange=()=>persistDir()}
   const vmK=$('#vmKey');if(vmK){vmK.oninput=()=>{C.defaults.clientKey=vmK.value.trim();markDirty()};vmK.onchange=()=>persistDir()}
-  const vmP=$('#vmProxy');if(vmP){vmP.oninput=()=>{C.defaults.proxy=vmP.value.trim();markDirty()};vmP.onchange=()=>persistDir()}
-  const vmPM=$('#vmProxyMode');if(vmPM){vmPM.onchange=()=>{C.defaults.proxyMode=vmPM.value;markDirty();persistDir()}}
   const dirAdd=$('#dirAdd');if(dirAdd)dirAdd.onchange=()=>{if(dirAdd.value){C.defaults.directory.push({model:dirAdd.value,mode:'afterAll',providers:[]});renderRoute();markDirty();persistDir()}}
   // 模型目录模板：保存当前目录 / 应用模板 / 删除模板（存 localStorage，随面板持久）
   const tplSel=$('#tplSel'),tplName=$('#tplName'),tplSave=$('#tplSave'),tplApply=$('#tplApply'),tplDel=$('#tplDel');
@@ -607,8 +609,8 @@ function bindVmEvents(box){
     const role=t.dataset.vrole
     if(role==='name'){const nn=t.value.trim();if(_vmOpen.has(v.name)){_vmOpen.delete(v.name);_vmOpen.add(nn)}v.name=nn;markDirty()}
     else if(role==='mode'&&t.closest('.diritem')){v.directory[+t.closest('.diritem').dataset.di].mode=t.value;markDirty()}
-    else if(role==='vmkey'){const val=t.value.trim();const r=await jpost('/api/keys',{id:'__mg_vm_'+v.name,key:val,version:ST.configVersion})
-      if(r.status===409){if(confirm('配置已被他处更新，加载最新后请重设 Key。')){dirty=false;await pollStatus()}}
+    else if(role==='vmkey'){const val=t.value.trim();const r=await jpost('/api/keys',{id:'__mg_vm_'+v.name,key:val,version:(baseVersion==null?ST.configVersion:baseVersion)})
+      if(r.status===409){if(confirm('配置已被他处更新，加载最新后请重设 Key。')){dirty=false;baseVersion=null;await pollStatus()}}
       else if(r.ok){toast('独立 Key 已'+(val?'更新':'清除'),'ok');delete _vmKeyDraft[v.name];t.value='';pollStatus()}
       else toast((r.d&&r.d.error)||'Key 保存失败','err')}
   }
@@ -631,12 +633,21 @@ $('#addVm').addEventListener('click',()=>{const nm='vm-'+String(Date.now()).slic
 function switchView(v){document.querySelectorAll('#viewtabs button').forEach(b=>b.classList.toggle('on',b.getAttribute('data-v')===v));['config','stats','log'].forEach(p=>{const el=$('#v-'+p);if(el)el.hidden=(p!==v)});if(v==='stats')requestAnimationFrame(()=>{renderModelStats();redrawTrend()})}
 (function(){const tabs=$('#viewtabs');if(tabs)tabs.addEventListener('click',(e)=>{const b=e.target.closest('button');if(b)switchView(b.getAttribute('data-v'))})})();
 function renderHealth(){const errs=(ST.global&&ST.global.errors)||0,h=$('#health');if(errs===0){h.classList.remove('deg');$('#healthTxt').textContent='健康'}else{h.classList.add('deg');$('#healthTxt').textContent='降级 · '+errs}}
-function buildCfrom(s){C.providers={};for(const p of s.providers||[])C.providers[p.id]={baseUrl:p.baseUrl,apiKeyEnv:p.apiKeyEnv||'',pathPrefix:p.pathPrefix||'',extraHeaders:p.extraHeaders||{},keyOk:p.hasKey,keySource:p.keySource,api:p.api||'openai',circuit:p.circuit||null,proxy:p.proxy||''};
-  C.models={};for(const m of s.models||[])C.models[m.name]={provider:m.provider,alias:m.alias||[],fallbacks:m.fallbacks||[],maxConcurrent:m.maxConcurrent||0,qps:m.qps||0,reasoning:m.reasoning||'',effortOptions:m.effortOptions||[],effortFormat:m.effortFormat||'',dailyQuota:m.dailyQuota||0,quota:m.quota||0,maxContext:m.maxContext||0,probe:m.probe||null,requests:m.requests||0,errors:m.errors||0,avgMs:m.avgMs!=null?m.avgMs:null};
+// MG-009 D-1：未知扩展字段走不透明袋（_extra），保存时合并回送，避免面板编辑静默洗掉插件字段
+function extraOf(obj,known,drop){const e={};for(const[k,v]of Object.entries(obj||{}))if(!known.includes(k)&&!drop.includes(k))e[k]=v;return Object.keys(e).length?e:null}
+function serializeEntity(o){const out=Object.assign({},(o&&o._extra)||{},o||{});delete out._extra;return out}
+function serializeMap(m){const out={};for(const[k,v]of Object.entries(m||{}))out[k]=serializeEntity(v);return out}
+const _PROVIDER_KEYS=['baseUrl','apiKeyEnv','pathPrefix','extraHeaders','api','circuit','proxy','keyOk','keySource'];
+const _MODEL_KEYS=['capability','provider','alias','fallbacks','maxConcurrent','qps','reasoning','effortOptions','effortFormat','dailyQuota','quota','maxContext','maxTokensMax','api','providerModels','forceNoStream','probe','requests','errors','avgMs','inTokens','outTokens','today','hitRate','affinity','latencySum','latencyCount'];
+function buildCfrom(s){C.providers={};for(const p of s.providers||[])C.providers[p.id]={baseUrl:p.baseUrl,apiKeyEnv:p.apiKeyEnv||'',pathPrefix:p.pathPrefix||'',extraHeaders:p.extraHeaders||{},keyOk:p.hasKey,keySource:p.keySource,api:p.api||'openai',circuit:p.circuit||null,proxy:p.proxy||'',_extra:extraOf(p,_PROVIDER_KEYS,['id','hasKey','st','probe'])};
+  C.models={};for(const m of s.models||[])C.models[m.name]={capability:m.capability||'chat',provider:m.provider,alias:m.alias||[],fallbacks:m.fallbacks||[],maxConcurrent:m.maxConcurrent||0,qps:m.qps||0,reasoning:m.reasoning||'',effortOptions:m.effortOptions||[],effortFormat:m.effortFormat||'',dailyQuota:m.dailyQuota||0,quota:m.quota||0,maxContext:m.maxContext||0,maxTokensMax:m.maxTokensMax||0,api:m.api||'',providerModels:m.providerModels||{},probe:m.probe||null,requests:m.requests||0,errors:m.errors||0,avgMs:m.avgMs!=null?m.avgMs:null,_extra:extraOf(m,_MODEL_KEYS,['name'])};
   C.defaults={provider:(s.defaults&&s.defaults.provider)||null,model:(s.defaults&&s.defaults.model)||'',clientKey:(s.defaults&&s.defaults.clientKey)||'',directory:(s.defaults&&s.defaults.directory)||[],retry:(s.defaults&&s.defaults.retry)||{},timeout:(s.defaults&&s.defaults.timeout)||{},concurrency:(s.defaults&&s.defaults.concurrency)||{},extraHeaders:(s.defaults&&s.defaults.extraHeaders)||{},proxy:(s.defaults&&s.defaults.proxy)||'',proxyMode:(s.defaults&&s.defaults.proxyMode)||'auto'};
   C.virtualModels=(s.virtualModels||[]).map(v=>({name:v.name,directory:v.directory||[],quota:v.quota||0,dailyQuota:v.dailyQuota||0,maxContext:v.maxContext||0,maxConcurrent:v.maxConcurrent||0,qps:v.qps||0,keySet:!!v.keySet,expiresAt:v.expiresAt||'',note:v.note||''}));
   Cinit=true}
-function ingestStatus(s){if(s.startedAt)startedAt=s.startedAt;(s.needAuth!=null)&&(ST.needAuth=s.needAuth);ST.configVersion=s.configVersion||0;ST.global=s.global||{};ST.server=s.server||{};ST.dialogues=s.dialogues||[];ST.byP={};for(const p of s.providers||[])ST.byP[p.id]=p.st;
+function ingestStatus(s){if(s.startedAt)startedAt=s.startedAt;(s.needAuth!=null)&&(ST.needAuth=s.needAuth);
+  // D-3：脏状态期间不覆盖已冻结的基准版本（否则每 3s 轮询会把 409 保护洗掉）；另存服务端版本用于展示
+  ST.serverVersion=s.configVersion||0;
+  if(!dirty||baseVersion==null)ST.configVersion=s.configVersion||0;ST.global=s.global||{};ST.server=s.server||{};ST.dialogues=s.dialogues||[];ST.byP={};for(const p of s.providers||[])ST.byP[p.id]=p.st;
   ST.byM={};for(const mn of s.models||[])ST.byM[mn.name]=mn;
   if(!Cinit){buildCfrom(s)}
   else{for(const p of s.providers||[]){if(C.providers[p.id]){C.providers[p.id].keyOk=p.hasKey;C.providers[p.id].keySource=p.keySource}}} // 每次轮询同步 Key 来源，保证删/存后徽标即时更新
@@ -664,12 +675,15 @@ function formProvider(id,p){const rows=Object.entries(p.extraHeaders||{}).map(([
    +'<div class="field"><label>Base URL</label><input class="inp" id="fBase" value="'+esc(p.baseUrl||'')+'" placeholder="https://api.deepseek.com"></div>'
    +'<div class="field"><label>API Key 环境变量名（无则留空）</label><input class="inp" id="fEnv" value="'+esc(p.apiKeyEnv||'')+'"><div class="hint2">缺省也可用「设 Key」直接存 Key</div></div>'
    +'<div class="field"><label>路径前缀（默认空）</label><input class="inp" id="fPrefix" value="'+esc(p.pathPrefix||'')+'"></div>'
-   +'<div class="field"><label>代理（留空=继承全局；direct=强制直连）</label><input class="inp" id="fProxy" value="'+esc(p.proxy||'')+'" placeholder="留空 / direct / http://127.0.0.1:7890"><div class="hint2">按上游定名单：留空走「网络代理」全局配置；填 direct 强制直连；填 http(s) 地址强制走该代理（需先切到「自动」模式才生效）</div></div>'
+   +'<div class="field"><label>代理（留空=继承全局；direct=强制直连）</label><input class="inp" id="fProxy" value="'+esc(p.proxy||'')+'" placeholder="留空 / direct / http://127.0.0.1:7890"><div class="hint2">代理只在上游这一层配置：direct=强制直连（当前全部上游已设为 direct）；填 http(s) 地址=强制走该代理；留空=继承 defaults.proxy（仅配置文件可设，面板不再暴露全局入口）</div></div>'
    +'<div class="field"><label>额外请求头（每行 k: v）</label><textarea class="inp ta" id="fHeaders">'+esc(rows)+'</textarea></div>'}
 function parseHeaders(txt){const out={};for(const line of String(txt||'').split('\n')){const i=line.indexOf(':');if(i>0&&line.trim()){const k=line.slice(0,i).trim(),x=line.slice(i+1).trim();if(k)out[k]=x}}return out}
 
 function provOptions(sel){return Object.keys(C.providers).map(id=>'<option value="'+esc(id)+'"'+(id===sel?' selected':'')+'>'+esc(id)+'</option>').join('')}
 // reasoning_effort 默认档位下拉：按该模型允许的档位列表渲染（LiteLLM 风格）
+function protDrop(sel){return ['<option value=""'+(sel?'':' selected')+'>— 继承上游 —</option>'].concat(['openai','anthropic','gemini'].map(x=>'<option value="'+x+'"'+(sel===x?' selected':'')+'>'+x+'</option>')).join('')}
+function provModelsRows(o){return Object.entries(o||{}).map(([k,x])=>k+': '+x).join('\n')}
+function parseKvMap(txt){const out={};for(const line of String(txt||'').split('\n')){const i=line.indexOf(':');if(i>0&&line.trim()){const k=line.slice(0,i).trim(),x=line.slice(i+1).trim();if(k)out[k]=x}}return out}
 function effortDrop(list,sel){return '<option value="">— 默认（不注入）—</option>'+((list||[]).map(v=>'<option value="'+esc(v)+'"'+(v===sel?' selected':'')+'>'+esc(v)+'</option>')).join('')}
 // 弹窗内：允许档位输入变化时，联动重建默认档位下拉
 function bindEffortOpts(){const i=$('#mOpts');if(i)i.addEventListener('input',()=>{const s=$('#mReason');if(s){const cur=s.value;const list=i.value.split(',').map(x=>x.trim()).filter(Boolean);s.innerHTML=effortDrop(list,cur)}})}
@@ -689,29 +703,33 @@ $('#addModel').addEventListener('click',()=>{
   openModal('新增 · 模型路由','<div class="field"><label>模型名</label><input class="inp" id="mName" placeholder="deepseek-chat"></div>'
    +'<div class="field"><label>主上游</label><select class="select" id="mProv" style="width:100%">'+provOptions()+'</select></div>'
    +'<div class="field"><label>备用上游（逗号分隔 provider id，优先→按序降级）</label><input class="inp" id="mFb"></div>'
-   +'<div class="field"><label>别名（逗号分隔，可选）</label><input class="inp" id="mAlias"></div>'+'<div class="field"><label>并发上限（0 不限）</label><input class="inp" id="mConc" type="number" min="0" value="0"></div>'+'<div class="field"><label>QPS（0 不限）</label><input class="inp" id="mQps" type="number" min="0" value="0"></div>'+'<div class="field"><label>每日额度 token（0=不限）</label><input class="inp" id="mDQ" type="number" min="0" value="0"></div>'+'<div class="field"><label>总额度 token（0=不限）</label><input class="inp" id="mQ" type="number" min="0" value="0"></div>'+'<div class="field"><label>最大上下文（0=用服务端默认）</label><input class="inp" id="mCtx" type="number" min="0" value="0"></div>'   +'<div class="field"><label>思考强度·允许档位（逗号分隔，留空=不限制）</label><input class="inp" id="mOpts" placeholder="如 low,medium,high"></div>'+'<div class="field"><label>思考强度·默认档位（留空=不改写）</label><select class="select" id="mReason" style="width:100%"><option value="">— 默认（不注入）—</option></select></div>'
+   +'<div class="field"><label>别名（逗号分隔，可选）</label><input class="inp" id="mAlias"></div>'+'<div class="field"><label>并发上限（0 不限）</label><input class="inp" id="mConc" type="number" min="0" value="0"></div>'+'<div class="field"><label>QPS（0 不限）</label><input class="inp" id="mQps" type="number" min="0" value="0"></div>'+'<div class="field"><label>每日额度 token（0=不限）</label><input class="inp" id="mDQ" type="number" min="0" value="0"></div>'+'<div class="field"><label>总额度 token（0=不限）</label><input class="inp" id="mQ" type="number" min="0" value="0"></div>'+'<div class="field"><label>最大上下文（0=用服务端默认）</label><input class="inp" id="mCtx" type="number" min="0" value="0"></div>'
+   +'<div class="field"><label>协议（默认继承上游）</label><select class="select" id="mApi" style="width:100%">'+protDrop('')+'</select><div class="hint2">同一上游的不同模型可各走不同协议，如 union-alpha 走 anthropic、其余走 openai</div></div>'
+   +'<div class="field"><label>每上游模型名（每行「上游ID: 该上游侧模型名」）</label><textarea class="inp ta" id="mProdModels"></textarea><div class="hint2">跨上游兜底时换个上游模型名也变了就要填，如 union-alpha 在 openrouter 侧叫 stealth/union-alpha</div></div>'
+   +'<div class="field"><label>流式降级</label><select class="select" id="mFNS" style="width:100%"><option value="">关（正常透传流式）</option><option value="1">开（上游流式不可用，改非流式拉取后以 SSE 交付）</option></select></div>'   +'<div class="field"><label>思考强度·允许档位（逗号分隔，留空=不限制）</label><input class="inp" id="mOpts" placeholder="如 low,medium,high"></div>'+'<div class="field"><label>思考强度·默认档位（留空=不改写）</label><select class="select" id="mReason" style="width:100%"><option value="">— 默认（不注入）—</option></select></div>'
    +'<div class="field"><label>思考强度·参数格式</label><select class="select" id="mEffort" style="width:100%"><option value="reasoning_effort">reasoning_effort（OpenAI 风格）</option><option value="thinking">thinking 对象（MiniMax 风格）</option></select><div class="hint2">MiniMax-M3 认 thinking:{"type":...}，选 thinking 后网关把 reasoning_effort 转成该对象注入</div></div>'
    +(!Object.keys(C.providers).length?'<div class="hint2" style="color:var(--err)">请先新增上游服务</div>':''),()=>{
     const name=v('mName').trim();if(!name){toast('请填写模型名','err');return}if(C.models[name]){toast('该模型名已存在','err');return}
     const prov=v('mProv');if(!prov){toast('请先新增上游服务','err');return}
-    C.models[name]={provider:prov,fallbacks:v('mFb').split(',').map(s=>s.trim()).filter(Boolean),alias:v('mAlias').split(',').map(s=>s.trim()).filter(Boolean),maxConcurrent:Math.max(0,parseInt(v('mConc'),10)||0),qps:Math.max(0,parseInt(v('mQps'),10)||0),dailyQuota:Math.max(0,parseInt(v('mDQ'),10)||0),quota:Math.max(0,parseInt(v('mQ'),10)||0),maxContext:Math.max(0,parseInt(v('mCtx'),10)||0),effortOptions:v('mOpts').split(',').map(s=>s.trim()).filter(Boolean),reasoning:v('mReason')||'',effortFormat:v('mEffort')||'reasoning_effort'};closeModal();saveAll()})});
+    C.models[name]=Object.assign({},C.models[name]&&C.models[name]._extra?{_extra:C.models[name]._extra}:{},{capability:v('mCap')==='video'?'video':(v('mCap')==='audio'?'audio':(v('mCap')==='image'?'image':(v('mCap')==='rerank'?'rerank':(v('mCap')==='embedding'?'embedding':'chat')))),provider:prov,fallbacks:v('mFb').split(',').map(s=>s.trim()).filter(Boolean),alias:v('mAlias').split(',').map(s=>s.trim()).filter(Boolean),maxConcurrent:Math.max(0,parseInt(v('mConc'),10)||0),qps:Math.max(0,parseInt(v('mQps'),10)||0),dailyQuota:Math.max(0,parseInt(v('mDQ'),10)||0),quota:Math.max(0,parseInt(v('mQ'),10)||0),maxContext:Math.max(0,parseInt(v('mCtx'),10)||0),api:v('mApi')||'',providerModels:parseKvMap(v('mProdModels')),forceNoStream:v('mFNS')==='1',effortOptions:v('mOpts').split(',').map(s=>s.trim()).filter(Boolean),reasoning:v('mReason')||'',effortFormat:v('mEffort')||'reasoning_effort'});closeModal();saveAll()})});
 bindEffortOpts();
 
 document.addEventListener('click',(e)=>{const t=e.target.closest('[data-act]');if(!t)return;const act=t.dataset.act,id=t.dataset.id;
   if(t.closest('#providers')){
-    if(act==='edit'){const p=C.providers[id];openModal('编辑 · 上游',formProvider(id,p),()=>{const base=v('fBase').trim();if(!base){toast('Base URL 不能为空','err');return};C.providers[id]={baseUrl:base,apiKeyEnv:v('fEnv').trim(),pathPrefix:v('fPrefix').trim(),extraHeaders:parseHeaders(v('fHeaders')),api:v('fApi')||'openai',circuit:circuitOf(),proxy:v('fProxy').trim()};closeModal();saveAll()})}
+    if(act==='edit'){const p=C.providers[id];openModal('编辑 · 上游',formProvider(id,p),()=>{const base=v('fBase').trim();if(!base){toast('Base URL 不能为空','err');return};C.providers[id]=Object.assign({},C.providers[id],{baseUrl:base,apiKeyEnv:v('fEnv').trim(),pathPrefix:v('fPrefix').trim(),extraHeaders:parseHeaders(v('fHeaders')),api:v('fApi')||'openai',circuit:circuitOf(),proxy:v('fProxy').trim()});closeModal();saveAll()})}
     if(act==='del'){if(confirm('确定删除上游「'+id+'」？引用它的模型需改上游。')){const used=Object.keys(C.models).filter(m=>C.models[m].provider===id||(C.models[m].fallbacks||[]).includes(id));if(used.length){toast('该上游仍被 '+used.length+' 个模型引用，无法删除','err');return}delete C.providers[id];saveAll()}}
     if(act==='test'){(async()=>{toast('测试上游「'+id+'」…');try{const r=await jpost('/api/probe',{id});if(r.ok&&r.d.status)ingestStatus(r.d.status);const rr=r.d&&r.d.results&&r.d.results[0];renderProviders();toast(rr&&rr.ok?('已连通 · '+rr.ms+'ms'):('连接失败：'+((rr&&(rr.err||'HTTP '+rr.code))||'未知')),rr&&rr.ok?'ok':'err')}catch(e){toast('测试失败：'+e.message,'err')}})()}
-    if(act==='key'){openModal('设置 API Key · '+id,'<div class="field"><label>API Key（输入并确定=保存）</label><input class="inp" id="kVal" type="password" placeholder="sk-…"><div class="hint2">保存到本机 keys.local.json（加密，不入 git）</div></div><div class="hint2">当前来源：'+((C.providers[id].keySource==='keys')?'面板存储':'环境变量 '+(C.providers[id].apiKeyEnv||'未设')+'')+(C.providers[id].keyOk?' ·已配':' ·未配')+'</div><button class="dlk" id="delKeyBtn" type="button">删除存储的 Key，回退到环境变量</button>',async()=>{const key=v('kVal');await jpost('/api/keys',{id,key});closeModal();await pollStatus();toast('Key 已'+(key?'更新':'清除'),'ok')});
-      const _dk=$('#delKeyBtn');if(_dk&&_dk.addEventListener)_dk.addEventListener('click',async()=>{await jpost('/api/keys',{id,key:''});closeModal();await pollStatus();toast('已删除存储的 Key，回退到环境变量','ok')});}
+    if(act==='key'){openModal('设置 API Key · '+id,'<div class="field"><label>API Key（输入并确定=保存）</label><input class="inp" id="kVal" type="password" placeholder="sk-…"><div class="hint2">保存到本机 keys.local.json（加密，不入 git）</div></div><div class="hint2">当前来源：'+((C.providers[id].keySource==='keys')?'面板存储':'环境变量 '+(C.providers[id].apiKeyEnv||'未设')+'')+(C.providers[id].keyOk?' ·已配':' ·未配')+'</div><button class="dlk" id="delKeyBtn" type="button">删除存储的 Key，回退到环境变量</button>',async()=>{const key=v('kVal');await postKey(id,key);closeModal();await pollStatus()});
+      const _dk=$('#delKeyBtn');if(_dk&&_dk.addEventListener)_dk.addEventListener('click',async()=>{await postKey(id,'');closeModal();await pollStatus()});}
   }
   if(t.closest('#models')){
     const name=id;
     if(act==='edit'){const m=C.models[name];
       openModal('编辑 · 模型','<div class="field"><label>模型名（只读）</label><input class="inp" readonly value="'+esc(name)+'"></div>'
         + '<div class="field"><label>主上游</label><select class="select" id="mProv" style="width:100%">'+provOptions(m.provider)+'</select></div>'
+        + '<div class="field"><label>能力</label><select class="select" id="mCap" style="width:100%"><option value="chat"'+((m.capability||'chat')!=='embedding'?' selected':'')+'>chat（对话/补全）</option><option value="embedding"'+((m.capability==='embedding')?' selected':'')+'>embedding（向量）</option><option value="rerank"'+((m.capability==='rerank')?' selected':'')+'>rerank（重排）</option><option value="audio"'+((m.capability==='audio')?' selected':'')+'>audio（语音）</option><option value="image"'+((m.capability==='image')?' selected':'')+'>image（图像）</option><option value="video"'+((m.capability==='video')?' selected':'')+'>video（视频异步任务）</option></select><div class="hint2">embedding 模型只能走 /v1/embeddings，chat 模型只能走对话入口</div></div>'
         +'<div class="field"><label>备用上游（逗号分隔 provider id，优先→按序降级）</label><input class="inp" id="mFb" value="'+esc((m.fallbacks||[]).join(', '))+'"></div>'
-        +'<div class="field"><label>别名（逗号分隔）</label><input class="inp" id="mAlias" value="'+esc((m.alias||[]).join(', '))+'"></div>'+'<div class="field"><label>并发上限（0 不限）</label><input class="inp" id="mConc" type="number" min="0" value="'+(m.maxConcurrent||0)+'"></div>'+'<div class="field"><label>QPS（0 不限）</label><input class="inp" id="mQps" type="number" min="0" value="'+(m.qps||0)+'"></div>'+'<div class="field"><label>每日额度 token（0=不限）</label><input class="inp" id="mDQ" type="number" min="0" value="'+(m.dailyQuota||0)+'"></div>'+'<div class="field"><label>总额度 token（0=不限）</label><input class="inp" id="mQ" type="number" min="0" value="'+(m.quota||0)+'"></div>'+'<div class="field"><label>最大上下文（0=用服务端默认）</label><input class="inp" id="mCtx" type="number" min="0" value="'+(m.maxContext||0)+'"></div>'+'<div class="field"><label>思考强度·允许档位（逗号分隔，留空=不限制）</label><input class="inp" id="mOpts" value="'+esc((m.effortOptions||[]).join(', '))+'"></div>'+'<div class="field"><label>思考强度·默认档位（留空=不改写）</label><select class="select" id="mReason" style="width:100%">'+effortDrop(m.effortOptions,m.reasoning)+'</select></div>'+'<div class="field"><label>思考强度·参数格式</label><select class="select" id="mEffort" style="width:100%"><option value="reasoning_effort"'+(m.effortFormat!=='thinking'?' selected':'')+'>reasoning_effort（OpenAI 风格）</option><option value="thinking"'+(m.effortFormat==='thinking'?' selected':'')+'>thinking 对象（MiniMax 风格）</option></select><div class="hint2">MiniMax-M3 认 thinking:{"type":...}，选 thinking 后网关把 reasoning_effort 转成该对象注入</div></div>',()=>{const prov=v('mProv');if(!prov){toast('请选择上游','err');return};C.models[name]={provider:prov,fallbacks:v('mFb').split(',').map(s=>s.trim()).filter(Boolean),alias:v('mAlias').split(',').map(s=>s.trim()).filter(Boolean),maxConcurrent:Math.max(0,parseInt(v('mConc'),10)||0),qps:Math.max(0,parseInt(v('mQps'),10)||0),dailyQuota:Math.max(0,parseInt(v('mDQ'),10)||0),quota:Math.max(0,parseInt(v('mQ'),10)||0),maxContext:Math.max(0,parseInt(v('mCtx'),10)||0),effortOptions:v('mOpts').split(',').map(s=>s.trim()).filter(Boolean),reasoning:v('mReason')||'',effortFormat:v('mEffort')||'reasoning_effort'};closeModal();saveAll()})}
+        +'<div class="field"><label>别名（逗号分隔）</label><input class="inp" id="mAlias" value="'+esc((m.alias||[]).join(', '))+'"></div>'+'<div class="field"><label>并发上限（0 不限）</label><input class="inp" id="mConc" type="number" min="0" value="'+(m.maxConcurrent||0)+'"></div>'+'<div class="field"><label>QPS（0 不限）</label><input class="inp" id="mQps" type="number" min="0" value="'+(m.qps||0)+'"></div>'+'<div class="field"><label>每日额度 token（0=不限）</label><input class="inp" id="mDQ" type="number" min="0" value="'+(m.dailyQuota||0)+'"></div>'+'<div class="field"><label>总额度 token（0=不限）</label><input class="inp" id="mQ" type="number" min="0" value="'+(m.quota||0)+'"></div>'+'<div class="field"><label>最大上下文（0=用服务端默认）</label><input class="inp" id="mCtx" type="number" min="0" value="'+(m.maxContext||0)+'"></div>'+'<div class="field"><label>协议（默认继承上游）</label><select class="select" id="mApi" style="width:100%">'+protDrop(m.api)+'</select><div class="hint2">同一上游的不同模型可各走不同协议，如 union-alpha 走 anthropic、其余走 openai</div></div>'+'<div class="field"><label>每上游模型名（每行「上游ID: 该上游侧模型名」）</label><textarea class="inp ta" id="mProdModels">'+esc(provModelsRows(m.providerModels))+'</textarea><div class="hint2">跨上游兜底时换个上游模型名也变了就要填</div></div>'+'<div class="field"><label>流式降级</label><select class="select" id="mFNS" style="width:100%"><option value=""'+(m.forceNoStream?'':' selected')+'>关（正常透传流式）</option><option value="1"'+(m.forceNoStream?' selected':'')+'>开（上游流式不可用，改非流式拉取后以 SSE 交付）</option></select></div>'+'<div class="field"><label>思考强度·允许档位（逗号分隔，留空=不限制）</label><input class="inp" id="mOpts" value="'+esc((m.effortOptions||[]).join(', '))+'"></div>'+'<div class="field"><label>思考强度·默认档位（留空=不改写）</label><select class="select" id="mReason" style="width:100%">'+effortDrop(m.effortOptions,m.reasoning)+'</select></div>'+'<div class="field"><label>思考强度·参数格式</label><select class="select" id="mEffort" style="width:100%"><option value="reasoning_effort"'+(m.effortFormat!=='thinking'?' selected':'')+'>reasoning_effort（OpenAI 风格）</option><option value="thinking"'+(m.effortFormat==='thinking'?' selected':'')+'>thinking 对象（MiniMax 风格）</option></select><div class="hint2">MiniMax-M3 认 thinking:{"type":...}，选 thinking 后网关把 reasoning_effort 转成该对象注入</div></div>',()=>{const prov=v('mProv');if(!prov){toast('请选择上游','err');return};C.models[name]={provider:prov,fallbacks:v('mFb').split(',').map(s=>s.trim()).filter(Boolean),alias:v('mAlias').split(',').map(s=>s.trim()).filter(Boolean),maxConcurrent:Math.max(0,parseInt(v('mConc'),10)||0),qps:Math.max(0,parseInt(v('mQps'),10)||0),dailyQuota:Math.max(0,parseInt(v('mDQ'),10)||0),quota:Math.max(0,parseInt(v('mQ'),10)||0),maxContext:Math.max(0,parseInt(v('mCtx'),10)||0),api:v('mApi')||'',providerModels:parseKvMap(v('mProdModels')),forceNoStream:v('mFNS')==='1',effortOptions:v('mOpts').split(',').map(s=>s.trim()).filter(Boolean),reasoning:v('mReason')||'',effortFormat:v('mEffort')||'reasoning_effort'};closeModal();saveAll()})}
       bindEffortOpts();
     if(act==='del'){if(confirm('确定删除模型「'+name+'」？')){delete C.models[name];saveAll()}}
     if(act==='test'){(async()=>{toast('测试模型「'+name.trim()+'」…');try{const r=await jpost('/api/model-test',{id:name});if(r.ok&&r.d.status)ingestStatus(r.d.status);const rr=r.d&&r.d.result;renderModels();toast(rr&&rr.ok?('已连通 · '+rr.ms+'ms'):('连接失败：'+((rr&&(rr.err||'HTTP '+rr.code))||'未知')),rr&&rr.ok?'ok':'err')}catch(e){toast('测试失败：'+e.message,'err')}})()}
@@ -723,9 +741,9 @@ $('#testAllModels').addEventListener('click',async()=>{const names=Object.keys(C
 
 function refresh(){renderProviders();renderModels();renderParams();renderStatsPanel();renderRoute();renderVirtualModels();renderModelStats()}
 
-async function saveAll(){const r=await jpost('/api/config/save',{providers:C.providers,models:C.models,defaults:C.defaults,virtualModels:C.virtualModels,version:ST.configVersion});
-  if(r.ok){dirty=false;if(r.d.status)ingestStatus(r.d.status);toast('配置已保存并生效','ok')}
-  else if(r.status===409){if(confirm('配置已被他处更新（版本过期）。加载最新配置将丢弃当前未保存修改，继续？')){dirty=false;await pollStatus();toast('已加载最新配置，请重新修改','ok')}}
+async function saveAll(){const r=await jpost('/api/config/save',{providers:serializeMap(C.providers),models:serializeMap(C.models),defaults:C.defaults,virtualModels:C.virtualModels,version:(baseVersion==null?ST.configVersion:baseVersion)});
+  if(r.ok){dirty=false;baseVersion=null;if(r.d.status)ingestStatus(r.d.status);toast('配置已保存并生效','ok')}
+  else if(r.status===409){if(confirm('配置已被他处更新（版本过期）。加载最新配置将丢弃当前未保存修改，继续？')){dirty=false;baseVersion=null;await pollStatus();toast('已加载最新配置，请重新修改','ok')}}
   else toast((r.d&&r.d.error)||'保存失败','err')}
 $('#saveAll').addEventListener('click',saveAll);
 $('#reloadCfg').addEventListener('click',async()=>{if(dirty&&!confirm('面板有未保存修改，确定丢弃并从文件重载？'))return;const r=await jpost('/api/config/reload',{});if(r.ok){dirty=false;await pollStatus();toast('已从配置文件重载','ok')}});

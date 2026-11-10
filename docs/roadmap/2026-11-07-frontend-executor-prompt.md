@@ -13,7 +13,7 @@
 ## 启动必读
 
 1. AGENTS.md、RESOURCE_APPROVAL.md、README.md、package.json。
-2. docs/roadmap/2026-11-07-frontend-rebuild-plan.md（主计划，F0-F5）、docs/roadmap/2026-11-07-gateway-platform-plan.md（后端协作边界）、docs/phased-execution-plan.md。
+2. docs/roadmap/2026-11-07-frontend-rebuild-plan.md（主计划，F0-F5）、docs/roadmap/2026-11-07-gateway-platform-plan.md（后端协作边界）、docs/archive/2026-08/phased-execution-plan.md。
 3. src/admin.html（仅盘点所有功能与 API；禁止当新设计代码模板）；src/index.js 的 buildStatus、saveConfig、saveKeys 及 /api/* endpoints；src/router.js、相关测试脚本。
 4. 后端执行 AI 已产生的 docs/contracts/management-api-v1.md 和 fixtures（若尚未存在则明确标注 PENDING_BACKEND_CONTRACT，先用从当前源代码静态核实得到的契约，不凭空发明字段）。
 5. 当前 git HEAD、open PR（尤其 Codex Responses Draft PR #2），以及前端分支相对于目标分支的差异；不要把 PR #2 的实验性接入当成生产功能。

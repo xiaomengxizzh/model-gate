@@ -1,0 +1,109 @@
+{
+  "version": 7,
+  "providers": {
+    "demo-openai": {
+      "baseUrl": "https://api.example.invalid/v1",
+      "apiKeyEnv": "DEMO_OPENAI_API_KEY",
+      "pathPrefix": "",
+      "api": "openai",
+      "extraHeaders": {
+        "X-Demo-Route": "fixture-only"
+      },
+      "proxy": "",
+      "circuit": {
+        "maxFailures": 3,
+        "openDurationMs": 10000
+      }
+    },
+    "demo-backup": {
+      "baseUrl": "https://backup.example.invalid",
+      "apiKeyEnv": "DEMO_BACKUP_API_KEY",
+      "pathPrefix": "/v1",
+      "api": "anthropic",
+      "extraHeaders": {},
+      "proxy": "http://proxy.example.invalid:8080",
+      "circuit": null,
+      "vendorRateClass": "fixture-extra"
+    }
+  },
+  "models": {
+    "demo-chat": {
+      "provider": "demo-openai",
+      "alias": [
+        "demo"
+      ],
+      "fallbacks": [
+        "demo-backup"
+      ],
+      "maxConcurrent": 8,
+      "qps": 4,
+      "reasoning": "",
+      "effortOptions": [],
+      "effortFormat": "",
+      "dailyQuota": 1000000,
+      "quota": 0,
+      "maxContext": 128000,
+      "maxTokensMax": 8192,
+      "api": "",
+      "providerModels": {
+        "demo-openai": "vendor-chat-model"
+      },
+      "forceNoStream": false,
+      "vendorCapability": "fixture-extra"
+    },
+    "demo-reasoner": {
+      "provider": "demo-backup",
+      "alias": [],
+      "fallbacks": [],
+      "maxConcurrent": 2,
+      "qps": 1,
+      "reasoning": "medium",
+      "effortOptions": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "effortFormat": "reasoning_effort",
+      "dailyQuota": 0,
+      "quota": 500000,
+      "maxContext": 64000,
+      "maxTokensMax": 4096,
+      "api": "anthropic",
+      "providerModels": {
+        "demo-backup": "vendor-reasoner-model"
+      },
+      "forceNoStream": true
+    }
+  },
+  "virtualModels": [
+    {
+      "name": "team-chat",
+      "directory": [
+        {
+          "model": "demo-chat",
+          "mode": "afterAll",
+          "providers": [
+            "demo-openai",
+            "demo-backup"
+          ]
+        },
+        {
+          "model": "demo-reasoner",
+          "mode": "onFail",
+          "providers": []
+        }
+      ],
+      "quota": 0,
+      "dailyQuota": 2000000,
+      "maxContext": 128000,
+      "maxConcurrent": 4,
+      "qps": 2,
+      "expiresAt": "2027-01-31T00:00:00.000Z",
+      "note": "fixture virtual entry"
+    }
+  ],
+  "defaults": {
+    "proxyMode": "auto",
+    "clientKey": "********"
+  }
+}

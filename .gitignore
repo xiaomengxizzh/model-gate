@@ -24,3 +24,9 @@ mg-tray.exe
 .workbuddy/
 config/admin.token
 mg-tray.new.exe
+
+# Process-local test leftovers and machine key material
+.tmp-test-*/
+master.key
+*.pyc
+__pycache__/
