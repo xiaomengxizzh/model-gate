@@ -19,6 +19,7 @@ import { validateRerankRequest, buildRerankRequest, rerankHeaders, normalizeRera
 import { supportsMedia, parseMultipartField, replaceMultipartField, isMultipart, validateSpeechRequest, validateImageRequest, mediaResponseLimit } from './media.js'
 import { defaultVideoPaths, newVideoTask, upstreamTaskId, applyUpstreamStatus, clientTask, loadVideoTasks, saveVideoTasks, gcVideoTasks, findTaskByIdem, validateVideoCreate, VIDEO_POLL_MIN_MS } from './videos.js'
 import { todayKey } from './shared.js'
+import { readNativeUsage, nativeUsageConfig } from './native-usage.js'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
@@ -264,9 +265,11 @@ function buildStatus(state) {
   })
   const models = Object.entries(state.cfg.models || {}).map(([name, d]) => {
     const m = (s.byModel && s.byModel[name]) || { requests: 0, errors: 0 }
+    const _provApi = ((state.cfg.providers || {})[d.provider] || {}).api || 'openai'
+    const _effectiveApi = d.api || _provApi
     const dk = (s.daily && s.daily[name] && s.daily[name][todayKey()]) || { tokens: 0, hit: 0, miss: 0 }
     const hitRate = (dk.hit + dk.miss) > 0 ? Math.round((dk.hit / (dk.hit + dk.miss)) * 1000) / 10 : null
-    return { name, provider: d.provider, alias: d.alias || [], fallbacks: d.fallbacks || [], capability: d.capability || 'chat', maxConcurrent: d.maxConcurrent || 0, qps: d.qps || 0, reasoning: d.reasoning || '', effortOptions: d.effortOptions || [], effortFormat: d.effortFormat || '', dailyQuota: d.dailyQuota || 0, quota: d.quota || 0, maxContext: d.maxContext || 0, maxTokensMax: d.maxTokensMax || 0, api: d.api || '', providerModels: d.providerModels || {}, forceNoStream: !!d.forceNoStream, probe: m.probe || null, requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate, affinity: state.affinity[name] || null, avgMs: m.latencyCount ? Math.round(m.latencySum / m.latencyCount) : null }
+    return { name, provider: d.provider, alias: d.alias || [], fallbacks: d.fallbacks || [], capability: d.capability || 'chat', maxConcurrent: d.maxConcurrent || 0, qps: d.qps || 0, reasoning: d.reasoning || '', effortOptions: d.effortOptions || [], effortFormat: d.effortFormat || '', dailyQuota: d.dailyQuota || 0, quota: d.quota || 0, maxContext: d.maxContext || 0, maxTokensMax: d.maxTokensMax || 0, api: d.api || '', effectiveApi: _effectiveApi, hostedTools: _effectiveApi === 'responses' ? 'native' : 'chat-bridge-lossy', providerModels: d.providerModels || {}, forceNoStream: !!d.forceNoStream, probe: m.probe || null, requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate, affinity: state.affinity[name] || null, avgMs: m.latencyCount ? Math.round(m.latencySum / m.latencyCount) : null }
   })
   const defaults = state.cfg.defaults || {}
   const todayTotal = models.reduce((a, m) => a + (m.today || 0), 0)
@@ -288,6 +291,7 @@ function buildStatus(state) {
     global: { requests: s.global.requests, errors: s.global.errors, retries: s.global.retries, interrupts: s.global.interrupts, tokenCount: s.global.tokens, todayTokens: todayTotal, avgMs: s.global.confirmed ? Math.round(s.global.latencySum / s.global.confirmed) : null, p50: pct(s.global.lats, 50), p95: pct(s.global.lats, 95), latTrend: s.global.latTrend || [] },
     cache: { trend: state.cacheTrend || [], alert: state.cacheAlert || null },
     dialogues: Object.values(state.dialogue).filter(d => d.requests > 0).sort((a, b) => b.lastAt - a.lastAt).slice(0, 30).map(d => ({ id: d.id, named: d.named, requests: d.requests, tokens: d.tokens, hit: d.hit, miss: d.miss, hitRate: (d.hit + d.miss) > 0 ? Math.round(d.hit / (d.hit + d.miss) * 1000) / 10 : null, startAt: d.startAt, lastAt: d.lastAt })),
+    nativeUsage: (() => { const n = nativeUsageConfig(state.cfg); return { enabled: n.enabled, dirLabel: n.label } })(),
     providers,
     models,
     // defaults 原样返回（仅 clientKey 掩码）：否则自定义字段（affinityTtlMs / failbackProbe 等）
@@ -986,6 +990,12 @@ function makeHandler(state) {
       }
 
       if (path === '/api/status' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; sendJson(res, 200, buildStatus(state)); return }
+      if (path === '/api/native-usage' && req.method === 'GET') {
+        if (!await requireAdmin(req, res)) return
+        const days = Math.min(90, Math.max(1, parseInt(new URL(url, 'http://x').searchParams.get('days') || '7', 10) || 7))
+        sendJson(res, 200, await readNativeUsage(state.cfg, days))
+        return
+      }
       if (path === '/api/model-stats' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const days = Math.min(90, Math.max(1, parseInt(new URL(url, 'http://x').searchParams.get('days') || '7', 10) || 7)); const out = {}; const now = new Date(); const modelNames = Object.keys(state.cfg.models || {}); const pt = (c) => ({ tokens: c ? c.tokens : 0, inTokens: c ? (c.inTokens || 0) : 0, outTokens: c ? (c.outTokens || 0) : 0, hit: c ? (c.hit || 0) : 0, miss: c ? (c.miss || 0) : 0, hitRate: (c && (c.hit + c.miss) > 0) ? Math.round((c.hit / (c.hit + c.miss)) * 1000) / 10 : null }); if (days === 1) { for (const name of modelNames) { const mh = state.stats.hourly[name] || {}; const arr = []; for (let i2 = 23; i2 >= 0; i2--) { const hd = new Date(now.getTime() - i2 * 3600 * 1000); const hk = todayKey(hd) + ':' + String(hd.getHours()).padStart(2, '0'); arr.push(Object.assign({ date: String(hd.getHours()).padStart(2, '0') + ':00' }, pt(mh[hk]))) } out[name] = arr } } else { for (const name of modelNames) { const md = state.stats.daily[name] || {}; const arr = []; for (let i2 = days - 1; i2 >= 0; i2--) { const d = new Date(now); d.setDate(d.getDate() - i2); const k = todayKey(d); arr.push(Object.assign({ date: k }, pt(md[k]))) } out[name] = arr } } sendJson(res, 200, { days, mode: days === 1 ? 'hourly' : 'daily', models: out }); return }
       if (path === '/api/route-preview' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return

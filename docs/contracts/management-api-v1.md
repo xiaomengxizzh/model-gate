@@ -16,7 +16,7 @@
 | --- | --- | --- | --- | --- |
 | `GET /api/auth` | 200 | 200（公开） | 200（公开） | 200 |
 | `POST /api/admin-token` | 200（本地初始化） | 403 | 401 | 200 |
-| `GET /api/status`、`GET /api/config`、`GET /api/logs`、`GET /api/model-stats` | 200 | 403 | 401 | 200 |
+| `GET /api/status`、`GET /api/config`、`GET /api/logs`、`GET /api/model-stats`、`GET /api/native-usage` | 200 | 403 | 401 | 200 |
 | `POST /api/config/save`、`POST /api/config/reload`、`POST /api/keys` | 200 | 403 | 401 | 200 |
 | `POST /api/route-preview`、`POST /api/probe`、`POST /api/model-test` | 200 | 403 | 401 | 200 |
 | 其他 `/api/*` 未知路径 | 404 | 404 | 404 | 404 |
@@ -85,6 +85,9 @@
 ### `GET /api/model-stats?days=7`
 `days` 夹取到 1–90（`0`/`abc` → 7）。`days=1` → `mode:'hourly'`，每模型 24 个小时桶（`date:'HH:00'`）；其余 `mode:'daily'`，每模型 `days` 个日期桶（`date:'YYYY-MM-DD'`）。桶字段 `{tokens,inTokens,outTokens,hit,miss,hitRate}`，`hitRate` 无样本时为 `null`。只覆盖真实模型，不含虚拟模型。
 
+### `GET /api/native-usage?days=7`
+只读采集 Codex 本地会话日志（默认关闭）。配置来源：`MG_NATIVE_USAGE_DIR` 环境变量优先，其次 `defaults.nativeUsageDir`；空串或 `off` 关闭。`days` 夹取 1–90。响应 `{enabled, source:'codex-sessions', days, dirLabel, generatedAt, scanned:{files,sessions,bytes,parseErrors}, totals:{inputTokens,cachedInputTokens,cacheWriteTokens,outputTokens,reasoningOutputTokens,totalTokens,turns}, byDay:[...], byModel:[...], note}`；关闭时 `{enabled:false, reason/note}`，目录不存在时 `{enabled:true, error:'目录不存在或不可读'}`。只解析 `session_meta`/`turn_context`/`token_count`，**不读取消息正文**；不代表经过网关的代理流量。回归见 `scripts/test/offline/native-usage.test.mjs`。
+
 ### `GET /api/logs?lines=200`
 `lines` 默认 200，超过 5000 按 5000，负数与非法值按 1/200 处理。响应 `{lines: string[]}`，读当前日志文件尾部，不是全量检索。
 
@@ -105,6 +108,7 @@
 | `virtualModels` | array | `{name,directory,quota,dailyQuota,maxContext,maxConcurrent,qps,keySet,expiresAt,note,requests,errors,tokens,today,hitRate}`；**不含 Key** |
 | `defaults` | object | 配置默认值原样回显，`clientKey` 有值时固定为 `********` |
 | `server` | object | `{maxBodyBytes,keyEncrypted,host,port}` |
+| `nativeUsage` | object | `{enabled,dirLabel}`；只暴露是否启用与目录标签，不返回日志内容 |
 
 `providers`/`models` 是带统计的**数组**，不是磁盘配置映射；把状态数组直接回存会破坏配置。可保存对象必须由明确映射构造（MG-009 负责前端读写一致性）。
 
@@ -118,6 +122,7 @@
 | 管理令牌 | 不经任何响应回显 | `/api/auth` 只给 `needAuth` |
 | 磁盘 | `keys.local.json` 为 `MG1:` 密文，权限 0600 | 无主密钥时拒绝明文写入并 400 |
 | 日志 | 不落 Key 与请求正文 | 启动时收集 secrets 供 logger 脱敏 |
+| 原生用量采集 | 只返回 token 计数/模型/provider/目录标签 | 不返回消息正文；默认关闭，目录由管理员显式配置 |
 | `extraHeaders`/`proxy` | **风险项** | 状态快照原样回显，可含鉴权头值或代理用户信息；MG-005 收敛后才能对外暴露诊断快照 |
 
 ## 6. Fixture（测试实际发送的形状）
