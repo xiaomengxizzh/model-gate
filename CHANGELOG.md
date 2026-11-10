@@ -2,6 +2,25 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-10 Codex 多 provider 边界与原生用量采集（未发布）
+
+### Added
+- `GET /api/native-usage?days=1|7|30|90` 与 `src/native-usage.js`：只读汇总 Codex 本地 sessions 的 `session_meta`/`turn_context`/`token_count`，返回 token 计数、按日/按模型聚合；**不读取消息正文**。配置 `defaults.nativeUsageDir` 或 `MG_NATIVE_USAGE_DIR`，默认关闭（`off`/空串）。管理 API 契约与 UI 矩阵同步。
+- 新前端「监控与诊断」增加“原生 / 直连用量（只读采集）”卡片；「安全与设置」增加采集目录与保存入口。
+- `GET /api/status` 的模型增加 `effectiveApi` 与 `hostedTools`（`native` / `chat-bridge-lossy`），把托管工具保真度变成可观察字段。
+- 回归：`offline/native-usage.test.mjs`（2 组：精确聚合/不含消息正文/非 jsonl 忽略；默认关闭与目录不存在）、`offline/hosted-tools.test.mjs`（原生保留 web_search/namespace；Chat 桥丢弃并保留函数工具）。
+
+### Verified
+- Codex CLI 0.167 的 `/model` 只列出当前 provider 的模型；`codex exec resume` 跨 provider 被明确拒绝（`modelProviderMismatch`）。同一 thread 不能原地切换 provider，结论从“未验证”变为“已验证限制”。
+- ChatGPT Desktop 26.1103.32239 的 app-server 协议支持 per-thread `modelProvider`，但 Desktop 创建线程固定传 `modelProvider:null`，模型列表无 provider 过滤、UI 无 profile 选择器；单实例只能用当前 provider。
+- 本机只读扫描真实 Codex sessions：39 文件 / 32 会话 / 389 ms / 0 解析错误（个人用量数字不外发），证明采集性能与格式兼容。
+- `npm test` 30/30 隔离套件；浏览器 14/14（含原生用量卡与设置项）。
+
+### 未验证 / 边界
+- 用独立 `CODEX_HOME` 启动第二个 Desktop 实例的端到端 GUI 流程：未验证，不作为已交付能力。
+- 真实原生 Responses 上游的 `web_search`/`namespace` 托管工具：本机只有 mock wire 级验证；OpenCode Chat 上游本身不提供这些工具，网关不能凭空补齐。
+- 原生用量采集是观察，不是配额/限流；只读，默认关闭。
+
 ## 2026-11-09 整合候选版 /ui-next 控制台（未发布，integration/modelgate-next）
 
 ### Added

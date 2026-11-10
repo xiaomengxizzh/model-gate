@@ -19,6 +19,8 @@
 | `client-mock-validation.txt` | DSH 0.2.2-rc.1 × 本地 mock 的 Chat / Responses 桥 / 原生 Responses 结果与阻断说明 |
 | `real-client-validation.txt` | Codex CLI / DSH × 真实 OpenCode Go 最小链路、网关记账、GitHub/PR 与 MCP 更正 |
 | `raw-codex-real.txt` / `raw-dsh-real.txt` | 真实客户端原始输出（无 Key） |
+| `codex-switching-desktop.txt` | Codex TUI `/model`、`resume` 跨 provider、Desktop bundle 与 hosted tools 边界 |
+| `ui-observability-native-usage.png` | 观测页“原生 / 直连用量（只读采集）”卡片 |
 | `raw-codex-mock-chat.txt` / `raw-codex-mock-native.txt` | Codex × 本地 mock 的 Chat 桥 / 原生 Responses 原始输出 |
 
 原始日志末尾的 `/tmp/mg-ui-final3` 是生成时的临时目录；对应截图已复制到本目录。

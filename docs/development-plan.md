@@ -2,6 +2,13 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
+## 2026-11-10 Codex 多 provider 边界与原生用量采集
+
+- 新增 `/api/native-usage` + `src/native-usage.js` + 观测页卡片/设置项：只读汇总 Codex sessions 的 token 计数，不读取消息正文，默认关闭。
+- `/api/status` 模型增加 `hostedTools`/`effectiveApi`；新增 `offline/hosted-tools.test.mjs` 与 `offline/native-usage.test.mjs`。
+- 已验证：Codex TUI `/model` 仅当前 provider；`exec resume` 跨 provider 报 `modelProviderMismatch`；Desktop 单实例固定默认 provider、UI 无 profile 选择器。结论与证据见 [Codex 多 provider 接入](how-to/codex-multi-provider.md) 与 [切换/Desktop 证据](evidence/2026-11-09-integration/codex-switching-desktop.txt)。
+- 测试：`npm test` 30/30；浏览器 14/14。未验证：独立 `CODEX_HOME` 的第二个 Desktop 实例、真实原生 Responses 托管工具上游。
+
 ## 2026-11-09 整合候选分支（integration/modelgate-next）
 
 起点 `35bed9b`（`dev/gateway-audit-20261108` @ `3a4ba89` + ui-next 三个预览提交）。候选分支只做整合与新增，不改写审计分支历史；旧 `/` 与 `/admin` 保留。

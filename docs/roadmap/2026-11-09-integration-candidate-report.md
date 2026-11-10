@@ -17,7 +17,7 @@
 | A 后端整合候选 | **PARTIAL → 可评审** | 以审计分支为主体；移植 429/Retry-After/工具请求不重放；修复配置投影两处契约缺口；未整包合并 G0–G4 或 PR #2。 |
 | B 可使用的 /ui-next 前端 | **PASS（Mock/浏览器层）** | 六区齐全，供应商/模型/虚拟模型/Key/409/诊断/设置均真实连通；旧 `/` 保留。 |
 | C 前后端 API 适配报告 | **PASS** | [ui-next-api-matrix.md](../contracts/ui-next-api-matrix.md)：逐操作列出 API、鉴权、错误与状态。 |
-| D 测试与验收报告 | **PASS（分层）** | 28/28 离线套件、14/14 浏览器检查、Codex/DSH × 本地 Mock、Codex/DSH × 真实上游；真实工具执行与 Desktop 仍 NOT_RUN。 |
+| D 测试与验收报告 | **PASS（分层）** | 30/30 离线套件、14/14 浏览器检查、Codex/DSH × 本地 Mock、Codex/DSH × 真实上游；真实工具执行与 Desktop 仍 NOT_RUN；原生用量只读采集已交付。 |
 | E Git 交接与合并建议 | **PASS** | 已推送分支并创建 Draft PR #5；无冲突、无未提交文件。 |
 | 合并 main | **不允许** | 未获所有者明确批准；真实上游/客户端与部署验收未完成。 |
 
@@ -93,7 +93,7 @@
 | STATIC_CHECK | `npm run check` | **PASS**（含 UI 模块 15/15） | 本轮最终执行 exit 0 |
 | STATIC_CHECK | `npm run docs:check` | **PASS** | 同上 |
 | STATIC_CHECK | `node scripts/check-metadata.mjs` | **PASS (21)** | 同上 |
-| MOCK_OFFLINE | `npm test` | **PASS 28/28 隔离套件** | 新增 `retry-governance`、`ui-contract`；既有 26 套件无回退 |
+| MOCK_OFFLINE | `npm test` | **PASS 30/30 隔离套件** | 新增 `retry-governance`、`ui-contract`、`native-usage`、`hosted-tools` |
 | MOCK_OFFLINE | `npm test ui-next` | **PASS 2/2** | 静态资源/CSP/鉴权/穿越/注入面 |
 | BROWSER | `node scripts/test/ui-browser-check.mjs` | **PASS 14/14** | `docs/evidence/2026-11-09-integration/browser-acceptance.txt` |
 | CLIENT_MOCK | DSH 0.2.2-rc.1 × 本地 mock | **PASS 3/3** | Chat、Responses 桥、原生 Responses；见 `client-mock-validation.txt` |
@@ -122,6 +122,14 @@
 - **DSH 0.2.2-rc.1**：临时 `DSH_HOME` + overlay（`api=openai-responses`），经同一实例，exit 0、输出 `DSH_REAL_OK`。
 - **网关记账**：3 请求 / 0 错误 / 18,809 tokens / p95 2,628 ms；`lastServing={model:"deepseek-v4.1-flash",provider:"opencodego"}`。
 - **仍 NOT_RUN**：真实工具执行（bwrap user namespace 不可用）、Codex Desktop、429/5xx 故障注入。证据见 `docs/evidence/2026-11-09-integration/real-client-validation.txt`。
+
+### 3.5 2026-11-10 补充：Codex 多 provider 边界与原生用量
+
+- **同一 thread 不能换 provider（已验证）**：TUI `/model` 只列当前 provider 模型；`codex exec resume` 跨 provider 返回 `modelProviderMismatch`（codex -32600）。正确方式是独立 profile/终端，不是同会话切换。
+- **Desktop（已验证限制）**：app-server 协议支持 per-thread `modelProvider`，但 Desktop bundle 固定传 `modelProvider:null`，模型列表无 provider 过滤、UI 无 profile 选择器；单实例只能用当前 provider。独立 `CODEX_HOME` 第二实例未做 GUI 端到端验证。
+- **托管工具（已验证边界）**：`offline/hosted-tools.test.mjs` 断言原生 Responses 原样保留 `web_search`/`namespace`，Chat 桥丢弃且保留函数工具；`/api/status` 暴露 `hostedTools`。OpenCode Chat 上游本身没有这些托管工具，网关不能凭空补齐。
+- **原生流量观测（已实现）**：`GET /api/native-usage` 只读汇总 Codex sessions 的 token 计数，默认关闭，不读取消息正文；观测页与设置已接入。真实本地日志只读扫描 39 文件/32 会话/389ms/0 解析错误（个人用量数字不外发）。
+- 回归：`npm test` **30/30**；`npm run check` 0；浏览器 **14/14**（含原生用量卡与设置项）。
 
 ## 4. 已知风险与未完成项
 
