@@ -1,0 +1,37 @@
+E8 额度与应急流程演练（离线合成，2026-11-11）
+==============================================
+
+目的：在真实额度 API 不可得（状态 UNKNOWN）的前提下，把"预警→确认→应急→恢复"整条流程演练一遍，
+证明网关不会自动切换/购买/退出登录。输入全部为合成数据。
+
+复现：node scripts/test/quota-emergency-drill.mjs
+
+结果：13/13
+```text
+PASS  source=none 即使有读数也严格 UNKNOWN
+PASS  UNKNOWN 时给出人工核对建议且不自动行动
+PASS  阈值：79 normal / 80 warn / 95 critical / 100 exhausted
+PASS  critical 给出需确认的应急建议（不自动执行）
+PASS  缺确认/原因/备份点分别拒绝且状态不变
+PASS  带齐三元组才进入应急态
+PASS  应急影响声明 ≥5 条且禁止项齐全
+PASS  应急态评估带 emergency_mode_active 且 mode=emergency
+PASS  应急态下 automation 全 false
+PASS  恢复后回到 normal 并保留 lastEmergency 审计
+PASS  状态可序列化/还原且字段一致
+PASS  非法状态解析回退 normal
+PASS  评估输出不含注入的凭据字段
+```
+
+## 演练固定的行为契约
+
+1. 没有可信来源时**永远显示 UNKNOWN**，即使调用方塞了读数（`source=none` 直接忽略）。
+2. 进入应急态必须 `{acknowledged:true, reason, backupPoint}` 三者齐全，缺一项错误码不同且状态不变。
+3. 应急态必须展示 5 条影响声明（分组/可见性/需独立实例/不复用官方凭据/非无缝）并列出 5 条禁止项。
+4. `automation` 四项恒为 false；恢复保留 `lastEmergency` 作为审计。
+5. 注入的 `token/apiKey/accessToken` 等字段不会出现在评估输出里。
+
+## 边界 / NOT_RUN
+
+- 真实官方额度 API：NOT_RUN（来源/鉴权/字段未核实，本轮不读取任何官方凭据）。
+- 真实应急端到端（独立实例/桌面分组）：NOT_RUN，需单独授权与回滚步骤。
