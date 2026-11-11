@@ -76,7 +76,7 @@ CODEX_HOME=/tmp/<temp> node scripts/test/codex-live.mjs
 
 ## 6. 未完成 / NOT_RUN / 风险
 
-- **Desktop 同会话切换**：NOT_RUN（Desktop 打包 app 的 openai_base_url 与单实例行为未验证）。
+- **Desktop 同会话切换**：NOT_RUN。已做静态审计（[证据](../evidence/2026-11-11-desktop-static-audit.txt)）：Desktop 内置 codex 为 **0.167.0-alpha.3.2**（与 CLI 0.167.0 不同构建），支持 CODEX_HOME；当前 Desktop 正在运行，未启动第二实例。
 - **真实第三方付费上游的聚合轮次**：本轮第三方轮用本地 mock；真实 OpenCode Go 文本链路已在 2026-11-09 证据中验证。
 - **v2 跨供应商真实端到端**：NOT_RUN（需真实第三方 v2 工具 + 官方主代理）。
 - **真实配置写入/客户端重载、历史迁移、额度应急**：NOT_RUN（按 D5/D6/D7 需逐项确认）。
