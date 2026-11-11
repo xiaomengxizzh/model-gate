@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { startGateway } from './offline/harness.mjs'
 
-const CODEX = process.env.CODEX_BIN || '/home/xiaomengxizi/ai/harness/codex/cli/bin/codex'
+const CODEX = process.env.CODEX_BIN || 'codex'
 const OFFICIAL_MODEL = 'gpt-6-astra'
 const THIRD_MODEL_RAW = 'deepseek-v4.1-flash'
 const THIRD_SLUG = 'mg-opencodego-' + THIRD_MODEL_RAW.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')

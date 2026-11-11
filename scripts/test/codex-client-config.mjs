@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { buildCatalog } from '../../src/codex/catalog.js'
 
-const CODEX = process.env.CODEX_BIN || '/home/xiaomengxizi/ai/harness/codex/cli/bin/codex'
+const CODEX = process.env.CODEX_BIN || 'codex'
 const basePath = process.env.MG_E3_CATALOG_BASE || '/tmp/mg-e0/catalog-default.json'
 const checks = []
 const check = (n, ok, d) => { checks.push(ok); console.log((ok ? 'PASS' : 'FAIL') + '  ' + n + (d ? ' :: ' + d : '')) }

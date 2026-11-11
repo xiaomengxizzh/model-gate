@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startGateway } from './offline/harness.mjs'
 
-const CODEX = process.env.CODEX_BIN || '/home/xiaomengxizi/ai/harness/codex/cli/bin/codex'
+const CODEX = process.env.CODEX_BIN || 'codex'
 const OFFICIAL_MODEL = 'gpt-6-astra'
 const THIRD_CONFIG_MODEL = 'deepseek-v4-flash'
 const THIRD_MODEL = 'mg-third-' + THIRD_CONFIG_MODEL

@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { startGateway } from './offline/harness.mjs'
 
-const CODEX = process.env.CODEX_BIN || '/home/xiaomengxizi/ai/harness/codex/cli/bin/codex'
+const CODEX = process.env.CODEX_BIN || 'codex'
 const basePath = process.env.MG_E3_CATALOG_BASE || '/tmp/mg-e0/catalog-default.json'
 if (!existsSync(basePath)) { console.error('缺少目录基线: ' + basePath); process.exit(2) }
 const checks = []

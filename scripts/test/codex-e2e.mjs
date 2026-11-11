@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startGateway } from './offline/harness.mjs'
 
-const CODEX = process.env.CODEX_BIN || '/home/xiaomengxizi/ai/harness/codex/cli/bin/codex'
+const CODEX = process.env.CODEX_BIN || 'codex'
 const OFFICIAL_MODEL = 'gpt-6-astra'
 // 聚合 slug 由目录生成器产出：mg-<provider>-<model>（config 里的模型名不含前缀）
 const THIRD_CONFIG_MODEL = 'deepseek-v4-flash'

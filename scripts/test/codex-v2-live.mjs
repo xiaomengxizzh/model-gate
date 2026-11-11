@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startGateway } from './offline/harness.mjs'
 
-const CODEX = process.env.CODEX_BIN || '/home/xiaomengxizi/ai/harness/codex/cli/bin/codex'
+const CODEX = process.env.CODEX_BIN || 'codex'
 const OFFICIAL = 'gpt-6-astra'
 const THIRD_SLUG = 'mg-opencodego-deepseek-v4-1-flash'
 const home = await mkdtemp(join(tmpdir(), 'mg-e4-live-'))
