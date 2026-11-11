@@ -1,0 +1,32 @@
+E7 真实数据只读诊断（2026-11-11）
+=================================
+
+对象：本机真实 `~/.codex/sessions`（**只读**，未复制、未修改；模块仅输出聚合计数与 slug，不输出任何消息正文/密文）。
+命令：`diagnoseHistory({ sessionsDir: ~/.codex/sessions, catalog: <官方基线 slugs> })`
+
+## 结果（40 个会话，688ms，0 解析错误）
+
+```text
+sessions 40 / turns 122 / 0 parse errors / truncated=false
+provider: openai（40 会话）
+模型分布：gpt-6-luna 71 turns（18 会话）、gpt-6.1-sol 28 turns（5 会话）
+          ccs-opencode/deepseek-v4.1-flash 23 turns（17 会话）
+toolReplay: 15 items / 6 会话 / unpairedCalls 0
+encryptedUnreadable: 40 会话 / 7056 items
+missingModels: ccs-opencode/deepseek-v4.1-flash（1 会话）
+```
+
+## 对 D6（历史）的三条硬结论
+
+1. **v2 加密是普遍状态，不是边角**：本机 40/40 会话都含加密项（共 7056 项）。
+   因此“把旧历史跨供应商重放/迁移”在默认情况下不可行——不是网关愿不愿意的问题，而是任务内容不可读。
+2. **已有聚合命名先例**：历史里出现 `ccs-opencode/deepseek-v4.1-flash`（另一款聚合工具的命名），
+   且不在我们的 catalog 中。未来做迁移/目录对齐时必须处理这类**外部聚合 ID**，不能假设只有 `mg-*`。
+3. **工具回放风险是真实存在的**：15 个风险项分布在 6 个会话；虽然有 0 个未配对调用，但只要重放就涉及副作用。
+   这与 E5 的“不因 429/5xx 就重放工具”结论一致。
+
+## 边界 / NOT_RUN
+
+- 只读诊断，未做任何迁移（`applySelectiveMigration` 仍抛 `not_authorized`）。
+- 未输出、未记录任何消息正文、工具参数或密文。
+- 真实历史迁移演练需单独授权（备份 + 回滚演练）。
