@@ -64,6 +64,7 @@ export const SUITES = [
   'scripts/test/offline/retry-governance.test.mjs',
   'scripts/test/offline/routing-decision.test.mjs',
   'scripts/test/offline/routing-ledger.test.mjs',
+  'scripts/test/offline/sse-chunking.test.mjs',
   'scripts/test/offline/ui-contract.test.mjs',
   'scripts/test/offline/ui-next.test.mjs',
   'scripts/test/offline/user-env.test.mjs',
