@@ -18,7 +18,7 @@ const filter = (process.argv[2] || '').toLowerCase()
 //  - codex-*.mjs 是需要显式 CODEX_HOME/真实上游的手动取证脚本（由 E9 矩阵单独记录）
 //  - ui-browser-check.mjs 需要显式 --port/--token 与已启动的 CDP Chrome，按证据 README 的命令单独运行
 const EXCLUDED = new Set(['run.mjs', 'live.mjs', 'utils.mjs', 'isolate.mjs', 'ui-fixture.mjs', 'ui-browser-check.mjs',
-  'codex-e2e.mjs', 'codex-live.mjs', 'codex-live-real.mjs', 'codex-v2-live.mjs', 'codex-config-e2e.mjs', 'codex-client-config.mjs', 'codex-config-driven.mjs', 'codex-desktop-binary.mjs', 'history-migration-drill.mjs'])
+  'codex-e2e.mjs', 'codex-live.mjs', 'codex-live-real.mjs', 'codex-v2-live.mjs', 'codex-config-e2e.mjs', 'codex-client-config.mjs', 'codex-config-driven.mjs', 'codex-desktop-binary.mjs', 'history-migration-drill.mjs', 'codex-catalog-rollback.mjs'])
 const files = readdirSync(__dirname).filter((f) => f.endsWith('.mjs') && !EXCLUDED.has(f)).sort()
 const list = filter ? files.filter((f) => f.toLowerCase().includes(filter)) : files
 if (!list.length) { console.log('无匹配测试: ' + filter + '（可选: ' + files.join(', ') + '）'); process.exit(2) }
