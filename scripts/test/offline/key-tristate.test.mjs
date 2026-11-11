@@ -12,6 +12,7 @@ import {
   isVirtualKeyExpired,
   parseVirtualExpiry,
   planClientKeyUpdate,
+  planVirtualMetaUpdate,
   virtualExpiryProjection,
 } from '../../../src/index.js'
 
@@ -49,6 +50,10 @@ test('T-KEY-01 三态判定：省略/掩码=保留，空串=显式清空，非�
   assert.equal(planClientKeyUpdate({ defaults: { proxyMode: 'direct' } }, sealed).action, 'KEEP', '省略字段=保留')
   assert.equal(planClientKeyUpdate({}, sealed).action, 'KEEP', '缺 defaults=保留')
   assert.equal(planClientKeyUpdate({ defaults: { clientKey: CLIENT_KEY_MASK } }, sealed).action, 'KEEP', '掩码=保留')
+  // F-a2：掩码容忍首尾空白（API 直连可能发 '********  '），绝不能落成真实 Key
+  assert.equal(planClientKeyUpdate({ defaults: { clientKey: CLIENT_KEY_MASK + '  ' } }, sealed).action, 'KEEP')
+  assert.equal(planClientKeyUpdate({ defaults: { clientKey: '  ' + CLIENT_KEY_MASK } }, sealed).action, 'KEEP')
+  assert.equal(planClientKeyUpdate({ defaults: { clientKey: CLIENT_KEY_MASK + '\t' } }, sealed).action, 'KEEP')
   assert.deepEqual(planClientKeyUpdate({ defaults: { clientKey: CLIENT_KEY_MASK } }, legacyOnly), { action: 'MIGRATE_EXISTING_VALUE', value: 'legacy-plain' })
   assert.deepEqual(planClientKeyUpdate({ defaults: { proxyMode: 'direct' } }, legacyOnly), { action: 'MIGRATE_EXISTING_VALUE', value: 'legacy-plain' })
   assert.equal(planClientKeyUpdate({ defaults: { proxyMode: 'direct' } }, empty).action, 'KEEP')
@@ -151,6 +156,13 @@ test('P0-1 省略字段不清空全局 Key；掩码保留；替换与显式清�
   assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: CLIENT_KEY_MASK } })).status, 200)
   assert.equal((await ctx.chat(KEY1)).status, 200)
   assert.equal((await ctx.chat()).status, 401)
+
+  // F-a2：掩码 + 尾随空格不得当成真实 Key 写入（否则旧 Key 与新值都 401 → 数据面锁死）
+  const keysBeforeSpacedMask = await readFile(keysPath, 'utf8')
+  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: CLIENT_KEY_MASK + '  ' } })).status, 200)
+  assert.equal(await readFile(keysPath, 'utf8'), keysBeforeSpacedMask, '掩码变体不得改写 keys')
+  assert.equal((await ctx.chat(KEY1)).status, 200, '掩码变体保存后旧 Key 仍然有效')
+  assert.equal((await ctx.chat(CLIENT_KEY_MASK + '  ')).status, 401, '掩码字面量绝不能成为真实 Key')
 
   // 替换生效（旧 Key 立即失效）。
   assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: KEY2 } })).status, 200)
@@ -293,3 +305,91 @@ test('T-KEY-02 虚拟 Key 过期：保存校验、规范化落盘、鉴权拒绝
   assert.equal(afterBad.virtualModels[0].expiresAt, legacy.normalized, '非法值不得改写已存值')
   assert.equal((await ctx.vmChat(VKEY)).status, 200)
 })
+
+// ============================================================================
+// M0-2b：虚拟模型元数据「省略 ≠ 删除」
+// ============================================================================
+
+test('T-KEY-03 vm meta 三态判定：整个数组/单字段省略=保留，显式空值=清空', () => {
+  const current = { expiresAt: '2026-01-01T00:00:00.000Z', note: 'keep-me' }
+  assert.equal(planVirtualMetaUpdate(null, 'omitted', current).action, 'KEEP_CURRENT_META')
+  assert.deepEqual(planVirtualMetaUpdate(null, 'omitted', current).meta, current)
+  assert.equal(planVirtualMetaUpdate({}, 'present', null).action, 'KEEP_CURRENT_META')
+  assert.equal(planVirtualMetaUpdate({ name: 'vm-a' }, 'present', current).action, 'KEEP_CURRENT_META')
+  // 只改 note：expiresAt 必须从当前 meta 继承
+  assert.deepEqual(planVirtualMetaUpdate({ note: 'new-note' }, 'present', current), {
+    action: 'UPDATE', meta: { expiresAt: current.expiresAt, note: 'new-note' },
+  })
+  // 只清 expiresAt：note 继承
+  assert.deepEqual(planVirtualMetaUpdate({ expiresAt: '' }, 'present', current), {
+    action: 'UPDATE', meta: { expiresAt: '', note: 'keep-me' },
+  })
+  // 显式全空 → 清空
+  assert.deepEqual(planVirtualMetaUpdate({ expiresAt: '', note: '' }, 'present', current), { action: 'EXPLICIT_CLEAR', meta: null })
+  // 非法值 → 400
+  assert.equal(planVirtualMetaUpdate({ expiresAt: 'not-a-date' }, 'present', current).action, 'INVALID_400')
+  // legacy datetime-local 规范化
+  const local = planVirtualMetaUpdate({ expiresAt: '2099-01-01T10:00' }, 'present', {})
+  assert.equal(local.action, 'UPDATE')
+  assert.equal(local.meta.expiresAt, parseVirtualExpiry('2099-01-01T10:00').normalized)
+})
+
+test('T-KEY-03 省略 virtualModels 不得清空 meta：已过期 Key 保存后仍然 401', { timeout: 60000 }, async (t) => {
+  const ctx = await boot({ virtualModels: VM })
+  t.after(() => ctx.stop())
+  const VKEY = 'sk-vm-meta-tri-777'
+  const keysPath = join(ctx.gw.dir, 'keys.local.json')
+  const vmBody = (extra) => ({ virtualModels: [Object.assign({ name: 'vm-a', directory: [{ model: 'demo' }] }, extra)] })
+
+  assert.equal((await ctx.gw.post('/api/keys', { id: '__mg_vm_vm-a', key: VKEY })).status, 200)
+  // 已过期
+  assert.equal((await ctx.gw.post('/api/config/save', vmBody({ expiresAt: '2000-01-01T00:00:00Z', note: '过期备注' }))).status, 200)
+  assert.equal((await ctx.vmChat(VKEY)).status, 401, '过期 Key 必须拒绝')
+  const keysBefore = await readFile(keysPath, 'utf8')
+
+  // ① 整个 virtualModels 省略（只改 defaults）→ meta 字节不变，过期 Key 仍 401
+  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
+  assert.equal(await readFile(keysPath, 'utf8'), keysBefore, '省略 virtualModels 不得改写 keys.local.json')
+  assert.equal((await ctx.vmChat(VKEY)).status, 401, '省略保存后已过期 Key 不得复活')
+
+  // ①b（QA F-a1 原场景）：带 providers/models、省略 virtualModels → meta 不变，过期 Key 仍 401
+  const providerPatch = {
+    providers: { mock: { baseUrl: ctx.upstream.base, apiKeyEnv: '' } },
+    models: { demo: { provider: 'mock', api: 'openai' } },
+  }
+  assert.equal((await ctx.gw.post('/api/config/save', providerPatch)).status, 200)
+  assert.equal(await readFile(keysPath, 'utf8'), keysBefore, 'providers/models 省略式保存不得改写 keys')
+  assert.equal((await ctx.vmChat(VKEY)).status, 401, 'QA F-a1：省略 virtualModels 后已过期 Key 仍必须 401')
+
+  // ② 数组里的 vm 对象省略 expiresAt/note → 两项都保留
+  assert.equal((await ctx.gw.post('/api/config/save', vmBody({}))).status, 200)
+  assert.equal(await readFile(keysPath, 'utf8'), keysBefore, '省略字段不得改写 meta')
+  assert.equal((await ctx.vmChat(VKEY)).status, 401)
+
+  // ③ 只改 note → expiresAt 必须继承，Key 仍然过期
+  assert.equal((await ctx.gw.post('/api/config/save', vmBody({ note: '更新备注' }))).status, 200)
+  assert.equal((await ctx.vmChat(VKEY)).status, 401, '只改 note 不得顺带清掉过期时间')
+  const afterNote = await (await ctx.gw.get('/api/config')).json()
+  assert.equal(afterNote.virtualModels[0].note, '更新备注')
+  assert.equal(afterNote.virtualModels[0].expiresAtState, 'expired')
+
+  // ④ 显式清空 expiresAt → 过期限制解除（保留 note），Key 恢复可用
+  assert.equal((await ctx.gw.post('/api/config/save', vmBody({ expiresAt: '' }))).status, 200)
+  assert.equal((await ctx.vmChat(VKEY)).status, 200, '显式清空过期时间后 Key 恢复可用')
+  const afterClearExpiry = await (await ctx.gw.get('/api/config')).json()
+  assert.equal(afterClearExpiry.virtualModels[0].expiresAtState, 'none')
+  assert.equal(afterClearExpiry.virtualModels[0].note, '更新备注', '清 expiresAt 不得误删 note')
+
+  // ⑤ 显式清空两项 → meta 删除
+  assert.equal((await ctx.gw.post('/api/config/save', vmBody({ expiresAt: '', note: '' }))).status, 200)
+  const keysAfterClear = JSON.parse(JSON.stringify(await (await ctx.gw.get('/api/config')).json()))
+  assert.equal(keysAfterClear.virtualModels[0].expiresAt, '')
+  assert.equal(keysAfterClear.virtualModels[0].note, '')
+
+  // ⑥ 删除虚拟模型仍然清理独立 Key 与 meta（该行为不能修坏）
+  assert.equal((await ctx.gw.post('/api/config/save', { virtualModels: [] })).status, 200)
+  assert.equal((await ctx.gw.post('/api/config/save', vmBody({}))).status, 200)
+  const readded = await (await ctx.gw.get('/api/status')).json()
+  assert.equal(readded.virtualModels[0].keySet, false, '删除虚拟模型必须清理其独立 Key（同名重建不得继承旧 Key）')
+})
+

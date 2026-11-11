@@ -106,14 +106,33 @@ export function modelTarget(cfg, modelName, pid) {
   return { servingName, api, effortFormat: (md && md.effortFormat) || 'reasoning_effort', maxTokensMax: Number((md && md.maxTokensMax) || 0) || 0 }
 }
 
+// M0-3：磁盘指纹（存在性 + sha256），随内存 cfg 保存；配置事务用它判断「内存代际是否仍是磁盘代际」。
+// 只存哈希，不存正文/Key。
+function readFileIfExists(path) {
+  try { return readFileSync(path) } catch (error) { if (error && error.code === 'ENOENT') return null; throw error }
+}
+function rawFingerprint(buf) {
+  return buf == null ? { exists: false, hash: null, size: 0 } : { exists: true, hash: createHash('sha256').update(buf).digest('hex'), size: buf.length }
+}
+function parseJsonBuffer(buf) {
+  try { return JSON.parse(buf.toString('utf8').replace(/^\uFEFF/, '')) } catch { return null }
+}
+function keysFromRaw(raw) {
+  if (raw == null) return {}
+  const text = raw.toString('utf8')
+  if (text.trimStart().startsWith('MG1:')) return keysDecrypt(text)
+  try { const o = JSON.parse(text); return o && typeof o === 'object' ? o : {} } catch { return {} }
+}
+
 export function loadConfig(opts = {}) {
   const p = configPaths()
   let mainFile = opts.configFile || (process.env.MG_CONFIG && existsSync(process.env.MG_CONFIG) ? process.env.MG_CONFIG : null)
   if (!mainFile) mainFile = join(p.dir, 'gateway.json')
   if (!existsSync(mainFile)) throw new Error('配置文件不存在: ' + mainFile)
   const base = readJson(mainFile)
-  if (existsSync(p.local)) {
-    const patch = readJson(p.local)
+  const localRaw = readFileIfExists(p.local)
+  if (localRaw != null) {
+    const patch = parseJsonBuffer(localRaw) || {}
     base.providers = Object.assign({}, base.providers, patch.providers)
     base.models = Object.assign({}, base.models, patch.models)
     // 删除墓碑：patch 只做合并，缺键无法表达"删除"，因此保存时显式记录被删的上游/模型名（MG-003）
@@ -126,7 +145,9 @@ export function loadConfig(opts = {}) {
     if (patch.virtualModels !== undefined) base.virtualModels = patch.virtualModels
   }
   base.virtualModels = normalizeVirtualModels(base.virtualModels, base)
-  base._keys = readKeys(p.keys)                // { providerId: key }，gitignored，不入库
+  const keysRaw = readFileIfExists(p.keys)     // 一次读盘：解析与指纹用同一份字节
+  base._keys = keysFromRaw(keysRaw)            // { providerId: key }，gitignored，不入库
+  base._disk = { local: rawFingerprint(localRaw), keys: rawFingerprint(keysRaw) }
   base._paths = p
   return base
 }
@@ -390,10 +411,7 @@ export function keysDecrypt(raw) {
   return JSON.parse(pt.toString('utf8'))
 }
 function readKeys(p) {
-  if (!existsSync(p)) return {}
-  const raw = readFileSync(p, 'utf8')
-  if (raw.trimStart().startsWith('MG1:')) return keysDecrypt(raw)
-  try { const o = JSON.parse(raw); return o && typeof o === 'object' ? o : {} } catch { return {} }
+  try { return keysFromRaw(readFileSync(p)) } catch (error) { if (error && error.code === 'ENOENT') return {}; throw error }
 }
 // 从盘上读取最新 keys（解密），供写路径合并使用——消除「基于内存旧副本写回」复活已删 key 的窗口
 export function readKeysFresh(p) { return readKeys(p) }
