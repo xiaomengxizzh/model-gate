@@ -6,7 +6,9 @@ import { URL } from 'node:url'
 import { gunzipSync } from 'node:zlib'
 import { adapterFor, embeddingAdapterFor } from './format.js'
 import { abortedError, sleepWith } from './budget.js'
-import { classify429, parseRetryAfterMs, retryWaitCap, MAX_ERR_BODY_BYTES } from './retry-policy.js'
+import { classify429, parseRetryAfterMs, retryWaitCap, retryAfterHeader, isToolBearingBody, MAX_ERR_BODY_BYTES, createAttemptPolicy, recordAttemptOutcome, planAttemptRetry } from './retry-policy.js'
+import { createDeadline, deadlineError, abortPromise, DEADLINE_TIMEOUT, DEADLINE_CANCELLED } from './deadline.js'
+import { STAGES, OUTCOMES, createAttempt, createExecutionContext, latestAttempt, retrySafetyOf, summarizeAttempt } from './attempt-state.js'
 
 // 上游连接复用（keep-alive）：减少每次 TLS/TCP 握手，改善连接体验与延迟
 const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 64 })
@@ -513,4 +515,436 @@ export function probeModel(provider, model, api = provider.api || 'openai', upst
     req.write(payload)
     req.end()
   })
+}
+
+// ============================================================================
+// M1-1：单次发送（forwardOnce）与一次发送执行器（execute）
+//
+// 契约（docs/contracts/request-lifecycle-v1.md，M1 扩展）：
+//  - 低层 forwardOnce 内部绝不自动重试；
+//  - execute 以单调 deadline 覆盖排队等待 → 连接 → 写体 → 读头 → 流读取 → 重试等待，
+//    等待可被取消唤醒，并发/限流令牌在 finally 归还；
+//  - 尝试阶段只前向单调，写开始即 SENT_UNKNOWN；只有 UNSENT 或供应商可证明的前置拒绝
+//    （REJECTED_BEFORE_EXECUTION）允许下一次发送；SENT_UNKNOWN / ACCEPTED 后断流 /
+//    DELIVERED / TOOL_RISK / PARTIAL_COMMIT 一律终止为可诊断终态，不隐式重放；
+//  - 429 保留 Retry-After 与归因，等待计入同一 deadline，且与熔断解耦；
+//  - 402/404 仅在证明未执行时标记为可换候选；不可归类业务 4xx 原样归一；
+//  - 取消独立于失败与熔断，返回一次终态，不触发重试。
+// ============================================================================
+
+const LOCAL_TIMERS = {
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (handle) => clearTimeout(handle),
+}
+
+function timersOf(deadline) {
+  return (deadline && deadline.timers) || LOCAL_TIMERS
+}
+
+function releaseLeaseOf(lease) {
+  if (!lease) return () => {}
+  if (typeof lease === 'function') return lease
+  if (typeof lease.release === 'function') return () => lease.release()
+  return () => {}
+}
+
+function safeRelease(lease) {
+  try { releaseLeaseOf(lease)() } catch { /* 释放失败不覆盖主结果 */ }
+}
+
+function deadlineAbortError(deadline, detail) {
+  if (deadline) return deadlineError(deadline.reason || DEADLINE_TIMEOUT, detail)
+  return abortedError('request_timeout', detail)
+}
+
+/**
+ * 单次上游发送（M1-1 低层执行器）：只发一次，内部绝不重试。
+ * attempt 提供阶段回调（onWriteBegin / onResponseHeaders / ...）；不传则退化为普通单次请求。
+ * 返回 { ok, status, headers, stream, retryAfter, bodyText?, wroteBody }；
+ * 非 2xx 会读取上限 8KB 的错误体（归因用）并销毁连接，不把错误流留给调用方。
+ */
+export function forwardOnce(provider, path, method, headers, bodyBuf, opts = {}, attempt = null, ctl = {}) {
+  const url = upstreamUrl(provider, path)
+  const timeout = Object.assign({ connectMs: 10000, firstByteMs: 60000, idleMs: 60000 }, opts.timeout)
+  const deadline = ctl.deadline || null
+  const budget = ctl.budget || null
+  const signal = ctl.signal || (deadline && deadline.signal) || (budget && budget.signal) || null
+  const timers = timersOf(deadline)
+  const maxErrBody = Number(opts.maxErrorBodyBytes) > 0 ? Number(opts.maxErrorBodyBytes) : MAX_ERR_BODY_BYTES
+  return new Promise((resolve, reject) => {
+    const remaining = () => (deadline ? deadline.remaining() : (budget ? budget.remaining() : Infinity))
+    const expiredNow = () => (deadline ? deadline.expired() : (budget ? budget.expired() : false))
+    const abortErr = (detail) => deadlineAbortError(deadline, detail)
+    if (expiredNow()) { reject(abortErr('deadline exceeded before send')); return }
+    if (signal && signal.aborted) { reject(abortErr('request aborted before send')); return }
+    const rem = remaining()
+    const firstByteMs = Number(timeout.firstByteMs) > 0 ? Number(timeout.firstByteMs) : 60000
+    const idleMs = Number(timeout.idleMs) > 0 ? Number(timeout.idleMs) : 60000
+    const effFirstByte = Number.isFinite(rem) ? Math.max(1, Math.min(firstByteMs, rem)) : firstByteMs
+    const effIdle = Number.isFinite(rem) ? Math.max(1, Math.min(idleMs, rem)) : idleMs
+    let settled = false
+    let req = null
+    let res = null
+    let firstByteTimer = null
+    let wrote = false
+    const cleanup = () => {
+      if (firstByteTimer) { try { timers.clearTimeout(firstByteTimer) } catch {} ; firstByteTimer = null }
+      if (signal && onAbort) { try { signal.removeEventListener('abort', onAbort) } catch {} }
+    }
+    const finishReject = (err) => { if (settled) return; settled = true; cleanup(); reject(err) }
+    const finishResolve = (value) => { if (settled) return; settled = true; cleanup(); resolve(value) }
+    const onAbort = () => {
+      const err = abortErr('upstream request aborted by deadline')
+      finishReject(err)
+      try { if (req) req.destroy(err) } catch {}
+      try { if (res) res.destroy(err) } catch {}
+    }
+    try {
+      const { mod, reqOpts } = ctxFor(provider, url, method, headers, Object.assign({}, ctl, { connectMs: effFirstByte }))
+      req = mod.request(reqOpts, (response) => {
+        res = response
+        if (settled) { try { response.destroy() } catch {} ; return }
+        if (attempt) attempt.onResponseHeaders({ status: response.statusCode, headers: response.headers })
+        const status = response.statusCode
+        try { response.setTimeout(effIdle, () => response.destroy(Object.assign(new Error('upstream idle'), { code: 'ETIMEDOUT' }))) } catch {}
+        const base = {
+          ok: status >= 200 && status < 300,
+          status,
+          headers: response.headers,
+          retryAfter: parseRetryAfter(response.headers),
+          wroteBody: wrote,
+        }
+        if (status >= 400) {
+          // 错误体只读上限字节用于 429/402/404 归因，读完立即销毁连接。
+          readSmall(response, signal, maxErrBody).then(
+            (bodyText) => finishResolve(Object.assign(base, { stream: null, bodyText })),
+            () => finishResolve(Object.assign(base, { stream: null, bodyText: '' })),
+          )
+        } else {
+          finishResolve(Object.assign(base, { stream: response }))
+        }
+      })
+    } catch (err) { finishReject(err); return }
+    // 先注册 error 监听，避免 abort/超时 destroy 在无监听时抛出未捕获 'error'。
+    req.on('error', (err) => finishReject(err && err.aborted ? err : err))
+    firstByteTimer = timers.setTimeout(() => {
+      const budgetBound = Number.isFinite(rem) && rem <= firstByteMs
+      const err = budgetBound ? abortErr('upstream response headers timeout') : Object.assign(new Error('first-byte timeout'), { code: 'ETIMEDOUT' })
+      finishReject(err)
+      try { req.destroy(err) } catch {}
+    }, effFirstByte)
+    if (firstByteTimer && typeof firstByteTimer.unref === 'function') firstByteTimer.unref()
+    try {
+      req.setTimeout(effFirstByte, () => {
+        const err = Object.assign(new Error('connect timeout'), { code: 'ETIMEDOUT' })
+        finishReject(err)
+        try { req.destroy(err) } catch {}
+      })
+    } catch {}
+    if (signal) {
+      if (signal.aborted) { onAbort(); return }
+      try { signal.addEventListener('abort', onAbort, { once: true }) } catch {}
+    }
+    try {
+      if (attempt) attempt.onWriteBegin({ method, hasBody: !!(bodyBuf && bodyBuf.length) })
+      wrote = true
+      if (bodyBuf && bodyBuf.length) req.write(bodyBuf)
+      req.end()
+    } catch (err) {
+      finishReject(err)
+      try { req.destroy() } catch {}
+    }
+  })
+}
+
+/**
+ * 读取一次流（M1-1）：同一 deadline 覆盖流读取；取消/超时立即销毁流并抛出
+ * 带 aborted/reason 的错误。onChunk 返回 false 可主动停止（例如已观测到工具意图）。
+ */
+export async function readStreamOnce(stream, deadline, opts = {}) {
+  if (!stream) throw new Error('readStreamOnce: stream required')
+  const limit = Number.isFinite(Number(opts.limit)) ? Math.max(0, Number(opts.limit)) : Infinity
+  const chunks = []
+  let total = 0
+  let aborted = null
+  const onAbort = () => {
+    aborted = deadlineAbortError(deadline, 'stream read aborted by deadline')
+    try { stream.destroy() } catch {}
+  }
+  if (deadline) {
+    if (deadline.signal && deadline.signal.aborted) { onAbort(); throw aborted }
+    try { deadline.signal.addEventListener('abort', onAbort, { once: true }) } catch {}
+  }
+  try {
+    for await (const chunk of stream) {
+      if (aborted) throw aborted
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))
+      if (total + buf.length > limit) {
+        const rest = limit - total
+        if (rest > 0) chunks.push(buf.subarray(0, rest))
+        total = limit
+        try { stream.destroy() } catch {}
+        break
+      }
+      chunks.push(buf)
+      total += buf.length
+      if (typeof opts.onChunk === 'function') {
+        const keep = opts.onChunk(buf.toString('utf8'))
+        if (keep === false) { try { stream.destroy() } catch {} ; break }
+      }
+    }
+  } catch (err) {
+    if (aborted) throw aborted
+    if (deadline && deadline.timedOut()) throw deadlineAbortError(deadline, 'stream deadline exceeded')
+    throw err
+  } finally {
+    if (deadline) { try { deadline.signal.removeEventListener('abort', onAbort) } catch {} }
+  }
+  if (aborted) throw aborted
+  if (deadline && deadline.timedOut()) throw deadlineAbortError(deadline, 'stream deadline exceeded')
+  return { text: Buffer.concat(chunks).toString('utf8'), bytes: total }
+}
+
+async function acquireWithDeadline(request, permit, deadline) {
+  if (typeof request.acquire !== 'function') return { lease: null }
+  const pending = Promise.resolve().then(() => request.acquire(permit, deadline, deadline.signal))
+  const aborted = abortPromise(deadline.signal)
+  const winner = await Promise.race([
+    pending.then((lease) => ({ lease })),
+    aborted.then(() => ({ aborted: true })),
+  ])
+  if (winner.aborted) {
+    // 迟到的授权必须立即归还，避免取消后令牌泄漏。
+    pending.then((late) => safeRelease(late), () => {})
+    return { aborted: true, reason: deadline.reason || (deadline.timedOut() ? DEADLINE_TIMEOUT : DEADLINE_CANCELLED) }
+  }
+  return { lease: winner.lease }
+}
+
+function defaultPolicyFor(request) {
+  const retry = Object.assign({}, (request && request.retry) || {})
+  const maxAttempts = request && request.maxAttempts !== undefined
+    ? request.maxAttempts
+    : (retry.maxAttempts !== undefined ? retry.maxAttempts : 1)
+  return createAttemptPolicy({
+    maxAttempts,
+    maxRetryAfterMs: request && request.maxRetryAfterMs !== undefined ? request.maxRetryAfterMs : retry.maxRetryAfterMs,
+    initialDelayMs: retry.initialDelayMs,
+    maxDelayMs: retry.maxDelayMs,
+    jitter: retry.jitter,
+    candidates: request && request.candidates,
+  })
+}
+
+function deadlineSummary(deadline) {
+  const remaining = deadline.remaining()
+  return {
+    elapsedMs: Math.round(deadline.elapsed()),
+    remainingMs: Number.isFinite(remaining) ? Math.round(remaining) : null,
+    expired: deadline.expired(),
+    timedOut: deadline.timedOut(),
+    cancelled: deadline.cancelled(),
+    reason: deadline.reason || null,
+  }
+}
+
+function defaultOutcomeError(outcome, detail = {}) {
+  switch (outcome) {
+    case OUTCOMES.SUCCEEDED: return undefined
+    case OUTCOMES.CANCELLED:
+    case OUTCOMES.CANCELLED_UNSENT:
+      return { type: 'client_closed', code: 'ECANCELED', aborted: true }
+    case OUTCOMES.DEADLINE_EXCEEDED:
+      return { type: 'request_timeout', code: 'ETIMEDOUT', aborted: true }
+    case OUTCOMES.DENIED:
+      return { type: 'target_denied', message: 'final target not authorized' }
+    case OUTCOMES.STOPPED:
+      return { type: 'no_attempt', message: 'no authorized target produced an attempt' }
+    default:
+      return detail.error || { type: 'upstream_error', message: String(outcome) }
+  }
+}
+
+function finishExecution(context, deadline, outcome, extras = {}) {
+  const detail = extras.detail || {}
+  const attempt = extras.attempt !== undefined ? extras.attempt : latestAttempt(context)
+  const out = {
+    ok: outcome === OUTCOMES.SUCCEEDED,
+    outcome,
+    stage: attempt ? attempt.stage : STAGES.UNSENT,
+    retryable: false,
+    nonIdempotent: !!context.nonIdempotent,
+    attempts: context.attempts.map(summarizeAttempt),
+    attemptsMade: context.attempts.length,
+    waitedMs: context.waitedMs,
+    deadline: deadlineSummary(deadline),
+  }
+  for (const key of [
+    'status', 'headers', 'stream', 'bodyText', 'attribution', 'attributionCode',
+    'retryAfterMs', 'hasRetryAfter', 'countsAsProviderFailure', 'circuit', 'swapAllowed',
+    'businessError', 'execution', 'delivered', 'error', 'errorClass',
+  ]) {
+    if (detail[key] !== undefined) out[key] = detail[key]
+  }
+  if (out.retryAfterMs != null) out.retryAfterHeader = retryAfterHeader(out.retryAfterMs)
+  // 取消/超时是独立于上游失败的终态：错误信封必须反映真实原因，不能被上一次尝试的
+  // transport 错误覆盖；429 的 Retry-After/归因等字段仍保留。
+  if (outcome === OUTCOMES.CANCELLED || outcome === OUTCOMES.CANCELLED_UNSENT) {
+    out.error = { type: 'client_closed', code: 'ECANCELED', aborted: true }
+    out.countsAsProviderFailure = false
+    out.circuit = 'unaffected'
+  } else if (outcome === OUTCOMES.DEADLINE_EXCEEDED) {
+    out.error = { type: 'request_timeout', code: 'ETIMEDOUT', aborted: true }
+    out.countsAsProviderFailure = false
+    out.circuit = 'unaffected'
+  } else if (!out.error) {
+    out.error = defaultOutcomeError(outcome, detail)
+  }
+  if (extras.reason) out.stopReason = extras.reason
+  if (extras.result) out.result = extras.result
+  return out
+}
+
+/**
+ * 一次发送执行器（M1-1）：
+ *   execute(request, adapter, policy)
+ *  - request：{ overallMs?, timeout?.overallMs, signal?, deadline?, target?, candidates?,
+ *               nonIdempotent?, body?, maxAttempts?, retry?, acquire?, authorize? }
+ *  - adapter：{ forwardOnce(attempt, ctl) }，低层只发一次；通过 attempt 回调记录阶段；
+ *  - policy：{ hasBudgetForAnotherAttempt, next, recordOutcome?, planRetry? }（缺省用
+ *             createAttemptPolicy；策略内部状态按请求隔离）。
+ * 返回可诊断终态 { ok, outcome, stage, attempts, status?, stream?, attribution?, ... }。
+ */
+export async function execute(request = {}, adapter, policy) {
+  if (!adapter || typeof adapter.forwardOnce !== 'function') throw new TypeError('execute: adapter.forwardOnce is required')
+  const ownDeadline = !request.deadline
+  const deadline = request.deadline || createDeadline({
+    overallMs: Number(request.overallMs) > 0 ? Number(request.overallMs) : Number((request.timeout && request.timeout.overallMs) || 0),
+    signal: request.signal || null,
+    now: request.now,
+    timers: request.timers,
+  })
+  const context = createExecutionContext({
+    requestId: request.id,
+    target: request.target === undefined ? null : request.target,
+    nonIdempotent: request.nonIdempotent === true || isToolBearingBody(request.body),
+  })
+  const pol = policy && typeof policy.next === 'function' ? policy : defaultPolicyFor(request)
+  let lease = null
+  try {
+    for (;;) {
+      if (deadline.expired()) {
+        const outcome = deadline.cancelled()
+          ? (context.attempts.length ? OUTCOMES.CANCELLED : OUTCOMES.CANCELLED_UNSENT)
+          : OUTCOMES.DEADLINE_EXCEEDED
+        return finishExecution(context, deadline, outcome, { detail: context.last || {}, reason: deadline.reason || 'deadline' })
+      }
+      const hasBudget = typeof pol.hasBudgetForAnotherAttempt === 'function'
+        ? !!pol.hasBudgetForAnotherAttempt(context)
+        : (!context.attempts.length || retrySafetyOf(latestAttempt(context)).allowed)
+      if (!hasBudget) {
+        if (context.last) return finishExecution(context, deadline, context.last.outcome, { detail: context.last, reason: 'attempt_budget_exhausted' })
+        return finishExecution(context, deadline, OUTCOMES.STOPPED, { detail: {}, reason: 'attempt_budget_exhausted' })
+      }
+      const decision = pol.next(context)
+      if (!decision || decision.stop) {
+        const outcome = decision && decision.outcome ? decision.outcome : (context.last ? context.last.outcome : OUTCOMES.STOPPED)
+        return finishExecution(context, deadline, outcome, { detail: context.last || {}, reason: (decision && decision.reason) || 'policy_stop' })
+      }
+      // 最终目标授权（M2 接缝）：注入守卫拒绝 → 零发送。
+      let permit = decision.target === undefined ? null : decision.target
+      if (typeof request.authorize === 'function') {
+        try {
+          permit = await request.authorize(decision.target, request)
+        } catch (err) {
+          return finishExecution(context, deadline, OUTCOMES.DENIED, {
+            detail: { error: { type: 'target_denied', message: String((err && err.message) || err).slice(0, 200) } },
+            reason: 'authorize_failed',
+          })
+        }
+        if (permit === false || (permit && permit.allowed === false)) {
+          return finishExecution(context, deadline, OUTCOMES.DENIED, {
+            detail: { error: { type: 'target_denied', message: String((permit && permit.reason) || 'final target not authorized').slice(0, 200) } },
+            reason: 'target_denied',
+          })
+        }
+      }
+      // 并发/限流租约：排队等待消耗同一 deadline，取消可唤醒；finally 归还。
+      let acquired
+      try {
+        acquired = await acquireWithDeadline(request, permit, deadline)
+      } catch (err) {
+        const cancelled = deadline.cancelled() || (err && err.reason === DEADLINE_CANCELLED)
+        const outcome = cancelled
+          ? (context.attempts.length ? OUTCOMES.CANCELLED : OUTCOMES.CANCELLED_UNSENT)
+          : (deadline.timedOut() || (err && err.aborted) ? OUTCOMES.DEADLINE_EXCEEDED : OUTCOMES.FAILED_UNSENT)
+        return finishExecution(context, deadline, outcome, {
+          detail: context.last || (outcome === OUTCOMES.FAILED_UNSENT ? { error: { type: 'lease_error', message: String((err && err.message) || err).slice(0, 200) } } : {}),
+          reason: cancelled ? 'cancelled_while_waiting' : 'deadline_while_waiting',
+        })
+      }
+      if (acquired && acquired.aborted) {
+        const cancelled = deadline.cancelled()
+        return finishExecution(context, deadline, cancelled
+          ? (context.attempts.length ? OUTCOMES.CANCELLED : OUTCOMES.CANCELLED_UNSENT)
+          : OUTCOMES.DEADLINE_EXCEEDED, { detail: context.last || {}, reason: acquired.reason || 'deadline_while_waiting' })
+      }
+      lease = acquired ? acquired.lease : null
+      let result = null
+      let thrown = null
+      let attempt = null
+      try {
+        if (deadline.expired() || (request.signal && request.signal.aborted)) {
+          const cancelled = deadline.cancelled() || (request.signal && request.signal.aborted)
+          return finishExecution(context, deadline, cancelled
+            ? (context.attempts.length ? OUTCOMES.CANCELLED : OUTCOMES.CANCELLED_UNSENT)
+            : OUTCOMES.DEADLINE_EXCEEDED, { detail: context.last || {}, reason: 'deadline_before_send' })
+        }
+        attempt = createAttempt({
+          number: decision.attempt || context.attempts.length + 1,
+          target: permit,
+          nonIdempotent: context.nonIdempotent,
+        })
+        context.attempts.push(attempt)
+        try {
+          result = await adapter.forwardOnce(attempt, {
+            deadline,
+            signal: deadline.signal,
+            target: permit,
+            attempt: attempt.number,
+            request,
+          })
+        } catch (err) { thrown = err }
+      } finally {
+        safeRelease(lease)
+        lease = null
+      }
+      const outcome = typeof pol.recordOutcome === 'function'
+        ? pol.recordOutcome({ context, attempt, result, error: thrown, deadline, request })
+        : recordAttemptOutcome({ attempt, result, error: thrown, deadline })
+      context.last = outcome
+      if (outcome.terminal) {
+        return finishExecution(context, deadline, outcome.outcome, { detail: outcome, attempt, result, reason: outcome.reason })
+      }
+      const plan = typeof pol.planRetry === 'function'
+        ? pol.planRetry({ context, outcome, remainingMs: deadline.remaining(), deadline, request })
+        : planAttemptRetry({ outcome, attemptsMade: context.attempts.length, maxAttempts: 1, remainingMs: deadline.remaining() })
+      if (!plan || plan.stop) {
+        return finishExecution(context, deadline, outcome.outcome, { detail: outcome, attempt, result, reason: plan && plan.reason })
+      }
+      if (plan.waitMs > 0) {
+        const waited = await deadline.wait(plan.waitMs)
+        if (!waited.ok) {
+          const outcome2 = waited.reason === DEADLINE_CANCELLED
+            ? (context.attempts.length ? OUTCOMES.CANCELLED : OUTCOMES.CANCELLED_UNSENT)
+            : OUTCOMES.DEADLINE_EXCEEDED
+          return finishExecution(context, deadline, outcome2, { detail: outcome, attempt, reason: waited.reason })
+        }
+        context.waitedMs += waited.waitedMs
+      }
+    }
+  } finally {
+    if (lease) safeRelease(lease)
+    if (ownDeadline) { try { deadline.dispose() } catch {} }
+  }
 }
