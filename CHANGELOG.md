@@ -2,6 +2,54 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-11/12 加固循环（M0–M5，本次交付）
+
+> 本次交付以 `dev/modelgate-hardening-a1` 集成分支为准。标注「未接线」的能力表示模块/契约已交付、生产入口仍走旧路径；部署前请按 [支持矩阵](docs/roadmap/2026-11-11-support-matrix.md) 与 [回滚与禁用](docs/how-to/rollback-and-disable.md) 核对。
+
+### Security —— 用户可观察的行为变更（Breaking / 部署前必须确认）
+
+1. **`/api/codex/*` 现在要求显式管理员令牌**：未设置 `MG_ADMIN_TOKEN`（或 `server.adminToken`）时**不再走 loopback 放行**，一律 `403 explicit_admin_required`，且在读取 body 之前拒绝。旧 `/api/*` 语义未变。
+2. **配置保存改为同代际事务**：`gateway.local.json` 与加密 `keys.local.json` 作为一个代际提交，新增跨进程锁与中断恢复；外部修改返回 `409 store_conflict`、锁被占返回 `409 store_locked`，不再出现「keys 已写、config 未写」的部分提交。
+3. **保存配置时省略 `defaults.clientKey` 不再清空数据面 Key**（此前会误删 → 无凭据可调用的 P0）。只有显式发送 `""` 才是清空；掩码（含前后空白）与省略都表示保留。
+4. **虚拟模型过期时间改为后端单一真源**：非法/歧义值保存即 `400`（`expiry_*` 码）；旧 `datetime-local` 与毫秒值保存后写显式时区 ISO；旧 `YYYY-MM-DD` 保留原样（兼容回读）。修复「过期 Key 永久有效」。
+5. **省略 `virtualModels` 或其中 `expiresAt`/`note` 字段不再清空元数据**（此前会清空并让过期 Key 复活）：整个数组或字段省略 = 保留，显式空值才清空。
+6. **第三方 Codex 目录要求能力证据**：`codex.capabilities` 中的非保守能力必须配 `codex.evidence.<同键> = { source, observedAt }`，否则目录生成以 `capability_evidence_missing` fail-closed；保守值 `false`/`[]`/`'disabled'` 无需证据。迁移做法：删除未证实字段，或补齐证据。
+7. **SSE / Chat 桥默认收紧**：`bridge()` 对托管工具、控制项、未知字段与无法精确表达的 `allowed_tools` 默认 `typedUnsupported`；产品入口 `responsesToChat()` 仍默认 `LEGACY_BRIDGE_COMPAT`（有损但逐项记录）。原生分支改由 `nativeContract` 驱动。
+8. **上游重放语义收紧（模块级，尚未全量接线）**：写开始即 `SENT_UNKNOWN`；写后无头、收头后 5xx、已交付后断流、工具风险一律不重放；只有未发送或可证明的前置拒绝（402/404/429）才允许下一跳。该语义位于 `src/request.js` 的新执行器，`forward()` 的生产接线状态以交付报告为准。
+9. **离线验证入口改为显式清单**：`scripts/test/run.mjs` 只执行 `SUITES` 字面量清单，新增测试文件**必须显式登记**否则不会执行；旧 `test:live` 改为**正向白名单 + 两道 opt-in**（`MG_ALLOW_LIVE_TESTS=1`，必要时再加 `MG_LIVE_ALLOW_UNLISTED=1`）。
+
+### Added
+
+- **M0 交付门禁**：离线 runner 改为显式清单 + 每 suite 独立 HOME/TMPDIR + 子进程环境白名单 + 超时与进程组回收；live runner 改正向白名单；`docs:check`、发布元数据与 CI 契约列为纯检出可判定门禁。
+- **M0 配置事务**：`src/config-transaction.js` 以 journal/commit marker + 原子 rename + fsync 实现配置与 Key 的同代际提交、锁与故障恢复（覆盖 9 个注入点与真实 SIGKILL）。
+- **M1 单次发送执行器**：`execute()/forwardOnce()` 提供单调截止、尝试状态机与 `SENT_UNKNOWN` 不重放语义（模块已交付，`forward()` 生产接线待后续，见「未接线」）。
+- **M1 SSE 流式解码与桥接**：SSE 流式解码、`nativeContract` 驱动的原生分支，Chat 桥严格默认（模块/契约交付，生产接线待后续）。
+- **M1 可选端点与视频幂等**：embedding/rerank/audio/image/video 共用 `src/optional/policy.js` 策略入口（未证实能力默认关闭、401、限流、429 Retry-After、取消终态）；视频创建先落 `PENDING_SEND` 再调上游，并发同键单次、主体隔离、重启恢复、结果未知不重发（模块已交付，入口接线待后续）。
+- **M2 授权与目录**：最终目标授权记录（`target-authz`）与拼装后二次校验；Codex 目录世代、零碰撞、第三方能力证据与 CAS 发布。
+- **M3 路由与预算**：证据化候选选择（可追溯）、legacy 能力信任收敛与 D7 身份闸门归一化、持久预算账本与 `MG_FB_BUDGET_EXCEEDED` 停机码。
+- **M4 管理面与控制台**：`/api/codex/*` 显式管理员入口与登记根；控制台 loading/empty/unknown/error 状态完备、401 清理与锁屏、409 保留草稿、客户端导出仅含客户端字段；历史只读诊断与额度三态/应急审计（模块侧）。
+- **M5 回执与委派**：UHR 推理回执契约（`ROUTE_MISMATCH`、verified usage 隔离）、本地 MCP 委派适配器与 mock UHR；支持矩阵与回滚/禁用开关文档。
+
+### Changed
+
+- 管理面错误信封新增结构化 `code`（如 `store_conflict`/`store_locked`/`optional_endpoint_disabled`/`capability_evidence_missing`），原有 `error` 文本保持兼容。
+- 控制台区分「会话失效（401）」与「功能级 403」：后者只让对应卡片/视图进入可重试错误，不清 token、不清其它视图数据、不跳登录；刷新与切路由在数据到达前渲染 loading 骨架，不再用旧数据顶替。
+- 控制台不再把未知计数渲染为 0/正常；`/admin` 旧面板保留为回退入口（退役条件：核心操作等价 + 双跑通过 + 真实浏览器 E2E 证据）。
+
+### Fixed
+
+- 修复 P0-1：省略 `defaults.clientKey` 的保存会删除加密库 `__mg_client`，导致数据面无凭据即可调用。
+- 修复 P1：省略 `virtualModels`/`expiresAt`/`note` 会清空元数据并让已过期虚拟 Key 复活。
+- 修复：虚拟 Key 过期判定把 ISO/`datetime-local` 经 `Number()` 变成 `NaN`，过期 Key 永久有效。
+- 修复：掩码 `'********  '`（尾随空白）被当成真实 Key 写入，导致数据面被锁死。
+- 修复：旧 runner denylist 可被字符串拼接/大小写/base64 绕过；改为正向白名单，未列入即永不执行。
+- 修复：控制台把功能级 403（如 `write_disabled`）当成会话失效，进入「客户端接入」即掉登录态。
+
+### NOT_RUN / 边界
+
+- 模块已交付但生产入口未接线：`forward()` 尚未切到新执行器（重放语义/预算/授权断言尚未成为线上行为）；可选端点入口接线；`/api/codex/*` 历史/额度模块侧生产接线。重开条件见支持矩阵。
+- 真实上游、真实 Codex CLI 三轮、真实浏览器 R00 验收：本轮离线/mock 范围之外未执行（E2E 由独立 QA 在 R00 执行）。
+
 ## 2026-11-11 Codex 聚合 M2 LIVE 边界：v2 加密任务显式阻断
 
 ### Verified
