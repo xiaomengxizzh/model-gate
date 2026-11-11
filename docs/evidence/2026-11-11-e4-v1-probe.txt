@@ -1,0 +1,28 @@
+E4/M2 只读取证：v2 关闭时的协作工具可用性（2026-11-11）
+====================================================
+
+环境：真实 Codex CLI 0.167（features.multi_agent_v2=false）→ ModelGate → 真实 chatgpt.com 官方主代理；
+模型 gpt-6-astra；隔离 CODEX_HOME（登录副本，测后 shred）。
+复现：node scripts/test/codex-v1-live.mjs（事件原文 /tmp/mg-e0/v1-live-events.jsonl）
+
+## 结果
+
+```text
+event: agent_message text="TOOLS_UNAVAILABLE"
+turn.completed usage{input 21,893 / cached 7,168 / output 44}
+```
+
+即：v2 关闭时，本次 `codex exec` 会话没有向模型提供 `multi_agent_v1` 的 spawn_agent 工具
+（模型自行判断工具不可用并如实回复），因此不存在“v1 明文任务”可用的路径。
+
+## 与 v2 对照
+
+| 配置 | 工具可用性 | 子代理任务 | 结论 |
+| --- | --- | --- | --- |
+| v2 开启（默认） | `collaboration` 命名空间可用 | 加密 `agent_message` → 网关显式 `v2_encrypted_task_unsupported` | M2 被 D3 阻断（有证据） |
+| v2 关闭 | 本次 exec 会话未提供 `multi_agent_v1` 工具 | 无法创建 | 不具备 M2 路径 |
+
+## 边界
+
+- 只覆盖 `codex exec --json` 一次性会话；交互式 TUI 或其他 flag 下 v1 工具是否出现未验证。
+- 即使将来 v1 明文可用，按 D3 也不能“默认全局切回 v1”，只能作为所有者明确批准的显式路径。
