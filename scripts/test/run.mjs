@@ -47,6 +47,7 @@ export const SUITES = [
   'scripts/test/offline/config-schema.test.mjs',
   'scripts/test/offline/config-transaction.test.mjs',
   'scripts/test/offline/deadline.test.mjs',
+  'scripts/test/offline/forward-wiring.test.mjs',
   'scripts/test/offline/embeddings.test.mjs',
   'scripts/test/offline/hosted-tools.test.mjs',
   'scripts/test/offline/inference-receipt.test.mjs',
@@ -73,6 +74,7 @@ export const SUITES = [
   'scripts/test/offline/ui-next.test.mjs',
   'scripts/test/offline/ui-state.test.mjs',
   'scripts/test/offline/user-env.test.mjs',
+  'scripts/test/offline/wiring-e2e.test.mjs',
   'scripts/test/offline/video.test.mjs',
   'scripts/test/offline/wire-format.test.mjs',
   // M0-1 自检：验证本运行器自身的清单/超时/环境隔离行为。
