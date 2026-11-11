@@ -2,6 +2,18 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-11 Codex 聚合补丁：OpenCode Go 会话头与真实第三方复验
+
+### Fixed
+- `forward.js`：`opencodego` 目标缺失 `x-opencode-session` 时上游返回 `400 MissingSessionID`。现从客户端 `x-opencode-session`/`session-id`/`thread-id` 派生（最后回退一次性 `mg-<uuid>`），仅派生值、不转发原始官方头。回归 `offline/codex-opencode-session.test.mjs`(2)。
+
+### Verified
+- **LIVE-REAL 7/7**：真实 Codex CLI + 真实 chatgpt.com 官方后端 + 真实 OpenCode Go `deepseek-v4.1-flash`，同线程 GPT→第三方→GPT 全部成功（证据 `docs/evidence/2026-11-11-e3-live-switching.md` §E）。
+- `npm test` 44/44 隔离套件。
+
+### NOT_RUN
+- Desktop；真实 v2 跨供应商；真实配置写入/历史迁移/额度演练。
+
 ## 2026-11-11 Codex 聚合 E5/E9：安全 Fallback 与验收矩阵
 
 ### Added

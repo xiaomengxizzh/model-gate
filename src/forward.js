@@ -1,6 +1,7 @@
 // 转发链模块（Phase1 TD3 自 index.js 拆分）：routes 构建 + 三层重试 + 循环兜底 + 限流/记账协作
 // 共享辅助（健康/统计/工具）由 index.js 经 deps 注入，避免双向依赖
 import { gunzipSync } from 'node:zlib'
+import { randomUUID } from 'node:crypto'
 import { adapterFor, cacheHitMiss, hasTools, mapErrorEnvelope } from './format.js'
 import { buildProvider, modelTarget } from './router.js'
 import { isStreamResponse } from './sse.js'
@@ -105,9 +106,13 @@ export function buildHeaders(req, provider, bodyBuf, cfg, api, body, ctx) {
   }
   if (provider.id === 'opencodego') {
     const first = (v) => Array.isArray(v) ? v[0] : v
+    // OpenCode Go 强制要求 x-opencode-session（缺失直接 400 MissingSessionID）。Codex 0.167 发的是
+    // session-id / thread-id（官方头，转发前已被剥掉），因此这里只**派生**一个会话标识：
+    // 优先客户端显式头，其次 Codex 的 session-id/thread-id 值，最后给一次性随机 id（不再发裸请求）。
     const session = first(req.headers['x-opencode-session']) || first(req.headers['x-session-id']) || first(req.headers['x-conversation-id']) ||
+      first(req.headers['session-id']) || first(req.headers['thread-id']) ||
       (body && (body.session_id || body.conversation_id)) || headers['x-opencode-session'] || headers['x-session-id']
-    if (session != null && String(session).trim()) headers['x-opencode-session'] = String(session)
+    headers['x-opencode-session'] = (session != null && String(session).trim()) ? String(session) : ('mg-' + randomUUID())
   }
   // 协议专属头（per-model protocol 改革的下游：协议换掉后鉴权头也得跟着换）。
   // Anthropic Messages API 认 x-api-key 且强制 anthropic-version（多数 OpenAI 兼容中转也接受 Bearer，

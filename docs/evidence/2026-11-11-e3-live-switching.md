@@ -40,3 +40,21 @@ turn3 同线程切回官方 → 官方 mock 再次收到
 - Desktop 同会话切换：NOT_RUN（Desktop 打包 app 的 `openai_base_url` 配置与单实例行为未验证）。
 - 官方订阅流量经本地网关的**条款/政策**边界：HANDLED-BY-OWNER（用户已明确授权本轮真实测试；产品化发布前仍需单独合规结论）。
 - 第三方真实付费上游：本轮第三方轮用本地 mock；真实 OpenCode Go 付费链路已在 2026-11-09 证据中验证文本往返，聚合模式下的真实第三方轮标 NOT_RUN（可随时用同一脚本替换 provider 复测）。
+
+## E. 真实第三方上游（OpenCode Go）同线程复验 —— 7/7
+
+```text
+CODEX_HOME=<temp> node scripts/test/codex-live-real.mjs
+PASS  turn1 官方（真实 chatgpt.com）文本 REAL_T1_OFFICIAL_OK
+PASS  turn2 真实第三方 deepseek-v4.1-flash（opencode.ai）文本 REAL_T2_THIRD_OK
+PASS  turn3 切回官方文本 REAL_T3_BACK_OK
+7/7 live-real checks passed
+```
+
+同一线程三轮全部为真实网络请求；第三方轮经 ModelGate Chat 桥到 OpenCode Go，官方凭据零进入第三方。
+
+### 本轮发现并修复的真实缺陷
+
+OpenCode Go 强制要求头 `x-opencode-session`，缺失时返回 `400 MissingSessionID`。Codex 0.167 只发 `session-id`/`thread-id`，而这两个官方头在第三方目标上会被安全策略剥掉，导致聚合轮次必然 400。
+
+修复：`forward.js` 为 `opencodego` **派生**该头（显式 `x-opencode-session` > `session-id`/`thread-id` > 一次性 `mg-<uuid>`），只派生值、不转发原始官方头；回归 `offline/codex-opencode-session.test.mjs`（2 用例）。
