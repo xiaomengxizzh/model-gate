@@ -25,6 +25,7 @@ import { classifyTarget } from './codex/identity.js'
 import { buildCatalog } from './codex/catalog.js'
 import { planTargetHeaders, targetDeny, buildOfficialHeaders, officialPassthroughEnabled } from './codex/auth.js'
 import { handleCodexApi, isCodexApiPath } from './codex/api.js'
+import { registerConfigRoot, sha256Hex } from './codex/config.js'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
@@ -256,6 +257,53 @@ function isLoopbackPeer(req) {
   const a = (req.socket && req.socket.remoteAddress) || ''
   return a === '::1' || a === '127.0.0.1' || a === '::ffff:127.0.0.1' || a.startsWith('::ffff:127.')
 }
+// —— P0-2：Codex 管理面入口（M4-1b）——
+// 与旧 /api/* 的管理语义分开：/api/codex/* 一律要求“显式管理员”（正确管理令牌），
+// 未设置令牌时不再有任何 loopback 放行；且必须在读请求体之前完成判定。
+const CODEX_MANAGED_ROOT_ENV = 'MG_CODEX_MANAGED_ROOT'
+const CODEX_MANAGED_ROOT_ID = 'managed-root'
+
+function managementTokenOf(req) {
+  const ah = req.headers['authorization'] || ''
+  if (String(ah).slice(0, 7).toLowerCase() === 'bearer ') return String(ah).slice(7).trim()
+  const x = req.headers['x-mg-admin']
+  return x == null ? '' : String(x).trim()
+}
+
+// 返回 { explicitAdmin:true, adminSubject } 或 null。adminSubject 是令牌的不可逆短哈希
+// （稳定、便于审计关联；日志/响应永不含令牌本体）。
+function explicitAdminOf(req, state) {
+  if (!state.adminToken) return null
+  const supplied = managementTokenOf(req)
+  if (!supplied || !safeTokenCmp(supplied, state.adminToken)) return null
+  return { explicitAdmin: true, adminSubject: 'admin-' + sha256Hex(String(state.adminToken)).slice(0, 16) }
+}
+
+// 远程管理显式开关：仅 server.allowRemote=true 或 MG_ADMIN_ALLOW_REMOTE=1 时放行非回环 peer。
+function remoteManagementAllowed(state) {
+  const s = (state.cfg && state.cfg.server) || {}
+  if (s.allowRemote === true) return true
+  return /^(1|true|on)$/i.test(String(process.env.MG_ADMIN_ALLOW_REMOTE || '').trim())
+}
+
+function sendCodexDenied(res, status, code, message) {
+  sendJson(res, status, { ok: false, error: message, code })
+}
+
+// 启动期登记受控自管根（默认关闭）。登记失败只警告并保持关闭（fail closed），不回显路径细节。
+function setupCodexManagedRoot(state) {
+  state.managedRoot = false
+  const raw = String(process.env[CODEX_MANAGED_ROOT_ENV] || '').trim()
+  if (!raw) return
+  try {
+    registerConfigRoot({ id: CODEX_MANAGED_ROOT_ID, path: raw, mode: 'managed' })
+    state.managedRoot = true
+    state.log && state.log.info('Codex 受控写入已启用（managed root 已登记，id=' + CODEX_MANAGED_ROOT_ID + '）')
+  } catch (e) {
+    state.log && state.log.warn('MG_CODEX_MANAGED_ROOT 无法登记，Codex 受控写入保持关闭', (e && e.code) ? e.code : 'invalid_managed_root')
+  }
+}
+
 function denyOrigin(res, path, msg) {
   // 管理面沿用 {error: string}；数据面沿用 {error:{message,type}}，避免同一个 403 出现两种信封
   if (path === '/api' || path.startsWith('/api/')) { sendJson(res, 403, { error: msg }); return }
@@ -1329,13 +1377,27 @@ function makeHandler(state) {
         res.end(html); return
       }
       if (path === '/api/auth' && req.method === 'GET') { sendJson(res, 200, { needAuth: !!state.adminToken, startedAt: state.st.startedAt }); return }
-      // E6 管理面：/api/codex/*（policy / config plan·apply·rollback / catalog status）。
-      // 鉴权、来源、路径护栏与 confirmToken 链都在 src/codex/api.js；这里只负责读 body 与回写 JSON。
+      // E6 管理面：/api/codex/*（P0-2 / M4-1b）。
+      // 顺序硬约束：Host/Origin 已在上面全局校验 → 可信 peer → 显式管理员 → 才读 body → 派发。
+      // 未设置 adminToken 时这里没有任何 loopback 放行：/api/codex/* 一律 403 explicit_admin_required。
       if (isCodexApiPath(path)) {
+        if (!isLoopbackPeer(req) && !remoteManagementAllowed(state)) {
+          log && log.warn('codex admin denied', 'remote_forbidden', path)
+          sendCodexDenied(res, 403, 'remote_forbidden', '拒绝非本机来源的 Codex 管理请求：只有回环或显式 allowRemote 可用')
+          return
+        }
+        const admin = explicitAdminOf(req, state)
+        if (!admin) {
+          log && log.warn('codex admin denied', 'explicit_admin_required', path)
+          sendCodexDenied(res, 403, 'explicit_admin_required', 'Codex 管理接口要求显式管理员令牌（未设置/未携带/错误令牌一律拒绝）')
+          return
+        }
         const rawBody = (req.method === 'POST')
           ? await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
           : undefined
-        const out = await handleCodexApi({ method: req.method, url, path, cfg: state.cfg, log, req, res, rawBody, requireAdmin: () => requireAdmin(req, res) })
+        // 入口已完成 Host/Origin/peer/显式管理员校验；isLocal=true 让模块侧不再重复用 socket 判来源
+        // （allowRemote 场景下 peer 非回环，但入口已显式放行）。
+        const out = await handleCodexApi({ method: req.method, url, path, cfg: state.cfg, log, req, res, rawBody, explicitAdmin: admin.explicitAdmin, adminSubject: admin.adminSubject, managedRoot: state.managedRoot === true, isLocal: true })
         if (out) sendJson(res, out.status, out.body)
         return
       }
@@ -1993,6 +2055,8 @@ export function start(opts = {}) {
     dUnnamed: null,      // 无会话 ID 时的当前兜底对话（按间隔切分）
     stats: { global: { requests:0, errors:0, retries:0, interrupts:0, tokens:0, latencySum:0, confirmed:0, lats: [], latTrend: [] }, byProvider: pids, byModel: {}, daily: {}, hourly: {} },
   }
+  // P0-2：受控自管 Codex 配置根只在显式环境开关下登记（默认关闭）；失败保持关闭。
+  setupCodexManagedRoot(state)
   const timers = []
   const every = (ms, fn) => { const h = setInterval(fn, ms); h.unref(); timers.push(h); return h }
   try {

@@ -95,6 +95,33 @@
 - **Key 加密落盘**：`config/keys.local.json` **始终 AES-256-GCM 加密**（文件头 `MG1:`），主密钥优先取 `MG_KEYS_MASTER`，否则自动生成并持久化到用户目录的 `master.key`。`clientKey` 同样加密存于 keys 库，不写明文。文件启动时收紧权限（Windows `icacls` / 其它 `chmod 0600`）。
 - **日志脱敏**：日志对已登记密钥/Token 值统一掩码，减少密钥落日志的风险；热更新后脱敏名单同步仍见开发计划 MG-005。
 
+## 管理面入口：/api/codex/* 显式管理员与受控写入（M4-1b / P0-2）
+
+- **显式管理员**：/api/codex/* 一律要求正确管理令牌（Authorization: Bearer <token> 或 x-mg-admin: <token>）。未设置令牌时**不再有任何本机放行**；未携带/错误令牌在读请求体之前返回 403 explicit_admin_required（大 body 不会被读取，也不会变成 413）。
+- **可信来源**：Host/Origin 仍按上文「管理面来源策略」在路由前校验；非回环对端默认 403 remote_forbidden，只有 server.allowRemote=true 或环境变量 MG_ADMIN_ALLOW_REMOTE=1 才放行远程管理（仍要求显式令牌）。旧 /api/* 的管理语义未在本轮改动。
+- **adminSubject**：入口用 sha256(管理令牌) 前 16 位派生稳定主体（形如 admin-xxxxxxxxxxxxxxxx），仅用于审计关联；日志与响应不含令牌本体。
+- **受控写入默认关闭**：apply/rollback 返回 403 write_disabled（便于诊断，不是 404）。启用：设置 MG_CODEX_MANAGED_ROOT=<绝对路径且文件名为 config.toml>；启动时登记为不透明根 id managed-root（mode=managed）。plan/apply 只接受 root=managed-root，不接受任何浏览器提供的路径或原始 TOML。登记失败（非绝对路径/非 config.toml/符号链接/父目录不可解析）只记告警并保持关闭。
+- **重启语义**：root/backup/confirmToken 注册表是进程内的；重启后旧 backupId 失效，需要重新 plan/apply 取得新 backupId；MG_CODEX_MANAGED_ROOT 会在每次启动时重新登记。
+- 相关契约：docs/contracts/management-api-v1.md 第 10 节（模块边界）与本文件。
+
+## Codex 第三方能力迁移（M2-2 行为变更）
+
+自 2026-11-11 起，第三方条目的 tool/search/patch/agent/hosted tools 能力不再从官方模板继承；未证实能力默认不声明（shell_type=disabled、experimental_supported_tools=[]，可选能力字段不写）。
+
+需要声明能力时，在 models.<名>.codex 中同时提供 capabilities 与同键 evidence：
+
+    codex:
+      capabilities:
+        webSearchToolType: text_and_image
+        multiAgentVersion: v1
+      evidence:
+        webSearchToolType: { source: "https://vendor.example/docs/models", observedAt: "2026-11-11" }
+        multiAgentVersion: { source: "https://vendor.example/docs/agents", observedAt: "2026-11-11" }
+
+- 旧字段 multiAgentVersion / toolMode / webSearchToolType / experimentalSupportedTools 视为同样的能力声明，也必须带 evidence.<同键>。
+- 保守值无需证据：false、空数组、字符串 disabled/none；codex.baseInstructions 属声明文本，无需 evidence（默认已改为中性指令）。
+- 缺失/非法证据是 fail-closed：生成目录报 capability_evidence_missing（details.model/field 指向具体项），不会静默降级。需要过渡时请删除未证实字段（自动落到保守骨架），不要依赖“只警告”模式。
+
 ## Codex 聚合身份域（E1）
 
 Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一批**会话/身份专用头**。网关按「目标身份域」逐头决定放行与否，避免官方凭据流入第三方、第三方 key 流入官方路径。
@@ -235,6 +262,8 @@ model-gateway/
 | `MG_KEYS_MASTER` | 可选：keys 加密主密钥；默认自动生成并持久化，keys 始终加密存储 |
 | `MG_CLIENT_KEY` | 数据面客户端接入 Key（配了则 /v1/* 需带 Bearer） |
 | `MG_ADMIN_TOKEN` | 管理 API 令牌 |
+| `MG_ADMIN_ALLOW_REMOTE` | 置 `1`/`true`/`on` 允许非回环对端访问**管理面**（仍要求显式管理令牌）；默认关闭 |
+| `MG_CODEX_MANAGED_ROOT` | 受控自管 Codex 配置文件的绝对路径（必须名为 `config.toml`）；设置后启动期登记不透明根 `managed-root`，启用 `/api/codex/config/apply|rollback`（仍要求显式管理员）。默认关闭 = apply/rollback 403 `write_disabled` |
 | `MG_MAX_BODY` | 覆盖 `server.maxBodyBytes`（测试用） |
 | `MG_CONFIG` | 指定非默认配置文件路径 |
 | `MG_SILENT` | 置 1 关闭控制台日志（仍写文件） |
