@@ -211,6 +211,27 @@ export function credentialModeAllowed(domain, target, callerScope) {
   return null
 }
 
+// 目录世代校验的单一入口：generation 必须与本次命令携带的 catalogGeneration 完全一致，
+// 且对应域的 verified 标志必须为 true（来源是目录世代记录，见 catalog-generation.generationAuthzBinding）。
+export function assertGenerationBinding(binding, catalogGeneration, domain) {
+  const b = binding || {}
+  if (catalogGeneration == null || b.generation == null) {
+    throw deny('catalog_generation_missing', '缺少目录 generation（授权与目录快照必须绑定）')
+  }
+  if (b.generation !== catalogGeneration) {
+    throw deny('generation_mismatch', '目录 generation 与授权绑定不一致：authz=' + String(catalogGeneration) + ' binding=' + String(b.generation))
+  }
+  if (domain !== TARGET_DOMAINS.OFFICIAL && domain !== TARGET_DOMAINS.THIRD_PARTY) {
+    throw deny('intent_domain_invalid', '未知身份域：' + String(domain))
+  }
+  if (domain === TARGET_DOMAINS.OFFICIAL) {
+    if (b.officialVerified !== true) throw deny('target_not_verified', '官方目标未经目录 generation 校验（officialVerified!=true）')
+  } else if (b.thirdPartyVerified !== true) {
+    throw deny('target_not_verified', '第三方目标未经目录 generation 校验（thirdPartyVerified!=true）')
+  }
+  return b
+}
+
 export function resolveCredentialMode(domain, identity, callerScope) {
   const s = callerScope || {}
   if (s.credentialMode) return s.credentialMode
@@ -336,12 +357,7 @@ export function authorizeFinalTarget(intent, catalogGeneration, binding) {
   if (i.official !== undefined && (i.official === true) !== (domain === TARGET_DOMAINS.OFFICIAL)) {
     throw deny('intent_domain_conflict', 'intent.official 与 intent.domain 冲突')
   }
-  if (catalogGeneration == null || b.generation == null) {
-    throw deny('catalog_generation_missing', '缺少目录 generation（授权与目录快照必须绑定）')
-  }
-  if (b.generation !== catalogGeneration) {
-    throw deny('generation_mismatch', '目录 generation 与授权绑定不一致：authz=' + String(catalogGeneration) + ' binding=' + String(b.generation))
-  }
+  assertGenerationBinding(b, catalogGeneration, domain)
   const cfg = b.cfg || {}
   const providerLike = Object.assign({}, b.provider || {}, {
     baseUrl: b.provider && b.provider.baseUrl != null ? b.provider.baseUrl : b.origin,
@@ -368,11 +384,8 @@ export function authorizeFinalTarget(intent, catalogGeneration, binding) {
   const credDeny = credentialModeAllowed(domain, target, credScope)
   if (credDeny) throw credDeny
   if (domain === TARGET_DOMAINS.OFFICIAL) {
-    if (b.officialVerified !== true) throw deny('target_not_verified', '官方目标未经目录 generation 校验（officialVerified!=true）')
     const policyDeny = officialIngressPolicy(domain, target, Object.assign({}, b, { cfg, credentialMode }))
     if (policyDeny) throw policyDeny
-  } else if (b.thirdPartyVerified !== true) {
-    throw deny('target_not_verified', '第三方目标未经目录 generation 校验（thirdPartyVerified!=true）')
   }
 
   const token = credentialMode === CREDENTIAL_MODES.PROVIDER_KEY ? providerToken(scope, b) : ''

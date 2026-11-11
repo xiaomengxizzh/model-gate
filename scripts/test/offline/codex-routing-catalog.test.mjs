@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRouter, modelTarget, codexBindingFor, isCodexOfficialSlug } from '../../../src/router.js'
 import { buildCatalog } from '../../../src/codex/catalog.js'
+import * as G from '../../../src/codex/catalog-generation.js'
 import { startGateway, startScriptedUpstream } from './harness.mjs'
 
 const OFFICIAL_SLUG = 'gpt-test-sol'
@@ -282,4 +283,33 @@ test('端到端：目录注入后聚合 slug 上游名/回写，官方 slug 走 
   assert.equal(ghost.status, 404)
   assert.equal((await ghost.json()).error.type, 'unknown_model')
   assert.equal(seen.length, hitsBefore, '严格 404 不产生上游请求')
+})
+
+// M2-2：注入“带世代”的目录视图后，router 的路由语义不变；未知/墓碑仍是 hard 404。
+// （retiredSlugs 的硬拒绝判定在 catalog-generation.resolveCatalogId 中；router 接线属后续卡。）
+test('M2-2：世代视图不改变路由语义；未知/墓碑 ID 仍 404 且不回退默认上游', () => {
+  const record = G.buildGenerationRecord({
+    generation: 9,
+    base: { models: [officialModel()] },
+    config: { providers: { third: { baseUrl: 'http://127.0.0.1:9' } }, models: { 'vendor-chat': { provider: 'third', maxContext: 128000 } } },
+  })
+  const view = G.toCatalogView(record, { retiredSlugs: ['mg-third-gone'] })
+  assert.equal(view.generation, 9)
+  assert.equal(view.key, record.key)
+
+  const cfg = cfgWith({ catalog: view })
+  const r = createRouter(cfg)
+  assert.deepEqual(r.resolve('gpt-test-sol').def, { provider: 'official', api: 'responses', codexOfficial: true })
+  assert.equal(r.resolve('mg-third-vendor-chat').def.codexAggregate, true)
+
+  // 未知 ID / 已下架（视图里无绑定）都走聚合保留前缀硬闸门：404，不回落 defaults.provider
+  const retiredView = G.toCatalogView(record, { retiredSlugs: ['mg-third-vendor-chat'] })
+  const retiredCfg = cfgWith({ catalog: Object.assign({}, retiredView, { bindings: {} }) })
+  const rr = createRouter(retiredCfg)
+  for (const id of ['mg-third-vendor-chat', 'mg-third-gone', 'mg-ghost-model']) {
+    const e = reasonOf(() => rr.resolve(id))
+    assert.equal(e && e.code, 'unknown_model', id)
+    assert.equal(e.status, 404)
+  }
+  assert.deepEqual(rr.resolve('legacy-unknown').def, { provider: 'third' }, '非保留前缀仍维持旧兜底')
 })

@@ -62,7 +62,31 @@ export const CODEX_OVERRIDE_FIELDS = Object.freeze([
   'displayName', 'description', 'contextWindow', 'maxContextWindow', 'modalities',
   'reasoningLevels', 'defaultReasoningLevel', 'priority', 'visibility', 'multiAgentVersion',
   'webSearchToolType', 'baseModel', 'supportedInApi', 'experimentalSupportedTools', 'toolMode',
+  'capabilities', 'evidence', 'baseInstructions',
 ])
+
+// P1 目录契约：第三方条目默认**不声明**未证实能力。以下能力只能经 codex.capabilities +
+// codex.evidence{source,observedAt} 显式声明；官方模板里的同类字段一律不复制。
+export const CODEX_CAPABILITY_FIELDS = Object.freeze({
+  shellType: 'shell_type',
+  applyPatchToolType: 'apply_patch_tool_type',
+  webSearchToolType: 'web_search_tool_type',
+  supportsSearchTool: 'supports_search_tool',
+  experimentalSupportedTools: 'experimental_supported_tools',
+  multiAgentVersion: 'multi_agent_version',
+  toolMode: 'tool_mode',
+  useResponsesLite: 'use_responses_lite',
+  supportsReasoningEffortUpdates: 'supports_reasoning_effort_updates',
+  modelSpecialty: 'model_specialty',
+})
+
+// 未证实能力的保守默认：Codex serde 必填字段给“关闭”值，可选能力字段不写（= 未知，不冒充支持）。
+export const NEUTRAL_BASE_INSTRUCTIONS = 'You are a helpful assistant. Follow the user request and the API contract. Do not assume tools, search, patching, or agent capabilities that the provider has not declared.'
+export const THIRD_PARTY_CONSERVATIVE_FIELDS = Object.freeze({
+  shell_type: 'disabled',
+  support_verbosity: false,
+  experimental_supported_tools: Object.freeze([]),
+})
 
 export class CatalogError extends Error {
   constructor(code, message, details = {}) {
@@ -353,6 +377,63 @@ export function stableModelId(provider, model) {
   return AGGREGATED_ID_PREFIX + providerPart + '-' + modelPart
 }
 
+export const DEFAULT_RESERVED_MODEL_NAMES = Object.freeze(['__proto__', 'constructor', 'prototype'])
+
+// 收集配置里的“身份名”：真实模型、别名、虚拟模型、默认虚拟共用名。别名指回自身模型也计入。
+export function collectIdentityNames(config) {
+  const models = isPlainObject(config) && isPlainObject(config.models) ? config.models : {}
+  const realModels = Object.keys(models).filter(name => {
+    const entry = models[name]
+    return !(isPlainObject(entry) && entry.disabled === true)
+  }).sort()
+  const aliases = []
+  for (const name of Object.keys(models)) {
+    const entry = models[name]
+    if (!isPlainObject(entry) || !Array.isArray(entry.alias)) continue
+    for (const raw of entry.alias) {
+      if (isNonEmptyString(raw)) aliases.push({ alias: raw.trim(), model: name })
+    }
+  }
+  const virtualModels = Array.isArray(config && config.virtualModels)
+    ? config.virtualModels.map(v => v && v.name).filter(isNonEmptyString).map(v => v.trim())
+    : []
+  const defaultsModel = isPlainObject(config && config.defaults) && isNonEmptyString(config.defaults.model)
+    ? config.defaults.model.trim()
+    : null
+  return { realModels, aliases, virtualModels, defaultsModel }
+}
+
+// P1 目录契约：真实模型名 / 别名 / 虚拟模型名 / 保留名必须零碰撞；墓碑 ID 不得被别名复活。
+// 返回冲突数组（空 = 通过），供 buildCatalog 与配置写入侧共用同一判定。
+export function zeroCollisionsAcrossRealModelsAliasesVirtualAndReservedNames(config, options = {}) {
+  const reserved = new Set(options.reservedNames || DEFAULT_RESERVED_MODEL_NAMES)
+  const retired = new Set((options.retiredSlugs || []).filter(isNonEmptyString))
+  const { realModels, aliases, virtualModels, defaultsModel } = collectIdentityNames(config)
+  const owner = new Map()
+  const collisions = []
+  const claim = (name, kind, source) => {
+    if (reserved.has(name)) return collisions.push({ code: 'reserved_name', name, kind, source })
+    if (retired.has(name)) return collisions.push({ code: kind === 'alias' ? 'alias_to_retired_id' : 'retired_name_reuse', name, kind, source })
+    if (owner.has(name)) return collisions.push({ code: 'name_collision', name, kind, source, first: owner.get(name) })
+    owner.set(name, { kind, source })
+  }
+  for (const name of realModels) claim(name, 'model', name)
+  for (const item of aliases) claim(item.alias, 'alias', item.model)
+  for (const name of virtualModels) claim(name, 'virtualModel', name)
+  if (defaultsModel) claim(defaultsModel, 'defaults.model', 'defaults.model')
+  return collisions
+}
+
+export function assertZeroCollisions(config, options = {}) {
+  const collisions = zeroCollisionsAcrossRealModelsAliasesVirtualAndReservedNames(config, options)
+  if (collisions.length) {
+    throw new CatalogError('identity_collision',
+      '模型身份名冲突（真实模型/别名/虚拟模型/保留名必须零碰撞）：' + collisions.map(c => '[' + c.code + '] ' + c.kind + ' ' + c.name + ' <- ' + c.source).join('; '),
+      { collisions })
+  }
+  return true
+}
+
 export function reasoningDescription(effort) {
   const table = {
     minimal: 'Minimal reasoning for the fastest responses',
@@ -411,6 +492,67 @@ function validateOverrideShape(name, override) {
   }
 }
 
+const OBSERVED_AT_RE = /^\d{4}-\d{2}-\d{2}([T ].*)?$/
+
+function isObservedAt(value) {
+  return typeof value === 'string' && OBSERVED_AT_RE.test(value.trim())
+}
+
+// 值本身是否在“声称能力”。false / 空数组 / disabled 这类保守声明不算声称，无需证据。
+function claimsCapability(value) {
+  if (value === undefined || value === null) return false
+  if (typeof value === 'boolean') return value === true
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value === 'string') {
+    const v = value.trim().toLowerCase()
+    return v !== '' && v !== 'disabled' && v !== 'none' && v !== 'false' && v !== 'off'
+  }
+  return true
+}
+
+function capabilityEvidenceFor(name, key, evidence) {
+  const item = evidence && evidence[key]
+  if (!isPlainObject(item) || !isNonEmptyString(item.source) || !isObservedAt(item.observedAt)) {
+    throw new CatalogError('capability_evidence_missing',
+      'models.' + name + '.codex.' + key + ' 声明了未证实能力；必须提供 evidence.' + key + ' = { source, observedAt(YYYY-MM-DD) }',
+      { model: name, field: key })
+  }
+  return { source: item.source.trim(), observedAt: String(item.observedAt).trim() }
+}
+
+// 收集显式能力声明（新旧字段都收），逐项要求可追溯证据；返回 { caps, evidence }。
+function collectCapabilities(name, override) {
+  const declared = Object.create(null)
+  if (override.capabilities !== undefined) {
+    if (!isPlainObject(override.capabilities)) {
+      throw new CatalogError('invalid_override', 'models.' + name + '.codex.capabilities 必须是对象')
+    }
+    for (const key of Object.keys(override.capabilities)) {
+      if (!Object.prototype.hasOwnProperty.call(CODEX_CAPABILITY_FIELDS, key)) {
+        throw new CatalogError('unknown_override_field',
+          'models.' + name + '.codex.capabilities 含未知能力：' + key + '（允许：' + Object.keys(CODEX_CAPABILITY_FIELDS).join(', ') + '）')
+      }
+      declared[key] = override.capabilities[key]
+    }
+  }
+  // 兼容旧字段：同样视为能力声明，同样必须带证据。
+  for (const legacy of ['multiAgentVersion', 'toolMode', 'webSearchToolType', 'experimentalSupportedTools']) {
+    if (override[legacy] !== undefined) declared[legacy] = override[legacy]
+  }
+  const evidence = isPlainObject(override.evidence) ? override.evidence : {}
+  if (override.evidence !== undefined && !isPlainObject(override.evidence)) {
+    throw new CatalogError('invalid_override', 'models.' + name + '.codex.evidence 必须是对象')
+  }
+  const caps = Object.create(null)
+  const used = Object.create(null)
+  for (const key of Object.keys(declared)) {
+    const value = declared[key]
+    if (claimsCapability(value) || evidence[key] !== undefined) used[key] = capabilityEvidenceFor(name, key, evidence)
+    caps[key] = value
+  }
+  return { caps, evidence: used }
+}
+
 function buildThirdPartyEntry(name, entry, template, options, warnings) {
   validateOverrideShape(name, entry.codex)
   const override = entry.codex || {}
@@ -422,7 +564,6 @@ function buildThirdPartyEntry(name, entry, template, options, warnings) {
     }
   }
   if (!templateModel) throw new CatalogError('template_model_missing', '基线目录为空，无法为第三方模型提供元数据模板')
-  const clone = JSON.parse(JSON.stringify(templateModel))
   const provider = entry.provider
   if (!isNonEmptyString(provider)) {
     throw new CatalogError('third_party_provider_missing', 'models.' + name + '.provider 缺失，无法生成稳定聚合 ID')
@@ -471,7 +612,17 @@ function buildThirdPartyEntry(name, entry, template, options, warnings) {
     throw new CatalogError('invalid_override', 'models.' + name + '.codex.priority 必须是非负整数')
   }
 
-  Object.assign(clone, {
+  // 能力：只有显式 capabilities + evidence 才写入；官方模板里的同名字段一律不复制。
+  const capabilityDecl = collectCapabilities(name, override)
+  const baseInstructionsDeclared = override.baseInstructions !== undefined
+  if (baseInstructionsDeclared && !isNonEmptyString(override.baseInstructions)) {
+    throw new CatalogError('invalid_override', 'models.' + name + '.codex.baseInstructions 必须是非空字符串')
+  }
+  const baseInstructions = baseInstructionsDeclared ? override.baseInstructions.trim() : NEUTRAL_BASE_INSTRUCTIONS
+
+  // 从“保守骨架”构造：不 clone 官方模板，避免把模板的 tool/search/patch/agent/hosted-tools
+  // 等未证实行为字段带到第三方上游（审计 P1 §模板行为）。
+  const model = {
     slug,
     display_name: override.displayName || (name + ' (' + providerName + ')'),
     description: override.description || ('Third-party ' + capability + ' model ' + name + ' via ' + providerName + ' (ModelGate aggregation)'),
@@ -483,32 +634,40 @@ function buildThirdPartyEntry(name, entry, template, options, warnings) {
     context_window: contextWindow,
     max_context_window: maxContextWindow,
     input_modalities: modalities,
+    shell_type: THIRD_PARTY_CONSERVATIVE_FIELDS.shell_type,
+    support_verbosity: THIRD_PARTY_CONSERVATIVE_FIELDS.support_verbosity,
+    truncation_policy: { mode: 'tokens', limit: maxContextWindow },
+    experimental_supported_tools: [...THIRD_PARTY_CONSERVATIVE_FIELDS.experimental_supported_tools],
+    base_instructions: baseInstructions,
     additional_speed_tiers: [],
     service_tiers: [],
     availability_nux: null,
     upgrade: null,
-    experimental_supported_tools: override.experimentalSupportedTools ? [...override.experimentalSupportedTools] : [],
-  })
-  if (clone.comp_hash !== undefined) delete clone.comp_hash
-  if (override.multiAgentVersion !== undefined) clone.multi_agent_version = override.multiAgentVersion
-  if (override.toolMode !== undefined) clone.tool_mode = override.toolMode
-  if (override.webSearchToolType !== undefined) clone.web_search_tool_type = override.webSearchToolType
-
-  const inheritedFields = Object.keys(templateModel).filter(k => !(k in clone) || JSON.stringify(clone[k]) === JSON.stringify(templateModel[k]))
-  const overriddenFields = Object.keys(clone).filter(k => JSON.stringify(clone[k]) !== JSON.stringify(templateModel[k]))
+  }
+  for (const key of Object.keys(capabilityDecl.caps)) {
+    model[CODEX_CAPABILITY_FIELDS[key]] = capabilityDecl.caps[key]
+  }
 
   const sources = {
     contextWindow: { value: contextWindow, origin: override.contextWindow !== undefined ? 'models.' + name + '.codex.contextWindow' : 'models.' + name + '.maxContext', confidence: 'declared' },
     maxContextWindow: { value: maxContextWindow, origin: override.maxContextWindow !== undefined ? 'models.' + name + '.codex.maxContextWindow' : (override.contextWindow !== undefined ? 'models.' + name + '.codex.contextWindow' : 'models.' + name + '.maxContext'), confidence: 'declared' },
     reasoningLevels: { values: levels.map(l => l.effort), origin: override.reasoningLevels !== undefined ? 'models.' + name + '.codex.reasoningLevels' : (entry.effortOptions !== undefined ? 'models.' + name + '.effortOptions' : (entry.reasoning !== undefined ? 'models.' + name + '.reasoning' : 'assumed')), confidence: levelsConfidence },
     inputModalities: { values: modalities, origin: override.modalities ? 'models.' + name + '.codex.modalities' : 'assumed:text-only', confidence: modalitiesConfidence },
-    baseInstructions: { origin: 'inherited:' + templateModel.slug, confidence: 'inherited' },
-    clientBehavior: { origin: 'inherited:' + templateModel.slug, confidence: 'inherited', fields: ['shell_type', 'support_verbosity', 'truncation_policy', 'apply_patch_tool_type', 'web_search_tool_type', 'use_responses_lite', 'model_messages', 'multi_agent_version', 'tool_mode'] },
+    baseInstructions: baseInstructionsDeclared
+      ? { origin: 'models.' + name + '.codex.baseInstructions', confidence: 'declared' }
+      : { origin: 'modelgate:neutral-instructions', confidence: 'conservative' },
+    clientBehavior: { origin: 'modelgate:conservative-defaults', confidence: 'conservative', fields: ['shell_type', 'support_verbosity', 'truncation_policy', 'experimental_supported_tools'] },
+  }
+  if (Object.keys(capabilityDecl.caps).length) {
+    sources.capabilities = {
+      fields: Object.keys(capabilityDecl.caps).map(k => CODEX_CAPABILITY_FIELDS[k]),
+      evidence: capabilityDecl.evidence,
+    }
   }
 
   const warningsForModel = warnings.filter(w => w.path === 'models.' + name)
   return {
-    model: clone,
+    model,
     binding: { slug, stableId: slug, provider, providerName, model: name, capability },
     meta: {
       slug,
@@ -518,8 +677,8 @@ function buildThirdPartyEntry(name, entry, template, options, warnings) {
       model: name,
       capability,
       templateModel: templateModel.slug,
-      inheritedFields,
-      overriddenFields,
+      inheritedFields: [],
+      templateFieldsNotInherited: Object.keys(templateModel),
       sources,
       warnings: warningsForModel,
     },
@@ -566,6 +725,8 @@ export function selectThirdPartyModels(config, options = {}) {
 
 export function buildCatalog({ base, config = null, options = {} }) {
   const warnings = []
+  // P1：身份名零碰撞 + 墓碑复活在生成前 fail-closed（别名指向已删 ID 同样拒绝）。
+  assertZeroCollisions(config, { retiredSlugs: options.retiredSlugs })
   const officialCatalog = normalizeCatalogInput(base, 'base catalog').catalog
   if (officialCatalog.models.length === 0) {
     throw new CatalogError('empty_catalog', '基线目录没有模型；拒绝生成空目录（整体替换语义会清空客户端模型列表）')
@@ -617,10 +778,37 @@ export function buildCatalog({ base, config = null, options = {} }) {
 
   const bindings = {}
   for (const item of thirdParty) bindings[item.binding.slug] = item.binding
+  // 生成的聚合/官方 slug 不得与配置身份名（真实模型/别名/虚拟模型/defaults.model）重合，
+  // 否则 /v1/models 与路由会出现同名不同源，必须 fail-closed。
+  if (config) {
+    const identities = collectIdentityNames(config)
+    const officialProviderIds = options.officialProviders || OFFICIAL_PROVIDER_IDS
+    const passthroughNames = new Set(Object.keys(config.models || {}).filter(name => {
+      const entry = config.models[name]
+      return isPlainObject(entry) && officialProviderIds.includes(entry.provider)
+    }))
+    const identitySet = new Set([
+      ...identities.realModels.filter(name => !passthroughNames.has(name)),
+      ...identities.aliases.map(a => a.alias),
+      ...identities.virtualModels,
+      ...(identities.defaultsModel ? [identities.defaultsModel] : []),
+    ])
+    for (const slug of Object.keys(bindings)) {
+      if (identitySet.has(slug)) {
+        throw new CatalogError('slug_collision', '生成的聚合 ID ' + slug + ' 与配置里的真实模型/别名/虚拟模型同名', { slug })
+      }
+    }
+    for (const slug of officialSlugs) {
+      if (identitySet.has(slug)) {
+        throw new CatalogError('official_slug_reuse', '官方目录 slug ' + slug + ' 与配置里的真实模型/别名/虚拟模型同名', { slug })
+      }
+    }
+  }
   const meta = {
     schema: META_SCHEMA,
     catalogSchema: CATALOG_SCHEMA,
     templateModel: template.slug,
+    officialSlugs: [...officialSlugs].sort(),
     counts: { official: officialCatalog.models.length, thirdParty: thirdParty.length, total: catalog.models.length },
     skipped,
     models: thirdParty.map(t => t.meta),
@@ -694,11 +882,14 @@ export function diffBindings(previousBindings, nextBindings) {
 // ---------------------------------------------------------------------------
 
 export function emptyState() {
-  return { schema: STATE_SCHEMA, currentVersion: 0, current: null, history: [], retiredBindings: {}, lastRollback: null }
+  return { schema: STATE_SCHEMA, currentVersion: 0, highWaterVersion: 0, current: null, history: [], retiredBindings: {}, lastRollback: null }
 }
 
+// 世代号单调：回滚只换整代，不回退“已用过的最高版本”，因此回滚后再发布不会复用旧版本号。
 export function nextVersion(state) {
-  return (Number.isInteger(state && state.currentVersion) ? state.currentVersion : 0) + 1
+  const current = Number.isInteger(state && state.currentVersion) ? state.currentVersion : 0
+  const high = Number.isInteger(state && state.highWaterVersion) ? state.highWaterVersion : 0
+  return Math.max(current, high) + 1
 }
 
 export function versionFileName(version, sha256) {
@@ -715,6 +906,9 @@ export function recordVersion(state, entry, { historyLimit = DEFAULT_HISTORY_LIM
     format: entry.format,
     counts: entry.counts,
     sourceFingerprint: entry.sourceFingerprint,
+    key: entry.key || null,
+    configFingerprint: entry.configFingerprint || null,
+    catalogFingerprint: entry.catalogFingerprint || null,
     bindings: entry.bindings || {},
     verified: entry.verified || null,
   }
@@ -722,6 +916,7 @@ export function recordVersion(state, entry, { historyLimit = DEFAULT_HISTORY_LIM
     ...state,
     schema: STATE_SCHEMA,
     currentVersion: entry.version,
+    highWaterVersion: Math.max(Number(state.highWaterVersion) || 0, entry.version),
     current: summary,
     history: [summary, ...(state.history || []).filter(item => item.version !== entry.version)].slice(0, limit),
     retiredBindings: { ...(state.retiredBindings || {}) },
