@@ -1,0 +1,24 @@
+# E3 前置实测：Codex 内置 openai 身份经本地网关（2026-11-11）
+
+环境：Codex CLI 0.167.0（vendor）；临时 CODEX_HOME=/tmp/mg-e0/official-home（复制一份 auth.json，权限 600，测后删除）；
+本地 mock 上游 127.0.0.1:19000（只记录头名/长度，不记录头值/正文，不回连任何真实服务）。
+命令（可复现，无真实上游）：
+
+    CODEX_HOME=/tmp/mg-e0/official-home codex exec --skip-git-repo-check --ephemeral --sandbox read-only \
+      -c 'openai_base_url="http://127.0.0.1:19000/v1"' -c 'model="gpt-6-astra"' \
+      "Reply with exactly: OFFICIAL_HTTP_OK"
+
+## 结论
+
+1. **D1-A 机制成立**：把顶层 `openai_base_url` 指向本地后，Codex 用真实 ChatGPT 身份（Bearer + chatgpt-account-id）向该地址发请求，一轮对话 exit 0 完成。官方身份与本地网关可以共存。
+2. **不能覆盖内置 provider**：`model_providers.openai.base_url` 直接启动失败（`reserved built-in provider IDs: openai`）。D1-A 唯一入口是顶层 `openai_base_url`；E6 的所有权字段必须是 `openai_base_url`，不是 `[model_providers.openai]`。
+3. **传输顺序**：先 `GET {base}/v1/models?client_version=0.167.0`；然后 **先试 WebSocket** `GET /v1/responses`（upgrade），404 后回落 `POST /v1/responses`（SSE）。WS 不可用不阻断，但网关必须正确返回 404（不能 405/挂起）。
+4. **请求体压缩**：`POST /v1/responses` 的 `content-encoding: zstd`（实测 raw 30,025 → decoded 28,463）。网关必须解压并删除该编码头；已在 src/index.js 实现并加 offline/request-encoding 回归。
+5. **官方专用头**（第三方目标必须全部剥离）：authorization、chatgpt-account-id、openai-beta、version、originator、session-id、thread-id、x-client-request-id、x-codex-beta-features、x-codex-routing-hint、x-codex-turn-metadata、x-codex-window-id、x-openai-internal-codex-responses-lite。
+6. **模型目录接口**：`GET /v1/models?client_version=…` 返回 `{"models":[ModelInfo…]}` 时客户端未再告警 fallback metadata。E2 输出需同时支持该形状。
+
+## 未做（NOT_RUN）
+
+- 未把请求转发到真实 `chatgpt.com/backend-api/codex`；真实官方上游透传仍待 E3 集成后单独执行并留证。
+- 未验证 WS 代理（当前策略：网关 404 触发客户端回落 HTTPS）。
+- 未验证 Desktop。

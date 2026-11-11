@@ -20,6 +20,25 @@
 //   unknown_tool_choice        无法识别的 tool_choice 已降级
 //
 // 拒绝 code：unsupported_parameter（契约 §3.4 / §4）。
+//
+// E4（v2 子代理互操作，src/codex/interop.js）新增稳定代码：
+//   unsupported_tool                工具无法用 Chat 表达（托管工具 / 空 namespace / 展开失败）
+//   v2_encrypted_task_unsupported   请求含加密 v2 子代理任务（encrypted_content / encrypted_task_id），
+//                                   Chat 桥无法保证可读 -> 显式拒绝；不解析/不删除/不伪造密文
+//   tool_call_missing_call_id       历史里的 function_call 缺 call_id（无法保证配对）
+// 命名空间工具在桥方向展开为 `mg_ns__<namespace>__<tool>`，回程（JSON 与 SSE 事件）还原 name+namespace。
+
+import {
+  UNSUPPORTED_TOOL,
+  V2_ENCRYPTED_TASK_UNSUPPORTED,
+  planChatTools,
+  normalizeInputToolCall,
+  collapseToolCallName,
+  collapseResponseOutputItems,
+  detectOpaqueV2Task,
+  flattenAgentMessage,
+  analyzeToolPairs,
+} from './codex/interop.js'
 
 const EFFORT_NONE_ALIAS = new Set(['off', 'none', 'disabled', 'false'])
 const HANDLED_REQ_FIELDS = new Set([
@@ -60,44 +79,16 @@ function joinTextParts(content, lossy) {
   return out
 }
 
-function mapTools(tools, lossy) {
-  if (tools == null) return undefined
-  if (!Array.isArray(tools)) throw new Error('tools 须为数组')
-  const out = []
-  for (const t of tools) {
-    if (!t || typeof t !== 'object') throw new Error('tools 项须为对象')
-    const type = t.type || 'function'
-    if (type === 'function') {
-      const name = t.name || (t.function && t.function.name)
-      if (!name) throw new Error('function tool 缺少 name')
-      const description = t.description != null ? String(t.description) : (t.function && t.function.description != null ? String(t.function.description) : '')
-      const parameters = t.parameters || (t.function && t.function.parameters) || { type: 'object', properties: {} }
-      const fn = { name, description, parameters }
-      if (typeof t.strict === 'boolean') fn.strict = t.strict
-      out.push({ type: 'function', function: fn })
-      continue
-    }
-    if (type === 'custom') {
-      const name = t.name
-      if (!name) throw new Error('custom tool 缺少 name')
-      // Chat 无 custom tool 语义：用 function 模拟，参数固定为 { input: string }；format 有损。
-      const fn = {
-        name,
-        description: (t.description != null ? String(t.description) : '') + '（custom tool：input 为自由文本）',
-        parameters: { type: 'object', properties: { input: { type: 'string', description: '自由文本输入' } }, required: ['input'] },
-      }
-      out.push({ type: 'function', function: fn })
-      if (t.format != null) lossy.push('custom_tool_format')
-      continue
-    }
-    // Chat 协议只能表达 function tool。托管工具（web_search / file_search / code_interpreter / mcp /
-    // computer_* / image_generation / local_shell …）与命名空间分组（Codex 0.167 每轮固定发的
-    // namespace，如 multi_agent_v1）在桥方向无法表达。整条拒绝会让真实客户端完全不可用——Codex 已
-    // 取消 chat/completions 支持（openai/codex discussions#7782），只能打 responses。因此这里丢弃并
-    // 逐项记 lossy，由客户端按"该工具不可用"自行降级；原生 responses 透传路径不经过本函数，上游自己处理。
-    lossy.push('tool_dropped:' + String(type))
-  }
-  return out.length ? out : undefined
+// tools[] -> Chat tools[]：委托 src/codex/interop.js 做可逆展开。
+// 返回 { tools, unsupported, aliases, rejected }：
+//  · namespace 分组展开为 `mg_ns__<ns>__<tool>` function（回程由 chatToResponse/SSE writer 还原）；
+//  · 托管工具逐项产出 unsupported_tool 错误码 + 兼容 lossy tool_dropped:<type>（不静默丢弃）；
+//  · onUnsupported:'reject' 时整条 rejected（code=unsupported_tool），默认 drop 以保持真实 Codex 可用。
+function mapTools(tools, lossy, mode) {
+  if (tools == null) return { tools: undefined, unsupported: [], aliases: [], rejected: null }
+  const plan = planChatTools(tools, { onUnsupported: mode === 'strict' ? 'reject' : 'drop' })
+  for (const code of plan.lossy) lossy.push(code)
+  return { tools: plan.chatTools, unsupported: plan.unsupported, aliases: plan.aliases, rejected: plan.rejected }
 }
 
 function mapToolChoice(choice, lossy) {
@@ -132,12 +123,18 @@ function mergeAssistantToolCalls(messages, toolCalls) {
 
 /**
  * Responses 请求 → Chat Completions 请求（Chat 桥）。
- * 返回 { body, lossy, rejected }：
- *  · 成功: rejected === null；body 为 Chat 请求体；
- *  · 拒绝: body === null，rejected = { code:'unsupported_parameter', message }，lossy 保留已发现项。
+ * opts.mode:
+ *  · 'bridge'（默认）：完整 wire 映射（工具展开/还原、v2 加密判定、call_id 配对诊断）；
+ *  · 'native'：仅做顶层拒绝矩阵（store/previous_response_id/background/include/truncation），
+ *    供"原生 Responses 透传"前置校验使用——input/tools 原样交给上游，不经过桥映射，也不因
+ *    v2 agent_message/密文被误拒。
+ * 返回 { body, lossy, rejected, unsupported, aliases, pairing, mode }：
+ *  · 成功: rejected === null；body 为 Chat 请求体（native 模式为 null，调用方丢弃）；
+ *  · 拒绝: body === null，rejected = { code, message }，lossy 保留已发现项；
+ *  · unsupported: 无法用 Chat 表达的工具（code=unsupported_tool），绝不静默丢弃。
  * 抛出仅在 tools 形状非法等客户端 bug；调用方应按 400 处理。
  */
-export function responsesToChat(input) {
+export function responsesToChat(input, opts = {}) {
   const req = isPlainObject(input) ? input : null
   const lossy = []
   if (!req) return { body: null, lossy, rejected: { code: 'unsupported_parameter', message: '请求体必须是 JSON 对象' } }
@@ -162,6 +159,30 @@ export function responsesToChat(input) {
   }
   if (req.truncation != null && req.truncation !== 'disabled') return reject('truncation 不支持：网关不截断对话（仅接受 disabled）')
 
+  const mode = opts && opts.mode === 'native' ? 'native' : 'bridge'
+  // 原生透传：上游自己解释 input/tools；这里只保留上面的顶层拒绝矩阵，避免把 v2 agent_message、
+  // 密文或托管工具误判成"不支持"（E4 实测 Codex 0.167 的 v2 历史每轮都会带 agent_message）。
+  if (mode === 'native') return { body: null, lossy, rejected: null, unsupported: [], aliases: [], pairing: null, mode }
+
+  // E4 v2：加密子代理任务不可读 -> 显式错误；不解析/不删除/不伪造密文，也不静默降级 v1。
+  const opaque = detectOpaqueV2Task(req)
+  if (opaque.opaque) {
+    const kinds = [...new Set(opaque.signals.filter((s) => s.encrypted).map((s) => s.kind))].join(',')
+    return {
+      body: null,
+      lossy,
+      rejected: {
+        code: V2_ENCRYPTED_TASK_UNSUPPORTED,
+        message: 'v2 子代理任务不可读：请求含加密的 ' + kinds + '（encrypted_content/encrypted_task_id）。网关不解析、不删除、不伪造密文，Chat 桥无法保证任务可读；请改用官方原生 Responses 上游，或取得授权后以明文重新委派。',
+      },
+      unsupported: [],
+      aliases: [],
+      pairing: null,
+      signals: opaque.signals,
+      mode,
+    }
+  }
+
   const messages = []
   if (typeof req.instructions === 'string' && req.instructions !== '') messages.push({ role: 'system', content: req.instructions })
   else if (Array.isArray(req.instructions)) {
@@ -176,14 +197,33 @@ export function responsesToChat(input) {
       if (typeof item === 'string') { lossy.push('input_item_string'); messages.push({ role: 'user', content: item }); continue }
       if (!isPlainObject(item)) return reject('input 数组包含非法项')
       const type = item.type
+      if (type === 'agent_message') {
+        // 已通过 detectOpaqueV2Task：这里只剩可读文本（加密项在上面已显式拒绝，绝不解密）。
+        // Codex v2 历史里的 agent_message 是"代理间消息"事件；Chat 无此 item 类型，降级为一条 user 消息，
+        // 保留 author/recipient 标注并显式记 lossy，不假装等价。
+        lossy.push('agent_message_text_flattened')
+        messages.push({ role: 'user', content: flattenAgentMessage(item) })
+        continue
+      }
       if (type === 'function_call_output') {
         const out = joinTextParts(item.output, lossy)
+        if (!item.call_id) lossy.push('tool_output_missing_call_id')
         messages.push({ role: 'tool', tool_call_id: item.call_id || '', content: out })
         continue
       }
       if (type === 'function_call' || type === 'custom_tool_call') {
         const name = item.name || ''
         if (!name) return reject('function_call 缺少 name')
+        let callName = name
+        if (item.namespace != null) {
+          // Codex 0.167 命名空间调用：{type:'function_call', name:'wait_agent', namespace:'collaboration'}
+          // Chat 只能看到扁平名，必须与 tools 展开名一致，回程再还原。
+          try { callName = normalizeInputToolCall(item).name } catch (e) {
+            return { body: null, lossy, rejected: { code: UNSUPPORTED_TOOL, message: e.message }, unsupported: [], aliases: [], pairing: null, mode }
+          }
+          lossy.push('namespace_tool_input:' + String(item.namespace))
+        }
+        if (!item.call_id) lossy.push('tool_call_missing_call_id')
         let args = item.arguments
         if (type === 'custom_tool_call') {
           const raw = item.input == null ? '' : String(item.input)
@@ -194,8 +234,15 @@ export function responsesToChat(input) {
         mergeAssistantToolCalls(messages, [{
           id: item.call_id || rid('call_'),
           type: 'function',
-          function: { name, arguments: args },
+          function: { name: callName, arguments: args },
         }])
+        continue
+      }
+      // Codex 0.167 的 resume 请求会带非对话型控制项：configuration_update（模型/配置变更）与
+      // additional_tools（工具集变更）。Chat 协议没有对应表达，且它们不是用户内容——显式丢弃并记 lossy，
+      // 否则同一线程切模型会被 400 直接卡死（E3 实测 turn2 失败原因）。不静默、不伪造。
+      if (type === 'configuration_update' || type === 'additional_tools') {
+        lossy.push('input_dropped:' + String(type))
         continue
       }
       if (type === 'message' || item.role) {
@@ -216,7 +263,15 @@ export function responsesToChat(input) {
   }
 
   let tools
-  try { tools = mapTools(req.tools, lossy) } catch (e) { return reject(e.message) }
+  let unsupported = []
+  let aliases = []
+  try {
+    const plan = mapTools(req.tools, lossy, opts && opts.onUnsupportedTool === 'reject' ? 'strict' : null)
+    if (plan.rejected) return { body: null, lossy, rejected: plan.rejected, unsupported: plan.unsupported, aliases: [], pairing: null, mode }
+    tools = plan.tools
+    unsupported = plan.unsupported
+    aliases = plan.aliases
+  } catch (e) { return reject(e.message) }
   let toolChoice
   try { toolChoice = mapToolChoice(req.tool_choice, lossy) } catch (e) { return reject(e.message) }
   // tool_choice 点名了被丢弃的工具时不能原样下发（上游没有该名字 → 400），降级为 auto 并记有损
@@ -250,7 +305,9 @@ export function responsesToChat(input) {
     lossy.push('unknown_field:' + k)
   }
 
-  return { body, lossy, rejected: null }
+  // call_id 配对诊断：并行调用/结果回填是否自洽（只含 call_id 与稳定 code，不含正文）。
+  const pairing = analyzeToolPairs(req.input)
+  return { body, lossy, rejected: null, unsupported, aliases, pairing, mode }
 }
 
 // Chat usage → Responses usage（契约 §5：无来源写 0，不臆造 reasoning_tokens）
@@ -329,14 +386,19 @@ export function chatToResponse(chatJson, ctx = {}) {
       if (lossy) lossy.push('custom_tool_call_restored')
       continue
     }
-    output.push({
+    // E4：上游返回的扁平展开名（mg_ns__<ns>__<tool>）必须还原 name+namespace，
+    // 否则 Codex 会按"未知工具"执行；这是可逆映射的回程一半。
+    const collapsed = collapseToolCallName(name)
+    const item = {
       id: rid('fc_'),
       type: 'function_call',
       status: 'completed',
       call_id: tc.id || '',
-      name,
+      name: collapsed.name,
       arguments: args,
-    })
+    }
+    if (collapsed.namespace) item.namespace = collapsed.namespace
+    output.push(item)
   }
   const response = {
     id: ctx.id || rid('resp_'), // 契约 §5：id 必须是 resp_<gateway-id>，不得沿用上游 chatcmpl id
@@ -445,11 +507,12 @@ export function makeSSEWriter(opts = {}) {
       const c = call || {}
       const outIndex = nextIndex++
       const id = c.id || rid(c.type === 'custom_tool_call' ? 'ctc_' : 'fc_')
-      toolState = { id, outIndex, callId: c.call_id || c.callId || '', name: c.name || '', args: '', type: c.type || 'function_call' }
-      return one('response.output_item.added', {
-        output_index: outIndex,
-        item: { id, type: toolState.type, status: 'in_progress', call_id: toolState.callId, name: toolState.name, arguments: '' },
-      })
+      // E4：Chat 上游的扁平展开名回程还原为 Codex 需要的 {name, namespace}。
+      const collapsed = collapseToolCallName(c.name || '')
+      toolState = { id, outIndex, callId: c.call_id || c.callId || '', name: collapsed.name, namespace: collapsed.namespace, args: '', type: c.type || 'function_call' }
+      const item = { id, type: toolState.type, status: 'in_progress', call_id: toolState.callId, name: toolState.name, arguments: '' }
+      if (toolState.namespace) item.namespace = toolState.namespace
+      return one('response.output_item.added', { output_index: outIndex, item })
     },
     toolArgsDelta(delta) {
       const t = ensureTool()
@@ -465,17 +528,20 @@ export function makeSSEWriter(opts = {}) {
       let frames = one('response.function_call_arguments.done', {
         item_id: t.id, output_index: t.outIndex, arguments: finalArgs,
       })
-      frames += one('response.output_item.done', {
-        output_index: t.outIndex,
-        item: { id: t.id, type: t.type, status: 'completed', call_id: t.callId, name: t.name, arguments: finalArgs },
-      })
+      const item = { id: t.id, type: t.type, status: 'completed', call_id: t.callId, name: t.name, arguments: finalArgs }
+      if (t.namespace) item.namespace = t.namespace
+      frames += one('response.output_item.done', { output_index: t.outIndex, item })
       toolState = null
       return frames
     },
 
     completed(response) {
       const r = response || baseResponse('completed')
-      return one('response.completed', { response: Object.assign({}, r, { status: r.status || 'completed' }) })
+      const normalized = Object.assign({}, r, { status: r.status || 'completed' })
+      // E4：response.completed 可能被客户端当作权威 output（实测 Codex 以 item 事件路由工具，
+      // 但其它客户端可能读终态对象），因此终态里的展开名同样还原为 name+namespace。
+      if (Array.isArray(normalized.output)) normalized.output = collapseResponseOutputItems(normalized.output)
+      return one('response.completed', { response: normalized })
     },
     failed(error) {
       const e = isPlainObject(error) ? error : { code: 'gateway_error', message: String(error == null ? 'stream failed' : error) }

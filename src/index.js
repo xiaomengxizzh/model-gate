@@ -1,9 +1,9 @@
 import http from 'node:http'
 import { pipeline } from 'node:stream'
-import { readFileSync, chmodSync, existsSync, writeFileSync, copyFileSync } from 'node:fs'
+import { readFileSync, chmodSync, existsSync, writeFileSync, copyFileSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
-import { gunzipSync } from 'node:zlib'
+import { gunzipSync, inflateSync, brotliDecompressSync, zstdDecompressSync } from 'node:zlib'
 import { isIP } from 'node:net'
 import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh, modelTarget } from './router.js'
 import { createLogger } from './logger.js'
@@ -20,6 +20,10 @@ import { supportsMedia, parseMultipartField, replaceMultipartField, isMultipart,
 import { defaultVideoPaths, newVideoTask, upstreamTaskId, applyUpstreamStatus, clientTask, loadVideoTasks, saveVideoTasks, gcVideoTasks, findTaskByIdem, validateVideoCreate, VIDEO_POLL_MIN_MS } from './videos.js'
 import { todayKey } from './shared.js'
 import { readNativeUsage, nativeUsageConfig } from './native-usage.js'
+import { classifyTarget } from './codex/identity.js'
+import { buildCatalog } from './codex/catalog.js'
+import { planTargetHeaders, targetDeny, buildOfficialHeaders, officialPassthroughEnabled } from './codex/auth.js'
+import { handleCodexApi, isCodexApiPath } from './codex/api.js'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
@@ -94,6 +98,85 @@ function collectBody(stream, maxBytes = 64 * 1024 * 1024, ctl = null) {
       try { signal.addEventListener('abort', onAbort, { once: true }) } catch {}
     }
   })
+}
+
+// —— 请求体压缩解码（Codex 0.167 官方路径实测 content-encoding: zstd）——
+// 解压后必须删除请求上的 content-encoding：buildHeaders 会原样复制头，而 content-length 已按解压后长度重写，
+// 保留旧编码声明会让上游按错误长度/编码解析。未知编码 fail-closed（415），绝不把压缩字节当 JSON 透传。
+const MAX_INFLATED_BODY = 64 * 1024 * 1024
+function decodeRequestBody(buf, headerValue) {
+  const encs = String(headerValue || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean)
+  let out = buf
+  try {
+    for (const enc of encs.reverse()) {
+      if (enc === 'identity' || enc === '') continue
+      else if (enc === 'gzip' || enc === 'x-gzip') out = gunzipSync(out, { maxOutputLength: MAX_INFLATED_BODY })
+      else if (enc === 'deflate') out = inflateSync(out, { maxOutputLength: MAX_INFLATED_BODY })
+      else if (enc === 'br') out = brotliDecompressSync(out, { maxOutputLength: MAX_INFLATED_BODY })
+      else if (enc === 'zstd') out = zstdDecompressSync(out, { maxOutputLength: MAX_INFLATED_BODY })
+      else return { error: 'unsupported content-encoding: ' + enc }
+    }
+  } catch (e) {
+    return { error: 'invalid compressed request body: ' + ((e && e.message) || 'decode failed') }
+  }
+  return { buf: out }
+}
+
+// 读请求体并处理 content-encoding；解压失败/未知编码返回 {error}，由调用方回 415（不把压缩字节当 JSON）
+async function readRequestBody(req, maxBytes, ctl) {
+  const raw = await collectBody(req, maxBytes, ctl)
+  const enc = req.headers['content-encoding']
+  if (!raw || !raw.length || !enc) return { buf: raw }
+  const dec = decodeRequestBody(raw, enc)
+  if (dec.error) return { error: dec.error }
+  delete req.headers['content-encoding']
+  return { buf: dec.buf }
+}
+
+// —— D2：Codex 远端模型目录（GET /v1/models?client_version=…）——
+// Codex 0.167 在官方身份下会先拉这个接口，且只接受 {"models":[完整 ModelInfo…]}；
+// 旧的 {"object":"list","data":[…]} 会让客户端报 "failed to decode models response"（实测致命，resume 时直接失败）。
+// 目录来源：defaults.codexCatalogBasePath 指向 codex debug models 导出的官方基线，再由 buildCatalog 合并第三方模型。
+// 结果按基线文件 (mtime,size) + 模型清单指纹缓存，避免每请求重算 700KB 目录。
+let _codexModelsCache = null
+let _codexCatalogError = null
+// 返回 { key, models, bindings, officialSlugs } 或 null；按基线文件 (mtime,size) + 模型清单缓存。
+// 目录不可用不阻断普通网关功能：null → 回落到旧 /v1/models 形状与第三方目录路由。
+function codexCatalogView(cfg) {
+  const basePath = cfg && cfg.defaults && cfg.defaults.codexCatalogBasePath
+  if (!basePath || typeof basePath !== 'string') return null
+  let st = null
+  try { st = statSync(basePath) } catch { return null }
+  const modelsKey = JSON.stringify(Object.keys((cfg && cfg.models) || {}).sort())
+  const key = basePath + '|' + st.mtimeMs + '|' + st.size + '|' + modelsKey
+  if (_codexModelsCache && _codexModelsCache.key === key) return _codexModelsCache
+  let view = null
+  try {
+    const base = JSON.parse(readFileSync(basePath, 'utf8'))
+    const built = buildCatalog({ base, config: cfg })
+    const bindings = built.meta.bindings || {}
+    view = {
+      key,
+      models: built.catalog.models,
+      bindings,
+      officialSlugs: built.catalog.models.map((m) => m && m.slug).filter((s) => s && !bindings[s]),
+    }
+  } catch (e) {
+    // fail-closed 但必须可诊断：错误码/消息只进日志，不进响应；不含凭据与正文。
+    _codexCatalogError = (e && (e.code || e.message)) ? String(e.code || '') + ' ' + String(e.message || '') : 'catalog_build_failed'
+    return null
+  }
+  _codexCatalogError = null
+  _codexModelsCache = view
+  return view
+}
+function codexModelsPayload(state) {
+  const view = codexCatalogView(state.cfg)
+  return view ? view.models : null
+}
+function isCodexModelListRequest(req, url) {
+  if (/[?&]client_version=/.test(url || '')) return true
+  return !!(req.headers['x-codex-window-id'] || req.headers['x-codex-beta-features'] || req.headers['originator'] === 'codex_cli_rs' || req.headers['chatgpt-account-id'])
 }
 
 // 上游偶发返回 gzip 响应却不带 content-encoding 头（如 opencodezen），会导致 usage 解析失败、统计断链
@@ -356,6 +439,12 @@ function pruneStateCapacity(state) {
 
 function reloadConfig(state) {
   state.cfg = loadConfig()
+  // D2：把 Codex 目录视图挂到配置上（只读派生，不进配置文件）。目录不可用时为 null，
+  // 聚合/官方 slug 将解析为 unknown（fail-closed），普通第三方路由不受影响。
+  state.cfg._codexCatalog = codexCatalogView(state.cfg)
+  if (!state.cfg._codexCatalog && state.cfg.defaults && state.cfg.defaults.codexCatalogBasePath && state.log) {
+    state.log.warn('Codex 目录不可用，官方/聚合模型将按未知模型处理', _codexCatalogError || '')
+  }
   state.router = createRouter(state.cfg)
   if (state.log && state.log.setSecrets) state.log.setSecrets(collectSecrets(state.cfg))
   // 管理令牌优先级：环境变量 MG_ADMIN_TOKEN > server.adminToken > 面板设置（keys.__mg_admin）
@@ -832,6 +921,82 @@ async function cancelVideoTask(state, task, log) {
   return task
 }
 
+// —— E3 / D1-A：官方身份透传代理 ——
+// 只在 classifyTarget()==='official' 时使用。客户端官方凭据仅在 MG_CODEX_OFFICIAL_PASSTHROUGH=1 时转发，
+// 否则 targetDeny 直接 fail-closed。官方请求不重试（可能有工具/托管副作用），也不跟随重定向。
+async function proxyOfficialResponses(state, budget, log, opts) {
+  const { req, body, modelName, def, res } = opts
+  const candidates = [def.provider, ...(def.fallbacks || [])].filter(Boolean)
+  let lastErr = null
+  for (const pid of candidates) {
+    if (!state.cfg.providers[pid]) continue
+    const prov = buildProvider(state.cfg, pid)
+    const pdef = prov._def || {}
+    const identity = classifyTarget(prov, state.cfg)
+    // 官方目标只允许官方候选：绝不因故障把官方请求递给第三方（身份串线）。
+    if (identity.kind !== 'official') { lastErr = new Error('候选上游不是官方目标：' + pid); continue }
+    const upstreamPath = (typeof def.responsesPath === 'string' && def.responsesPath) || (typeof pdef.responsesPath === 'string' && pdef.responsesPath) || '/backend-api/codex/responses'
+    const deny = targetDeny({ identity, provider: prov, cfg: state.cfg, path: upstreamPath, env: process.env })
+    if (deny) {
+      log && log.warn('官方目标被拒绝', deny.code, pid)
+      return { status: deny.status, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: deny.message, code: deny.code, type: 'official_target_rejected' } })) }
+    }
+    const target = modelTarget(state.cfg, modelName, pid)
+    const payload = Buffer.from(JSON.stringify(Object.assign({}, body, { model: target.servingName })))
+    const clientPassthrough = identity.credential === 'client-passthrough'
+    let headers
+    let dropped = []
+    if (clientPassthrough) {
+      // 客户端官方凭据透传（仅开关开启时 targetDeny 才放行）：头集合由 codex/auth 单一真源生成。
+      headers = buildOfficialHeaders(req, payload.length)
+    } else {
+      const plan = planTargetHeaders({ identity, provider: prov, cfg: state.cfg, incoming: req.headers, passthrough: false })
+      dropped = plan.dropped
+      headers = Object.assign({}, plan.headers, {
+        'content-type': 'application/json',
+        'content-length': payload.length,
+        'accept-encoding': 'identity',
+      })
+      if (prov.apiKey) headers.authorization = 'Bearer ' + prov.apiKey
+    }
+    if (!officialPassthroughEnabled() && clientPassthrough) {
+      // 双保险：targetDeny 已拦，这里防止未来调用顺序变化悄悄放行。
+      return { status: 403, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: '官方凭据透传未开启', code: 'official_passthrough_disabled', type: 'official_target_rejected' } })) }
+    }
+    if (dropped.length) log && log.info('官方目标丢弃头（仅名称）', dropped.slice(0, 20).join(','))
+    let release = null
+    try {
+      release = await acquireProvider(state, pid, state.cfg, budget.signal)
+      const up = await forward(prov, upstreamPath, 'POST', headers, payload, state.cfg.defaults || {}, log, { budget, signal: budget.signal, noRetry: true })
+      if (up.ok) {
+        state.st.counters.requests += 1
+        agg(state, pid, 'requests', 1)
+        const sg = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
+        sg.requests = (sg.requests || 0) + 1
+        markOk(state, pid); noteAffinity(state, modelName, pid)
+        const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
+        if (/text\/event-stream/i.test(ct)) {
+          writeUpstreamHeaders(res, up)
+          await streamRawResponses(res, up.stream, budget)
+          return { streamed: true }
+        }
+        const buf = await collectBody(up.stream, 128 * 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
+        return { status: up.status, contentType: ct, buf }
+      }
+      const ebuf = await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
+      agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+      markFail(state, pid, prov.circuit)
+      return { status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: ebuf }
+    } catch (err) {
+      if (err && err.aborted) throw err
+      lastErr = err
+      agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+      markFail(state, pid, prov.circuit)
+    } finally { if (release) release() }
+  }
+  return { status: 502, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: '官方上游失败：' + (lastErr ? lastErr.message : 'all providers failed'), type: 'all_providers_failed' } })) }
+}
+
 // —— MG-015 原生 Responses 透传：模型显式 api:"responses" 时，不做 Chat 桥转换 ——
 // 非流式：JSON 原样透传并把响应 model 回写客户端请求名；流式：上游 SSE 原样管道（不翻译事件、不改 model）。
 // 仍复用 forward 的 retry/timeout 与请求预算；错误体原样/映射透传。
@@ -970,6 +1135,16 @@ function makeHandler(state) {
         res.end(html); return
       }
       if (path === '/api/auth' && req.method === 'GET') { sendJson(res, 200, { needAuth: !!state.adminToken, startedAt: state.st.startedAt }); return }
+      // E6 管理面：/api/codex/*（policy / config plan·apply·rollback / catalog status）。
+      // 鉴权、来源、路径护栏与 confirmToken 链都在 src/codex/api.js；这里只负责读 body 与回写 JSON。
+      if (isCodexApiPath(path)) {
+        const rawBody = (req.method === 'POST')
+          ? await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
+          : undefined
+        const out = await handleCodexApi({ method: req.method, url, path, cfg: state.cfg, log, req, res, rawBody, requireAdmin: () => requireAdmin(req, res) })
+        if (out) sendJson(res, out.status, out.body)
+        return
+      }
 
       // 面板设置管理令牌：写入加密 keys 库并热生效。未启用鉴权时开放（本地初始化）；已启用时需携带当前令牌。
       if (path === '/api/admin-token' && req.method === 'POST') {
@@ -1075,7 +1250,9 @@ function makeHandler(state) {
         let vm = null
         const vms = state.cfg.virtualModels || []
         if (vms.length && (CHAT_PATHS.has(path) || RESPONSES_PATHS.has(path)) && (req.method === 'POST' || req.method === 'PUT')) {
-          req.__mgBodyBuf = await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024, { budget, signal: budget.signal })
+          const rb = await readRequestBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024, { budget, signal: budget.signal })
+          if (rb.error) { sendJson(res, 415, { error: { message: rb.error, type: 'invalid_request_error' } }); return }
+          req.__mgBodyBuf = rb.buf
           req.__mgBody = tryParse(req.__mgBodyBuf)
           const model = req.__mgBody && req.__mgBody.model
           vm = vms.find(v => v.name === (typeof model === 'string' ? model.trim() : ''))
@@ -1089,7 +1266,14 @@ function makeHandler(state) {
         }
       }
 
-      if (req.method === 'GET' && (path === '/v1/models' || path === '/models')) { sendJson(res, 200, staticModels(state.cfg)); return }
+      if (req.method === 'GET' && (path === '/v1/models' || path === '/models')) {
+        // Codex 只认 {"models":[ModelInfo…]}；普通 OpenAI 客户端继续拿旧 list 形状（向后兼容）。
+        if (isCodexModelListRequest(req, url)) {
+          const models = codexModelsPayload(state)
+          if (models) { sendJson(res, 200, { models }); return }
+        }
+        sendJson(res, 200, staticModels(state.cfg)); return
+      }
 
       // —— MG-011：POST /v1/embeddings（能力声明 + 上游适配 + 记账 + 熔断/回退） ——
       if (path === '/v1/embeddings') {
@@ -1299,11 +1483,25 @@ function makeHandler(state) {
       const isChat = CHAT_PATHS.has(path)
       const isResponses = RESPONSES_PATHS.has(path)
       if (!path.startsWith('/v1') && !isChat && !isResponses) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
-      if (isResponses && req.method !== 'POST') { sendJson(res, 405, { error: { message: '仅支持 POST /v1/responses', type: 'invalid_request_error' } }); return }
+      if (isResponses && req.method !== 'POST') {
+        // Codex 0.167 会先尝试 WebSocket（GET /v1/responses + upgrade）。网关不做协议升级：
+        // 必须明确 404 让客户端回落到 HTTPS（实测日志 "unexpected status 404" 后 POST 成功），
+        // 不能 405/挂起，也绝不把 upgrade 帧头转发给任何上游。
+        if (req.method === 'GET' && String(req.headers.upgrade || '').toLowerCase() === 'websocket') {
+          sendJson(res, 404, { error: { message: 'WebSocket transport not supported by gateway; fall back to HTTPS', type: 'ws_not_supported' } })
+          return
+        }
+        sendJson(res, 405, { error: { message: '仅支持 POST /v1/responses', type: 'invalid_request_error' } })
+        return
+      }
 
       // —— 数据面转发（二阶段鉴权已收集 body 时直接复用，流不可二次读取） ——
       let bodyBuf = req.__mgBodyBuf || null
-      if (!bodyBuf && (req.method === 'POST' || req.method === 'PUT')) bodyBuf = await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024), { budget, signal: budget.signal })
+      if (!bodyBuf && (req.method === 'POST' || req.method === 'PUT')) {
+        const rb = await readRequestBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024), { budget, signal: budget.signal })
+        if (rb.error) { sendJson(res, 415, { error: { message: rb.error, type: 'invalid_request_error' } }); return }
+        bodyBuf = rb.buf
+      }
       let body = req.__mgBody || (bodyBuf && bodyBuf.length ? tryParse(bodyBuf) : null)
       if ((isChat || isResponses) && (!body || typeof body !== 'object' || Array.isArray(body))) {
         sendJson(res, 400, { error: { message: '请求体必须为 JSON 对象', type: 'invalid_request_error' } })
@@ -1316,8 +1514,20 @@ function makeHandler(state) {
         let nHit = null
         try { nHit = state.router.resolve(body.model) } catch { nHit = null }
         const nDef = nHit && nHit.def
+        // D1-A：解析到官方上游（内置 openai 身份，由 openai_base_url 指到网关）→ 官方透传代理。
+        // 判定只认 codex/identity.classifyTarget（单一真源），不按 provider 名字猜。
+        if (nDef && !nDef.isVirtualModel && !nDef.virtual && nDef.provider && state.cfg.providers[nDef.provider]) {
+          const nProv = buildProvider(state.cfg, nDef.provider)
+          if (classifyTarget(nProv, state.cfg).kind === 'official') {
+            const nconvOfficial = responsesToChat(body, { mode: 'native' })
+            if (nconvOfficial.rejected) { sendJson(res, 400, { error: { message: nconvOfficial.rejected.message, type: nconvOfficial.rejected.code || 'unsupported_parameter' } }); return }
+            const noutOfficial = await proxyOfficialResponses(state, budget, log, { req, body, modelName: nHit.canonicalName, def: nDef, res })
+            if (noutOfficial && noutOfficial.streamed) return
+            res.writeHead(noutOfficial.status, { 'content-type': noutOfficial.contentType }); res.end(noutOfficial.buf); return
+          }
+        }
         if (nDef && !nDef.isVirtualModel && !nDef.virtual && nDef.api === 'responses') {
-          const nconv = responsesToChat(body)   // 仅复用拒绝矩阵/校验，不采用其 Chat body
+          const nconv = responsesToChat(body, { mode: 'native' })   // 仅复用顶层拒绝矩阵；input/tools 原样透传（含 v2 密文）
           if (nconv.rejected) { sendJson(res, 400, { error: { message: nconv.rejected.message, type: nconv.rejected.code || 'unsupported_parameter' } }); return }
           if ((nDef.capability || 'chat') !== 'chat') { sendJson(res, 400, { error: { message: '模型 ' + nHit.canonicalName + ' 的能力不是 chat，不能用于 /v1/responses', type: 'unsupported_model' } }); return }
           const nout = await proxyNativeResponses(state, budget, log, { body, modelName: nHit.canonicalName, def: nDef, wantStream: !!body.stream, res })
@@ -1537,6 +1747,11 @@ export function start(opts = {}) {
   if (mb > 0) cfg.server = Object.assign({}, cfg.server || {}, { maxBodyBytes: mb })
   // 收集所有密钥值供日志脱敏：环境变量 Key + 面板 Key + extraHeaders 值 + 客户端/管理令牌 + 代理内嵌凭据
   const log = createLogger({ logFile: cfg.server && cfg.server.logFile, silent: opts.silent, secrets: collectSecrets(cfg) })
+  // 启动与热重载必须同源注入 Codex 目录视图：否则官方 slug 会按「未知非保留前缀」回落 defaults.provider（跨身份串线）。
+  cfg._codexCatalog = codexCatalogView(cfg)
+  if (!cfg._codexCatalog && cfg.defaults && cfg.defaults.codexCatalogBasePath) {
+    log.warn('Codex 目录不可用，官方/聚合模型将按未知模型处理', _codexCatalogError || '')
+  }
   const pids = (() => { const o = {}; for (const id of Object.keys(cfg.providers || {})) o[id] = { requests:0, errors:0, retries:0, latencySum:0, latencyCount:0, tokens:0 }; return o })()
   const state = {
     cfg, log, router: createRouter(cfg),

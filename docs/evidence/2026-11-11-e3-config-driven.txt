@@ -1,0 +1,37 @@
+E3/E6 集成证据：完全由 config.toml 驱动的一轮（2026-11-11）
+==========================================================
+
+目标：证明 D1-A 配置在**真实启动路径**上生效，而不是靠命令行 `-c` 覆盖。
+链路：Codex 0.167（仅 CODEX_HOME/config.toml，无任何 -c）→ ModelGate（openai_base_url）→ 本地官方 mock。
+无真实上游调用、无真实登录（OPENAI_API_KEY 为虚构值），但走的是真实客户端启动与真实网关转发。
+
+config.toml（临时 CODEX_HOME）：
+```toml
+model = "gpt-6-astra"
+model_provider = "openai"
+openai_base_url = "<gateway>"
+model_catalog_json = "<官方基线目录>"
+approval_policy = "never"
+sandbox_mode = "read-only"
+```
+
+复现：node scripts/test/codex-config-driven.mjs
+
+结果：3/3
+```text
+PASS  config.toml 驱动的一轮 exit 0
+PASS  网关收到官方请求并回传文本（agent_message: CONFIG_DRIVEN_OK；usage 5/3/8）
+PASS  mock 官方后端被命中（网关转发生效）
+```
+
+## 过程中发现的真实约束
+
+- harness 默认 `server.maxBodyBytes = 64KB` 会拦截 Codex 的 Responses 请求（413 Payload Too Large）。
+  真实部署需保证该上限覆盖 Codex 的请求体（本机实测单轮约 28–60KB，含工具时更大）；测试夹具已显式提高到 8MB。
+- 再次确认：客户端第一步会尝试 WebSocket，网关回 404 后回落 HTTPS（日志可见），否则该轮不会发出 POST。
+
+## 边界
+
+- 官方 mock 只验证传输/配置/路由；真实 `chatgpt.com` 与真实第三方已在 `codex-live.mjs` / `codex-live-real.mjs` 单独取证。
+- 真实 `~/.codex/config.toml` 写入与客户端重载：NOT_RUN。
+- Desktop 未覆盖。

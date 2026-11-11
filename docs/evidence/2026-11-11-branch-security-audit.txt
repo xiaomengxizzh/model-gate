@@ -1,0 +1,36 @@
+分支安全 / 合规自查（2026-11-11，提交前）
+==========================================
+
+范围：ec66b24..HEAD（Draft PR #6 的全部提交）。只读审计，不修改历史。
+
+## 检查项与结果
+
+| 检查 | 结果 |
+| --- | --- |
+| 新增行中的疑似密钥/令牌 | 仅命中**测试用虚构值**（sk-dummy-not-a-real-key、sk-config-driven-test、sk-secret-should-not-leak、sk-SECRET-MUST-NOT-LEAK）；均为断言不得泄漏的阴性夹具 |
+| 凭据文件是否入库 | 无（auth.json / keys.local.json / master.key / config.toml 均未提交） |
+| 私钥块 | 无 |
+| 新增文件体积 | 最大 39KB（src/codex/catalog.js），无二进制/权重/大文件 |
+| 源码中的绝对家目录路径 | 无（src/、scripts/ 已清理） |
+| 证据文档中的真实密钥 | 无（docs/evidence 只有头名/长度/脱敏统计） |
+
+## 本轮修复
+
+- 7 个取证脚本原先硬编码 /home/xiaomengxizi/ai/harness/codex/cli/bin/codex 作为默认值，
+  已改为 process.env.CODEX_BIN || 'codex'；本机运行需 CODEX_BIN=<path>（证据文档命令均按此执行）。
+  目的：避免把开发者主目录写进仓库与证据脚本，同时保持可复现。
+
+## 复现命令
+
+```bash
+git diff ec66b24..HEAD -U0 | grep '^+' | grep -nE 'sk-[A-Za-z0-9_-]{16,}|gho_[A-Za-z0-9]{20,}|Bearer ey[A-Za-z0-9]{10,}|PRIVATE KEY'
+git ls-tree -r --name-only HEAD | grep -E 'auth.json|keys.local.json|master.key|config.toml'
+git diff --name-only --diff-filter=A ec66b24..HEAD | xargs -r stat -c '%s %n' | sort -rn | head
+```
+
+## 边界
+
+- 这是静态仓库审计，不等同于依赖漏洞扫描或运行时渗透测试。
+- 未扫描 GitHub 侧 secret scanning 结果（PR 未合并，未触发）。
+
+结论：分支内无真实凭据/私钥/大文件；剩余命中均为显式虚构测试值。

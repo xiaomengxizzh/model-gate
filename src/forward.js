@@ -1,6 +1,7 @@
 // 转发链模块（Phase1 TD3 自 index.js 拆分）：routes 构建 + 三层重试 + 循环兜底 + 限流/记账协作
 // 共享辅助（健康/统计/工具）由 index.js 经 deps 注入，避免双向依赖
 import { gunzipSync } from 'node:zlib'
+import { randomUUID } from 'node:crypto'
 import { adapterFor, cacheHitMiss, hasTools, mapErrorEnvelope } from './format.js'
 import { buildProvider, modelTarget } from './router.js'
 import { isStreamResponse } from './sse.js'
@@ -8,6 +9,10 @@ import { forward } from './request.js'
 import { abortedError, sleepWith } from './budget.js'
 import { todayKey } from './shared.js'
 import { isToolBearingBody, retryAfterHeader, attributionCode, retryWaitFits } from './retry-policy.js'
+import { classifyTarget, isAggregateModelId } from './codex/identity.js'
+import { planTargetHeaders, applyExtraHeaders, targetDeny, officialPassthroughEnabled } from './codex/auth.js'
+import { detectOpaqueV2Task } from './codex/interop.js'
+import { decide, advancePhase, PHASE, ACTION } from './routing/decision.js'
 
 const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-length','upgrade','keep-alive','te','trailer'])
 const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection','x-mg-admin','x-goog-api-key','host'])
@@ -63,26 +68,51 @@ function maybeGunzip(buf, contentEncoding) {
   return buf
 }
 
-// 转发头：剥离客户端授权/敏感头，统一由网关注入鉴权，防止绕过
-function buildHeaders(req, provider, bodyBuf, cfg, api, body) {
-  const headers = {}
-  const connectionHeaders = new Set(String(req.headers.connection || '').toLowerCase().split(',').map(v => v.trim()))
+// 转发头（E1 身份域防火墙）：先按目标身份域决定哪些客户端头可以过（官方白名单 / 第三方剥离官方专用集），
+// 再由网关注入自有鉴权，最后合并 extraHeaders（凭据类禁止覆盖）。判定与清单集中在 codex/auth.js。
+// 兼容说明：旧的 STRIP_IN 语义（客户端授权/内部头不外流）保留在自身白名单里，行为只收紧不放宽。
+export function buildHeaders(req, provider, bodyBuf, cfg, api, body, ctx) {
+  const identity = (ctx && ctx.identity) || classifyTarget(provider, cfg)
+  // 官方目标无自有 key 时只能走「客户端官方凭据透传」，该路径默认关闭，由 auth.js 的统一开关控制。
+  const passthrough = identity.credential === 'client-passthrough' && officialPassthroughEnabled()
+  // 帧层/连接层头先剔除，避免 connection 列出的自定义头继续外流（与旧 connectionHeaders 行为等价）。
+  const connectionHeaders = new Set(String(req.headers.connection || '').toLowerCase().split(',').map(v => v.trim()).filter(Boolean))
+  const incoming = {}
   for (const [k, v] of Object.entries(req.headers)) {
     const lk = k.toLowerCase()
     if (HOP_BY_HOP.has(lk) || STRIP_IN.has(lk) || connectionHeaders.has(lk)) continue
-    headers[k] = v
+    incoming[k] = v
   }
+  // 凭据类头单独取：STRIP_IN 已把客户端 authorization 从 incoming 剔掉，官方透传路径需要原值，
+  // 因此显式保留一份，仅当 passthrough（官方目标 + 无自有 key + 开关开启）时放回。
+  const clientCredential = {}
+  for (const name of ['authorization', 'chatgpt-account-id']) {
+    const v = req.headers[name]
+    if (v !== undefined && !connectionHeaders.has(name)) clientCredential[name] = v
+  }
+  const plan = planTargetHeaders({ identity, provider, cfg, incoming, passthrough })
+  const headers = plan.headers
+  if (passthrough) for (const [k, v] of Object.entries(clientCredential)) headers[k] = v
   headers['user-agent'] = 'model-gateway/0.1'
   if (!headers['accept']) headers['accept'] = 'application/json'
   headers['accept-encoding'] = 'identity' // 请求上游返回明文，避免 gzip 导致响应体解析失败
-  if (provider.apiKey) headers['authorization'] = 'Bearer ' + provider.apiKey
+  // 自有 key 优先；客户端凭据透传路径不得被网关 key 覆盖（两条路互斥）。
+  if (provider.apiKey && identity.credential !== 'client-passthrough') headers['authorization'] = 'Bearer ' + provider.apiKey
   const extra = Object.assign({}, (cfg.defaults || {}).extraHeaders, provider.extraHeaders)
-  for (const [k, v] of Object.entries(extra)) headers[k.toLowerCase()] = v
+  const extraPlan = applyExtraHeaders(headers, extra)
+  if (ctx && ctx.log) {
+    if (extraPlan.blocked.length) ctx.log.warn('extraHeaders 鉴权头/帧层头已拦截（仅记头名）', 'provider=' + provider.id, extraPlan.blocked.join(','))
+    if (plan.dropped.length) ctx.log.info('upstream 头策略丢弃', 'provider=' + provider.id, 'identity=' + identity.kind, plan.dropped.join(','))
+  }
   if (provider.id === 'opencodego') {
     const first = (v) => Array.isArray(v) ? v[0] : v
+    // OpenCode Go 强制要求 x-opencode-session（缺失直接 400 MissingSessionID）。Codex 0.167 发的是
+    // session-id / thread-id（官方头，转发前已被剥掉），因此这里只**派生**一个会话标识：
+    // 优先客户端显式头，其次 Codex 的 session-id/thread-id 值，最后给一次性随机 id（不再发裸请求）。
     const session = first(req.headers['x-opencode-session']) || first(req.headers['x-session-id']) || first(req.headers['x-conversation-id']) ||
+      first(req.headers['session-id']) || first(req.headers['thread-id']) ||
       (body && (body.session_id || body.conversation_id)) || headers['x-opencode-session'] || headers['x-session-id']
-    if (session != null && String(session).trim()) headers['x-opencode-session'] = String(session)
+    headers['x-opencode-session'] = (session != null && String(session).trim()) ? String(session) : ('mg-' + randomUUID())
   }
   // 协议专属头（per-model protocol 改革的下游：协议换掉后鉴权头也得跟着换）。
   // Anthropic Messages API 认 x-api-key 且强制 anthropic-version（多数 OpenAI 兼容中转也接受 Bearer，
@@ -273,6 +303,173 @@ function resolveDialogue(state, req, body) {
   return id
 }
 
+
+// ===== E5：Codex 聚合路径的智能 Fallback（决策器接入） =====
+// 只在 Codex 聚合目标上启用：def.codexAggregate / def.codexOfficial（router.js 目录解析）、
+// defaults.codexFallback===true、或聚合保留前缀（isAggregateModelId）。其它请求继续走原有
+// forwardChain 逻辑，行为逐字节不变。决策/阶段语义见 src/routing/decision.js 与
+// docs/explanation/fallback-decision.md。
+//
+// 接入约定（与 E5 决策器分工）：
+//   · 同上游重试由决策器 retry_same 控制（Codex 模式给 forward() 传 noRetry，避免双重重试）；
+//   · 换模型/上游由决策器 failover 控制，且只允许已授权第三方候选；官方目标只在“用户直接选择的
+//     官方主目标”上使用，永不作为 failover 目标（D7）；
+//   · 阶段由本模块推进（首字节/工具出现/交付/取消），出现工具或托管副作用、已交付流、部分提交、
+//     取消、v2 不可读时立即 stop_with_error，不重放；
+//   · 日志只落决策字段（模型/供应商/错误类/阶段/动作/预算），不含令牌与请求正文。
+const CODEX_FALLBACK_LIMIT_DEFAULTS = Object.freeze({ maxSameProviderAttempts: 1, maxFailovers: 2, maxTotalAttempts: 3, maxWaitMs: 30000 })
+
+function codexFallbackEnabled(cfg, def, requested, canonical) {
+  if (def && (def.codexAggregate === true || def.codexOfficial === true)) return true
+  if (cfg && cfg.defaults && cfg.defaults.codexFallback === true) return true
+  return isAggregateModelId(canonical || requested || '', cfg)
+}
+
+function codexLimitsOf(cfg) {
+  const raw = (cfg.defaults && cfg.defaults.codexFallbackLimits) || {}
+  const n = (v, d) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Math.trunc(Number(v)) : d)
+  return {
+    maxSameProviderAttempts: n(raw.maxSameProviderAttempts, CODEX_FALLBACK_LIMIT_DEFAULTS.maxSameProviderAttempts),
+    maxFailovers: n(raw.maxFailovers, CODEX_FALLBACK_LIMIT_DEFAULTS.maxFailovers),
+    maxTotalAttempts: n(raw.maxTotalAttempts, CODEX_FALLBACK_LIMIT_DEFAULTS.maxTotalAttempts),
+    maxWaitMs: Number.isFinite(Number(raw.maxWaitMs)) && Number(raw.maxWaitMs) > 0 ? Number(raw.maxWaitMs) : CODEX_FALLBACK_LIMIT_DEFAULTS.maxWaitMs,
+  }
+}
+
+// 预算：只认用户显式配置的上限；spent.requestUsd 由本请求累计的估算费用提供
+// （task/daily 维度未接费用账本，保持 0；文档标注）。
+function codexBudgetOf(cfg, spentUsd) {
+  const raw = (cfg.defaults && cfg.defaults.codexBudget) || {}
+  const lim = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0)
+  return {
+    limits: { requestUsd: lim(raw.requestUsd), taskUsd: lim(raw.taskUsd), dailyUsd: lim(raw.dailyUsd) },
+    spent: { requestUsd: Math.max(0, Number(spentUsd) || 0), taskUsd: 0, dailyUsd: 0 },
+    enforceUnknownCost: raw.enforceUnknownCost === true,
+  }
+}
+
+// 单次费用估算：models.<m>.costEstimateUsd > providers.<p>.costEstimateUsd；都未配置 = 未知。
+function codexEstimateFor(cfg) {
+  return (model, pid) => {
+    const m = cfg.models && model ? cfg.models[model] : null
+    const p = cfg.providers && pid ? cfg.providers[pid] : null
+    for (const v of [m && m.costEstimateUsd, p && p.costEstimateUsd]) {
+      const n = Number(v)
+      if (Number.isFinite(n) && n >= 0) return n
+    }
+    return undefined
+  }
+}
+
+// D7 手动应急：用户显式写 defaults.codexEmergency=true 或 {acknowledged:true} 才算确认。
+function codexEmergencyOf(cfg) {
+  const raw = cfg && cfg.defaults ? cfg.defaults.codexEmergency : null
+  if (raw === true) return { acknowledged: true }
+  if (raw && typeof raw === 'object' && raw.acknowledged === true) return { acknowledged: true }
+  return null
+}
+
+// 从请求提取决策所需的能力/工具/可读性事实。宿主托管工具按“可能已产生副作用”处理。
+function codexRequestInfoOf(body) {
+  const tools = Array.isArray(body && body.tools) ? body.tools : []
+  const types = []
+  const hosted = []
+  for (const t of tools) {
+    const ty = String((t && t.type) || '')
+    if (ty === 'function' || ty === 'custom' || ty === 'local_shell') { if (!types.includes(ty)) types.push(ty) }
+    else if (ty) { if (!hosted.includes(ty)) hosted.push(ty) }
+  }
+  const input = Array.isArray(body && body.input) ? body.input : []
+  for (const it of input) {
+    const ty = String((it && it.type) || '')
+    if (/function_call|custom_tool_call/.test(ty) && !types.includes('function')) types.push('function')
+  }
+  const v2 = detectOpaqueV2Task(body)
+  return {
+    capability: 'chat',
+    promptTokens: estPromptTokens(body),
+    modalities: [],
+    tools: types,
+    hostedTools: hosted,
+    requiresV2TaskRead: v2.opaque === true,
+    sideEffectRisk: hosted.length ? 'possible' : 'none',
+    streaming: body && body.stream === true,
+  }
+}
+
+function codexCandidateFor(cfg, model, pid, requestInfo, primary) {
+  const built = buildProvider(cfg, pid)
+  const identity = classifyTarget(built, cfg)
+  const official = identity.kind === 'official'
+  const keyMissing = !!(built._def && built._def.apiKeyEnv && !built.keyOk)
+  const md = cfg.models && model ? cfg.models[model] : null
+  return {
+    model,
+    provider: pid,
+    providerKind: official ? 'official_subscription' : 'third_party',
+    // 已配置且凭据可用的第三方上游 = 用户已授权（配置即授权）；官方订阅永不授权给通用池。
+    authorized: !official && !keyMissing,
+    capability: (md && md.capability) || 'chat',
+    modalities: [],
+    contextWindow: Number((md && md.maxContext) || 0) || 0,
+    // 工具能力由 E4 interop 层负责显式拒绝不可表达工具；此处按请求声明放行，避免误杀。
+    tools: { types: requestInfo.tools.slice(), hosted: requestInfo.hostedTools.slice() },
+    readability: { plaintext: true, v2Encrypted: false },
+    priority: primary ? -1 : 0,
+  }
+}
+
+function codexBuildCandidates(cfg, routes, requestInfo) {
+  const out = []
+  for (let ri = 0; ri < routes.length; ri++) {
+    const route = routes[ri]
+    const provs = Array.isArray(route.providers) ? route.providers : []
+    for (let pi = 0; pi < provs.length; pi++) {
+      const pid = provs[pi]
+      if (!pid || !cfg.providers[pid]) continue
+      out.push(codexCandidateFor(cfg, route.model, pid, requestInfo, ri === 0 && pi === 0))
+    }
+  }
+  return out
+}
+
+// 只扫描工具类事件名（不解析正文、不落日志），用于把“流里出现过 tool_call”标成副作用阶段。
+const CODEX_TOOL_EVENT_RE = /"(tool_calls|function_call|custom_tool_call|local_shell_call|web_search_call|computer_call|file_search_call|code_interpreter_call|mcp_call)"/
+// 仅 Codex 聚合路径使用的流包装：透传每个 chunk，顺带探测工具事件；不影响背压/销毁语义。
+function codexTapStream(stream, onTool) {
+  if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return stream
+  const wrapper = {
+    statusCode: stream.statusCode,
+    headers: stream.headers,
+    on(ev, fn) { if (typeof stream.on === 'function') stream.on(ev, fn); return wrapper },
+    once(ev, fn) { if (typeof stream.once === 'function') stream.once(ev, fn); return wrapper },
+    removeListener(ev, fn) { if (typeof stream.removeListener === 'function') stream.removeListener(ev, fn); return wrapper },
+    destroy(...args) { try { stream.destroy && stream.destroy(...args) } catch {} },
+    get destroyed() { return !!stream.destroyed },
+    async *[Symbol.asyncIterator]() {
+      for await (const chunk of stream) {
+        try { if (CODEX_TOOL_EVENT_RE.test(typeof chunk === 'string' ? chunk : chunk.toString('utf8'))) onTool() } catch {}
+        yield chunk
+      }
+    },
+  }
+  return wrapper
+}
+
+// 决策错误到 HTTP 状态：保留上游可执行语义，未知一律 502。
+function codexStopStatus(code, upstreamStatus) {
+  const c = String(code || '')
+  if (c === 'MG_FB_RATE_LIMITED') return 429
+  if (c === 'MG_FB_BUDGET' || c === 'MG_FB_QUOTA' || c === 'MG_FB_OFFICIAL_QUOTA') return 402
+  if (c === 'MG_FB_TASK_UNREADABLE') return 422
+  if (c === 'MG_FB_TIMEOUT') return 504
+  if (c === 'MG_FB_SIDE_EFFECT_REPLAY_BLOCKED' || c === 'MG_FB_STREAM_DELIVERED' || c === 'MG_FB_PARTIAL_COMMIT') return 409
+  if (c === 'MG_FB_BAD_REQUEST') return Number.isFinite(upstreamStatus) ? upstreamStatus : 400
+  if (c === 'MG_FB_AUTH') return Number.isFinite(upstreamStatus) ? upstreamStatus : 403
+  if (c === 'MG_FB_MODEL_UNAVAILABLE') return Number.isFinite(upstreamStatus) ? upstreamStatus : 404
+  return 502
+}
+
 export async function forwardChain(deps, state, req, url, path, method, bodyBuf, body, log, streamRelay, budget, opts = {}) {
   const { ensureHst, markFail, markOk, healthy, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tallyDialogueRequest, tryParse, collectBody } = deps
   const cfg = state.cfg
@@ -290,6 +487,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     ? { kind: 'aborted' }
     : { kind: 'json', status: 504, contentType: 'application/json', body: timeoutBody() }
   let routes = []
+  let codexDef = null // Codex 聚合目标（目录 slug）的 def，用于启用 E5 决策器
   let maxModel = 0
   let qps = 0
   let bodyDirty = false        // body 已被网关改写（入站归一化 / 思考强度整形 / 跨模型兜底）：tbuf 必须重新序列化，不能沿用客户端原缓冲
@@ -304,12 +502,20 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   // 一次客户端请求只计一次对话请求数（token/缓存回调各自累加数值，不再 +1）
   if (dialogueId && typeof tallyDialogueRequest === 'function') tallyDialogueRequest(state, dialogueId)
   if (body && body.model) {
-    const hit = state.router.resolve(body.model)
+    let hit
+    try { hit = state.router.resolve(body.model) } catch (e) {
+      // E1：聚合保留 ID 未命中（router 已判定不回退）→ 404 + 稳定错误码 + 可用 ID，绝不落默认上游。
+      if (e && e.code === 'unknown_model') {
+        return { kind: 'json', status: 404, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: e.message, type: 'unknown_model', code: 'unknown_model', model: body.model, available: e.available || [] } })) }
+      }
+      throw e
+    }
     // 决策 1：已配置虚拟模型后，未知名不再静默走 defaults 链（防 key 隔离被无感绕过），明确 404
     if (!hit.known && (state.cfg.virtualModels || []).length) {
       return { kind: 'json', status: 404, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '未知模型名: ' + body.model + '。可用虚拟模型见 GET /v1/models', type: 'unknown_model' } })) }
     }
     requestModel = hit.canonicalName
+    codexDef = hit.def
     // 能力隔离（MG-011/012）：非 chat 能力不得从对话入口调用（embedding/rerank 各有专属入口）
     if (!hit.def.isVirtualModel && !hit.def.virtual && (hit.def.capability || 'chat') !== 'chat') {
       const _cap = hit.def.capability || 'chat'
@@ -386,6 +592,24 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       if (!(cfg.defaults && cfg.defaults.provider)) return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '\u672a\u6307\u5b9a model\uff0c\u4e14\u672a\u8bbe\u7f6e\u9ed8\u8ba4\u4e0a\u6e38\uff08\u8bf7\u5728\u9762\u677f\u300c\u9ed8\u8ba4\u4e0a\u6e38\u300d\u4e2d\u9009\u62e9\uff09', type: 'missing_model' } })) }
     }
   }
+  // E5：Codex 聚合路径启用决策器；其它请求 codex=null，下方所有 codex 分支短路，原有行为不变。
+  let codex = null
+  if (codexFallbackEnabled(cfg, codexDef, body && body.model, requestModel)) {
+    const codexRequest = codexRequestInfoOf(body)
+    const codexEstimate = codexEstimateFor(cfg)
+    codex = {
+      request: codexRequest,
+      candidates: codexBuildCandidates(cfg, routes, codexRequest),
+      phase: PHASE.UNSENT,
+      attempts: { total: 0, sameProvider: 0, failovers: 0 },
+      spentUsd: 0,
+      limits: codexLimitsOf(cfg),
+      emergency: codexEmergencyOf(cfg),
+      tried: [],
+      toolCallSeen: false,
+      estimate: (cand) => (cand ? codexEstimate(cand.model, cand.provider) : undefined),
+    }
+  }
   // 思考强度取值（单一真源）：客户端显式档位 > 入口模型（虚拟入口即链首）的配置默认值。
   // 字段**形态**不在此处决定——每条路由按目标模型自身 effortFormat 整形，见下方 for(route) 内。
   const _clientEff = (body && body.reasoning_effort !== undefined && body.reasoning_effort !== null && String(body.reasoning_effort).trim() !== '') ? canonEffort(body.reasoning_effort) : null
@@ -418,18 +642,87 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   // 模型链循环上限进一步被请求级整体预算钳制（MG-002）：预算小于 loopMs 时以预算为准
   const loopDeadline = (budget && budget.deadlineAt != null) ? Math.min(Date.now() + loopMs, budget.deadlineAt) : Date.now() + loopMs
   const chainModels = []            // 实际尝试过的 serving 模型链（跨模型兜底/循环标记，供日志/面板查看）
+  // —— E5 决策器运行时（codex=null 时全部短路；非聚合路径零改动）——
+  const codexCandidateOf = (model, pid) => {
+    if (!codex) return null
+    const hitCand = codex.candidates.find((c) => c.model === model && c.provider === pid)
+    return hitCand || (cfg.providers[pid] ? codexCandidateFor(cfg, model, pid, codex.request, false) : null)
+  }
+  const codexAdvance = (to, why) => {
+    if (!codex) return false
+    const r = advancePhase(codex.phase, to)
+    if (r.ok) { codex.phase = r.phase; return true }
+    log && log.warn('codex phase rejected', codex.phase + '->' + to, why || '')
+    return false
+  }
+  const codexDecide = (o = {}) => {
+    if (!codex) return null
+    const d = decide({
+      now: Date.now(),
+      phase: codex.phase,
+      error: o.error || null,
+      request: codex.request,
+      current: o.current || null,
+      candidates: codex.candidates,
+      triedTargets: codex.tried,
+      attempts: codex.attempts,
+      limits: codex.limits,
+      budget: codexBudgetOf(cfg, codex.spentUsd),
+      estimateCost: (cand) => codex.estimate(cand),
+      remainingMs: remainingBudgetMs(),
+      emergency: codex.emergency,
+      healthOf: (cand) => {
+        const h = ensureHst(state, cand.provider)
+        const open = !healthy(h, Date.now()) || (h.streamDrops || 0) >= STREAM_DROP_THRESHOLD
+        return open ? { state: 'open', cooldownUntilMs: h.openUntil || 0 } : { state: 'closed' }
+      },
+    })
+    // 审计日志：只记决策字段，不含令牌/正文
+    log && log.info('codex fallback decision', 'action=' + d.action, 'code=' + d.code, 'phase=' + d.audit.phase, 'error=' + d.audit.errorClass, 'model=' + ((o.current && o.current.model) || '-'), 'provider=' + ((o.current && o.current.provider) || '-'), 'target=' + ((d.target && (d.target.model + '/' + d.target.provider)) || '-'), 'budgetNextUsd=' + (d.budget.nextUsd == null ? '?' : d.budget.nextUsd))
+    return d
+  }
+  const codexStopResult = (d, o = {}) => {
+    const upstreamStatus = d.audit.errorStatus
+    if (o.streamStarted) {
+      return { kind: 'stream-interrupted', pid: o.pid || null, modelName: o.modelName || modelName, serving: o.serving, chain: chainModels.join('>'), note: d.reason, code: d.code, phase: d.audit.phase, reconnects: 0 }
+    }
+    const raMs = o.retryAfterMs != null ? Number(o.retryAfterMs) : null
+    const status = codexStopStatus(d.code, upstreamStatus)
+    const headers = (status === 429 && raMs != null) ? { 'retry-after': String(Math.ceil(Math.max(0, raMs) / 1000)) } : undefined
+    return {
+      kind: 'json', status, contentType: 'application/json; charset=utf-8', headers,
+      pid: o.pid || null, modelName, serving: o.serving, chain: chainModels.join('>'),
+      body: Buffer.from(JSON.stringify({ error: {
+        message: d.reason, type: 'codex_fallback', code: d.code, action: d.action,
+        phase: d.audit.phase, user_action: d.userAction,
+        upstream_status: upstreamStatus == null ? null : upstreamStatus,
+        retry_after_ms: raMs,
+      } })),
+    }
+  }
+  const codexWaitRetry = async (d) => {
+    const ms = d && d.retry && Number.isFinite(Number(d.retry.afterMs)) ? Number(d.retry.afterMs) : null
+    if (ms == null || ms > remainingBudgetMs()) return false
+    try { await sleepWith(ms, budgetSignal); return true } catch { return false }
+  }
+  const codexMarkTried = (model, pid) => {
+    if (!codex) return
+    if (!codex.tried.some((t) => t.model === model && t.provider === pid)) codex.tried.push({ model, provider: pid })
+  }
   try {
   // 循环兜底：整条路由链(a→b→c)一轮失败后回到队首反复尝试，直到成功 / 业务4xx / 整体超时(loopMs)
   outer: while (Date.now() < loopDeadline) {
     if (budget && budget.expired()) { lastErr = abortedError((budget && budget.reason) || 'request_timeout'); refundQps(); break }
     let cycleTried = false
     rejectedOnly = true // 每轮重置：遇到可重试类失败（catch）即置 false；整轮只有 403/404 则维持 true → 轮末 break
-    for (const route of routes) {
+    for (let ri = 0; ri < routes.length; ri++) {
+      const route = routes[ri]
       const serving = route.model
     const lim = routeLimit(state, cfg, serving, body)
     if (lim) { log && log.warn('skip model (' + lim + ')', serving || '-', '-> next'); continue } // 额度/上下文超限：自动断连并按目录切换到下一模型
     const provs = (route.mode === 'onFail') ? route.providers.slice(0, 1) : orderCandidates(state, route.model, route.providers)
-    for (const pid of provs) {
+    for (let pi = 0; pi < provs.length; pi++) {
+    const pid = provs[pi]
     if (!pid || !cfg.providers[pid]) continue
     const prov = buildProvider(cfg, pid)
     const h = ensureHst(state, pid)
@@ -456,8 +749,26 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       log && log.warn('half-open 放行上游（连续断流冷却结束，探测一次）', pid)
     }
     if (prov._def.apiKeyEnv && !prov.keyOk) { log && log.warn('skip provider (no key)', pid); continue }
+    // E5：Codex 聚合路径 = 主目标 + 已授权第三方；官方订阅只作为用户直接选择的主目标，绝不进 fallback 池（D7）。
+    const isPrimaryTarget = ri === 0 && pi === 0
+    const codexCand = codex ? codexCandidateOf(serving, pid) : null
+    if (codex && !isPrimaryTarget) {
+      if (classifyTarget(prov, cfg).kind === 'official') {
+        log && log.warn('codex fallback: 官方订阅不进通用池，跳过', 'provider=' + pid, 'model=' + (serving || '-'))
+        continue
+      }
+      if (codexCand && codexCand.authorized !== true) {
+        log && log.warn('codex fallback: 候选未授权，跳过', 'provider=' + pid, 'model=' + (serving || '-'))
+        continue
+      }
+    }
     tried = true
     cycleTried = true
+    if (codex) {
+      codex.attempts.total += 1
+      const _estUsd = codexCand ? codex.estimate(codexCand) : undefined
+      if (Number.isFinite(_estUsd)) codex.spentUsd += _estUsd
+    }
     if (chainModels[chainModels.length - 1] !== serving) chainModels.push(serving)
     agg(state, pid, 'requests', 1); state.st.counters.requests += 1; bm.requests += 1
     // 跨模型兜底：把发给上游的 model 名改写为该兜底模型名。
@@ -530,7 +841,15 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     }
     if (api !== 'openai' && routeBody) { const ad = adapterFor(api); const r = ad.build(routeBody); if ((hasTools(routeBody) || routeBody.tool_choice) && routeBody.stream) { r.body.stream = false; degraded = true } turl = r.path; tbuf = Buffer.from(JSON.stringify(r.body)) }
     else if ((bodyDirty || routeBody !== body) && routeBody) tbuf = Buffer.from(JSON.stringify(routeBody))
-    const headers = buildHeaders(req, prov, tbuf, cfg, api, body)
+    // E1 身份域门禁（fail-closed）：官方目标做 host/scheme/path 白名单校验，未知身份直接拒绝；
+    // 官方凭据透传默认关闭。拒绝发生在任何上游 I/O 之前，且错误消息不含头值。
+    const identity = classifyTarget(prov, cfg)
+    const denied = targetDeny({ identity, provider: prov, cfg, path: turl, env: process.env })
+    if (denied) {
+      log && log.warn('上游目标身份拒绝', 'provider=' + pid, 'identity=' + identity.kind, 'code=' + denied.code, 'model=' + (serving || '-'))
+      return { kind: 'json', status: denied.status, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: denied.message, type: 'identity_denied', code: denied.code } })), pid, modelName, serving, api, chain: chainModels.join('>') }
+    }
+    const headers = buildHeaders(req, prov, tbuf, cfg, api, body, { identity, log })
     // 429 冷却（rateUntil）：只有剩余预算等得下才等；等不下就跳过该上游并记 429 归因
     // （全部上游都在冷却 → 收尾回 429 + Retry-After，而不是为了等冷却把客户端挂死或误报 502）
     const cooldownWaitMs = Math.max(0, throttleOf(state, pid).rateUntil - Date.now())
@@ -548,7 +867,8 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     try {
       upstreamAttempted = true
       // noRetry：非幂等请求同上游只发一次（Retry-After 仍在预算内时允许等待后重发，见 request.js）
-      const result = await forward(prov, turl, req.method, headers, tbuf, Object.assign({}, cfg.defaults || {}, { noRetry: noReplay }), log, { budget, signal: budgetSignal })
+      const result = await forward(prov, turl, req.method, headers, tbuf, Object.assign({}, cfg.defaults || {}, { noRetry: noReplay || !!codex }), log, { budget, signal: budgetSignal })
+      if (codex) codexAdvance(PHASE.ACCEPTED, 'upstream responded')
       upstreamHits += (result.retries || 0) + 1
       const latency = Date.now() - attemptStart
       const o = ensureSt(state, pid)
@@ -564,10 +884,13 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           // 流式：成败延后到流结束统一判定（streamRelay 内 relay，返回流结局）。
           // 不能在响应头阶段 markOk——头 2xx 不代表流能走完，故障上游「头 2xx + 流中断」若在此刻被洗白，
           // 熔断计数永远攒不齐，后续请求被亲和钉在故障主上游，「切备用/切下一模型」形同虚设。
+          // E5：Codex 路径探测流内工具事件（只扫事件名，不解析/不落正文），用于把副作用阶段标出来。
+          const codexOnTool = codex ? () => { codex.toolCallSeen = true; codexAdvance(PHASE.TOOL_SIDE_EFFECT, 'tool_call in stream') } : null
+          if (codexOnTool && result.stream) result.stream = codexTapStream(result.stream, codexOnTool)
           const reconnector = async () => {
             const again = await forward(prov, turl, req.method, headers, tbuf, cfg.defaults || {}, log, { budget, signal: budgetSignal })
             if (!again.ok) throw new Error('reconnect status ' + again.status)
-            return again.stream
+            return codexOnTool && again.stream ? codexTapStream(again.stream, codexOnTool) : again.stream
           }
           if (typeof streamRelay !== 'function') {
             // 兼容兜底：未注入 relay（异常路径）按旧行为直接交付，由调用方处理
@@ -581,16 +904,19 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           const h = ensureHst(state, pid)
           if (relay && relay.clientGone) {
             // 客户端断开/写停滞：不是上游失败——不计中断、不计错误、不动熔断/streamDrops，也不再切上游
+            if (codex) codexAdvance(PHASE.USER_CANCELLED, 'client gone')
             log && log.info('sse 客户端已断开/停止消费，结束该请求', 'model=' + sm, 'provider=' + pid)
             return { kind: 'aborted' }
           }
           if (relay && relay.timedOut && !relay.completed) {
             // 整体预算在流式阶段耗尽：不再续传/切上游，以流内错误事件收尾（客户端可感知）
+            if (codex && relay.contentSent) codexAdvance(PHASE.STREAM_DELIVERED, 'content delivered then budget timeout')
             log && log.warn('请求超出整体预算（流式阶段）', 'model=' + sm, 'provider=' + pid, 'overallMs=' + overallMsCfg)
             return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, timeout: true, chain: chainModels.join('>'), note: '请求超出整体预算 ' + overallMsCfg + 'ms（defaults.timeout.overallMs）', reconnects: relay.reconnects || 0 }
           }
           if (relay.completed) {
             // 流完整结束（含续传成功）：正常计成功
+            if (codex) codexAdvance(PHASE.STREAM_DELIVERED, 'stream completed')
             h.streamDrops = 0
             markOk(state, pid)
             noteAffinity(state, sm, pid)
@@ -605,6 +931,22 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           h.streamDropAt = Date.now() // 冷却计时起点：配合 half-open 让上游有机会自证恢复
           markFail(state, pid, prov.circuit) // 走到这里说明是上游侧中断（clientGone 已在上方提前返回）
           const _note = '断流续传' + (relay.reconnects || 0) + '次仍失败，结束'
+          // E5：先推进阶段，再由决策器裁决「同上游重试 / 换模型 / 停机」。已交付内容或工具副作用一律不重放。
+          if (codex) {
+            if (relay.contentSent) codexAdvance(PHASE.STREAM_DELIVERED, 'content delivered before interruption')
+            else if (codex.toolCallSeen) codexAdvance(PHASE.TOOL_SIDE_EFFECT, 'tool call before interruption')
+            const _d = codexDecide({ error: { streamInterrupted: true }, current: codexCand })
+            if (_d && _d.action === ACTION.STOP) {
+              if (relay.finish) relay.finish(_d.reason)
+              return codexStopResult(_d, { streamStarted: true, pid, modelName, serving: sm })
+            }
+            codexMarkTried(serving || route.model, pid)
+            if (_d && _d.action === ACTION.RETRY_SAME) {
+              codex.attempts.sameProvider += 1
+              if (await codexWaitRetry(_d)) { pi -= 1; continue }
+            }
+            if (_d && _d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
+          }
           if (relay.contentSent && (cfg.defaults && cfg.defaults.streamInterruptOnContent) !== true) {
             // 正式回答（content）已回传后中断且未开「中断也切」：重发会让客户端收到「半截旧回答 + 新回答」拼接——发错误事件收尾（客户端可干净重试）
             if (relay.finish) relay.finish(_note)
@@ -621,6 +963,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         let out = await collectBody(result.stream, undefined, { budget, signal: budgetSignal, destroyOnAbort: true })
         out = maybeGunzip(out, result.headers && result.headers['content-encoding'])
         const parsed = tryParse(out)
+        // E5：非流式 2xx 也推进阶段；命工具调用按副作用处理（请求已结束，仅用于审计与后续轮次判定）。
+        if (codex) {
+          const _msg = parsed && parsed.choices && parsed.choices[0] && parsed.choices[0].message
+          const _items = parsed && Array.isArray(parsed.output) ? parsed.output : []
+          const _hasTool = !!(_msg && Array.isArray(_msg.tool_calls) && _msg.tool_calls.length) ||
+            _items.some((it) => it && /function_call|custom_tool_call|local_shell_call|web_search_call|mcp_call|computer_call/.test(String(it.type || '')))
+          codexAdvance(_hasTool ? PHASE.TOOL_SIDE_EFFECT : PHASE.STREAM_DELIVERED, 'non-stream response')
+        }
         const usage = parsed && parsed.usage
         if (usage) {
           // usage 字段归一化：此处拿到的是**上游原始响应**（非 openai 协议的转换在下面才做），
@@ -660,6 +1010,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       markOk(state, pid)
       // 3xx 重定向对 Chat 端点属于异常：不跟随、不裸透传，明确转 502，避免客户端误跟随或解析错乱
       if (result.status >= 300 && result.status < 400) {
+        if (codex) {
+          const _d = codexDecide({ error: { status: result.status }, current: codexCand })
+          if (_d.action === ACTION.STOP) return codexStopResult(_d, { pid, modelName, serving, streamStarted })
+          codexMarkTried(serving || route.model, pid)
+          if (_d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
+          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
+          continue
+        }
         // 流已开始：写不了 502 头，按上游失败继续链（不改 rejectedOnly——3xx/4xx 是确定性拒绝，重发同一请求无意义，轮末即收尾）
         if (streamStarted) { lastErr = Object.assign(new Error('upstream redirect ' + result.status), { status: result.status }); continue }
         return { kind: 'json', status: 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'upstream returned unexpected redirect (' + result.status + ')', type: 'upstream_error', status: result.status } })), pid, modelName, chain: chainModels.join('>') }
@@ -669,6 +1027,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       // 全链失败时由收尾逻辑以流内错误事件结束。此前此处直接 return json，index.js 二次 writeHead
       // 抛 "Cannot write headers after they are sent"，客户端只拿到没有 [DONE] 的半截流。
       if (streamStarted) {
+        if (codex) {
+          const _d = codexDecide({ error: { status: result.status }, current: codexCand })
+          if (_d.action === ACTION.STOP) return codexStopResult(_d, { streamStarted: true, pid, modelName, serving })
+          codexMarkTried(serving || route.model, pid)
+          if (_d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
+          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
+          continue
+        }
         // 不置 rejectedOnly=false：4xx 是确定性拒绝，链走完一轮即可收尾，不必重复空转到 loopMs
         lastErr = Object.assign(new Error('upstream ' + result.status + ' ' + (serving || '')), { status: result.status })
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
@@ -676,6 +1042,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         continue
       }
       if (isUpstreamSideFailure(result.status, out)) {
+        if (codex) {
+          const _d = codexDecide({ error: { status: result.status, upstreamFault: true }, current: codexCand })
+          if (_d.action === ACTION.STOP) return codexStopResult(_d, { pid, modelName, serving })
+          codexMarkTried(serving || route.model, pid)
+          if (_d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
+          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
+          continue
+        }
         // 上游侧故障（4xx 但语义是「我/我的下游出错了」，见 isUpstreamSideFailure 注释）：
         // 计为**真·失败**（进熔断计数——反复这么报的上游该被冷却，而不是每笔请求都白撞一次），
         // 保留原始响应供整链全败时回显真实错误，继续目录链下一上游/模型。
@@ -690,6 +1064,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         continue
       }
       if (isModelLevelRejection(result.status, out)) {
+        if (codex) {
+          const _d = codexDecide({ error: { status: result.status, upstreamFault: result.status === 400 }, current: codexCand })
+          if (_d.action === ACTION.STOP) return codexStopResult(_d, { pid, modelName, serving })
+          codexMarkTried(serving || route.model, pid)
+          if (_d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
+          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
+          continue
+        }
         // 模型级拒绝（403/404，或 400 且响应体含「模型/上游不可用」语义）：
         // 记入错误统计（不熔断），保留原始响应供整链全拒时回显，继续尝试下一模型。
         // 注：opencodego 等上游对「模型不可用」也返回 400（Provider rejected / Model not supported），
@@ -703,6 +1085,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         continue
       }
       if (out.length) {
+        if (codex) {
+          const _d = codexDecide({ error: { status: result.status }, current: codexCand })
+          if (_d.action === ACTION.STOP) return codexStopResult(_d, { pid, modelName, serving })
+          codexMarkTried(serving || route.model, pid)
+          if (_d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
+          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
+          continue
+        }
         // 其余 4xx（真·参数/请求错误）：直接返回保留原始错误，不再尝试下一模型（换模型同样会失败）
         log && log.warn('upstream ' + result.status, 'provider=' + pid, 'model=' + (serving || '-'), 'body=' + out.toString('utf8', 0, 300).replace(/\n/g, ' '))
         // 非 OpenAI 上游的原生错误信封 → OpenAI 形状回给客户端（状态码与原始 body 保留在日志里）
@@ -756,6 +1146,25 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       }
       // 非幂等（tool）请求在这里**不** break：同一上游不重试已由 forward 的 noRetry 保证，
       // 允许沿链换下一个上游/模型再试一次（可用性优先）；本轮走完由下方 noReplay break 收尾，绝不回队首。
+      // E5：Codex 聚合路径的错误由决策器裁决（429/5xx/网络/超时），只允许它给出的 retry_same / failover。
+      if (codex) {
+        const _derr = {
+          status: err && err.status != null ? err.status : null,
+          retryAfterMs: err && err.retryAfter != null ? err.retryAfter : null,
+          code: err && err.code,
+          timeout: !!(err && (err.code === 'ETIMEDOUT' || err.reason === 'request_timeout' || err.status === 408)),
+        }
+        const _d = codexDecide({ error: _derr, current: codexCand })
+        if (_d.action === ACTION.STOP) {
+          return codexStopResult(_d, { streamStarted, pid, modelName, serving, retryAfterMs: _derr.retryAfterMs })
+        }
+        codexMarkTried(serving || route.model, pid)
+        if (_d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
+        if (_d.action === ACTION.RETRY_SAME) {
+          codex.attempts.sameProvider += 1
+          if (await codexWaitRetry(_d)) { pi -= 1; continue }
+        }
+      }
     } finally {
       release()
     }

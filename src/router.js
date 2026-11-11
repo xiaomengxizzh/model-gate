@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
+import { isAggregateModelId, aggregatePrefixes } from './codex/identity.js'
 
 export function configPaths() {
   // MG_CONFIG_DIR：可选。多实例隔离时为实例指定独立配置目录（keys/stats 随之独立）；未设置=cwd/config（单实例零配置）
@@ -47,14 +48,61 @@ function normalizeVirtualModels(vms, base) {
   return out
 }
 
+// ===== Codex 目录（E2×E3）：官方 slug 与聚合 slug =====
+// index.js 在加载/重载配置时把 E2 生成的目录视图注入 cfg._codexCatalog：
+//   { officialSlugs: string[], bindings: { [slug]: { slug, provider, model, capability } }, models: ModelInfo[] }
+// 本模块**只消费内存视图**：不读文件、不生成目录、不校验 ModelInfo（那是 src/codex/catalog.js 的职责）。
+// 目录缺失/为 null 时，下面所有分支都不生效 → 与 E1 的语义逐字节一致。
+function codexCatalogOf(cfg) {
+  const cat = cfg && cfg._codexCatalog
+  return (cat && typeof cat === 'object') ? cat : null
+}
+export function codexCatalogBindings(cfg) {
+  const cat = codexCatalogOf(cfg)
+  const b = cat && cat.bindings
+  return (b && typeof b === 'object') ? b : {}
+}
+// 单个聚合 slug 的绑定；非法条目返回 null（由 resolve 负责 fail-closed）。
+export function codexBindingFor(cfg, model) {
+  if (typeof model !== 'string' || !model) return null
+  const b = codexCatalogBindings(cfg)[model]
+  if (!b || typeof b !== 'object' || !b.provider) return null
+  return {
+    slug: typeof b.slug === 'string' && b.slug ? b.slug : model,
+    provider: String(b.provider),
+    model: typeof b.model === 'string' && b.model ? b.model : model,
+    capability: typeof b.capability === 'string' && b.capability ? b.capability : 'chat',
+  }
+}
+export function codexOfficialSlugSet(cfg) {
+  const cat = codexCatalogOf(cfg)
+  const list = cat && Array.isArray(cat.officialSlugs) ? cat.officialSlugs : []
+  return new Set(list.filter((s) => typeof s === 'string' && s))
+}
+export function isCodexOfficialSlug(cfg, model) {
+  return typeof model === 'string' && !!model && codexOfficialSlugSet(cfg).has(model)
+}
+// 官方 slug 的上游 provider：只认 defaults.codexOfficialProvider（不猜、不按名字推断）。
+export function codexOfficialProvider(cfg) {
+  const v = cfg && cfg.defaults && cfg.defaults.codexOfficialProvider
+  return typeof v === 'string' ? v.trim() : ''
+}
+
 // 模型解析单一入口（MG-008 余项）：探测/预热/failback/转发必须得到同一组
 // { servingName(上游模型名), api(协议), effortFormat, maxTokensMax }，否则同一模型在不同路径
 // 会打不同上游名/协议（典型：providerModels 覆盖只在转发生效，预热却发网关模型名 → 404）。
 export function modelTarget(cfg, modelName, pid) {
-  const md = (modelName && cfg && cfg.models && cfg.models[modelName]) || null
+  const mdDirect = (modelName && cfg && cfg.models && cfg.models[modelName]) || null
+  // 聚合 slug 不在 config.models：上游模型名取目录绑定里的原模型名（仅对绑定自己的上游生效），
+  // 协议/思考强度/输出上限仍继承原模型条目，避免「目录模型能力退化」。
+  const binding = mdDirect ? null : codexBindingFor(cfg, modelName)
+  const md = mdDirect || (binding && cfg && cfg.models && cfg.models[binding.model]) || null
   const prov = (cfg && cfg.providers && cfg.providers[pid]) || null
-  const servingName = (md && md.providerModels && md.providerModels[pid]) || modelName
-  const api = (md && md.api) || (prov && prov.api) || 'openai'
+  const servingName = (mdDirect && mdDirect.providerModels && mdDirect.providerModels[pid]) ||
+    (binding && (!pid || binding.provider === pid) ? binding.model : null) ||
+    (md && md.providerModels && md.providerModels[pid]) ||
+    modelName
+  const api = (md && md.api) || (binding && binding.capability === 'chat' ? 'openai' : null) || (prov && prov.api) || 'openai'
   return { servingName, api, effortFormat: (md && md.effortFormat) || 'reasoning_effort', maxTokensMax: Number((md && md.maxTokensMax) || 0) || 0 }
 }
 
@@ -214,8 +262,79 @@ export function createRouter(cfg) {
   const defaultProvider = cfg.defaults && cfg.defaults.provider
   const virtualModel = cfg.defaults && cfg.defaults.model
   const vms = new Map((cfg.virtualModels || []).map(v => [v.name, v]))
+  // 聚合保留 ID 未命中：明确 404 unknown_model，**绝不**回退 defaults.provider。
+  // 错误对象自带 code/status/available，forward.js 与 /api/route-preview 据此给出稳定错误码；
+  // 不在这里直接猜上游——「同名不同源」的静默改绑正是 D1 禁止的行为。
+  function unknownAggregate(model) {
+    const available = [...alias.keys()].filter((name) => isAggregateModelId(name, cfg)).sort().slice(0, 50)
+    const e = new Error('未知聚合模型 ID: ' + model + '（聚合保留 ID 未在 config/models 显式声明即 404，不回退默认上游 defaults.provider）')
+    e.code = 'unknown_model'
+    e.status = 404
+    e.aggregate = true
+    e.model = model
+    e.prefixes = aggregatePrefixes(cfg)
+    e.available = available
+    return e
+  }
+  // 目录视图按引用缓存：index.js 可能在 createRouter 之后才注入/替换 cfg._codexCatalog
+  // （加载顺序与热重载都不可依赖），因此按对象引用失效，而不是在构造时快照。
+  let catCache = null
+  let catSource
+  function catalog() {
+    const src = cfg && cfg._codexCatalog
+    if (catSource === src && catCache) return catCache
+    catSource = src
+    catCache = { officials: codexOfficialSlugSet(cfg), bindings: codexCatalogBindings(cfg) }
+    return catCache
+  }
+  // 目录 slug 无法安全路由（身份冲突 / 上游缺失 / 绑定损坏）：**fail-closed**。
+  // 用 unknown_model 404 而非静默回落 defaults.provider —— 静默改绑正是 D1 禁止的行为；
+  // reason 供日志/诊断区分具体原因（不把上游细节当客户端可执行提示）。
+  function catalogError(model, reason, message) {
+    const e = new Error(message)
+    e.code = 'unknown_model'
+    e.status = 404
+    e.reason = reason
+    e.model = model
+    e.available = [...alias.keys()].filter((name) => isAggregateModelId(name, cfg)).sort().slice(0, 50)
+    return e
+  }
+  function resolveCatalogSlug(model) {
+    const cat = catalog()
+    const isOfficial = cat.officials.has(model)
+    const rawBinding = cat.bindings[model]
+    const hasBinding = !!(rawBinding && typeof rawBinding === 'object')
+    if (!isOfficial && !hasBinding) return null
+    // 1) 目录 slug 与 config.models/别名同名 → 身份不确定（同名不同源），fail-closed，绝不让任何一侧静默胜出。
+    const clash = alias.get(model)
+    if (clash) throw catalogError(model, 'catalog_slug_conflicts_with_models', '目录 slug ' + model + ' 同时被 config/models（' + clash.name + '）声明，身份冲突已拒绝路由')
+    // 2) 官方 slug：只走 defaults.codexOfficialProvider 指向的官方上游，api=responses（原生透传）。
+    if (isOfficial) {
+      const pid = codexOfficialProvider(cfg)
+      if (!pid) throw catalogError(model, 'official_provider_missing', '官方目录模型 ' + model + ' 需要 defaults.codexOfficialProvider 指定官方上游')
+      if (!cfg.providers || !cfg.providers[pid]) throw catalogError(model, 'official_provider_missing', '官方目录模型 ' + model + ' 指向的上游 ' + pid + ' 未配置')
+      return { canonicalName: model, known: true, def: { provider: pid, api: 'responses', codexOfficial: true } }
+    }
+    // 3) 聚合 slug：绑定到 provider + 原模型名；providerModels 让转发/探活/预热共用同一映射。
+    const binding = codexBindingFor(cfg, model)
+    if (!binding) throw catalogError(model, 'catalog_binding_invalid', '聚合目录模型 ' + model + ' 的绑定损坏（缺少 provider）')
+    if (!cfg.providers || !cfg.providers[binding.provider]) throw catalogError(model, 'catalog_binding_invalid', '聚合目录模型 ' + model + ' 绑定的上游 ' + binding.provider + ' 未配置')
+    return {
+      canonicalName: model,
+      known: true,
+      def: {
+        provider: binding.provider,
+        api: 'openai',
+        providerModels: { [binding.provider]: binding.model },
+        codexAggregate: true,
+        servingModel: binding.model,
+        capability: binding.capability,
+      },
+    }
+  }
   function resolve(model) {
-    // 优先级：真实模型/别名 → 虚拟模型（自带 directory 快照）→ 旧 defaults.model → 默认上游兜底
+    // 优先级：虚拟模型 → 旧 defaults.model → 目录 slug（官方/聚合）→ 真实模型/别名
+    //          → 聚合保留 ID 严格闸门 → 默认上游兜底（旧接口兼容）
     if (model && vms.has(model)) {
       const vm = vms.get(model)
       return { canonicalName: vm.name, known: true, def: { isVirtualModel: true, name: vm.name, directory: vm.directory, quota: vm.quota, dailyQuota: vm.dailyQuota, maxContext: vm.maxContext, maxConcurrent: vm.maxConcurrent, qps: vm.qps } }
@@ -224,7 +343,12 @@ export function createRouter(cfg) {
       if (!defaultProvider) throw new Error('defaults.provider 未设置，无法用虚拟共用模型名: ' + model)
       return { canonicalName: virtualModel, known: true, def: { virtual: true } }
     }
+    // 目录 slug 必须先于 alias：否则「官方 slug 被 config.models 同名声明」会被静默解析成第三方模型。
+    if (model) { const catHit = resolveCatalogSlug(model); if (catHit) return catHit }
     if (model) { const hit = alias.get(model); if (hit) return { canonicalName: hit.name, known: true, def: hit.def } }
+    // 聚合保留前缀（默认 mg-/mg/，可用 defaults.aggregatePrefixes 覆盖）：未命中即硬失败。
+    // 已配置的聚合 ID 在上一步就已返回，因此这条只影响「下架/拼错/同名不同源」的 ID。
+    if (isAggregateModelId(model, cfg)) throw unknownAggregate(model)
     if (defaultProvider) return { canonicalName: model || '(默认)', known: !!model && alias.has(model), def: { provider: defaultProvider } }
     throw new Error('model 未在 config/models 中配置，且未设置 defaults.provider: ' + model)
   }

@@ -1,6 +1,7 @@
 // Embedding 能力（MG-011）：请求校验、上游整形、鉴权头与响应归一。
 // 保持 Node 内置模块、零第三方依赖；承载入口在 src/index.js（/v1/embeddings）。
 import { embeddingAdapterFor, supportsEmbeddings } from './format.js'
+import { applyExtraHeaders } from './codex/auth.js'
 
 export const MAX_EMBEDDING_INPUTS = 2048
 
@@ -37,7 +38,8 @@ export function buildEmbeddingRequest(api, body) {
 export function embeddingHeaders(cfg, provider, api, payload) {
   const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }
   const extra = Object.assign({}, (cfg && cfg.defaults && cfg.defaults.extraHeaders) || {}, (provider && provider.extraHeaders) || {})
-  for (const [k, v] of Object.entries(extra)) headers[String(k).toLowerCase()] = v
+  // E1：extraHeaders 不得覆盖/注入鉴权头（与 forward.js buildHeaders 同一守卫）。
+  applyExtraHeaders(headers, extra)
   if (provider && provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
   if (api === 'gemini' && provider && provider.apiKey && !headers['x-goog-api-key']) headers['x-goog-api-key'] = provider.apiKey
   if (api === 'anthropic') {

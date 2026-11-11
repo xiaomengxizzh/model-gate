@@ -26,6 +26,8 @@
 | 验收整合候选版、查看分支取舍与合并/回滚条件 | [2026-11-09 整合候选验收报告](roadmap/2026-11-09-integration-candidate-report.md) |
 | 查逐能力分支差异、已知问题与风险等级 | [后端能力差异审计](roadmap/2026-11-09-backend-diff-audit.md) |
 | 查看浏览器截图与客户端 Mock 证据 | [2026-11-09 整合证据](evidence/2026-11-09-integration/browser-acceptance.txt) |
+| Codex 聚合身份/目录/管理面设计 | [ADR-0002](explanation/adr-0002-codex-aggregation-identity.md)、[Codex 管理面 API](reference/codex-api.md) |
+| 接手 Codex 聚合交付（看这里先） | [Codex 聚合 HANDOFF](roadmap/2026-11-11-codex-aggregation-handoff.md) |
 | 安排后续工作 | [开发计划](development-plan.md) |
 
 [旧上下文入口](project-context.md) 已迁移为导航；[archive/2026-08](archive/2026-08/README.md) 只保留历史，不定义当前开发顺序。

@@ -2,6 +2,93 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-11 Codex 聚合 M2 LIVE 边界：v2 加密任务显式阻断
+
+### Verified
+- 官方主代理（真实 chatgpt.com）成功调用 spawn_agent 派生第三方子代理（真实 OpenCode Go），model 覆盖生效；子代理请求含加密 agent_message 时网关返回 v2_encrypted_task_unsupported，主代理如实回显错误并结束轮次。未解析/未删除/未伪造密文，未静默降级 v1。证据 docs/evidence/2026-11-11-e4-v2-live-blocked.md。
+
+### NOT_RUN
+- 真实 v2 子代理成功闭环：被加密边界阻断（D3 设计内结果）；明文重新委派与官方子代理路径未实现。
+
+## 2026-11-11 Codex 聚合补丁：OpenCode Go 会话头与真实第三方复验
+
+### Fixed
+- `forward.js`：`opencodego` 目标缺失 `x-opencode-session` 时上游返回 `400 MissingSessionID`。现从客户端 `x-opencode-session`/`session-id`/`thread-id` 派生（最后回退一次性 `mg-<uuid>`），仅派生值、不转发原始官方头。回归 `offline/codex-opencode-session.test.mjs`(2)。
+
+### Verified
+- **LIVE-REAL 7/7**：真实 Codex CLI + 真实 chatgpt.com 官方后端 + 真实 OpenCode Go `deepseek-v4.1-flash`，同线程 GPT→第三方→GPT 全部成功（证据 `docs/evidence/2026-11-11-e3-live-switching.md` §E）。
+- `npm test` 44/44 隔离套件。
+
+### NOT_RUN
+- Desktop；真实 v2 跨供应商；真实配置写入/历史迁移/额度演练。
+
+## 2026-11-11 Codex 聚合 E5/E9：安全 Fallback 与验收矩阵
+
+### Added
+- `src/routing/decision.js` 接入 `src/forward.js`（仅 Codex 聚合/官方目标）：请求阶段状态机（accepted/tool_side_effect/stream_delivered/partially_committed/user_cancelled）、13 类错误分类、429+Retry-After 同上游重试、5xx/402/404 授权候选 failover、工具副作用/已交付流/取消/v2 不可读一律 stop、预算耗尽停机不降级、官方候选永不进入通用池、官方 402 需 `defaults.codexEmergency` 显式确认。非聚合请求走旧链路逐字节不变。
+
+### Verified
+- `offline/codex-fallback-forward`(10)：429→retry_same、5xx/402/404→failover、tool_call 后断流→stop、已交付后断流→stop、官方 402 未确认→stop、预算耗尽→停机、400→stop、非聚合模型旧兜底。
+- `docs/roadmap/2026-11-11-codex-aggregation-e9-acceptance.md` 记录完整 Mock/CLI LIVE/Desktop/TOOLS 矩阵与回滚。
+
+### 未验证 / 边界
+- task/daily 费用账本未接 stats；`partially_committed` 无自动信号；Desktop 端到端 NOT_RUN。
+
+## 2026-11-11 Codex 聚合 E7/E8：历史只读诊断与额度应急
+
+### Added
+- `src/codex/history.js`（E7）：只读扫描显式 sessions 目录，统计 provider/model、目录缺失模型、工具回放风险计数、v2 加密历史（`unreadable`，不解密）、`planSelectiveMigration` 只读迁移预演（含 sha256/备份建议），写入接口一律 `not_authorized`。输出无正文/密文/绝对路径。
+- `src/codex/quota.js`（E8）：官方额度只读评估，无可信数据时严格 `UNKNOWN`；阈值 `warnPercent/criticalPercent`；手动应急态需 `{acknowledged,reason,backupPoint}`，记录时间线、可恢复；输出禁止项（自动切换/购买/退出登录）恒为 false。
+- 回归：`offline/codex-history`(3)、`offline/codex-quota`(6)。
+
+### 未验证 / 边界
+- 真实 `~/.codex/sessions` 扫描与实际历史迁移：NOT_RUN（D6 要求逐条授权 + 隔离副本 + 回滚演练）。
+- 真实官方额度 API 与应急端到端（provider 分组/会话可见性/重启）：NOT_RUN。
+
+## 2026-11-11 Codex 聚合 E2/E3/E4/E6：目录、同线程切换、v2 互操作、受控配置
+
+### Added
+- `src/codex/catalog.js` + `scripts/codex-catalog.mjs`：Codex 完整模型目录生成器（官方基线 + 第三方聚合），稳定 ID `mg-<provider>-<model>`、serde/策略校验闸门、版本化与回滚、差异摘要；`--verify-codex` 用 `codex debug models -c` 离线校验。第三方模型必须声明 `maxContext`（缺少即 fail-closed）。
+- `GET /v1/models?client_version=…` 返回 Codex `{models:[ModelInfo…]}`（启动与热重载同源注入 `cfg._codexCatalog`）；普通 OpenAI 客户端维持旧 list 形状。
+- E3 官方透传代理（`index.js`）：`classifyTarget==='official'` 时按 D1-A 走官方后端（`/backend-api/codex/responses`），官方请求不重试、不跟随重定向、候选只能是官方目标；WS upgrade 回 404 让客户端回落 HTTPS；请求体支持 `content-encoding: zstd/gzip/deflate/br`（Codex 0.167 实测 zstd），未知/损坏编码 415 且零上游。
+- `src/codex/interop.js`（E4）：`namespace` 工具可逆展开 `mg_ns__<ns>__<tool>` 与回程 `{name,namespace}` 还原、call_id 配对、托管工具 `unsupported_tool` 显式错误、v2 加密任务 `v2_encrypted_task_unsupported`；原生 responses 透传 `mode:'native'` 不经过桥校验。
+- `src/codex/config.js`（E6）+ `/ui-next` D1-A 客户端卡片：受控写入 config.toml（只改 model_provider/openai_base_url/model/model_catalog_json/features），sha256+令牌门禁、原子写、.bak/.prev 备份、并发冲突拒绝、`[model_providers.openai]` 只告警保留、拒绝写 auth.json。
+- 回归：`offline/codex-catalog`(27)、`codex-interop`(15)、`codex-config`(31)、`codex-official`(4)、`codex-control-items`(1)、`request-encoding`(4)、`codex-routing-catalog`(10)。
+
+### Fixed
+- resume 切模型时 Codex 发来的控制项 `configuration_update` / `additional_tools` 不再让 Chat 桥整条 400，改为显式丢弃并记 `lossy: input_dropped:<type>`。
+- 启动路径补齐 `cfg._codexCatalog` 注入：官方 slug 不再因"未知非保留前缀"回落 `defaults.provider`（跨身份串线）。
+
+### Verified
+- **LIVE（真实 chatgpt.com 官方后端 + 真实 Codex CLI）**：同一线程 GPT → 第三方 → GPT，5/5 通过；官方轮 usage 21,849 input / 8 output。证据 `docs/evidence/2026-11-11-e3-live-switching.md`。
+- 离线真客户端 × 双 mock：9/9（官方头只到官方、第三方零官方头、WS 回落、同线程三轮）。
+- 目录真实生成物 14 模型（12 官方 + 2 第三方），`codex debug models -c` 解析 exit 0。
+- `npm run check` / `npm test` / `docs:check` / `check-metadata` 全绿（最终计数见 E9 报告）。
+
+### 未验证 / 边界
+- Desktop 同会话切换、WebSocket 传输代理、真实第三方付费上游在聚合模式下的轮次：NOT_RUN。
+- 官方订阅经本地网关的条款/政策边界：本轮由所有者授权测试；产品化发布前需单独合规结论。
+
+## 2026-11-11 Codex 聚合 E1：凭据隔离与严格路由（未发布）
+
+### Added
+- `src/codex/identity.js`：目标身份域分类（`official` / `thirdParty` / `unknown`）。判定依据是**官方 host 白名单 + 显式 `providers.<名>.codexIdentity`**，provider 名字不参与——把条目叫 openai 既不构成官方目标，也不使其自动成为第三方。声明与 host 冲突（声明 official 却指向非官方 host，或反之）判 `unknown` 并 fail-closed。新增 `defaults.codexOfficialHosts`（**替换**内置 `api.openai.com`/`chatgpt.com`/`chat.openai.com` 清单）。
+- `src/codex/auth.js`：请求头防火墙。第三方目标剥除官方专用集（`authorization`、`chatgpt-account-id`、`openai-beta`、`version`、`originator`、`session-id`、`thread-id`、`x-client-request-id` 及 `chatgpt-*`/`openai-*`/`x-codex-*`/`x-openai-*` 前缀）与 WebSocket/逐跳头（`sec-websocket-*`、`upgrade`、`connection`）；官方目标只放行白名单。官方目标新增 host/scheme/path 白名单与两条互斥凭据路径（网关自有 key；客户端官方凭据透传，`MG_CODEX_OFFICIAL_PASSTHROUGH=1` 才开启，默认 403 `official_passthrough_disabled`）。E3 集成导出 `isOfficialTarget` / `OFFICIAL_REQUEST_HEADER_NAMES` / `buildOfficialHeaders` / `officialPassthroughEnabled`，与转发路径共用同一组常量。
+- 严格聚合路由：`defaults.aggregatePrefixes`（默认 `mg-`/`mg/`）为聚合保留 ID 前缀；命中前缀但未在 `models`/别名显式声明时返回 404 `unknown_model`（附 `available` 列表）且零上游请求，不再静默回退 `defaults.provider`。非保留前缀的未知模型维持旧兜底语义。
+- 回归 `scripts/test/offline/codex-identity.test.mjs`（14 组）：第三方逐头剥离/官方白名单/两条凭据路径互斥、host·scheme·path fail-closed、恶意 `extraHeaders`（不得覆盖或注入鉴权头）、302 不跟随、WS upgrade 不转发、聚合 ID 404 与旧兜底兼容。
+
+### Changed
+- `src/forward.js` `buildHeaders` 改为按身份域逐头决策，并在转发前增加身份门禁（拒绝产生零上游 I/O）。日志只记录被丢弃/拦截的**头名**，不记录头值。
+- `extraHeaders` 不再能覆盖或注入 `authorization`/`x-api-key`/`x-goog-api-key`/`chatgpt-account-id`/`cookie` 等凭据头与帧层头：命中即忽略并写审计日志（`forward.js`、`embeddings.js`、`rerank.js` 同一守卫）。
+
+### Verified
+- `npm run check` 0（含 UI）；`npm test` **35/35** 隔离套件通过（新增 codex-identity 14/14）；`npm run docs:check` PASS；`node scripts/check-metadata.mjs` 21 项 PASS。
+- 全部为本地 mock + 动态端口 + 临时配置目录：**零真实上游调用**，未读写 `~/.codex`、未改正式配置、未占用 8787。
+
+### 未验证 / 边界
+- 真实官方登录透传（`openai_base_url` 指向网关 + 客户端 ChatGPT 凭据）与 `GET /v1/models?client_version`、WS→HTTPS 回落在 `index.js` 侧收口：本阶段只提供离线头矩阵与门禁，真实链路标 NOT_RUN。
+- 网关探活/预热/模型测试路径（`src/request.js` 的 `applyProviderHeaders`）仍走旧 `extraHeaders` 合并；本阶段未纳入同一守卫。
+
 ## 2026-11-10 Codex 多 provider 边界与原生用量采集（未发布）
 
 ### Added
@@ -329,26 +416,6 @@
 - `scripts/tray/swap.cmd`：托盘换装脚本（杀托盘→`mg-tray.new.exe`→`mg-tray.exe`→启动；托盘重启会短暂重启其守护的网关）。
 
 ### Fixed
-- **面板 Key 徽标与真实能力不同步（环境变量已生效仍显示「设 Key」）**：`/api/status` 的 `hasKey` 判定独立只查 `process.env`，未走 `resolveKey` 的注册表 fallback——环境变量修复后面板仍显示「设 Key」，而转发/探活实际已取到 key（用户截图：探活「通 122ms」但徽标「设 Key」，误判未生效）。现 `buildStatus` 改用 `resolveKey` 同源判定（keys 存储 → 进程环境 → 注册表实时读取），面板徽标文案新增「环境·注册表」区分来源。
-- **baseUrl 带 `/v1` 结尾时 URL 双拼 404**：`request.js` 拼 URL 为 `baseUrl + pathPrefix + /v1/chat/completions`，而大量 OpenAI 兼容服务的文档示例 baseUrl 自带 `/v1`（如 `https://kuaipao.pro/v1`）——照抄即拼出 `/v1/v1/chat/completions` 上游 404（生产 09-04 实录：kuaipaoai 全部请求 404 后被目录链切走，用户以为 key 未生效）。新增 `upstreamUrl()` 规范化：baseUrl 尾斜杠归一；base 以 `/v1` 结尾且 path 又以 `/v1/` 开头时去掉 base 的版本段。5 处拼接点（forward/probe/probeModel/探活）统一走该函数。
-- **今日计费恒为 ¥0.00**：模型日桶按「下一个引号键」切块时日期键同样命中模型键正则，块被截空 → 今日桶永远找不到；且金额公式漏 ÷1e6（修复后会显示约 ¥1976 万）。改为括号配平截取 `daily` 段 + 按模型分块扫描。
-- **回答（content）已回传后断流不再硬中断——新增 `streamInterruptOnContent` 策略**：上游在正式回答已回传后断流（续传 2 次失败），此前一律报错收尾。现支持两种策略：默认（`streamInterruptOnContent: false`）保持报错收尾（客户端干净重试）；开启后**同样切下一上游/模型**——客户端会收到「半截旧回答 + 新回答」拼接（已发出的字节无法撤回，接受重复呈现）。配套改动：`relayStream` 中断时**不再自动 end 客户端连接**（切/不切由模型链循环决定，切则下一上游的流继续写同一连接，不切则调 `endInterruptedStream` 发错误事件收尾）；流已开始后的全链失败以流内错误事件收尾（不再尝试写 json 状态码）；`streamRelay` 二次写入跳过响应头（`headersSent` 防护）。测试 `stream-failover.mjs` 扩展至 5 场景 10 断言：未回传断流切上游/切模型、已回传断流按配置切（拼接证据 half-+ok-B）、配置关时错误事件收尾不切。
-- **窗控按钮只显示空心圆**：萝莉体 9.5pt 下「—」「×」笔画仅 10×1px 发丝线（叠加 Opacity 0.8 不可见）——改矢量线绘制（`Pen` 圆头线帽，悬停转红不变），字体无关。
-- **托盘单实例互斥偶发失效**：`Mutex` 局部变量无根引用被 GC 回收——改静态根引用持有；互斥/唤起事件名按 exe 目录哈希派生（多实例部署互不干扰）。
-- **流式「头 2xx + 立刻断流」不切下一上游/模型（根因修复）**：上游返回 2xx/event-stream 后一个 token 都没回传就断流时，此前 `forward.js` 一旦拿到流式响应即 `return` 交付中继，模型链循环终止——断流只走同上游续传，永不尝试备用上游/下一模型（上游故障形态从「响应头失败」转为「流式中断」后，切模型机制形同虚设）。现：`sse.js` relayStream 返回流结局（`completed`/`contentSent`）；`forward.js` 在模型链循环内等待 relay 结局——**未回传任何内容的中断视为该上游失败（计入熔断），继续模型链切下一上游/模型**；已回传内容仍维持「不可重发、按中断结束」语义。新增 `scripts/test/stream-failover.mjs` 模拟「2xx + 0 token 断流」验证同模型切备用、跨模型切目录下一模型。
-
-### Changed
-- **日志按天分文件 + 7 天保留**：`logs/gateway.log` 改为落盘 `logs/gateway-YYYY-MM-DD.log`（配置 `logFile` 仅指定前缀/目录），启动/跨天清理 7 天前旧文件（含 `.old` 轮转件；历史无日期旧版按 mtime 判断）；单文件超 5MB 轮转 `.old`；`/api/logs` 改读当前天文件（logger 暴露 `file()`）；`start.bat` 前台调试用法不变。
-- **defaults 合并保存（交接问题 2 根治）**：`saveConfig` 此前把 `body.defaults` 整体替换现有配置，而面板只回传 9 个白名单字段——面板每次保存都会冲掉 `affinityTtlMs`/`failbackProbe` 等自定义字段（生产 configVersion 78→89 实录丢失）。现改为合并：提交的字段覆盖、未回传字段保留；面板 `extraHeaders` 从 status 回写。代价：字段无法经保存接口删除（需要时直接编辑 gateway.local.json）。
-
-### Fixed
-- **SSE 流中断计入熔断（交接问题 1）**：流式响应此前在响应头 2xx 阶段即 `markOk` 并记亲和，「头 2xx + 流中断」的故障上游被间歇性成功反复洗白，熔断计数永远攒不齐——生产 08-29 15:00-15:10 UTC 七请求钉死 jiyuan、备用零接管即此。现 markOk/亲和延后到流完整结束，流中断按上游失败同口径 `markFail`（客户端主动断开不计）；回切探活改 `stream:true` 按首条 SSE 数据判定恢复；续传重连校验必须 event-stream。
-- **半死流事件级看门狗**：字节级 idle 只认「上游没字节」——上游用 SSE 注释/垃圾字节续命却从不发 `data` 事件时，字节计时被反复喂活、网关 keepalive 注释又喂活客户端空闲检测，客户端既无内容也无错误地无限悬挂（生产 08-30 09:43-09:48 实录，悬挂 3 分多钟后客户端自行放弃）。新增事件级看门狗（默认 2×idleMs）：收到含 `data:` 的完整事件才重置，超时判死走续传/报错，客户端最终收到 `stream_interrupted` 错误事件。
-- **判死定时器改「掐流+带内续传」**：idle/看门狗定时器此前直接 fire-and-forget 调 `resume`，续传链脱离 await 链——顶层 `pump(firstUpstream)` 可能永不返回（onEnd 不触发、成败记账丢失），旧泵 iterator 复活还会与新泵双写客户端。现定时器只判死+掐流，由被掐断的泵在 catch 里带内续传；引入泵代数（gen），被换掉的旧泵醒来即静默退场。
-- **流式中断终态落日志**：`finalize` 此前只对客户端发错误事件、日志无痕；现记录终态（含「客户端已断开，未发送错误事件」分支），事后可查。
-- **连续断流上游「一断流就永久出局」（半开恢复）**：`streamDrops >= 3` 后该上游被绕开，但绕开时还会再 `markFail`（熔断被反复续期），而 `streamDrops` 只在流完整结束时归零——被绕开的上游永远拿不到流量，永远无法自证恢复，整条兜底链退化成单点（生产 09-01 实录：jiyuan 504 抽风期 113 次重试、13 次 400 全部卡在「opencodego 早已被钉死」）。现改为：绕开仅限冷却期（`defaults.streamDropCooldownMs`，默认 60s）内，到点放行一次半开探测——成功即解除（归零），再断流则重新计时；绕开时不再 `markFail`；非流式请求完整成功同样解除绕开。回归测试 `scripts/test/stream-drop-halfopen.mjs`（绕开仍生效 + 冷却后复活）。
-- **流已开始后上游 4xx 二次写响应头崩溃**：首个上游流式响应头已发给客户端后，模型链切到的下一上游若返回非流式 4xx，`forward.js` 直接 `return json` → `index.js` 二次 `writeHead` 抛 "Cannot write headers after they are sent to the client"，客户端只拿到没有 `[DONE]` 的半截流（生产 09-01 日志 7 次实录）。现：流已开始后的 3xx/4xx 按上游失败继续切下一上游（4xx 为确定性拒绝，不计入可重试，轮末即收尾），全链失败以流内 `stream_interrupted` 错误事件 + `[DONE]` 收尾；`index.js` json 回写处加 `headersSent` 防御兜底。回归测试 `scripts/test/stream-started-4xx.mjs`。
-- **上游「模型不可用」400 被当业务错误直接抛给客户端，目录链中断**：opencodego 等上游对「模型不可用」也返回 400（`Provider rejected the model request` / `Model not supported`，生产 09-03 08:13-08:21 UTC 实录：jiyuan 504 故障期目录链切到 opencodego 后 400 直接透传，zcode 断连、未继续尝试 MiniMax）。此前仅 403/404 视为模型级拒绝继续目录链，400 一律按「业务 4xx」直接返回。现新增 `isModelLevelRejection()`：403/404 恒真，400 需响应体含「模型/上游不可用」语义（reject/not support/disabled/MODEL_DISABLED/模型已关闭等）——这类**换下一模型可能成功，继续目录链**；真·参数错误 400（messages 格式/字段非法等）不误伤，仍直接返回保留原始错误。顺带：所有 4xx 现在把响应体前 300 字符写入日志（此前只记 status，排查 400 需靠直测猜 body）。回归测试 `scripts/test/model-reject-failover.mjs`（模型级拒绝切备用 + 参数错误不切不浪费）。
 
 ## [0.2.3] · 2026-08-29 —— 测试套件修正与文档口径同步
 

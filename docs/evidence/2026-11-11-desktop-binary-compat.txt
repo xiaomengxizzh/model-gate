@@ -1,0 +1,29 @@
+Desktop 内置 codex（0.167.0-alpha.3.2）兼容性验证（2026-11-11）
+===============================================================
+
+目标：当前 Desktop 应用正在运行（不便重启/抢单实例锁），但它实际调用的 codex 二进制可以单独在 CLI 模式验证。
+这样能把 Desktop 风险从「完全未知」降到「只剩 GUI 交互未验证」。
+
+环境：/usr/lib/chatgpt/resources/codex（Desktop 打包的 alpha 构建）；临时 CODEX_HOME；本地官方 mock；无真实上游/无真实登录。
+复现：CODEX_BIN=/usr/lib/chatgpt/resources/codex node scripts/test/codex-desktop-binary.mjs
+
+结果：5/5
+```text
+PASS  Desktop 二进制版本可读（codex-cli 0.167.0-alpha.3.2）
+PASS  Desktop 二进制加载 config.toml + 目录（models=13）
+PASS  Desktop 二进制一轮 exit 0
+PASS  文本回传（agent_message: DESKTOP_BIN_OK，usage 5/3/8）
+PASS  网关/官方 mock 被命中（hits=1）
+```
+
+## 结论
+
+- Desktop 使用的 alpha 二进制与 D1-A 配置（openai_base_url + model_catalog_json + model_provider=openai）兼容；
+  目录可加载、请求可经网关转发、SSE 可回传。
+- 仍未验证的是 **Desktop GUI 交互层**：app-server 的线程创建参数（2026-11-09 证据显示 modelProvider:null）、
+  模型选择器展示、同会话切换的实际体验。
+
+## 边界 / NOT_RUN
+
+- Desktop GUI 端到端：NOT_RUN（未启动第二实例、未打扰运行中的 Desktop）。
+- Desktop 的 v2 子代理交互：未验证。
