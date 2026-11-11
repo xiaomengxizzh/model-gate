@@ -94,6 +94,8 @@ export const STOP = Object.freeze({
   STREAM_DELIVERED: 'MG_FB_STREAM_DELIVERED',
   PARTIAL_COMMIT: 'MG_FB_PARTIAL_COMMIT',
   BUDGET: 'MG_FB_BUDGET',
+  // F-b2：候选全部因预算类原因被排除时用它，让调用方能把"预算不足"和"没有合格候选"分开。
+  BUDGET_EXCEEDED: 'MG_FB_BUDGET_EXCEEDED',
   NO_CANDIDATE: 'MG_FB_NO_CANDIDATE',
   ATTEMPTS: 'MG_FB_ATTEMPTS_EXHAUSTED',
   OFFICIAL_POOL: 'MG_FB_OFFICIAL_SUBSCRIPTION_EXCLUDED',
@@ -352,6 +354,27 @@ function budgetGate(budget, candidate, cost, opts = {}) {
 }
 
 /** 闸门 token → 候选排除原因码。 */
+// 预算类排除原因：全部候选都只因这些原因出局时，用 MG_FB_BUDGET_EXCEEDED 而不是笼统的 NO_CANDIDATE。
+const BUDGET_EXCLUDE_CODES = new Set([
+  EXCLUDE.BUDGET_EXCEEDED,
+  EXCLUDE.QUOTE_UNKNOWN,
+  EXCLUDE.COST_UNKNOWN,
+  EXCLUDE.WORST_CASE_EXCEEDS_BUDGET,
+  EXCLUDE.BUDGET_UNVERIFIED,
+])
+
+/**
+ * 排除原因归因：budget（全部是预算类）/ mixed（预算 + 其它）/ other。
+ * 说明：这是**审计/停机码选择**的归因，不改变任何筛选或排序行为。
+ */
+function exclusionCause(skipped) {
+  if (!Array.isArray(skipped) || skipped.length === 0) return 'none'
+  const allBudget = skipped.every((row) => Array.isArray(row.reasons) &&
+    row.reasons.length > 0 &&
+    row.reasons.every((code) => BUDGET_EXCLUDE_CODES.has(code)))
+  return allBudget ? 'budget' : 'mixed'
+}
+
 function reasonForGate(token, evidence) {
   if (token === 'unknown_cost') return evidence ? EXCLUDE.QUOTE_UNKNOWN : EXCLUDE.COST_UNKNOWN
   if (token === 'unverified_spend') return EXCLUDE.BUDGET_UNVERIFIED
@@ -580,6 +603,66 @@ function healthAt(health, now) {
   return state === 'half_open' ? 'half_open' : 'closed'
 }
 
+const OFFICIAL_KINDS = new Set(['official', 'official_subscription'])
+
+/** 身份 kind 归一化：大小写/空白差异不得影响"是否官方订阅"的判定。 */
+function normalizeIdentityKind(raw) {
+  const kind = str(raw).trim().toLowerCase()
+  return kind || null
+}
+
+/** 事实读取用的时间参数（没有可信时钟时按未知处理，与 evaluateCandidate 一致）。 */
+function factReadOpts(ctx, now) {
+  return { now: clockForFact(ctx, now), maxAgeMs: ctx.maxAgeMs }
+}
+
+/**
+ * 身份归一化（唯一入口）：官方订阅判定只在这里做，避免"evidence 看 identity 事实、legacy 只看
+ * providerKind"这类分叉（审计缺陷：kind:'official' 或只写身份名字都能混进通用池）。
+ *   · evidence：只认 identity 事实（带来源与观测时间）；kind ∈ {official, official_subscription}
+ *     或 value.official === true 即官方；
+ *   · legacy：providerKind 映射进来，显式 official/subscription 标记也算；
+ *     调用方给的 officialIdentities（如 ['openai']）把同名 legacy 候选判成官方；
+ *     只写身份名字却没有 kind/标记 ⇒ 无法证明"非官方"，按未证明处理（fail-closed）。
+ * @returns {{status:string, kind:string|null, name:string|null, scope:string|null,
+ *            official:boolean, unproven:boolean, source:string, fact:object|null}}
+ */
+function identityOf(norm, ctx, now) {
+  const c = norm.raw || {}
+  if (norm.mode === 'evidence') {
+    const f = readFact(norm, FACT.IDENTITY, factReadOpts(ctx, now))
+    const v = f.status === FACT_STATUS.PROVEN && f.value && typeof f.value === 'object' ? f.value : null
+    const kind = v ? normalizeIdentityKind(v.kind) : null
+    return {
+      status: f.status,
+      kind,
+      name: v ? str(v.name) || null : null,
+      scope: v ? str(v.scope) || null : null,
+      official: (kind != null && OFFICIAL_KINDS.has(kind)) || (!!v && v.official === true),
+      unproven: f.status !== FACT_STATUS.PROVEN,
+      source: 'identity_fact',
+      fact: f,
+    }
+  }
+  const kind = normalizeIdentityKind(c.providerKind)
+  const name = str(c.identity || c.identityName || c.providerIdentity).trim() || null
+  const explicitOfficial = c.official === true || c.subscription === true || c.officialSubscription === true
+  const configured = ctx.officialIdentities instanceof Set ? ctx.officialIdentities : null
+  const namedOfficial = !!(name && configured && configured.has(name.toLowerCase()))
+  const official = explicitOfficial || (kind != null && OFFICIAL_KINDS.has(kind)) || namedOfficial
+  return {
+    status: FACT_STATUS.LEGACY,
+    kind,
+    name,
+    scope: str(c.scope) || null,
+    official,
+    // 只写身份名字、没有 kind/标记、也不在官方名单 ⇒ 无法证明非官方（不能默认"第三方"）。
+    unproven: !official && !kind && !!name,
+    source: 'legacy_fields',
+    fact: null,
+  }
+}
+
 /**
  * 健康快照解析。优先级：healthOf 注入 > healthInput 注入（见 decide 位置参数）> 候选 facts.health
  * > 旧形状候选自带快照。
@@ -723,30 +806,28 @@ export function evaluateCandidate(candidate, ctx = {}) {
     if (c.authorized !== true) reasons.push(EXCLUDE.UNAUTHORIZED)
   }
 
-  // 2) 身份：官方订阅永不进通用池（D7）；请求点名身份时必须能被证明（否则就是身份冲突/未知）。
-  let identityKind = null
-  let identityName = null
-  let identityScope = null
+  // 2) 身份：官方订阅永不进通用池（D7）；判定统一走 identityOf（identity 事实优先，legacy 字段映射进来）。
+  const identity = identityOf(norm, ctx, now)
+  const identityKind = identity.kind
+  const identityName = identity.name
+  const identityScope = identity.scope
   if (evidence) {
-    const f = readFact(norm, FACT.IDENTITY, factOpts)
-    const v = f.status === FACT_STATUS.PROVEN && f.value && typeof f.value === 'object' ? f.value : null
-    identityKind = v ? str(v.kind) : null
-    identityName = v ? str(v.name) : null
-    identityScope = v ? str(v.scope) : null
-    provenance.identity = Object.assign(factView(f), { kind: identityKind })
+    provenance.identity = Object.assign(factView(identity.fact), { kind: identityKind })
     const wantIdentity = str(request.identity)
-    if (f.status !== FACT_STATUS.PROVEN) reasons.push(EXCLUDE.IDENTITY_UNPROVEN)
-    else if (identityKind === 'official_subscription') reasons.push(EXCLUDE.OFFICIAL)
+    if (identity.unproven) reasons.push(EXCLUDE.IDENTITY_UNPROVEN)
+    else if (identity.official) reasons.push(EXCLUDE.OFFICIAL)
     else if (wantIdentity && identityName !== wantIdentity) reasons.push(EXCLUDE.IDENTITY_CONFLICT)
   } else {
-    identityKind = str(c.providerKind)
-    identityName = str(c.identity)
-    identityScope = str(c.scope)
-    provenance.identity = { status: FACT_STATUS.LEGACY, source: FACT_SOURCE.LEGACY_DECLARED, kind: identityKind || null }
-    if (identityKind === 'official_subscription') reasons.push(EXCLUDE.OFFICIAL)
-    const wantIdentity = str(request.identity)
-    // 旧形状没有身份证据，只在"双方都写了且不一致"时判冲突（不改变既有放行语义）。
-    if (wantIdentity && identityName && identityName !== wantIdentity) reasons.push(EXCLUDE.IDENTITY_CONFLICT)
+    provenance.identity = {
+      status: FACT_STATUS.LEGACY,
+      source: FACT_SOURCE.LEGACY_DECLARED,
+      kind: identityKind,
+      official: identity.official,
+      unproven: identity.unproven,
+    }
+    if (identity.official) reasons.push(EXCLUDE.OFFICIAL)
+    else if (identity.unproven) reasons.push(EXCLUDE.IDENTITY_UNPROVEN)
+    else if (str(request.identity) && identityName && identityName !== str(request.identity)) reasons.push(EXCLUDE.IDENTITY_CONFLICT)
   }
 
   // 3) 应急范围：未确认的应急候选不得进入自动链路。
@@ -796,6 +877,11 @@ export function evaluateCandidate(candidate, ctx = {}) {
         if (!request.hostedTools.every((t) => haveHosted.includes(t))) reasons.push(EXCLUDE.HOSTED_TOOLS_UNSUPPORTED)
       }
     }
+  } else if (ctx.legacyCapabilityUntrusted === true) {
+    // 混池（池子里已有带证据的候选）：legacy 的"能力声明"不能再当证据，
+    // 否则把请求工具复制进候选就能伪造能力、击败合法 evidence 候选。
+    provenance.capabilities = { status: 'legacy_unverified', source: FACT_SOURCE.LEGACY_DECLARED, observedAt: null, ageMs: null }
+    reasons.push(EXCLUDE.CAPABILITY_UNPROVEN)
   } else {
     provenance.capabilities = { status: FACT_STATUS.LEGACY, source: FACT_SOURCE.LEGACY_DECLARED, observedAt: null, ageMs: null }
     // 旧形状：调用方显式声明（forward.js 的 E4 interop 层负责拒绝不可表达工具）。
@@ -894,7 +980,18 @@ function collectWarnings(evaluations) {
  */
 export function rankCandidates(candidates, ctx = {}) {
   const list = Array.isArray(candidates) ? candidates.filter(Boolean) : []
-  const evaluated = list.map((candidate, index) => Object.assign({ candidate, index }, evaluateCandidate(candidate, ctx)))
+  const modes = list.map((candidate) => normalizeCandidate(candidate, { now: ctx.now }).mode)
+  const evidenceCount = modes.filter((m) => m === 'evidence').length
+  const legacyCount = modes.filter((m) => m === 'legacy').length
+  const pool = evidenceCount > 0 && legacyCount > 0 ? 'mixed' : evidenceCount > 0 ? 'evidence_only' : 'legacy_only'
+  const evaluated = list.map((candidate, index) => {
+    const mode = normalizeCandidate(candidate, { now: ctx.now }).mode
+    // 混池：legacy 候选的能力声明一律按未证明处理（M3-1b 返工：E 的对抗用例）。
+    const evalCtx = mode === 'legacy' && pool === 'mixed'
+      ? Object.assign({}, ctx, { legacyCapabilityUntrusted: true })
+      : ctx
+    return Object.assign({ candidate, index }, evaluateCandidate(candidate, evalCtx))
+  })
   const ranked = evaluated.filter((e) => e.eligible).sort(compareEvaluations)
   const skipped = evaluated
     .filter((e) => !e.eligible)
@@ -909,7 +1006,16 @@ export function rankCandidates(candidates, ctx = {}) {
     .sort((a, b) => cmpStr(str(a.model), str(b.model)) ||
       cmpStr(str(a.provider), str(b.provider)) ||
       cmpStr(a.reasons.join(','), b.reasons.join(',')))
-  return { ranked, skipped }
+  const keyOf = (e) => str(e.candidate.model) + '|' + str(e.candidate.provider)
+  // 审计面（M3-1b）：混池里 legacy 能力被按未证明处理；legacy-only 池里被采信的 legacy 候选必须留痕。
+  const trust = {
+    pool,
+    evidence: evidenceCount,
+    legacy: legacyCount,
+    legacyCapabilityTrusted: pool === 'legacy_only' ? ranked.filter((e) => e.factMode === 'legacy').map(keyOf).sort() : [],
+    legacyCapabilityUntrusted: pool === 'mixed' ? evaluated.filter((e) => e.factMode === 'legacy').map(keyOf).sort() : [],
+  }
+  return { ranked, skipped, trust }
 }
 
 /** 指数退避（确定性、无抖动）：attempt 从 0 开始；上限 maxWaitMs。 */
@@ -973,6 +1079,7 @@ function decidePositional(args) {
     estimateCost: typeof requestRaw.estimateCost === 'function' ? requestRaw.estimateCost : options.estimateCost,
     allowHalfOpen: options.allowHalfOpen,
     requireVerifiedContext: options.requireVerifiedContext,
+    officialIdentities: pick('officialIdentities'),
     maxAgeMs: pick('maxAgeMs'),
     remainingMs: pick('remainingMs'),
     callerCancelled: requestRaw.callerCancelled === true || options.callerCancelled === true,
@@ -1021,6 +1128,11 @@ function runDecision(input = {}) {
     allowHalfOpen: opts.allowHalfOpen !== false,
     requireVerifiedContext: opts.requireVerifiedContext === true,
     preferredTarget: request.preferredTarget,
+    // M3-1b：调用方可点名一组"官方订阅身份名"（如 ['openai']），让只写 identity 名字、
+    // 不写 providerKind 的 legacy 候选也走同一条官方判定（否则会静默混进通用池）。
+    officialIdentities: new Set((Array.isArray(opts.officialIdentities) ? opts.officialIdentities : [])
+      .map((v) => str(v).trim().toLowerCase())
+      .filter(Boolean)),
   }
 
   const factModes = { evidence: 0, legacy: 0 }
@@ -1045,6 +1157,9 @@ function runDecision(input = {}) {
       supplied: candidates.length,
       eligible: 0,
       skipped: [],
+      // M3-1b：legacy-only 池里"能力声明被采信"的候选必须留痕（混池里 legacy 一律按未证明处理）。
+      legacyUnverifiedCapability: [],
+      selected: null,
     },
     request: {
       capability: request.capability,
@@ -1070,6 +1185,9 @@ function runDecision(input = {}) {
       maxAgeMs: opts.maxAgeMs == null ? Object.assign({}, FACT_MAX_AGE_MS) : opts.maxAgeMs,
       candidates: factModes,
       warnings: [],
+      // evidence_only / mixed / legacy_only / no_candidates：能力证据的可信度取决于池子形态。
+      capabilityTrust: candidates.length ? null : 'no_candidates',
+      d7: null,
     },
     reconcile: null,
   }
@@ -1147,26 +1265,43 @@ function runDecision(input = {}) {
         })
       }
       const ctxPick = Object.assign({}, ctx, { excludeTargets: [], triedTargets })
-      const { ranked, skipped } = rankCandidates(candidates, ctxPick)
+      const { ranked, skipped, trust } = rankCandidates(candidates, ctxPick)
       audit.board.skipped = skipped
       audit.board.eligible = ranked.length
+      audit.board.legacyUnverifiedCapability = trust.legacyCapabilityTrusted.slice()
+      audit.facts.capabilityTrust = trust.pool
       audit.facts.warnings = collectWarnings(ranked.concat(skipped))
       if (!ranked.length) {
+        const cause = exclusionCause(skipped)
+        audit.board.exclusionCause = cause
+        const budgetOnly = cause === 'budget'
         return out(ACTION.STOP, {
-          code: STOP.NO_CANDIDATE,
-          reason: candidates.length
-            ? '候选池无可用项（授权/身份/能力证据/上下文/工具/健康/费用/预算过滤后为空）'
-            : '没有提供任何候选模型',
-          userAction: '检查模型目录、供应商授权、事实新鲜度与预算配置',
+          // F-b2：全部候选都只因预算类原因出局时，给一个能区分"预算不足"的稳定停机码。
+          code: budgetOnly ? STOP.BUDGET_EXCEEDED : STOP.NO_CANDIDATE,
+          reason: budgetOnly
+            ? '全部候选都因预算/价格原因被排除（费用上限或报价未知），不是"没有候选"'
+            : candidates.length
+              ? '候选池无可用项（授权/身份/能力证据/上下文/工具/健康/费用/预算过滤后为空）'
+              : '没有提供任何候选模型',
+          userAction: budgetOnly
+            ? '调整预算授权或补充可信报价；不要用更便宜的候选绕过上限'
+            : '检查模型目录、供应商授权、事实新鲜度与预算配置',
           excluded: skipped,
         })
       }
       const best = ranked[0]
+      const selected = {
+        model: str(best.candidate.model),
+        provider: str(best.candidate.provider),
+        factMode: best.factMode,
+        capabilitySource: best.factMode === 'legacy' ? 'legacy_declared' : 'evidence',
+      }
+      audit.board.selected = selected
       return out(ACTION.CONTINUE, {
         code: STOP.CONTINUE,
         reason: '发送前候选选择完成（按确定性排序取首个可用候选）',
         userAction: '无需操作：网关按已授权候选放行',
-        target: { model: str(best.candidate.model), provider: str(best.candidate.provider), score: best.score },
+        target: { model: selected.model, provider: selected.provider, score: best.score, capabilitySource: selected.capabilitySource },
         willIncurCost: true,
         estimatedCostUsd: best.projectedCostUsd,
         costKnown: best.costKnown,
@@ -1250,13 +1385,25 @@ function runDecision(input = {}) {
     })
   }
 
-  // 7) 官方额度耗尽：D7 要求手动应急，不能自动进第三方池。
-  if (current && str(current.providerKind) === 'official_subscription' && err.cls === ERROR_CLASS.QUOTA && !emergency) {
-    return out(ACTION.STOP, {
-      code: STOP.OFFICIAL_QUOTA,
-      reason: '官方订阅额度耗尽：D7 只允许用户手动确认后进入第三方应急，禁止自动换池',
-      userAction: '如需应急，请显式确认进入第三方应急模式；否则等官方额度恢复',
-    })
+  // 7) 官方额度耗尽（D7）：身份判定统一走 identityOf（identity 事实优先，legacy 字段映射进来），
+  // 因此 evidence 形状的官方候选与 legacy 形状一样必须停机，不能自动换到第三方/账单身份。
+  // 证据模式下身份无法证明（缺失/过期）时同样 fail-closed：不能证明"不是官方"，就不许自动离开。
+  if (current && err.cls === ERROR_CLASS.QUOTA && !emergency) {
+    const currentNorm = normalizeCandidate(current, { now })
+    const currentIdentity = identityOf(currentNorm, ctx, now)
+    const unprovable = currentNorm.mode === 'evidence' && currentIdentity.unproven
+    audit.facts.d7 = {
+      official: currentIdentity.official,
+      identityStatus: currentIdentity.status,
+      unprovable,
+    }
+    if (currentIdentity.official || unprovable) {
+      return out(ACTION.STOP, {
+        code: STOP.OFFICIAL_QUOTA,
+        reason: '官方订阅额度耗尽：D7 只允许用户手动确认后进入第三方应急，禁止自动换池',
+        userAction: '如需应急，请显式确认进入第三方应急模式；否则等官方额度恢复',
+      })
+    }
   }
 
   // 8) 重放安全评估：阶段/副作用风险不允许时，重试与换模型都不成立。
@@ -1310,9 +1457,11 @@ function runDecision(input = {}) {
       triedTargets,
       attempt: attempts.failovers + 1,
     })
-    const { ranked, skipped } = rankCandidates(candidates, ctxPick)
+    const { ranked, skipped, trust } = rankCandidates(candidates, ctxPick)
     audit.board.skipped = skipped
     audit.board.eligible = ranked.length
+    audit.board.legacyUnverifiedCapability = trust.legacyCapabilityTrusted.slice()
+    audit.facts.capabilityTrust = trust.pool
     audit.facts.warnings = collectWarnings(ranked.concat(skipped))
     if (ranked.length) {
       const best = ranked[0]
@@ -1325,11 +1474,22 @@ function runDecision(input = {}) {
           excluded: skipped,
         })
       }
+      audit.board.selected = {
+        model: str(best.candidate.model),
+        provider: str(best.candidate.provider),
+        factMode: best.factMode,
+        capabilitySource: best.factMode === 'legacy' ? 'legacy_declared' : 'evidence',
+      }
       return out(ACTION.FAILOVER, {
         code: 'MG_FB_FAILOVER_' + (CODE_SUFFIX[err.cls] || upper(err.cls)),
         reason: '错误 ' + err.cls + ' 在其余候选上可恢复；换到已授权候选 ' + str(best.candidate.model) + '（评分 ' + best.score + '）',
         userAction: '网关自动切换已授权候选，客户端无需操作',
-        target: { model: str(best.candidate.model), provider: str(best.candidate.provider), score: best.score },
+        target: {
+          model: str(best.candidate.model),
+          provider: str(best.candidate.provider),
+          score: best.score,
+          capabilitySource: best.factMode === 'legacy' ? 'legacy_declared' : 'evidence',
+        },
         willIncurCost: true,
         estimatedCostUsd: best.projectedCostUsd,
         costKnown: best.costKnown,
@@ -1337,10 +1497,18 @@ function runDecision(input = {}) {
       })
     }
     if (candidates.length) {
+      const cause = exclusionCause(skipped)
+      audit.board.exclusionCause = cause
+      const budgetOnly = cause === 'budget'
       return out(ACTION.STOP, {
-        code: STOP.NO_CANDIDATE,
-        reason: '候选池无可用备用（授权/身份/能力证据/可读性/工具/上下文/模态/健康/费用/预算过滤后为空）',
-        userAction: '检查模型目录、供应商授权、事实新鲜度与预算配置；不得自动使用未授权或官方订阅候选',
+        // F-b2：备用候选全部只因预算类原因出局 ⇒ 明确报"预算不足"，而不是笼统的"没有候选"。
+        code: budgetOnly ? STOP.BUDGET_EXCEEDED : STOP.NO_CANDIDATE,
+        reason: budgetOnly
+          ? '全部备用候选都因预算/价格原因被排除（费用上限或报价未知），不是"没有候选"'
+          : '候选池无可用备用（授权/身份/能力证据/可读性/工具/上下文/模态/健康/费用/预算过滤后为空）',
+        userAction: budgetOnly
+          ? '调整预算授权或补充可信报价；不得为了继续服务而改选更便宜候选'
+          : '检查模型目录、供应商授权、事实新鲜度与预算配置；不得自动使用未授权或官方订阅候选',
         excluded: skipped,
       })
     }
