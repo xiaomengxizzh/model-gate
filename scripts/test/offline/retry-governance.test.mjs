@@ -236,19 +236,15 @@ test('连续 429 不打开熔断（不 markFail）', { timeout: 45000 }, async (
 })
 
 // ============================================================================
-// 普通请求仍按 retry.maxAttempts 重试（治理不能误杀既有重试能力）。
+// M1-3a：旧「普通请求 5xx 按 retry.maxAttempts 重试」断言编码的是审计 P1「上游重放」，
+// 按 plan §3.1 改为：收到响应头后同一 attempt 只发一次，绝不靠 HTTP status 推导可安全重放。
 // ============================================================================
-test('普通请求仍可重试（治理不误杀既有重试能力）', { timeout: 30000 }, async (t) => {
+test('普通请求 5xx 收到响应头 → 一次终态，不按 retry.maxAttempts 重放', { timeout: 30000 }, async (t) => {
   let hits = 0
   const upstream = await startScriptedUpstream(async (req, res) => {
     hits += 1
-    if (hits === 1) {
-      res.writeHead(500, { 'content-type': 'application/json' })
-      res.end('{"error":{"message":"temporary backend error"}}')
-      return
-    }
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(CHAT_OK)
+    res.writeHead(500, { 'content-type': 'application/json' })
+    res.end('{"error":{"message":"temporary backend error"}}')
   })
   const gw = await startGateway({
     name: 'mg-retry-plain',
@@ -264,15 +260,17 @@ test('普通请求仍可重试（治理不误杀既有重试能力）', { timeou
   t.after(async () => { await gw.stop(); await upstream.stop() })
 
   const res = await postChat(gw.base, chatBody('m1'))
-  assert.equal(res.status, 200, '普通请求 500 一次后应重试成功')
-  assert.equal(hits, 2, '普通请求按 retry.maxAttempts 重试（实际 ' + hits + ' 次）')
+  assert.equal(res.status, 502, '5xx 收到响应头是一次终态（不再重试）')
+  assert.equal(hits, 1, '同一 attempt 只发一次（实际 ' + hits + ' 次）')
+  const body = await res.json()
+  assert.equal(body.error.type, 'no_replay')
 })
 
 // ============================================================================
 // 非幂等（tool）请求：(a) 同上游不重试；(b) 允许沿链换一次上游/模型（可用性优先）；
 // (c) 整条链只走一轮，绝不回队首重放（loopMs 远大于一轮耗时时也不出现第二轮）。
 // ============================================================================
-test('tool 请求：同上游不重试、可换一次上游（一轮链）、不回队首重放', { timeout: 45000 }, async (t) => {
+test('tool 请求：写后失败不重试、不换上游、不回队首重放（M1-3a 收紧）', { timeout: 45000 }, async (t) => {
   const TOOL_REPLY = JSON.stringify({
     id: 'mock-2',
     object: 'chat.completion',
@@ -309,21 +307,18 @@ test('tool 请求：同上游不重试、可换一次上游（一轮链）、不
   const tools = [{ type: 'function', function: { name: 'shell', parameters: { type: 'object', properties: {} } } }]
   const toolBody = chatBody('m-tool', { tools })
 
-  // (a)+(b) 主上游 500：不重试同一上游，但换到备用上游后成功（一轮链）
-  const ok = await postChat(gw.base, toolBody)
-  const okJson = await ok.json()
-  assert.equal(ok.status, 200, 'tool 请求应能沿链换一次上游后成功（可用性优先）')
-  assert.equal(okJson.choices[0].message.content, 'from-fallback', '应由备用上游服务')
-  assert.equal(primary.hits.length, 1, 'tool 请求不得重试同一上游（retry.maxAttempts=2 也不重试，实际 ' + primary.hits.length + ' 次）')
-  assert.equal(backup.hits.length, 1, '一轮链只换一次上游（实际 ' + backup.hits.length + ' 次）')
+  // (a) 主上游 500（已收到响应头）：一次终态，不重试同上游、也不换备用上游。
+  const first = await postChat(gw.base, toolBody)
+  assert.equal(first.status, 502, 'tool 请求写后失败一次终态')
+  assert.equal(primary.hits.length, 1, '同上游只发一次（实际 ' + primary.hits.length + ' 次）')
+  assert.equal(backup.hits.length, 0, '收到响应头后不得换上游重放（实际 ' + backup.hits.length + ' 次）')
 
-  // (c) 双失败：一轮链即收尾，不回队首重放
-  mode = 'dead'
+  // (c) 再请求一次：仍然一轮即收尾，不回队首重放
   const bad = await postChat(gw.base, toolBody)
-  assert.ok(bad.status >= 500, '双失败应回上游失败状态（实际 ' + bad.status + '）')
+  assert.ok(bad.status >= 500, '再次失败仍是一次终态（实际 ' + bad.status + '）')
   const total = primary.hits.length + backup.hits.length
   assert.equal(primary.hits.length, 2, '第二次请求主上游只被调用一次（实际 ' + primary.hits.length + ' 次）')
-  assert.equal(backup.hits.length, 2, '第二次请求备用上游只被调用一次（实际 ' + backup.hits.length + ' 次）')
+  assert.equal(backup.hits.length, 0, '第二次请求也不得换上游（实际 ' + backup.hits.length + ' 次）')
   await sleep(400)
   assert.equal(primary.hits.length + backup.hits.length, total, '不得回队首重放整条链（400ms 后无新增上游调用）')
 })

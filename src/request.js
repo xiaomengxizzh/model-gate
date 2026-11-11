@@ -601,6 +601,7 @@ export function forwardOnce(provider, path, method, headers, bodyBuf, opts = {},
     }
     try {
       const { mod, reqOpts } = ctxFor(provider, url, method, headers, Object.assign({}, ctl, { connectMs: effFirstByte }))
+      if (opts.redirect) reqOpts.redirect = String(opts.redirect)
       req = mod.request(reqOpts, (response) => {
         res = response
         if (settled) { try { response.destroy() } catch {} ; return }
@@ -617,8 +618,8 @@ export function forwardOnce(provider, path, method, headers, bodyBuf, opts = {},
         if (status >= 400) {
           // 错误体只读上限字节用于 429/402/404 归因，读完立即销毁连接。
           readSmall(response, signal, maxErrBody).then(
-            (bodyText) => finishResolve(Object.assign(base, { stream: null, bodyText })),
-            () => finishResolve(Object.assign(base, { stream: null, bodyText: '' })),
+            (bodyText) => finishResolve(Object.assign(base, { stream: null, bodyText, bodyBuf: Buffer.from(bodyText || '', 'utf8') })),
+            () => finishResolve(Object.assign(base, { stream: null, bodyText: '', bodyBuf: Buffer.alloc(0) })),
           )
         } else {
           finishResolve(Object.assign(base, { stream: response }))
@@ -719,6 +720,23 @@ async function acquireWithDeadline(request, permit, deadline) {
     return { aborted: true, reason: deadline.reason || (deadline.timedOut() ? DEADLINE_TIMEOUT : DEADLINE_CANCELLED) }
   }
   return { lease: winner.lease }
+}
+
+/**
+ * 强制 adapter 工厂（M1-3a）：在真实 write 之前置位 onWriteBegin。
+ * execute 自身也会在 dispatch 前置位；两层都做是为了让"写后异常"在任何调用方式下都落成
+ * SENT_UNKNOWN，绝不因为 adapter 忘了回调而退化成 UNSENT（E 用此路径击穿过 sends=2 的重放）。
+ */
+export function makeAdapter(write) {
+  if (typeof write !== 'function') throw new TypeError('makeAdapter: write must be a function')
+  return {
+    async forwardOnce(attempt, ctl) {
+      if (attempt && typeof attempt.onWriteBegin === 'function' && attempt.stage === STAGES.UNSENT) {
+        attempt.onWriteBegin({ reason: 'adapter_dispatch', dispatchedBy: 'makeAdapter' })
+      }
+      return write(attempt, ctl)
+    },
+  }
 }
 
 function defaultPolicyFor(request) {
@@ -906,6 +924,10 @@ export async function execute(request = {}, adapter, policy) {
           nonIdempotent: context.nonIdempotent,
         })
         context.attempts.push(attempt)
+        // M1-3a / E 证据 2：写开始标记必须由执行器在**真实 dispatch 之前**置位，
+        // 不能依赖 adapter 自觉（adapter 写后抛错但不调 onWriteBegin 会被误判 UNSENT 而重放）。
+        // 因此任何 adapter.forwardOnce 之后的异常都至少是 SENT_UNKNOWN。
+        attempt.onWriteBegin({ reason: 'dispatch', dispatchedBy: 'execute' })
         try {
           result = await adapter.forwardOnce(attempt, {
             deadline,

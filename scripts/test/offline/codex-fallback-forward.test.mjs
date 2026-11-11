@@ -83,7 +83,7 @@ test('429 + Retry-After → retry_same 同上游重试后成功（命中 2 次 p
 // ============================================================================
 // 2. 5xx → failover 到已授权第三方候选
 // ============================================================================
-test('5xx → failover 到已授权备用上游（命中 1 次 p1 / 1 次 p2）', { timeout: 30000 }, async (t) => {
+test('5xx（已收到响应头）→ 一次终态，不换候选重放（p2 命中 0）', { timeout: 30000 }, async (t) => {
   const primary = await startScriptedUpstream(async (req, res) => { res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":{"message":"overloaded"}}') })
   const backup = await startScriptedUpstream(async (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(CHAT_OK('backup')) })
   t.after(async () => { await primary.stop(); await backup.stop() })
@@ -93,10 +93,11 @@ test('5xx → failover 到已授权备用上游（命中 1 次 p1 / 1 次 p2）'
     models: { 'mg-fb-5xx': { provider: 'p1', fallbacks: ['p2'] } },
   })
   const res = await postChat(gw, chatBody('mg-fb-5xx'))
-  const text = await res.text()
-  assert.equal(res.status, 200, text.slice(0, 300))
+  const body = await res.json()
+  assert.equal(res.status, 502, JSON.stringify(body).slice(0, 300))
   assert.equal(primary.hits.length, 1)
-  assert.equal(backup.hits.length, 1)
+  assert.equal(backup.hits.length, 0, '5xx 已收到响应头：不得换候选重放')
+  assert.equal(body.error.code, 'MG_FB_STOP_RECONCILE', '账本/副作用未知时先对账')
 })
 
 // ============================================================================
@@ -136,7 +137,7 @@ test('tool_call 后断流 → stop_with_error，不换上游（p2 命中 0）', 
   const gw = await startGw(t, 'mg-fb-tool', {
     defaults: baseDefaults(),
     providers: { p1: { baseUrl: primary.base }, p2: { baseUrl: backup.base } },
-    models: { 'mg-fb-tool': { provider: 'p1', fallbacks: ['p2'] } },
+    models: { 'mg-fb-tool': { provider: 'p1', fallbacks: ['p2'], codex: { capabilities: { shellType: 'disabled' } } } },
   })
   const res = await postChat(gw, chatBody('mg-fb-tool', { stream: true, tools: [{ type: 'function', function: { name: 'shell' } }] }))
   const text = await res.text()
@@ -146,7 +147,7 @@ test('tool_call 后断流 → stop_with_error，不换上游（p2 命中 0）', 
   // 审计日志：只记决策字段，不含请求正文/凭据
   const log = await gwLog(gw)
   assert.match(log, /codex fallback decision/, '应记录决策审计行')
-  assert.match(log, /action=stop_with_error/, '日志应含决策动作')
+  assert.match(log, /tool_side_effect|不重放/, '日志应含工具副作用/不重放证据')
   assert.ok(!/sk-[A-Za-z0-9]/.test(log), '日志不得含凭据')
 })
 
@@ -177,7 +178,7 @@ test('内容已交付后断流 → stop_with_error，不换上游（p2 命中 0�
 // ============================================================================
 // 6. 官方 402 未确认应急 → stop；确认后 → failover
 // ============================================================================
-test('官方 402 未确认应急 → stop；确认 codexEmergency 后才 failover 到第三方', { timeout: 30000 }, async (t) => {
+test('官方 402 未确认应急 → stop；确认 codexEmergency 后才 failover 到第三方（config-declared official）', { timeout: 30000 }, async (t) => {
   const official = await startScriptedUpstream(async (req, res) => { res.writeHead(402, { 'content-type': 'application/json' }); res.end('{"error":{"message":"quota exhausted"}}') })
   const third = await startScriptedUpstream(async (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(CHAT_OK('third')) })
   t.after(async () => { await official.stop(); await third.stop() })
@@ -228,10 +229,10 @@ test('官方候选被列进目录兜底也不会被 failover 选中（p3 命中 
     models: { 'mg-fb-pool': { provider: 'p1', fallbacks: ['p2'] }, 'mg-dir-official': { provider: 'p3' } },
   }, { env: { MG_TEST_OFFICIAL_KEY: 'test-official-key' } })
   const res = await postChat(gw, chatBody('mg-fb-pool'))
-  const text = await res.text()
-  assert.equal(res.status, 502, '无已授权候选时显式失败：' + text.slice(0, 300))
+  const body = await res.json()
+  assert.equal(res.status, 502, '写后失败一次终态：' + JSON.stringify(body).slice(0, 300))
   assert.equal(p1.hits.length, 1)
-  assert.equal(p2.hits.length, 1)
+  assert.equal(p2.hits.length, 0, 'M1-3a：5xx 收到头不得换候选重放')
   assert.equal(p3.hits.length, 0, '官方订阅不得进入通用 fallback 池（实际 ' + p3.hits.length + '）')
 })
 
@@ -251,7 +252,7 @@ test('预算耗尽 → stop MG_FB_BUDGET，不换便宜候选（p2 命中 0）',
   const body = await res.json()
   assert.equal(res.status, 402, JSON.stringify(body).slice(0, 300))
   assert.equal(body.error.code, 'MG_FB_BUDGET')
-  assert.equal(primary.hits.length, 1)
+  assert.equal(primary.hits.length, 0, 'M1-3a：超预算在发送前停机（不再先发一次再判 spent）')
   assert.equal(backup.hits.length, 0, '超预算停机不降级（实际 ' + backup.hits.length + '）')
 })
 
@@ -287,9 +288,9 @@ test('非聚合模型 5xx 仍走旧 forwardChain 兜底（决策器不介入）'
     models: { 'legacy-model': { provider: 'p1', fallbacks: ['p2'] } },
   })
   const res = await postChat(gw, chatBody('legacy-model'))
-  assert.equal(res.status, 200)
+  assert.equal(res.status, 502, 'M1-3a：非聚合链同样不得在收到响应头后重放')
   assert.equal(primary.hits.length, 1)
-  assert.equal(backup.hits.length, 1, '旧路径仍按配置兜底')
+  assert.equal(backup.hits.length, 0, '旧显式链也复用同一"不重放"安全检查')
   const log = await gwLog(gw)
   assert.doesNotMatch(log, /codex fallback decision/, '非聚合路径不得触发决策器')
 })

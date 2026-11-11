@@ -1,18 +1,27 @@
 // 转发链模块（Phase1 TD3 自 index.js 拆分）：routes 构建 + 三层重试 + 循环兜底 + 限流/记账协作
 // 共享辅助（健康/统计/工具）由 index.js 经 deps 注入，避免双向依赖
 import { gunzipSync } from 'node:zlib'
-import { randomUUID } from 'node:crypto'
+import { Readable } from 'node:stream'
+import { randomUUID, createHash } from 'node:crypto'
 import { adapterFor, cacheHitMiss, hasTools, mapErrorEnvelope } from './format.js'
 import { buildProvider, modelTarget } from './router.js'
 import { isStreamResponse } from './sse.js'
-import { forward } from './request.js'
+import { forwardOnce, execute, makeAdapter, upstreamUrl } from './request.js'
+import { createDeadline } from './deadline.js'
 import { abortedError, sleepWith } from './budget.js'
 import { todayKey } from './shared.js'
 import { isToolBearingBody, retryAfterHeader, attributionCode, retryWaitFits } from './retry-policy.js'
 import { classifyTarget, isAggregateModelId } from './codex/identity.js'
 import { planTargetHeaders, applyExtraHeaders, targetDeny, officialPassthroughEnabled } from './codex/auth.js'
 import { detectOpaqueV2Task } from './codex/interop.js'
-import { decide, advancePhase, PHASE, ACTION } from './routing/decision.js'
+import { decide, advancePhase, PHASE, ACTION, STOP } from './routing/decision.js'
+import { openLedger } from './routing/ledger.js'
+import * as facts from './routing/facts.js'
+import {
+  authorizeFinalTarget, assertSendTarget, isTargetAuthzError,
+  TARGET_DOMAINS, REDIRECT_POLICY,
+} from './codex/target-authz.js'
+import { generationAuthzBinding } from './codex/catalog-generation.js'
 
 const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-length','upgrade','keep-alive','te','trailer'])
 const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection','x-mg-admin','x-goog-api-key','host'])
@@ -397,29 +406,55 @@ function codexRequestInfoOf(body) {
   }
 }
 
-function codexCandidateFor(cfg, model, pid, requestInfo, primary) {
-  const built = buildProvider(cfg, pid)
-  const identity = classifyTarget(built, cfg)
-  const official = identity.kind === 'official'
-  const keyMissing = !!(built._def && built._def.apiKeyEnv && !built.keyOk)
+// 候选能力只来自配置/目录声明，绝不复制请求 tools（审计 P1 / T-ROUTE-01）。
+// 未声明 capabilities ⇒ 工具能力为空（请求带工具时该候选不可入选），而不是"请求需要什么就支持什么"。
+function codexCapabilitiesOf(cfg, model) {
   const md = cfg.models && model ? cfg.models[model] : null
+  const codex = md && md.codex && typeof md.codex === 'object' ? md.codex : {}
+  const declared = codex.capabilities && typeof codex.capabilities === 'object' ? codex.capabilities : null
+  const contextWindow = Number((md && md.maxContext) || codex.contextWindow || 0) || 0
+  const modalities = Array.isArray(codex.modalities) ? codex.modalities.map(String) : []
   return {
-    model,
-    provider: pid,
-    providerKind: official ? 'official_subscription' : 'third_party',
-    // 已配置且凭据可用的第三方上游 = 用户已授权（配置即授权）；官方订阅永不授权给通用池。
-    authorized: !official && !keyMissing,
     capability: (md && md.capability) || 'chat',
-    modalities: [],
-    contextWindow: Number((md && md.maxContext) || 0) || 0,
-    // 工具能力由 E4 interop 层负责显式拒绝不可表达工具；此处按请求声明放行，避免误杀。
-    tools: { types: requestInfo.tools.slice(), hosted: requestInfo.hostedTools.slice() },
+    contextWindow,
+    modalities,
+    tools: { types: declared ? ['function', 'custom'] : [], hosted: [] },
     readability: { plaintext: true, v2Encrypted: false },
-    priority: primary ? -1 : 0,
   }
 }
 
-function codexBuildCandidates(cfg, routes, requestInfo) {
+function codexCandidateFor(cfg, model, pid, now, primary) {
+  const built = buildProvider(cfg, pid)
+  const identity = classifyTarget(built, cfg)
+  const official = identity.kind === 'official'
+  const md = cfg.models && model ? cfg.models[model] : null
+  const keyMissing = !!(built._def && built._def.apiKeyEnv && !built.keyOk)
+  const bag = {
+    authorization: facts.evidence(!official && !keyMissing, { source: facts.FACT_SOURCE.CONFIG, observedAt: now }),
+    identity: facts.evidence({
+      kind: official ? 'official_subscription' : 'third_party',
+      name: model || '',
+      scope: primary ? 'primary' : 'fallback',
+    }, { source: facts.FACT_SOURCE.CONFIG, observedAt: now }),
+    capabilities: facts.evidence(codexCapabilitiesOf(cfg, model), {
+      source: md && md.codex ? facts.FACT_SOURCE.CATALOG : facts.FACT_SOURCE.CONFIG,
+      observedAt: now,
+    }),
+  }
+  let price = null
+  for (const v of [md && md.costEstimateUsd, cfg.providers && cfg.providers[pid] && cfg.providers[pid].costEstimateUsd]) {
+    const n = Number(v)
+    if (Number.isFinite(n) && n >= 0) { price = n; break }
+  }
+  if (price != null) bag.pricing = facts.evidence({ usd: price, worstCaseUsd: price, paid: price > 0 }, { source: facts.FACT_SOURCE.CONFIG, observedAt: now })
+  const cand = facts.candidate({ model, provider: pid, facts: bag, scope: primary ? 'primary' : 'fallback' })
+  // 决策器仍用 providerKind 判定"官方额度耗尽走手动应急"（D7），证据模式候选补上同一事实。
+  cand.providerKind = official ? 'official_subscription' : 'third_party'
+  cand.authorized = !official && !keyMissing
+  return cand
+}
+
+function codexBuildCandidates(cfg, routes, now) {
   const out = []
   for (let ri = 0; ri < routes.length; ri++) {
     const route = routes[ri]
@@ -427,7 +462,7 @@ function codexBuildCandidates(cfg, routes, requestInfo) {
     for (let pi = 0; pi < provs.length; pi++) {
       const pid = provs[pi]
       if (!pid || !cfg.providers[pid]) continue
-      out.push(codexCandidateFor(cfg, route.model, pid, requestInfo, ri === 0 && pi === 0))
+      out.push(codexCandidateFor(cfg, route.model, pid, now, ri === 0 && pi === 0))
     }
   }
   return out
@@ -470,10 +505,496 @@ function codexStopStatus(code, upstreamStatus) {
   return 502
 }
 
+// ============================================================================
+// M1-3a：生产发送层
+//   授权（authorizeFinalTarget + assertSendTarget，官方 fail-closed）
+//   → 持久预留（ledger.reserve，只有 duplicate===false 才发）
+//   → execute/forwardOnce（同一单调 deadline，单次发送，写前置位 onWriteBegin）
+//   → 账本收尾（settle/release/markUnknown）
+// 任何在写开始之后的异常都不得重放；调用方只会在 REJECTED_BEFORE_EXECUTION / UNSENT 上继续下一跳。
+// ============================================================================
+
+const LEDGER_CACHE = new Map()
+let LEDGER_DIAGNOSTIC = null
+
+function ledgerSpecOf(cfg, opts) {
+  const injected = opts && opts.ledgerOptions
+  const lc = injected || (cfg && cfg.routing && cfg.routing.ledger)
+  if (!lc || typeof lc !== 'object' || !lc.dir) return null
+  return {
+    dir: String(lc.dir),
+    currency: lc.currency ? String(lc.currency) : 'USD',
+    dayZone: lc.dayZone ? String(lc.dayZone) : 'Asia/Shanghai',
+    caps: lc.caps && typeof lc.caps === 'object' ? lc.caps : {},
+    quoteMaxAgeMs: Number(lc.quoteMaxAgeMs) > 0 ? Number(lc.quoteMaxAgeMs) : 0,
+  }
+}
+
+function openLedgerFor(cfg, opts, log) {
+  if (opts && opts.ledger) return opts.ledger
+  const spec = ledgerSpecOf(cfg, opts)
+  if (!spec) return null
+  const key = JSON.stringify(spec)
+  const hit = LEDGER_CACHE.get(key)
+  if (hit) return hit
+  const ledger = openLedger(Object.assign({}, spec, opts && Number.isFinite(Number(opts.now)) ? { now: () => Number(opts.now) } : {}))
+  const recovered = ledger.recover()
+  LEDGER_DIAGNOSTIC = {
+    dir: spec.dir,
+    recovered: recovered.recovered,
+    inflightMicro: recovered.inflightMicro,
+    unknownMicro: recovered.unknownMicro,
+    inflight: recovered.inflight.length,
+    unknown: recovered.unknown.length,
+  }
+  log && log.info('ledger recovered', 'dir=' + spec.dir, 'inflight=' + recovered.inflight.length, 'unknown=' + recovered.unknown.length, 'inflightMicro=' + recovered.inflightMicro, 'unknownMicro=' + recovered.unknownMicro)
+  LEDGER_CACHE.set(key, ledger)
+  return ledger
+}
+
+/** 启动自检（M1-3b 可在 index 启动时调用）：打开账本并 recover 在途/未知预留。 */
+export function initForwardLedger(cfg, opts = {}, log) {
+  try { return openLedgerFor(cfg, opts, log) } catch (e) { log && log.warn('ledger init failed', String((e && e.code) || 'error')); return null }
+}
+export function forwardLedgerDiagnostic() { return LEDGER_DIAGNOSTIC }
+
+function costLimitsOf(cfg) {
+  const b = (cfg && cfg.routing && cfg.routing.budget) || {}
+  const n = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0)
+  return { requestUsd: n(b.requestUsd), taskUsd: n(b.taskUsd), dailyUsd: n(b.dailyUsd) }
+}
+
+function limitsMicroOf(limits) {
+  return {
+    requestMicro: facts.microFromUsd(limits.requestUsd),
+    taskMicro: facts.microFromUsd(limits.taskUsd),
+    dayMicro: facts.microFromUsd(limits.dailyUsd),
+  }
+}
+
+function typedSendError(code, message, extra = {}) {
+  const e = new Error(message)
+  e.code = code
+  e.type = extra.type || code
+  if (extra.status != null) e.status = extra.status
+  if (extra.noReplay != null) e.noReplay = extra.noReplay
+  if (extra.possiblyCommitted != null) e.possiblyCommitted = extra.possiblyCommitted
+  if (extra.receipt) e.receipt = extra.receipt
+  if (extra.retryAfter != null) e.retryAfter = extra.retryAfter
+  if (extra.attribution) e.attribution = extra.attribution
+  if (extra.bodyText != null) e.bodyText = extra.bodyText
+  if (extra.deny != null) e.deny = extra.deny
+  return e
+}
+
+function authzContextOf(opts) {
+  const c = (opts && opts.authzContext) || {}
+  const record = c.catalogRecord || (opts && opts.catalogRecord) || null
+  const generation = c.catalogGeneration != null
+    ? c.catalogGeneration
+    : (record && record.generation != null ? record.generation : (opts && opts.catalogGeneration != null ? opts.catalogGeneration : null))
+  const binding = typeof c.generationAuthzBinding === 'function' ? c.generationAuthzBinding : generationAuthzBinding
+  return { record, generation, binding }
+}
+
+// 每次实际发送前的最终目标授权：官方没有目录世代 ⇒ fail-closed；第三方无目录记录时用配置声明的
+// thirdPartyVerified（generation=unscoped，写入日志/审计），不冒充官方目录证据。
+export function authorizeSendTarget({ cfg, provider, pid, path, req, opts, log, catalogScoped }) {
+  const identity = classifyTarget(provider, cfg)
+  const ac = authzContextOf(opts)
+  const official = identity.kind === 'official'
+  const domain = official ? TARGET_DOMAINS.OFFICIAL
+    : (identity.kind === 'thirdParty' ? TARGET_DOMAINS.THIRD_PARTY : null)
+  if (!domain) {
+    throw typedSendError('target_identity_unknown', '上游目标身份无法确认，已按 fail-closed 拒绝发送', { status: 403, deny: true })
+  }
+  // 目录世代只有在"本次请求确实由 Codex 目录解析参与"时才强制；普通配置链（含官方 Chat 直连）
+  // 使用可审计的 config-declared 世代，仍然必须产出授权记录并做 assertSendTarget（P0-3 真身）。
+  const scoped = catalogScoped === true
+  if (scoped && (!ac.record || ac.generation == null)) {
+    throw typedSendError('catalog_generation_missing', '目录解析参与但缺少 catalog generation 记录：按 fail-closed 拒绝发送', { status: 403, deny: true })
+  }
+  let generation
+  let binding
+  if (ac.record && ac.generation != null) {
+    generation = ac.generation
+    binding = ac.binding(ac.record, {
+      domain, origin: provider.baseUrl, path, pathPrefix: provider.pathPrefix,
+      identity, provider, cfg, providerId: pid, modelBinding: {},
+    })
+  } else {
+    generation = 'config-declared'
+    binding = {
+      generation,
+      origin: provider.baseUrl, path, pathPrefix: provider.pathPrefix,
+      identity, provider, cfg, providerId: pid, modelBinding: {},
+      officialVerified: official, thirdPartyVerified: true,
+    }
+    log && log.info('send authz generation=config-declared (unscoped)', 'provider=' + pid, 'domain=' + domain)
+  }
+  // 配置声明官方直连（没有目录世代参与）：凭据模式按"网关自持 key"或"客户端官方凭据透传"处理。
+  // target-authz 的订阅模式只允许 /backend-api/codex 入口；Chat 直连的官方白名单头由 buildHeaders
+  // 的既有规则承载，但最终目标仍然必须通过 authorizeFinalTarget/assertSendTarget（P0-3 真身）。
+  const incoming = req && req.headers ? req.headers : {}
+  const incomingAuth = Array.isArray(incoming.authorization) ? incoming.authorization[0] : incoming.authorization
+  const configDeclaredOfficial = official && !scoped
+  const passthroughToken = configDeclaredOfficial && !provider.apiKey && identity.credential === 'client-passthrough' && typeof incomingAuth === 'string'
+    ? incomingAuth.replace(/^Bearer\s+/i, '').trim()
+    : ''
+  const intent = {
+    domain,
+    official,
+    caller: {
+      incoming,
+      threadId: opts && opts.threadId,
+      sessionHeader: opts && opts.sessionHeader,
+      sessionSalt: opts && opts.sessionSalt,
+      // 官方凭据透传的调用方身份由目标分类推出，避免把"客户端官方凭据"误判成无凭据。
+      officialSubscription: !!(opts && opts.officialSubscription === true) || identity.credential === 'client-passthrough',
+      passthroughEnabled: opts && opts.passthroughEnabled != null
+        ? opts.passthroughEnabled === true
+        : officialPassthroughEnabled(),
+      ...(passthroughToken ? { providerKey: passthroughToken, credentialMode: 'provider-key' } : {}),
+    },
+  }
+  const baseAuthz = authorizeFinalTarget(intent, generation, binding)
+  // 二次校验：实际拼装出来的 URL 必须与授权记录逐字段一致（scheme/host/port/path/query）。
+  assertSendTarget(baseAuthz, upstreamUrl(provider, path))
+  return configDeclaredOfficial ? Object.freeze(Object.assign({}, baseAuthz, { configDeclared: true })) : baseAuthz
+}
+
+// 授权记录是身份/凭据的单一真源；在它之上只补协议/传输必需头。
+// 第三方自有 key 由本层按 provider.apiKey 注入（target-authz 的第三方头集合只承载域派生的会话标识）。
+function buildAuthorizedHeaders(req, provider, bodyBuf, cfg, api, body, identity, authz, log) {
+  const base = buildHeaders(req, provider, bodyBuf, cfg, api, body, { identity, log })
+  if (identity.kind === 'official' && authz && authz.configDeclared === true) {
+    // 配置声明官方直连：沿用既有官方头白名单/自有 key 规则（授权记录仍负责目标一致性）。
+    const h = Object.assign({}, base)
+    h['content-type'] = 'application/json'
+    h['content-length'] = bodyBuf ? bodyBuf.length : 0
+    h['accept-encoding'] = 'identity'
+    return h
+  }
+  const headers = Object.assign({}, base, authz && authz.headers ? authz.headers : {})
+  if (identity.kind !== 'official' && provider.apiKey && !headers.authorization) headers.authorization = 'Bearer ' + provider.apiKey
+  if (identity.kind === 'official') {
+    // 官方只认授权记录里的凭据方式：清掉 base 可能带出的其它 Authorization，再按记录写回。
+    headers.authorization = undefined
+    delete headers.authorization
+    const auth = authz && authz.headers ? authz.headers.authorization : null
+    if (auth) headers.authorization = auth
+  }
+  headers['content-type'] = 'application/json'
+  headers['content-length'] = bodyBuf ? bodyBuf.length : 0
+  headers['accept-encoding'] = 'identity'
+  return headers
+}
+
+// 账本幂等键：同 requestId + 同请求体 + 同目标 ⇒ 同一笔账；换候选是新的 digest（允许 failover），
+// 但同候选的重放会被 duplicate 挡住。
+function sendIdentityOf(req, opts, bodyBuf, model, pid) {
+  const header = (name) => {
+    const v = req && req.headers ? req.headers[name] : null
+    return Array.isArray(v) ? v[0] : v
+  }
+  const requestId = (opts && opts.requestId) || header('x-request-id') || randomUUID()
+  const bodyHash = createHash('sha256').update(bodyBuf || Buffer.alloc(0)).digest('hex')
+  const digest = createHash('sha256').update(bodyHash + '|' + String(model || '') + '|' + String(pid || '')).digest('hex')
+  const taskRef = (opts && opts.taskRef) || header('x-mg-task') || null
+  return { requestId: String(requestId), requestDigest: digest, taskRef: taskRef == null ? null : String(taskRef) }
+}
+
+function quoteFor(cfg, model, pid, now, ledger) {
+  const md = cfg.models && model ? cfg.models[model] : null
+  const pd = cfg.providers && pid ? cfg.providers[pid] : null
+  let usd = null
+  for (const v of [md && md.costEstimateUsd, pd && pd.costEstimateUsd]) {
+    const n = Number(v)
+    if (Number.isFinite(n) && n >= 0) { usd = n; break }
+  }
+  if (usd == null || !Number.isFinite(usd)) return null
+  const micro = facts.microFromUsd(usd)
+  const version = ('q1:' + String(now)).slice(0, 64)
+  return { amountMicro: micro, worstCaseMicro: micro, currency: ledger.currency, version, quotedAt: now }
+}
+
+async function reserveAttempt({ cfg, opts, req, bodyBuf, model, pid, ledger, log }) {
+  if (!ledger) return null
+  const ident = sendIdentityOf(req, opts, bodyBuf, model, pid)
+  const now = Number.isFinite(Number(opts && opts.now)) ? Number(opts.now) : Date.now()
+  const quote = quoteFor(cfg, model, pid, now, ledger)
+  if (!quote) {
+    throw typedSendError('quote_unknown', '账本已启用但缺少 pricing 证据：无法报价，拒绝发送', { status: 503 })
+  }
+  let receipt
+  try {
+    receipt = await ledger.reserve({
+      requestId: ident.requestId,
+      requestDigest: ident.requestDigest,
+      taskRef: ident.taskRef,
+      candidate: { model, provider: pid },
+      quote,
+    })
+  } catch (e) {
+    const err = typedSendError(e && e.code ? String(e.code) : 'ledger_reserve_failed', '账本预留失败：拒绝发送（' + String((e && e.code) || 'error') + '）', { status: 402 })
+    err.ledger = e
+    throw err
+  }
+  if (receipt && receipt.duplicate === true) {
+    throw typedSendError('MG_FB_STOP_RECONCILE', '同一请求已启动过（账本幂等命中）：禁止重放，先对账', {
+      status: 409, noReplay: true, possiblyCommitted: true, receipt,
+    })
+  }
+  log && log.info('ledger reserved', 'model=' + (model || '-'), 'provider=' + pid, 'attempt=' + String(receipt.attemptId).slice(0, 12), 'quoteMicro=' + receipt.quoteMicro)
+  return receipt
+}
+
+async function closeoutLedger(ledger, receipt, action, log) {
+  if (!ledger || !receipt) return receipt
+  try {
+    if (action === 'settled') return await ledger.settle(receipt.attemptId, { actualMicro: receipt.quoteMicro, currency: receipt.currency })
+    if (action === 'released') return await ledger.release(receipt.attemptId, { verifiedNotExecuted: true })
+    return await ledger.markUnknown(receipt.attemptId)
+  } catch (e) {
+    // 收尾失败不改变已经发生的上游事实；保留 reserved/unknown 让恢复流程对账。
+    log && log.warn('ledger closeout failed', 'attempt=' + String(receipt.attemptId).slice(0, 12), 'code=' + String((e && e.code) || 'error'))
+    return receipt
+  }
+}
+
+// 错误信封/日志兜底：上游错误体可能回显请求内容或 Key，网关不得原样回给客户端/落盘。
+const SECRET_TEXT_RE = /\b(?:sk|rk|pk)-[A-Za-z0-9._-]{8,}\b|Bearer\s+[A-Za-z0-9._~+/=-]{8,}/gi
+function scrubSecretText(text) { return String(text == null ? '' : text).replace(SECRET_TEXT_RE, '****') }
+function scrubBody(buf) {
+  if (!buf || !buf.length) return buf
+  try {
+    const s = buf.toString('utf8')
+    const t = scrubSecretText(s)
+    return t === s ? buf : Buffer.from(t, 'utf8')
+  } catch { return buf }
+}
+
+const ATTEMPT_TOOL_EVENT_RE = /"(tool_calls|function_call|custom_tool_call|local_shell_call|web_search_call|computer_call|file_search_call|code_interpreter_call|mcp_call)"/
+
+// 包住上游流：首个 data 事件 = DELIVERED，出现工具事件 = TOOL_RISK；不解析正文、不落日志。
+function attemptTapStream(stream, attempt, onTool) {
+  if (!stream || typeof attempt !== 'object' || !attempt) return stream
+  let first = true
+  const wrapper = {
+    statusCode: stream.statusCode,
+    headers: stream.headers,
+    on(ev, fn) { if (typeof stream.on === 'function') stream.on(ev, fn); return wrapper },
+    once(ev, fn) { if (typeof stream.once === 'function') stream.once(ev, fn); return wrapper },
+    removeListener(ev, fn) { if (typeof stream.removeListener === 'function') stream.removeListener(ev, fn); return wrapper },
+    destroy(...args) { try { stream.destroy && stream.destroy(...args) } catch {} },
+    get destroyed() { return !!stream.destroyed },
+    async *[Symbol.asyncIterator]() {
+      for await (const chunk of stream) {
+        const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+        if (first && /^data:\s*\{/.test(text.trimStart())) {
+          first = false
+          attempt.onFirstSemanticEvent({ source: 'stream' })
+        }
+        if (ATTEMPT_TOOL_EVENT_RE.test(text)) {
+          attempt.onToolIntent({ source: 'stream' })
+          if (typeof onTool === 'function') { try { onTool() } catch {} }
+        }
+        yield chunk
+      }
+    },
+  }
+  return wrapper
+}
+
+/**
+ * 单次实际发送：授权 → 预留 → execute/forwardOnce → 账本收尾。
+ * 返回 { result, receipt }，其中 result 兼容既有 forward() 形状：
+ *   - 2xx：{ ok,status,headers,stream? , relay? , body? }
+ *   - 前置拒绝 4xx（402/404/429/400/...）：{ ok:false,status,headers,stream,bodyText,retryAfter }
+ * 写后无头/5xx/断流/工具风险：抛 noReplay typed error，调用方不得再发。
+ */
+async function authorizedSendOnce(input) {
+  const {
+    cfg, provider, pid, path, req, method, bodyBuf, opts, log, model,
+    streamRelay, streamMeta, api, budget, signal, collectBody, nonIdempotent,
+  } = input
+  if (budget && typeof budget.expired === 'function' && budget.expired()) {
+    throw abortedError((budget && budget.reason) || 'request_timeout', 'request budget exceeded before send')
+  }
+  const ledger = openLedgerFor(cfg, opts, log)
+  const limits = costLimitsOf(cfg)
+  if (!ledger && (limits.requestUsd > 0 || limits.taskUsd > 0 || limits.dailyUsd > 0)) {
+    throw typedSendError('ledger_required_for_cost_limits', '配置了费用上限但没有账本：拒绝发送（无法强制上限）', { status: 503 })
+  }
+  let receipt = await reserveAttempt({ cfg, opts, req, bodyBuf, model, pid, ledger, log })
+  let authz
+  let identity
+  let headers
+  let deadline
+  try {
+    authz = authorizeSendTarget({ cfg, provider, pid, path, req, opts, log, catalogScoped: input.catalogScoped === true })
+    identity = classifyTarget(provider, cfg)
+    headers = buildAuthorizedHeaders(req, provider, bodyBuf, cfg, api, input.body, identity, authz, log)
+    const budgetRemaining = budget && typeof budget.remaining === 'function' ? Number(budget.remaining()) : 0
+    deadline = createDeadline({
+    // Infinity（无 overallMs）= 不设整体 deadline；不能把 Infinity 传给 setTimeout（会退化成 1ms 立即超时）。
+      overallMs: Number.isFinite(budgetRemaining) && budgetRemaining > 0 ? budgetRemaining : 0,
+      signal: signal || null,
+      now: opts && opts.now,
+      timers: opts && opts.timers,
+    })
+  } catch (e) {
+    // 授权/头构造在发送前失败：账本必须立即按"已验证未执行"释放，不能留下永久 reserved。
+    if (receipt) await closeoutLedger(ledger, receipt, 'released', log)
+    throw e
+  }
+  let relayResult = null
+  const factory = typeof input.adapterFactory === 'function' ? input.adapterFactory : makeAdapter
+  const adapter = factory(async (attempt) => {
+    const res = await forwardOnce(provider, path, method, headers, bodyBuf, {
+      timeout: (cfg.defaults && cfg.defaults.timeout) || {},
+      redirect: REDIRECT_POLICY,
+    }, attempt, { deadline, signal: deadline.signal })
+    if (streamMeta && typeof streamMeta.onHeaders === 'function') { try { streamMeta.onHeaders(res) } catch {} }
+    if (!res.ok) return res
+    if (isStreamResponse(res) && typeof streamRelay === 'function') {
+      const tapped = attemptTapStream(res.stream, attempt, streamMeta && streamMeta.onTool)
+      relayResult = await streamRelay(Object.assign({}, res, { stream: tapped }), Object.assign({}, streamMeta, {
+        // 单一 attempt 只发一次：断流不重连（旧 reconnect 会重放整个请求）。
+        reconnect: async () => null,
+      }))
+      return Object.assign({}, res, { stream: null, relay: relayResult })
+    }
+    if (res.stream && typeof collectBody === 'function') {
+      const out = await collectBody(res.stream, undefined, { budget, signal, destroyOnAbort: true })
+      return Object.assign({}, res, { stream: null, body: out })
+    }
+    return res
+  })
+  let exec
+  try {
+    exec = await execute({
+      deadline,
+      signal: deadline.signal,
+      target: { model, provider: pid },
+      maxAttempts: 1,
+      nonIdempotent: !!nonIdempotent,
+    }, adapter)
+  } catch (e) {
+    const closed = await closeoutLedger(ledger, receipt, 'unknown', log)
+    const err = e && e.aborted ? e : typedSendError('send_failed', '发送失败：' + String((e && e.message) || 'unknown'), { status: 502, noReplay: true, possiblyCommitted: true, receipt: closed })
+    if (err !== e) { err.cause = e }
+    err.noReplay = true
+    err.possiblyCommitted = true
+    err.receipt = closed
+    throw err
+  } finally { try { deadline.dispose() } catch {} }
+
+  // budget.signal 的 parent abort 在 createDeadline 里只能看到"被取消"；若 budget 明确是超时，
+  // 必须还原为 DEADLINE_EXCEEDED（否则会错误地以 499/client_closed 收尾）。
+  const outcome = exec.outcome === 'CANCELLED' && budget && typeof budget.timedOut === 'function' && budget.timedOut()
+    ? 'DEADLINE_EXCEEDED'
+    : exec.outcome
+  const attempt = exec.attempts[0] || null
+  const sent = !!(attempt && attempt.wroteBody)
+  let action = 'unknown'
+  if (outcome === 'SUCCEEDED') action = 'settled'
+  else if (outcome === 'REJECTED_BEFORE_EXECUTION' || outcome === 'CANCELLED_UNSENT' || outcome === 'FAILED_UNSENT') action = 'released'
+  else if (outcome === 'CANCELLED' || outcome === 'DEADLINE_EXCEEDED') action = sent ? 'unknown' : 'released'
+  const closed = await closeoutLedger(ledger, receipt, action, log)
+  if (closed && closed.status != null) exec.ledgerReceipt = closed
+
+  const fr = exec.result || {}
+  if (outcome === 'SUCCEEDED') {
+    return {
+      receipt: closed,
+      authz,
+      result: Object.assign({}, fr, {
+        ok: true,
+        status: fr.status || exec.status,
+        headers: fr.headers || null,
+        stream: fr.stream || null,
+        relay: fr.relay || null,
+        streamed: !!fr.relay,
+        retries: 0,
+      }),
+    }
+  }
+  if (outcome === 'REJECTED_BEFORE_EXECUTION') {
+    const bodyBufOut = fr.bodyBuf || Buffer.from(fr.bodyText || '', 'utf8')
+    if (Number(fr.status) === 429) {
+      // 429 保留状态码 + Retry-After/归因，交回既有 429 收尾路径；账本已按"未执行"release。
+      const err = typedSendError('MG_FB_RATE_LIMITED', '上游限流（429）', {
+        status: 429,
+        retryAfter: fr.retryAfter != null ? fr.retryAfter : (exec.retryAfterMs != null ? exec.retryAfterMs : null),
+        attribution: exec.attribution || null,
+        bodyText: fr.bodyText || '',
+      })
+      err.receipt = closed
+      err.noReplay = false
+      throw err
+    }
+    const stream = Readable.from(bodyBufOut && bodyBufOut.length ? [bodyBufOut] : [])
+    return {
+      receipt: closed,
+      authz,
+      result: {
+        ok: false,
+        status: fr.status || exec.status,
+        headers: fr.headers || null,
+        stream,
+        bodyText: fr.bodyText || '',
+        retryAfter: fr.retryAfter != null ? fr.retryAfter : (exec.retryAfterMs != null ? exec.retryAfterMs : null),
+        attribution: exec.attribution || null,
+        retries: 0,
+      },
+    }
+  }
+  // 取消/超时：交回既有 aborted 收尾（504 request_timeout 或 aborted），不伪装成上游故障。
+  if (outcome === 'CANCELLED' || outcome === 'DEADLINE_EXCEEDED') {
+    const err = abortedError(outcome === 'CANCELLED' ? 'client_closed' : 'request_timeout', outcome === 'CANCELLED' ? 'request canceled' : 'request timeout')
+    err.receipt = closed
+    throw err
+  }
+  // 写后无头 / 已交付后断流 / 工具风险 / 5xx 收到头：一律一次终态，不重放。
+  const possiblyCommitted = sent || outcome === 'TOOL_RISK' || outcome === 'SENT_UNKNOWN'
+  const code = outcome === 'TOOL_RISK' ? 'MG_FB_SIDE_EFFECT_REPLAY_BLOCKED'
+    : outcome === 'SENT_UNKNOWN' ? 'MG_FB_STREAM_INTERRUPTED'
+      : outcome === 'CANCELLED' ? 'MG_FB_CANCELLED'
+        : outcome === 'DEADLINE_EXCEEDED' ? 'MG_FB_DEADLINE'
+          : 'MG_FB_UPSTREAM'
+  const err = typedSendError(code, '上游已写出请求但未完成可安全重放的响应：终止而不重放（' + outcome + '）', {
+    status: outcome === 'CANCELLED' ? 499 : (outcome === 'DEADLINE_EXCEEDED' ? 504 : (fr.status >= 500 ? 502 : 409)),
+    noReplay: true,
+    possiblyCommitted,
+    receipt: closed,
+    retryAfter: exec.retryAfterMs != null ? exec.retryAfterMs : null,
+    attribution: exec.attribution || null,
+    bodyText: fr.bodyText || '',
+  })
+  err.execOutcome = outcome
+  err.execStage = exec.stage
+  err.relay = relayResult
+  err.attempt = attempt
+  throw err
+}
+
 export async function forwardChain(deps, state, req, url, path, method, bodyBuf, body, log, streamRelay, budget, opts = {}) {
   const { ensureHst, markFail, markOk, healthy, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tallyDialogueRequest, tryParse, collectBody } = deps
   const cfg = state.cfg
   const budgetSignal = (budget && budget.signal) || null
+  // M1-3a：账本启用/费用上限 fail-closed。没有账本却配置了费用上限 ⇒ 零发送（审计：上限不能对着 spent=0 判）。
+  let ledger = null
+  try { ledger = openLedgerFor(cfg, opts, log) } catch (e) {
+    return { kind: 'json', status: 503, contentType: 'application/json; charset=utf-8', body: Buffer.from(JSON.stringify({ error: { message: '账本不可用：拒绝发送（fail-closed）', type: 'ledger_unavailable', code: String((e && e.code) || 'ledger_unavailable') } })) }
+  }
+  const sendLimits = costLimitsOf(cfg)
+  if (!ledger && (sendLimits.requestUsd > 0 || sendLimits.taskUsd > 0 || sendLimits.dailyUsd > 0)) {
+    return { kind: 'json', status: 503, contentType: 'application/json; charset=utf-8', body: Buffer.from(JSON.stringify({ error: { message: '配置了费用上限但没有账本：拒绝发送（无法强制上限）', type: 'ledger_required_for_cost_limits', code: 'ledger_required_for_cost_limits' } })) }
+  }
+  const headerValue = (name) => { const v = req && req.headers ? req.headers[name] : null; return Array.isArray(v) ? v[0] : v }
+  const ledgerRequestId = String((opts && opts.requestId) || headerValue('x-request-id') || randomUUID())
+  const ledgerTaskRef = (opts && opts.taskRef) || headerValue('x-mg-task') || null
   // 非幂等不重放（G1）：带工具语义的请求（tools / tool_calls / tool 结果）重放可能重复触发
   // 客户端已执行的工具（shell_command / apply_patch）。策略：同一上游只发一次（forward 的 noRetry）、
   // 整条链最多走一轮（可换上游/模型，但绝不回队首重放）；opts.noReplay 可显式覆盖
@@ -594,12 +1115,16 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   }
   // E5：Codex 聚合路径启用决策器；其它请求 codex=null，下方所有 codex 分支短路，原有行为不变。
   let codex = null
+  const codexNow = Number.isFinite(Number(opts && opts.now)) ? Number(opts.now) : Date.now()
+  // 目录世代是否参与本次路由：显式 authzContext/catalogRecord，或 Codex 目录聚合目标。
+  const catalogScoped = !!(opts && (opts.authzContext || opts.catalogRecord || opts.catalogGeneration != null)) ||
+    !!(codexDef && (codexDef.codexAggregate === true || codexDef.codexOfficial === true))
   if (codexFallbackEnabled(cfg, codexDef, body && body.model, requestModel)) {
     const codexRequest = codexRequestInfoOf(body)
     const codexEstimate = codexEstimateFor(cfg)
     codex = {
       request: codexRequest,
-      candidates: codexBuildCandidates(cfg, routes, codexRequest),
+      candidates: codexBuildCandidates(cfg, routes, codexNow),
       phase: PHASE.UNSENT,
       attempts: { total: 0, sameProvider: 0, failovers: 0 },
       spentUsd: 0,
@@ -646,7 +1171,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   const codexCandidateOf = (model, pid) => {
     if (!codex) return null
     const hitCand = codex.candidates.find((c) => c.model === model && c.provider === pid)
-    return hitCand || (cfg.providers[pid] ? codexCandidateFor(cfg, model, pid, codex.request, false) : null)
+    return hitCand || (cfg.providers[pid] ? codexCandidateFor(cfg, model, pid, codexNow, false) : null)
   }
   const codexAdvance = (to, why) => {
     if (!codex) return false
@@ -654,6 +1179,19 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     if (r.ok) { codex.phase = r.phase; return true }
     log && log.warn('codex phase rejected', codex.phase + '->' + to, why || '')
     return false
+  }
+  const decisionLimitsMicro = limitsMicroOf(sendLimits)
+  const codexBudgetForDecision = () => {
+    if (ledger) {
+      try {
+        return facts.budgetFromLedger(ledger.usage({ requestId: ledgerRequestId, taskRef: ledgerTaskRef }), {
+          limitsMicro: decisionLimitsMicro,
+          currency: ledger.currency,
+          enforceUnknownCost: true,
+        })
+      } catch { /* 账本视图不可用：退回旧预算（仍受上面的 fail-closed 保护） */ }
+    }
+    return codexBudgetOf(cfg, codex.spentUsd)
   }
   const codexDecide = (o = {}) => {
     if (!codex) return null
@@ -667,7 +1205,8 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       triedTargets: codex.tried,
       attempts: codex.attempts,
       limits: codex.limits,
-      budget: codexBudgetOf(cfg, codex.spentUsd),
+      lastAttempt: o.lastAttempt || null,
+      budget: codexBudgetForDecision(),
       estimateCost: (cand) => codex.estimate(cand),
       remainingMs: remainingBudgetMs(),
       emergency: codex.emergency,
@@ -709,6 +1248,29 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     if (!codex) return
     if (!codex.tried.some((t) => t.model === model && t.provider === pid)) codex.tried.push({ model, provider: pid })
   }
+  // M1-3a：裁决目标 = 实际执行目标。初始裁决给出首个 target；failover/retry_same 后
+  // forcedTarget 让路由循环只允许命中该 target（不匹配的候选直接跳过，绝不偷换）。
+  let forcedTarget = null
+  let forcedTargetMisses = 0
+  if (codex) {
+    const primaryPid = routes[0] && routes[0].providers && routes[0].providers[0]
+    const primaryProv = primaryPid ? buildProvider(cfg, primaryPid) : null
+    const primaryOfficial = primaryProv ? classifyTarget(primaryProv, cfg).kind === 'official' : false
+    // 官方主目标是"用户直接选择"，不进入通用 fallback 排名（D7）；其授权由 authorizeFinalTarget 另行 fail-closed。
+    if (!primaryOfficial) {
+      const d0 = codexDecide({})
+      if (d0 && d0.action === ACTION.STOP) {
+        // 候选全被预算/报价门排除时，用 402 MG_FB_BUDGET 表达"超预算停机"，而不是泛化 502。
+        const budgetExcluded = Array.isArray(d0.excluded) && d0.excluded.some((x) => Array.isArray(x.reasons) &&
+          x.reasons.some((r) => /budget|cost|quote/.test(String(r))))
+        if (d0.code === STOP.BUDGET || /BUDGET/.test(String(d0.code || '')) || (d0.code === STOP.NO_CANDIDATE && budgetExcluded)) {
+          return { kind: 'json', status: 402, contentType: 'application/json; charset=utf-8', body: Buffer.from(JSON.stringify({ error: { message: '候选池因预算/报价不足不可用：禁止降级到更便宜候选', type: 'codex_fallback', code: STOP.BUDGET, action: ACTION.STOP, phase: d0.audit.phase } })), pid: null, modelName, chain: '' }
+        }
+        return codexStopResult(d0, {})
+      }
+      if (d0 && d0.target) forcedTarget = { model: d0.target.model, provider: d0.target.provider }
+    }
+  }
   try {
   // 循环兜底：整条路由链(a→b→c)一轮失败后回到队首反复尝试，直到成功 / 业务4xx / 整体超时(loopMs)
   outer: while (Date.now() < loopDeadline) {
@@ -724,6 +1286,8 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     for (let pi = 0; pi < provs.length; pi++) {
     const pid = provs[pi]
     if (!pid || !cfg.providers[pid]) continue
+    if (forcedTarget && (route.model !== forcedTarget.model || pid !== forcedTarget.provider)) continue
+    if (forcedTarget) forcedTarget = null
     const prov = buildProvider(cfg, pid)
     const h = ensureHst(state, pid)
     if (!healthy(h, Date.now())) {
@@ -757,7 +1321,10 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         log && log.warn('codex fallback: 官方订阅不进通用池，跳过', 'provider=' + pid, 'model=' + (serving || '-'))
         continue
       }
-      if (codexCand && codexCand.authorized !== true) {
+      const candAuthorized = codexCand
+        ? (codexCand.facts && codexCand.facts.authorization ? codexCand.facts.authorization.value === true : codexCand.authorized === true)
+        : false
+      if (codexCand && candAuthorized !== true) {
         log && log.warn('codex fallback: 候选未授权，跳过', 'provider=' + pid, 'model=' + (serving || '-'))
         continue
       }
@@ -849,7 +1416,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       log && log.warn('上游目标身份拒绝', 'provider=' + pid, 'identity=' + identity.kind, 'code=' + denied.code, 'model=' + (serving || '-'))
       return { kind: 'json', status: denied.status, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: denied.message, type: 'identity_denied', code: denied.code } })), pid, modelName, serving, api, chain: chainModels.join('>') }
     }
-    const headers = buildHeaders(req, prov, tbuf, cfg, api, body, { identity, log })
+    // M1-3a：headers 由授权记录（identity/凭据单一真源）在 authorizedSendOnce 内构造。
     // 429 冷却（rateUntil）：只有剩余预算等得下才等；等不下就跳过该上游并记 429 归因
     // （全部上游都在冷却 → 收尾回 429 + Retry-After，而不是为了等冷却把客户端挂死或误报 502）
     const cooldownWaitMs = Math.max(0, throttleOf(state, pid).rateUntil - Date.now())
@@ -866,9 +1433,22 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     const attemptStart = Date.now()
     try {
       upstreamAttempted = true
-      // noRetry：非幂等请求同上游只发一次（Retry-After 仍在预算内时允许等待后重发，见 request.js）
-      const result = await forward(prov, turl, req.method, headers, tbuf, Object.assign({}, cfg.defaults || {}, { noRetry: noReplay || !!codex }), log, { budget, signal: budgetSignal })
-      if (codex) codexAdvance(PHASE.ACCEPTED, 'upstream responded')
+      const sent = await authorizedSendOnce({
+        cfg, provider: prov, pid, path: turl, req, method: req.method,
+        bodyBuf: tbuf, body: routeBody, opts: Object.assign({}, opts, { ledger }),
+        log, model: serving, api, budget, signal: budgetSignal, collectBody,
+        nonIdempotent: noReplay || !!codex, catalogScoped,
+        adapterFactory: opts && opts.adapterFactory,
+        streamRelay,
+        streamMeta: {
+          pid, modelName, serving: serving || modelName, api, dialogueId,
+          rewriteModel: (body && body.model) || null, chain: chainModels.join('>'),
+          onHeaders: codex ? () => { if (codex.phase === PHASE.UNSENT) codexAdvance(PHASE.ACCEPTED, 'upstream responded') } : null,
+          onTool: codex ? () => { codex.toolCallSeen = true; codexAdvance(PHASE.TOOL_SIDE_EFFECT, 'tool_call in stream') } : null,
+        },
+      })
+      const result = sent.result
+      if (codex && codex.phase === PHASE.UNSENT) codexAdvance(PHASE.ACCEPTED, 'upstream responded')
       upstreamHits += (result.retries || 0) + 1
       const latency = Date.now() - attemptStart
       const o = ensureSt(state, pid)
@@ -879,27 +1459,18 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       bm.latencySum = (bm.latencySum || 0) + latency; bm.latencyCount = (bm.latencyCount || 0) + 1
       agg(state, pid, 'retries', result.retries || 0)
       if (result.ok) {
-        if (isStreamResponse(result)) {
+        if (result.streamed || (isStreamResponse(result) && typeof streamRelay === 'function')) {
           streamStarted = true
-          // 流式：成败延后到流结束统一判定（streamRelay 内 relay，返回流结局）。
-          // 不能在响应头阶段 markOk——头 2xx 不代表流能走完，故障上游「头 2xx + 流中断」若在此刻被洗白，
-          // 熔断计数永远攒不齐，后续请求被亲和钉在故障主上游，「切备用/切下一模型」形同虚设。
-          // E5：Codex 路径探测流内工具事件（只扫事件名，不解析/不落正文），用于把副作用阶段标出来。
-          const codexOnTool = codex ? () => { codex.toolCallSeen = true; codexAdvance(PHASE.TOOL_SIDE_EFFECT, 'tool_call in stream') } : null
-          if (codexOnTool && result.stream) result.stream = codexTapStream(result.stream, codexOnTool)
-          const reconnector = async () => {
-            const again = await forward(prov, turl, req.method, headers, tbuf, cfg.defaults || {}, log, { budget, signal: budgetSignal })
-            if (!again.ok) throw new Error('reconnect status ' + again.status)
-            return codexOnTool && again.stream ? codexTapStream(again.stream, codexOnTool) : again.stream
+          // 流式：relay 已在 authorizedSendOnce 内完成（attemptTapStream 已标 DELIVERED/TOOL_RISK）。
+          let relay = result.relay
+          if (!relay) {
+            // 兼容分支：未经过 authorizedSendOnce 的旧调用（streamRelay 注入但 result 未标记）
+            const reconnector = async () => null // M1-3a：断流不重连/不重放
+            relay = await streamRelay(result, {
+              pid, modelName, serving: serving || modelName, api, dialogueId, reconnect: reconnector,
+              rewriteModel: (body && body.model) || null, chain: chainModels.join('>'),
+            })
           }
-          if (typeof streamRelay !== 'function') {
-            // 兼容兜底：未注入 relay（异常路径）按旧行为直接交付，由调用方处理
-            return { kind: 'stream', res: result, pid, modelName, serving, api, reconnect: reconnector, dialogueId, chain: chainModels.join('>') }
-          }
-          const relay = await streamRelay(result, {
-            pid, modelName, serving: serving || modelName, api, dialogueId, reconnect: reconnector,
-            rewriteModel: (body && body.model) || null, chain: chainModels.join('>'),
-          })
           const sm = serving || modelName
           const h = ensureHst(state, pid)
           if (relay && relay.clientGone) {
@@ -909,58 +1480,38 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
             return { kind: 'aborted' }
           }
           if (relay && relay.timedOut && !relay.completed) {
-            // 整体预算在流式阶段耗尽：不再续传/切上游，以流内错误事件收尾（客户端可感知）
             if (codex && relay.contentSent) codexAdvance(PHASE.STREAM_DELIVERED, 'content delivered then budget timeout')
             log && log.warn('请求超出整体预算（流式阶段）', 'model=' + sm, 'provider=' + pid, 'overallMs=' + overallMsCfg)
             return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, timeout: true, chain: chainModels.join('>'), note: '请求超出整体预算 ' + overallMsCfg + 'ms（defaults.timeout.overallMs）', reconnects: relay.reconnects || 0 }
           }
-          if (relay.completed) {
-            // 流完整结束（含续传成功）：正常计成功
+          if (relay && relay.completed) {
             if (codex) codexAdvance(PHASE.STREAM_DELIVERED, 'stream completed')
             h.streamDrops = 0
             markOk(state, pid)
             noteAffinity(state, sm, pid)
             return { kind: 'stream-done', pid, modelName, serving, api, dialogueId, chain: chainModels.join('>') }
           }
-          // 流中断：计入中断 + 错误统计 + 连续中断计数
+          // 流中断：M1-3a 起一次终态，绝不重放（半截流同样不得隐式重放）。
           state.st.counters.interrupts += 1; state.stats.global.interrupts += 1
           agg(state, pid, 'errors', 1); state.st.counters.errors += 1
           const sg = state.stats.byModel[sm] = state.stats.byModel[sm] || { requests: 0, errors: 0 }
           sg.errors = (sg.errors || 0) + 1
           h.streamDrops = (h.streamDrops || 0) + 1
-          h.streamDropAt = Date.now() // 冷却计时起点：配合 half-open 让上游有机会自证恢复
-          markFail(state, pid, prov.circuit) // 走到这里说明是上游侧中断（clientGone 已在上方提前返回）
-          const _note = '断流续传' + (relay.reconnects || 0) + '次仍失败，结束'
-          // E5：先推进阶段，再由决策器裁决「同上游重试 / 换模型 / 停机」。已交付内容或工具副作用一律不重放。
+          h.streamDropAt = Date.now()
+          markFail(state, pid, prov.circuit)
           if (codex) {
-            if (relay.contentSent) codexAdvance(PHASE.STREAM_DELIVERED, 'content delivered before interruption')
+            if (relay && relay.contentSent) codexAdvance(PHASE.STREAM_DELIVERED, 'content delivered before interruption')
             else if (codex.toolCallSeen) codexAdvance(PHASE.TOOL_SIDE_EFFECT, 'tool call before interruption')
-            const _d = codexDecide({ error: { streamInterrupted: true }, current: codexCand })
-            if (_d && _d.action === ACTION.STOP) {
-              if (relay.finish) relay.finish(_d.reason)
-              return codexStopResult(_d, { streamStarted: true, pid, modelName, serving: sm })
-            }
-            codexMarkTried(serving || route.model, pid)
-            if (_d && _d.action === ACTION.RETRY_SAME) {
-              codex.attempts.sameProvider += 1
-              if (await codexWaitRetry(_d)) { pi -= 1; continue }
-            }
-            if (_d && _d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
           }
-          if (relay.contentSent && (cfg.defaults && cfg.defaults.streamInterruptOnContent) !== true) {
-            // 正式回答（content）已回传后中断且未开「中断也切」：重发会让客户端收到「半截旧回答 + 新回答」拼接——发错误事件收尾（客户端可干净重试）
-            if (relay.finish) relay.finish(_note)
-            return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, chain: chainModels.join('>') }
-          }
-          // 未回传内容（「头 2xx + 立刻断流」= 假成功）或已回传但 streamInterruptOnContent=true（用户接受拼接重复）：
-          // 均视为该上游失败，继续模型链（下一 provider / 下一模型）——客户端连接保持，下一上游的流继续写同一连接
-          log && log.warn('sse 流中断(续传' + (relay.reconnects || 0) + '次仍失败)' + (relay.contentSent ? '，已回传内容按策略切换' : '，未回传内容切下一上游'), 'model=' + sm + ' provider=' + pid, 'chain=' + chainModels.join('>'))
-          continue
+          const _note = '上游流式响应中断：禁止重放同一请求'
+          if (relay && relay.finish) relay.finish(_note)
+          log && log.warn('sse 流中断：一次终态，不重放', 'model=' + sm + ' provider=' + pid, 'chain=' + chainModels.join('>'))
+          return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, chain: chainModels.join('>'), note: _note }
         }
         markOk(state, pid)
         ensureHst(state, pid).streamDrops = 0 // 非流式请求完整成功同样代表上游健康：解除连续断流绕开
         noteAffinity(state, serving || route.model, pid) // 非流式响应已完整收到：记录本次成功上游，供后续请求保持亲和、复用其缓存
-        let out = await collectBody(result.stream, undefined, { budget, signal: budgetSignal, destroyOnAbort: true })
+        let out = result.body != null ? result.body : await collectBody(result.stream, undefined, { budget, signal: budgetSignal, destroyOnAbort: true })
         out = maybeGunzip(out, result.headers && result.headers['content-encoding'])
         const parsed = tryParse(out)
         // E5：非流式 2xx 也推进阶段；命工具调用按副作用处理（请求已结束，仅用于审计与后续轮次判定）。
@@ -1005,6 +1556,57 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         }
         return { kind: 'json', status: result.status, contentType: 'application/json', body: out, pid, modelName, serving, asSSE: degraded || undefined, dialogueId, chain: chainModels.join('>') }
       }
+      // —— M1-3a：ok:false 只可能是前置拒绝（402/404 或其它 4xx；429 已在发送层抛错）——
+      // 只允许 402/404 进入下一候选；其余业务 4xx 原样归一终态，不换模型、不重放。
+      if (result.status !== 402 && result.status !== 404) {
+        let out = Buffer.alloc(0)
+        if (result.stream) { try { out = await collectBody(result.stream, undefined, { budget, signal: budgetSignal, destroyOnAbort: true }) } catch {} }
+        if (!out.length && result.bodyText) out = Buffer.from(result.bodyText, 'utf8')
+        // 供应商侧业务拒绝（422 upstream_error 等）：已收到完整响应且明确归类为"上游侧故障、未执行"，
+        // 属于可证明前置拒绝 → 同 attempt 不重发，但允许换下一候选（审计 P1 只禁止重放，不禁止换候选）。
+        if (isUpstreamSideFailure(result.status, out)) {
+          last4xx = { status: result.status, body: scrubBody(mapErrorEnvelope(api, result.status, out) || out) }
+          last4xxPid = pid
+          last429 = null
+          lastErr = Object.assign(new Error('upstream-side ' + result.status + ' ' + (serving || '')), { status: result.status })
+          agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
+          markFail(state, pid, prov.circuit)
+          log && log.warn('上游侧故障（已收头、可证明未执行）', 'provider=' + pid, 'status ' + result.status, '-> next candidate')
+          if (codex) {
+            const _d = codexDecide({ error: { status: result.status, upstreamFault: true }, current: codexCand })
+            if (_d.action === ACTION.STOP) return codexStopResult(_d, { pid, modelName, serving })
+            codexMarkTried(serving || route.model, pid)
+            if (_d.action === ACTION.FAILOVER) { codex.attempts.failovers += 1; forcedTarget = _d.target ? { model: _d.target.model, provider: _d.target.provider } : null }
+            if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; forcedTarget = { model: serving, provider: pid }; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
+          }
+          continue
+        }
+        markOk(state, pid)
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
+        log && log.warn('upstream 4xx（不可安全重放）', 'provider=' + pid, 'status=' + result.status)
+        // Codex 聚合路径用决策器的稳定错误码收尾（400→MG_FB_BAD_REQUEST 等）；非聚合仍原样归一。
+        if (codex) {
+          const _d = codexDecide({ error: { status: result.status }, current: codexCand })
+          if (_d && _d.action === ACTION.STOP) return codexStopResult(_d, { pid, modelName, serving })
+        }
+        return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: scrubBody(mapErrorEnvelope(api, result.status, out) || out), pid, modelName, chain: chainModels.join('>') }
+      }
+      // 402/404 = 可证明未执行（前置拒绝）：允许换下一候选，但仍受决策/账本对账约束。
+      const rejectedBody = result.stream ? await collectBody(result.stream, undefined, { budget, signal: budgetSignal, destroyOnAbort: true }) : Buffer.from(result.bodyText || '', 'utf8')
+      last4xx = { status: result.status, body: scrubBody(mapErrorEnvelope(api, result.status, rejectedBody) || rejectedBody) }
+      last4xxPid = pid
+      last429 = null
+      lastErr = Object.assign(new Error('upstream rejected ' + result.status + ' ' + (serving || '')), { status: result.status })
+      agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
+      log && log.warn('provider rejected (pre-execution)', pid, 'status ' + result.status, '-> next candidate')
+      if (codex) {
+        const _d = codexDecide({ error: { status: result.status }, current: codexCand })
+        if (_d.action === ACTION.STOP) return codexStopResult(_d, { pid, modelName, serving })
+        codexMarkTried(serving || route.model, pid)
+        if (_d.action === ACTION.FAILOVER) { codex.attempts.failovers += 1; forcedTarget = _d.target ? { model: _d.target.model, provider: _d.target.provider } : null }
+        if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; forcedTarget = { model: serving, provider: pid }; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
+      }
+      continue
       // 非重试错误码（4xx）：业务问题，不熔断、不 fallback，直接返回；
       // 例外：403/404 属「模型/资源级拒绝」（如上游对该模型无权限/不存在），换下一模型可能成功，记录后继续尝试而非中断
       markOk(state, pid)
@@ -1014,8 +1616,8 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           const _d = codexDecide({ error: { status: result.status }, current: codexCand })
           if (_d.action === ACTION.STOP) return codexStopResult(_d, { pid, modelName, serving, streamStarted })
           codexMarkTried(serving || route.model, pid)
-          if (_d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
-          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
+          if (_d.action === ACTION.FAILOVER) { codex.attempts.failovers += 1; forcedTarget = _d.target ? { model: _d.target.model, provider: _d.target.provider } : null }
+          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; forcedTarget = { model: serving, provider: pid }; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
           continue
         }
         // 流已开始：写不了 502 头，按上游失败继续链（不改 rejectedOnly——3xx/4xx 是确定性拒绝，重发同一请求无意义，轮末即收尾）
@@ -1031,8 +1633,8 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           const _d = codexDecide({ error: { status: result.status }, current: codexCand })
           if (_d.action === ACTION.STOP) return codexStopResult(_d, { streamStarted: true, pid, modelName, serving })
           codexMarkTried(serving || route.model, pid)
-          if (_d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
-          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
+          if (_d.action === ACTION.FAILOVER) { codex.attempts.failovers += 1; forcedTarget = _d.target ? { model: _d.target.model, provider: _d.target.provider } : null }
+          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; forcedTarget = { model: serving, provider: pid }; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
           continue
         }
         // 不置 rejectedOnly=false：4xx 是确定性拒绝，链走完一轮即可收尾，不必重复空转到 loopMs
@@ -1046,8 +1648,8 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           const _d = codexDecide({ error: { status: result.status, upstreamFault: true }, current: codexCand })
           if (_d.action === ACTION.STOP) return codexStopResult(_d, { pid, modelName, serving })
           codexMarkTried(serving || route.model, pid)
-          if (_d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
-          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
+          if (_d.action === ACTION.FAILOVER) { codex.attempts.failovers += 1; forcedTarget = _d.target ? { model: _d.target.model, provider: _d.target.provider } : null }
+          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; forcedTarget = { model: serving, provider: pid }; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
           continue
         }
         // 上游侧故障（4xx 但语义是「我/我的下游出错了」，见 isUpstreamSideFailure 注释）：
@@ -1060,16 +1662,16 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         lastErr = Object.assign(new Error('upstream-side ' + result.status + ' ' + (serving || '')), { status: result.status })
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
         markFail(state, pid, prov.circuit)
-        log && log.warn('上游侧故障(4xx 语义为上游出错)', 'provider=' + pid, 'status ' + result.status, '-> next provider/model', out.length ? 'body=' + out.toString('utf8', 0, 300).replace(/\n/g, ' ') : '')
+        log && log.warn('上游侧故障(4xx 语义为上游出错)', 'provider=' + pid, 'status ' + result.status, '-> next provider/model', out.length ? 'bodyBytes=' + out.length : '')
         continue
       }
       if (isModelLevelRejection(result.status, out)) {
         if (codex) {
-          const _d = codexDecide({ error: { status: result.status, upstreamFault: result.status === 400 }, current: codexCand })
+          const _d = codexDecide({ error: { status: result.status }, current: codexCand })
           if (_d.action === ACTION.STOP) return codexStopResult(_d, { pid, modelName, serving })
           codexMarkTried(serving || route.model, pid)
-          if (_d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
-          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
+          if (_d.action === ACTION.FAILOVER) { codex.attempts.failovers += 1; forcedTarget = _d.target ? { model: _d.target.model, provider: _d.target.provider } : null }
+          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; forcedTarget = { model: serving, provider: pid }; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
           continue
         }
         // 模型级拒绝（403/404，或 400 且响应体含「模型/上游不可用」语义）：
@@ -1081,7 +1683,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         last429 = null // 最后失败不是 429：不把更早的 429 当归因回给客户端
         lastErr = Object.assign(new Error('upstream ' + result.status + ' ' + (serving || '')), { status: result.status })
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
-        log && log.warn('provider rejected (model-level)', pid, 'status ' + result.status, '-> next model', out && out.length ? 'body=' + out.toString('utf8', 0, 300).replace(/\n/g, ' ') : '')
+        log && log.warn('provider rejected (model-level)', pid, 'status ' + result.status, '-> next model', out && out.length ? 'bodyBytes=' + out.length : '')
         continue
       }
       if (out.length) {
@@ -1089,14 +1691,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           const _d = codexDecide({ error: { status: result.status }, current: codexCand })
           if (_d.action === ACTION.STOP) return codexStopResult(_d, { pid, modelName, serving })
           codexMarkTried(serving || route.model, pid)
-          if (_d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
-          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
+          if (_d.action === ACTION.FAILOVER) { codex.attempts.failovers += 1; forcedTarget = _d.target ? { model: _d.target.model, provider: _d.target.provider } : null }
+          if (_d.action === ACTION.RETRY_SAME) { codex.attempts.sameProvider += 1; forcedTarget = { model: serving, provider: pid }; if (await codexWaitRetry(_d)) { pi -= 1; continue } }
           continue
         }
         // 其余 4xx（真·参数/请求错误）：直接返回保留原始错误，不再尝试下一模型（换模型同样会失败）
-        log && log.warn('upstream ' + result.status, 'provider=' + pid, 'model=' + (serving || '-'), 'body=' + out.toString('utf8', 0, 300).replace(/\n/g, ' '))
+        log && log.warn('upstream ' + result.status, 'provider=' + pid, 'model=' + (serving || '-'), 'bodyBytes=' + out.length)
         // 非 OpenAI 上游的原生错误信封 → OpenAI 形状回给客户端（状态码与原始 body 保留在日志里）
-        return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: mapErrorEnvelope(api, result.status, out) || out, pid, modelName, chain: chainModels.join('>') }
+        return { kind: 'json', status: result.status, contentType: 'application/json; charset=utf-8', body: scrubBody(mapErrorEnvelope(api, result.status, out) || out), pid, modelName, chain: chainModels.join('>') }
       }
       return { kind: 'json', status: result.status || 502, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: 'gateway upstream error', type: 'upstream_error', status: result.status } })), pid, modelName }
     } catch (err) {
@@ -1106,6 +1708,49 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         refundQps()
         log && log.warn('request aborted', err.reason || err.message, 'model=' + (serving || '-'), 'provider=' + pid, '-> stop chain')
         break outer
+      }
+      // 目标授权拒绝：零发送语义，typed deny，不熔断、不换候选。
+      if (err && err.deny) {
+        log && log.warn('send target denied', 'provider=' + pid, 'code=' + err.code)
+        return { kind: 'json', status: err.status || 403, contentType: 'application/json; charset=utf-8', body: Buffer.from(JSON.stringify({ error: { message: err.message, type: 'target_denied', code: err.code } })), pid, modelName, chain: chainModels.join('>') }
+      }
+      // 账本 fail-closed / 报价缺失：不发送、不换候选。
+      if (err && (err.code === 'ledger_required_for_cost_limits' || err.code === 'quote_unknown' || err.code === 'ledger_reserve_failed' || err.ledger)) {
+        log && log.warn('ledger blocked send', 'provider=' + pid, 'code=' + err.code)
+        return { kind: 'json', status: err.status || 503, contentType: 'application/json; charset=utf-8', body: Buffer.from(JSON.stringify({ error: { message: err.message, type: err.type || err.code, code: err.code } })), pid, modelName, chain: chainModels.join('>') }
+      }
+      // M1-3a：写后无头 / 5xx 收到头 / 已交付后断流 / 工具风险 ⇒ 一次终态，绝不换候选重放。
+      if (err && err.noReplay) {
+        const latency = Date.now() - attemptStart
+        const o = ensureSt(state, pid)
+        o.latencySum += latency; o.latencyCount += 1
+        o.lats.push(latency); if (o.lats.length > 200) o.lats.shift()
+        state.stats.global.latencySum += latency; state.stats.global.confirmed += 1
+        state.stats.global.lats.push(latency); if (state.stats.global.lats.length > 200) state.stats.global.lats.shift()
+        bm.latencySum = (bm.latencySum || 0) + latency; bm.latencyCount = (bm.latencyCount || 0) + 1
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
+        upstreamHits += 1
+        if (err.execOutcome !== 'TOOL_RISK') markFail(state, pid, prov && prov.circuit)
+        lastErr = err
+        last429 = null
+        rejectedOnly = false
+        if (codex) {
+          const _d = codexDecide({
+            error: { status: err.status || null, code: err.code, streamInterrupted: err.execOutcome === 'SENT_UNKNOWN' },
+            current: codexCand,
+            lastAttempt: { possiblyCommitted: err.possiblyCommitted === true, trustedResume: null },
+          })
+          if (_d && _d.action === ACTION.STOP) {
+            if (err.relay && err.relay.finish) err.relay.finish(_d.reason)
+            return codexStopResult(_d, { pid, modelName, serving, streamStarted: !!err.relay })
+          }
+        }
+        if (streamStarted || err.relay) {
+          if (err.relay && err.relay.finish) err.relay.finish(err.message)
+          return { kind: 'stream-interrupted', pid, modelName, serving, api, dialogueId, chain: chainModels.join('>'), note: err.message }
+        }
+        const status = err.execOutcome === 'SENT_UNKNOWN' ? 502 : (err.status && err.status >= 500 ? 502 : (err.status && err.status >= 400 && err.status < 500 ? err.status : 409))
+        return { kind: 'json', status, contentType: 'application/json; charset=utf-8', body: Buffer.from(JSON.stringify({ error: { message: err.message, type: 'no_replay', code: err.code } })), pid, modelName, chain: chainModels.join('>') }
       }
       const latency = Date.now() - attemptStart
       const o = ensureSt(state, pid)
@@ -1159,9 +1804,10 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           return codexStopResult(_d, { streamStarted, pid, modelName, serving, retryAfterMs: _derr.retryAfterMs })
         }
         codexMarkTried(serving || route.model, pid)
-        if (_d.action === ACTION.FAILOVER) codex.attempts.failovers += 1
+        if (_d.action === ACTION.FAILOVER) { codex.attempts.failovers += 1; forcedTarget = _d.target ? { model: _d.target.model, provider: _d.target.provider } : null }
         if (_d.action === ACTION.RETRY_SAME) {
           codex.attempts.sameProvider += 1
+          forcedTarget = { model: serving, provider: pid }
           if (await codexWaitRetry(_d)) { pi -= 1; continue }
         }
       }
@@ -1170,6 +1816,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     }
     } // for pid
   } // for route
+  if (forcedTarget) {
+    // failover target 可能在 f 本轮已经遍历过的位置：允许重新从链首走一轮（最多 2 次），
+    // 但绝不能偷换成别的候选。
+    forcedTargetMisses += 1
+    if (forcedTargetMisses <= 2) continue
+    return { kind: 'json', status: 502, contentType: 'application/json; charset=utf-8', pid: null, modelName, chain: chainModels.join('>'), body: Buffer.from(JSON.stringify({ error: { message: '裁决目标不在可执行候选链中：拒绝改用其它候选', type: 'codex_fallback', code: STOP.NO_CANDIDATE } })) }
+  }
+  forcedTargetMisses = 0
   // 非幂等（tool）请求：整条链最多走一轮（每个上游至多一次尝试，可换上游/模型），绝不回队首重放
   if (noReplay) break
   if (!cycleTried || rejectedOnly) break // 无上游被尝试，或整轮只有 403/404 模型级拒绝（确定性失败）：再循环无意义，直接收尾

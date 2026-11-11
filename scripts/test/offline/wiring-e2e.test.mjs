@@ -1,0 +1,177 @@
+// M1-3b（T-LIFE-04 / T-ROUTE-02）：index 注入 catalogRecord / ledgerOptions / 显式兼容模式
+// 后的端到端验收。全部离线：合成目录 + 回环 mock + 真实临时账本目录。
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { startGateway, startScriptedUpstream } from './harness.mjs'
+import { authorizeSendTarget } from '../../../src/forward.js'
+import { assertSendTarget } from '../../../src/codex/target-authz.js'
+
+const json = () => ({ 'content-type': 'application/json' })
+const CHAT_OK = (content) => JSON.stringify({
+  id: 'mock', object: 'chat.completion',
+  choices: [{ index: 0, message: { role: 'assistant', content: content || 'pong' }, finish_reason: 'stop' }],
+  usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+})
+function officialModel(overrides = {}) {
+  return {
+    slug: 'gpt-test-sol',
+    display_name: 'GPT Test Sol',
+    description: 'Official fixture model',
+    default_reasoning_level: 'low',
+    supported_reasoning_levels: [{ effort: 'low' }, { effort: 'medium' }, { effort: 'high' }],
+    shell_type: 'unified_exec',
+    visibility: 'list',
+    supported_in_api: true,
+    priority: 1,
+    additional_speed_tiers: [],
+    service_tiers: [],
+    availability_nux: null,
+    upgrade: null,
+    include_skills_usage_instructions: false,
+    include_plugin_usage_instructions: false,
+    include_apps_usage_instructions: false,
+    default_reasoning_summary: 'none',
+    support_verbosity: true,
+    default_verbosity: 'low',
+    apply_patch_tool_type: 'freeform',
+    web_search_tool_type: 'text_and_image',
+    truncation_policy: { mode: 'tokens', limit: 10000 },
+    supports_image_detail_original: true,
+    context_window: 200000,
+    max_context_window: 400000,
+    comp_hash: '1000',
+    effective_context_window_percent: 95,
+    experimental_supported_tools: ['clock'],
+    input_modalities: ['text', 'image'],
+    supports_search_tool: true,
+    supports_experimental_context: false,
+    use_responses_lite: true,
+    supports_reasoning_effort_updates: true,
+    node_repl_auto_review_required: true,
+    node_repl_disabled: false,
+    tool_mode: 'code_mode_only',
+    multi_agent_version: 'v2',
+    multi_agent_reasoning_effort: 'high',
+    base_instructions: 'You are Codex, a fixture agent.',
+    model_messages: { instructions_template: 'You are Codex, a fixture agent.' },
+    ...overrides,
+  }
+}
+async function gwLog(gw) {
+  const files = (await readdir(gw.dir)).filter((f) => f.endsWith('.log'))
+  const parts = await Promise.all(files.map((f) => readFile(join(gw.dir, f), 'utf8')))
+  return parts.join('\n')
+}
+
+test('M1-3b catalog slug：注入 catalogRecord 后 200；上游 model = 裁决 target；发送前已有账本预留', { timeout: 60000 }, async (t) => {
+  const catalogDir = mkdtempSync(join(tmpdir(), 'mg-wire-cat-'))
+  const ledgerDir = await mkdtemp(join(tmpdir(), 'mg-wire-cat-ledger-'))
+  t.after(() => { rmSync(catalogDir, { recursive: true, force: true }); return rm(ledgerDir, { recursive: true, force: true }) })
+  const basePath = join(catalogDir, 'catalog-base.json')
+  writeFileSync(basePath, JSON.stringify({ models: [officialModel()] }))
+
+  let reservedBeforeRespond = false
+  const bodies = []
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    const chunks = []
+    for await (const c of req) chunks.push(c)
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+    try {
+      const state = JSON.parse(await readFile(join(ledgerDir, 'ledger.json'), 'utf8'))
+      reservedBeforeRespond = Object.values(state.attempts || {}).some((a) => a.status === 'reserved')
+    } catch { reservedBeforeRespond = false }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(CHAT_OK('catalog-ok'))
+  })
+  t.after(() => upstream.stop())
+  const gw = await startGateway({
+    name: 'm13b-catalog',
+    env: { MG_ADMIN_TOKEN: '' },
+    config: {
+      defaults: {
+        model: '', codexOfficialProvider: '',
+        retry: { maxAttempts: 1 }, timeout: { firstByteMs: 3000, idleMs: 3000, loopMs: 3000 },
+        codexCatalogBasePath: basePath,
+        codexFallbackLimits: { maxSameProviderAttempts: 0, maxFailovers: 1, maxTotalAttempts: 2 },
+      },
+      providers: { third: { baseUrl: upstream.base + '/v1', api: 'openai', costEstimateUsd: 0.001 } },
+      models: { alpha: { provider: 'third', api: 'openai', maxContext: 128000, costEstimateUsd: 0.001 } },
+      routing: { ledger: { dir: ledgerDir, currency: 'USD' } },
+    },
+  })
+  t.after(() => gw.stop())
+
+  const res = await gw.post('/v1/responses', { model: 'mg-third-alpha', input: 'hi', stream: false }, json())
+  assert.equal(res.status, 200, await res.clone().text())
+  assert.equal(bodies.length, 1)
+  assert.equal(bodies[0].model, 'alpha', '上游必须收到目录绑定的原模型名')
+  assert.equal(reservedBeforeRespond, true, '上游被命中前账本必须已有 reserved attempt')
+  const log = await gwLog(gw)
+  assert.match(log, /send authz|codex fallback decision/, '应有授权/决策审计')
+  assert.equal(log.includes('sk-'), false)
+})
+
+test('M1-3b official Chat（非目录参与）200，不要求 catalogRecord', { timeout: 30000 }, async (t) => {
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    for await (const _ of req) { /* drain */ }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(CHAT_OK('official-ok'))
+  })
+  t.after(() => upstream.stop())
+  const gw = await startGateway({
+    name: 'm13b-official-chat',
+    env: { MG_CODEX_OFFICIAL_PASSTHROUGH: '1' },
+    config: {
+      defaults: { provider: 'official', codexOfficialHosts: ['127.0.0.1'] },
+      providers: { official: { baseUrl: upstream.base, codexIdentity: 'official' } },
+      models: { demo: { provider: 'official' } },
+    },
+  })
+  t.after(() => gw.stop())
+  const res = await fetch(gw.base + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer CLIENT-OFFICIAL-TOKEN', 'chatgpt-account-id': 'acct-1' },
+    body: JSON.stringify({ model: 'demo', messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  assert.equal(res.status, 200, await res.clone().text())
+  assert.equal(upstream.hits.length, 1)
+})
+
+test('M1-3b catalogScoped 但 record 缺失 → 403 catalog_generation_missing（单元）', () => {
+  const cfg = { defaults: {}, providers: { third: { baseUrl: 'http://127.0.0.1:9' } } }
+  const provider = { id: 'third', baseUrl: 'http://127.0.0.1:9', apiKey: 'k', pathPrefix: '', _def: {} }
+  const base = { cfg, provider, pid: 'third', path: '/v1/chat/completions', req: { headers: {} }, log: null, catalogScoped: true }
+  assert.throws(() => authorizeSendTarget(Object.assign({}, base, { opts: {} })), (e) => e.code === 'catalog_generation_missing' && e.status === 403)
+
+  const record = { generation: 7, key: 'k7', verified: { official: true, thirdParty: true } }
+  const authz = authorizeSendTarget(Object.assign({}, base, { opts: { catalogRecord: record, catalogGeneration: 7 } }))
+  assert.equal(authz.generation, 7)
+  assert.equal(assertSendTarget(authz, 'http://127.0.0.1:9/v1/chat/completions'), authz, '授权对象必须等于实际发送对象')
+
+  const noRecordForPlain = authorizeSendTarget({ cfg, provider, pid: 'third', path: '/v1/chat/completions', req: { headers: {} }, log: null, catalogScoped: false, opts: {} })
+  assert.equal(noRecordForPlain.generation, 'config-declared', '非目录参与的普通请求走可审计的 config-declared 世代')
+})
+
+test('M1-3b 未配置 ledger + 配置费用上限 → typed 拒绝，零上游', { timeout: 30000 }, async (t) => {
+  const upstream = await startScriptedUpstream(async (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(CHAT_OK()) })
+  t.after(() => upstream.stop())
+  const gw = await startGateway({
+    name: 'm13b-limit',
+    config: {
+      defaults: { retry: { maxAttempts: 1 }, timeout: { firstByteMs: 2000, idleMs: 2000, loopMs: 3000 } },
+      providers: { p1: { baseUrl: upstream.base } },
+      models: { 'wire-limit': { provider: 'p1', costEstimateUsd: 0.01 } },
+      routing: { budget: { requestUsd: 0.1 } },
+    },
+  })
+  t.after(() => gw.stop())
+  const res = await gw.post('/v1/chat/completions', { model: 'wire-limit', messages: [{ role: 'user', content: 'hi' }] }, json())
+  assert.equal(res.status, 503)
+  const body = await res.json()
+  assert.equal(body.error.code, 'ledger_required_for_cost_limits')
+  assert.equal(upstream.hits.length, 0)
+})

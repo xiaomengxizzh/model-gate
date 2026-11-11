@@ -13,6 +13,9 @@ function fmt(msg, rest) {
 function escapeReg(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
 // 通用 Bearer 令牌兜底脱敏
 const TOKEN_RE = /Bearer\s+[A-Za-z0-9._~+/=-]{8,}/gi
+// 常见 API Key 形态（sk-/rk-/pk-）兜底脱敏：即使 Key 不在启动/热更新词表里，
+// 也不允许以上游错误片段/请求摘要形式落盘（审计 P1「上游错误片段可能回显请求内容并写日志」）。
+const API_KEY_RE = /\b(?:sk|rk|pk)-[A-Za-z0-9._-]{8,}/g
 // URL 内嵌凭据（scheme://user:pass@host）用线性扫描抹除：可回溯字符类在超长单行上是 O(n²)。
 const URL_STOP = /[\s"'()<>,;]/
 function maskUrlCreds(s) {
@@ -64,6 +67,7 @@ export function createLogger(opts = {}) {
     let s = line
     for (const sec of secrets) { const re = new RegExp(escapeReg(sec), 'g'); s = s.replace(re, '****') }
     s = s.replace(TOKEN_RE, 'Bearer ****')
+    s = s.replace(API_KEY_RE, '****')
     // 代理/URL 内嵌凭据：http://user:pass@host 属于最常见的"日志里带秘密"形态，与 secrets 列表无关地兜底
     return maskUrlCreds(s)
   }
