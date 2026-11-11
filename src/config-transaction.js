@@ -154,10 +154,19 @@ function releaseLock (lock) {
 
 function removeIfExists (path) { try { unlinkSync(path) } catch {} }
 
+// 只清理本事务自有的临时写文件（writeFileDurable 的命名模式），不碰用户其它文件。
+const OWN_TMP_RE = /^(?:keys\.local\.json|gateway\.local\.json|config-txn(?:\.commit)?\.json)\.[0-9]+\.[a-f0-9]+\.tmp$/
+function cleanupOwnedTmp (paths) {
+  let names = []
+  try { names = readdirSync(paths.dir) } catch { return }
+  for (const name of names) if (OWN_TMP_RE.test(name)) removeIfExists(join(paths.dir, name))
+}
+
 function cleanupArtifacts (paths, opId) {
   if (opId) { try { rmSync(join(paths.dir, TXN_DIR, opId), { recursive: true, force: true }) } catch {} }
   // 只清理空的事务目录（仍有其它 op 的暂存件时保留）。
   try { rmdirSync(join(paths.dir, TXN_DIR)) } catch {}
+  cleanupOwnedTmp(paths)
   removeIfExists(join(paths.dir, JOURNAL_FILE))
   removeIfExists(join(paths.dir, MARKER_FILE))
   fsyncDir(paths.dir)
@@ -172,6 +181,7 @@ function recoverLocked (paths, opts = {}) {
     // 因此「无 journal ⇒ 没有任何目标文件被替换」）。这些都只是自有半成品，直接清理。
     if (existsSync(markerPath)) removeIfExists(markerPath)
     try { rmSync(join(paths.dir, TXN_DIR), { recursive: true, force: true }) } catch {}
+    cleanupOwnedTmp(paths)
     fsyncDir(paths.dir)
     return { status: 'clean', generation: fingerprint(paths) }
   }

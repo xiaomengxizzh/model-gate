@@ -832,6 +832,10 @@ function currentClientKey(state) { return process.env.MG_CLIENT_KEY || (state.cf
 // 因此判定必须基于**原始补丁**的 hasOwnProperty（早于任何 defaults 合并），并由调用方按 action 执行写盘。
 export const CLIENT_KEY_MASK = '********'
 export const CLIENT_KEY_ACTIONS = Object.freeze(['KEEP', 'MIGRATE_EXISTING_VALUE', 'EXPLICIT_CLEAR', 'INVALID_400', 'REPLACE_WITH_SEALED'])
+// 掩码识别必须先 trim：API 直连可能发 '********  '，不能把它当真实 Key 写入（否则数据面被锁死）。
+export function isClientKeyMaskValue(value) {
+  return typeof value === 'string' && /^\s*\*{8}\s*$/.test(value)
+}
 export function isValidClientKeyValue(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 8192) return false
   if (value.trim().length === 0) return false
@@ -842,11 +846,11 @@ export function planClientKeyUpdate(patch, current) {
   const sealed = cfg._keys && cfg._keys.__mg_client
   const legacy = cfg.defaults && cfg.defaults.clientKey
   const hasSealed = typeof sealed === 'string' && sealed.length > 0
-  const hasLegacy = typeof legacy === 'string' && legacy.length > 0 && legacy !== CLIENT_KEY_MASK
+  const hasLegacy = typeof legacy === 'string' && legacy.length > 0 && !isClientKeyMaskValue(legacy)
   const patchDefaults = patch && isPlainObject(patch.defaults) ? patch.defaults : null
   const present = !!patchDefaults && Object.prototype.hasOwnProperty.call(patchDefaults, 'clientKey')
   const value = present ? patchDefaults.clientKey : undefined
-  if (!present || value === CLIENT_KEY_MASK) {
+  if (!present || isClientKeyMaskValue(value)) {
     if (hasSealed) return { action: 'KEEP' }
     if (hasLegacy) return { action: 'MIGRATE_EXISTING_VALUE', value: legacy }
     return { action: 'KEEP' }

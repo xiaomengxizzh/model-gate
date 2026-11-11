@@ -50,6 +50,10 @@ test('T-KEY-01 三态判定：省略/掩码=保留，空串=显式清空，非�
   assert.equal(planClientKeyUpdate({ defaults: { proxyMode: 'direct' } }, sealed).action, 'KEEP', '省略字段=保留')
   assert.equal(planClientKeyUpdate({}, sealed).action, 'KEEP', '缺 defaults=保留')
   assert.equal(planClientKeyUpdate({ defaults: { clientKey: CLIENT_KEY_MASK } }, sealed).action, 'KEEP', '掩码=保留')
+  // F-a2：掩码容忍首尾空白（API 直连可能发 '********  '），绝不能落成真实 Key
+  assert.equal(planClientKeyUpdate({ defaults: { clientKey: CLIENT_KEY_MASK + '  ' } }, sealed).action, 'KEEP')
+  assert.equal(planClientKeyUpdate({ defaults: { clientKey: '  ' + CLIENT_KEY_MASK } }, sealed).action, 'KEEP')
+  assert.equal(planClientKeyUpdate({ defaults: { clientKey: CLIENT_KEY_MASK + '\t' } }, sealed).action, 'KEEP')
   assert.deepEqual(planClientKeyUpdate({ defaults: { clientKey: CLIENT_KEY_MASK } }, legacyOnly), { action: 'MIGRATE_EXISTING_VALUE', value: 'legacy-plain' })
   assert.deepEqual(planClientKeyUpdate({ defaults: { proxyMode: 'direct' } }, legacyOnly), { action: 'MIGRATE_EXISTING_VALUE', value: 'legacy-plain' })
   assert.equal(planClientKeyUpdate({ defaults: { proxyMode: 'direct' } }, empty).action, 'KEEP')
@@ -152,6 +156,13 @@ test('P0-1 省略字段不清空全局 Key；掩码保留；替换与显式清�
   assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: CLIENT_KEY_MASK } })).status, 200)
   assert.equal((await ctx.chat(KEY1)).status, 200)
   assert.equal((await ctx.chat()).status, 401)
+
+  // F-a2：掩码 + 尾随空格不得当成真实 Key 写入（否则旧 Key 与新值都 401 → 数据面锁死）
+  const keysBeforeSpacedMask = await readFile(keysPath, 'utf8')
+  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: CLIENT_KEY_MASK + '  ' } })).status, 200)
+  assert.equal(await readFile(keysPath, 'utf8'), keysBeforeSpacedMask, '掩码变体不得改写 keys')
+  assert.equal((await ctx.chat(KEY1)).status, 200, '掩码变体保存后旧 Key 仍然有效')
+  assert.equal((await ctx.chat(CLIENT_KEY_MASK + '  ')).status, 401, '掩码字面量绝不能成为真实 Key')
 
   // 替换生效（旧 Key 立即失效）。
   assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: KEY2 } })).status, 200)
@@ -340,6 +351,15 @@ test('T-KEY-03 省略 virtualModels 不得清空 meta：已过期 Key 保存后�
   assert.equal((await ctx.gw.post('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
   assert.equal(await readFile(keysPath, 'utf8'), keysBefore, '省略 virtualModels 不得改写 keys.local.json')
   assert.equal((await ctx.vmChat(VKEY)).status, 401, '省略保存后已过期 Key 不得复活')
+
+  // ①b（QA F-a1 原场景）：带 providers/models、省略 virtualModels → meta 不变，过期 Key 仍 401
+  const providerPatch = {
+    providers: { mock: { baseUrl: ctx.upstream.base, apiKeyEnv: '' } },
+    models: { demo: { provider: 'mock', api: 'openai' } },
+  }
+  assert.equal((await ctx.gw.post('/api/config/save', providerPatch)).status, 200)
+  assert.equal(await readFile(keysPath, 'utf8'), keysBefore, 'providers/models 省略式保存不得改写 keys')
+  assert.equal((await ctx.vmChat(VKEY)).status, 401, 'QA F-a1：省略 virtualModels 后已过期 Key 仍必须 401')
 
   // ② 数组里的 vm 对象省略 expiresAt/note → 两项都保留
   assert.equal((await ctx.gw.post('/api/config/save', vmBody({}))).status, 200)
