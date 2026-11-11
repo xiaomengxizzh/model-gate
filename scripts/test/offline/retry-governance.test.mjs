@@ -11,8 +11,14 @@ import {
   retryWaitFits,
   retryAfterHeader,
   attributionCode,
+  classifyStatus,
+  recordAttemptOutcome,
+  planAttemptRetry,
+  createAttemptPolicy,
   MAX_RETRY_AFTER_MS,
 } from '../../../src/retry-policy.js'
+import { createAttempt, STAGES, retrySafetyOf } from '../../../src/attempt-state.js'
+import { execute } from '../../../src/request.js'
 import { startGateway, startScriptedUpstream } from './harness.mjs'
 
 const CHAT_OK = JSON.stringify({
@@ -358,4 +364,228 @@ test('预算耗尽 → 504 request_timeout，不计上游失败、不熔断', { 
   assert.notEqual(p.st.state, 'open', '取消/超时不得熔断')
   assert.equal(st.global.errors, 0, '全局错误计数不得被取消污染')
   await waitFor(() => upstream.hits[0].closedAt !== null, 2500, '预算耗尽后必须销毁上游连接')
+})
+
+// ============================================================================
+// M1-1（T-LIFE-03）：一次发送的状态分类、429 预算与归因、非幂等不重放。
+// 断言打在状态机、终态分类与适配器/上游命中计数上，不依赖日志字符串。
+// ============================================================================
+test('T-LIFE-03a 状态分类：402/404 证明未执行可换候选；5xx/业务 4xx 不得推导可安全重放', () => {
+  const p402 = classifyStatus(402)
+  assert.equal(p402.retrySafety, 'rejected_before_execution')
+  assert.equal(p402.swapAllowed, true, '402 未支付：明确未执行，允许换候选')
+  const p404 = classifyStatus(404)
+  assert.equal(p404.retrySafety, 'rejected_before_execution')
+  assert.equal(p404.swapAllowed, true, '404 模型不存在：明确未执行，允许换候选')
+  assert.equal(classifyStatus(429).retrySafety, 'rejected_before_execution')
+  assert.equal(classifyStatus(429).retryAfterRelevant, true)
+  for (const status of [500, 502, 503, 504]) {
+    const c = classifyStatus(status)
+    assert.equal(c.retrySafety, 'unsafe', status + ' 已收到响应头，执行状态未知 → 不可安全重放')
+    assert.equal(c.swapAllowed, false)
+  }
+  assert.equal(classifyStatus(400).class, 'business_4xx')
+  assert.equal(classifyStatus(401).class, 'auth_rejected')
+  assert.equal(classifyStatus(422).class, 'business_4xx')
+
+  // 5xx：ACCEPTED 证据 + FAILED 终态，绝不允许再发
+  const a500 = createAttempt({ number: 1 })
+  a500.onWriteBegin()
+  a500.onResponseHeaders({ status: 500, headers: {} })
+  const out500 = recordAttemptOutcome({ attempt: a500, result: { ok: false, status: 500, headers: {}, bodyText: 'backend exploded' } })
+  assert.equal(out500.outcome, 'FAILED')
+  assert.equal(out500.terminal, true, '5xx 必须立即终态')
+  assert.equal(out500.retrySameTarget, false)
+  assert.equal(out500.countsAsProviderFailure, true, '5xx 仍计入 provider 失败')
+  assert.equal(a500.stage, STAGES.ACCEPTED)
+  assert.equal(retrySafetyOf(a500).allowed, false, '已受理响应后不得重放')
+
+  // 业务 4xx：原样归一、终态；不换候选也不重试
+  const a400 = createAttempt({ number: 1 })
+  a400.onWriteBegin()
+  a400.onResponseHeaders({ status: 400, headers: {} })
+  const out400 = recordAttemptOutcome({ attempt: a400, result: { ok: false, status: 400, headers: {}, bodyText: '{"error":{"message":"bad request"}}' } })
+  assert.equal(out400.outcome, 'REJECTED_BEFORE_EXECUTION')
+  assert.equal(out400.terminal, true, '不可归类业务 4xx 原样归一，不自动重试')
+  assert.equal(out400.businessError, true)
+  assert.equal(out400.status, 400)
+
+  // 402 / 404：可证明未执行 → 允许换候选（不是重放同一目标）
+  const a402 = createAttempt({ number: 1 })
+  a402.onWriteBegin()
+  a402.onResponseHeaders({ status: 402, headers: {} })
+  const out402 = recordAttemptOutcome({ attempt: a402, result: { ok: false, status: 402, headers: {}, bodyText: 'payment required' } })
+  assert.equal(out402.outcome, 'REJECTED_BEFORE_EXECUTION')
+  assert.equal(out402.terminal, false)
+  assert.equal(out402.needsSwitch, true)
+  assert.equal(out402.swapAllowed, true)
+  assert.equal(retrySafetyOf(a402).allowed, true, '证明未执行时允许下一次尝试（换候选）')
+
+  const a404 = createAttempt({ number: 1 })
+  a404.onWriteBegin()
+  a404.onResponseHeaders({ status: 404, headers: {} })
+  const out404 = recordAttemptOutcome({ attempt: a404, result: { ok: false, status: 404, headers: {}, bodyText: 'model not found' } })
+  assert.equal(out404.needsSwitch, true)
+  assert.equal(out404.businessError, true)
+})
+
+test('T-LIFE-03b 429 Retry-After 预算判定：装得下才等、装不下立即终态（纯函数）', () => {
+  const base = { outcome: 'REJECTED_BEFORE_EXECUTION', terminal: false, retrySameTarget: true }
+  const fits = planAttemptRetry({ outcome: Object.assign({ retryAfterMs: 2000 }, base), attemptsMade: 1, maxAttempts: 2, remainingMs: 10000 })
+  assert.equal(fits.stop, false)
+  assert.equal(fits.waitMs, 2000, '按上游 Retry-After 等待')
+  assert.equal(fits.retryAfter, true)
+
+  const notFits = planAttemptRetry({ outcome: Object.assign({ retryAfterMs: 5000 }, base), attemptsMade: 1, maxAttempts: 2, remainingMs: 800 })
+  assert.equal(notFits.stop, true, '预算装不下必须停止（不空等越过 deadline）')
+  assert.equal(notFits.reason, 'retry_after_over_budget')
+  assert.equal(notFits.retryAfterMs, 5000, '保留 Retry-After 原值供外层回 429')
+
+  const exhausted = planAttemptRetry({ outcome: Object.assign({ retryAfterMs: 0 }, base), attemptsMade: 2, maxAttempts: 2, remainingMs: 10000 })
+  assert.equal(exhausted.stop, true)
+  assert.equal(exhausted.reason, 'attempts_exhausted')
+
+  const unknown = planAttemptRetry({
+    outcome: { outcome: 'SENT_UNKNOWN', terminal: true, retrySameTarget: false },
+    attemptsMade: 1, maxAttempts: 5, remainingMs: 10000,
+  })
+  assert.equal(unknown.stop, true, '执行状态未知一律停止')
+})
+
+test('T-LIFE-03c 429 归因与熔断解耦：attribution/code 保留、不计 provider 失败', () => {
+  const a = createAttempt({ number: 1 })
+  a.onWriteBegin()
+  a.onResponseHeaders({ status: 429, headers: { 'retry-after': '3' } })
+  const out = recordAttemptOutcome({
+    attempt: a,
+    result: {
+      ok: false, status: 429, headers: { 'retry-after': '3' }, retryAfter: 3000,
+      bodyText: '{"error":{"message":"Rate limit exceeded for requests per minute"}}',
+    },
+  })
+  assert.equal(out.outcome, 'REJECTED_BEFORE_EXECUTION')
+  assert.equal(out.terminal, false)
+  assert.equal(out.retrySameTarget, true, '429 是已证实的前置限流，可在预算内重发')
+  assert.equal(out.attribution, 'rate_limit')
+  assert.equal(out.attributionCode, 'MG_429_RATE_LIMIT')
+  assert.equal(out.retryAfterMs, 3000)
+  assert.equal(out.retryAfterHeader, undefined, '信封头由终态统一派生，不在分类层臆造')
+  assert.equal(out.countsAsProviderFailure, false, '429 不是 provider 故障（不熔断）')
+  assert.equal(out.circuit, 'unaffected')
+  assert.equal(a.stage, STAGES.REJECTED_BEFORE_EXECUTION)
+  assert.equal(a.attribution, 'rate_limit')
+})
+
+test('T-LIFE-03d 工具请求：SENT_UNKNOWN 一律不重放；402 证明未执行仍可换候选', { timeout: 20000 }, async () => {
+  // 1) 工具请求 + 写后无头：即使 maxAttempts=3 也只发一次
+  let hits = 0
+  const sentUnknown = {
+    async forwardOnce(attempt) {
+      hits += 1
+      attempt.onWriteBegin()
+      throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })
+    },
+  }
+  const first = await execute(
+    { overallMs: 3000, target: 'p1', maxAttempts: 3, body: { tools: [{ type: 'function', function: { name: 'shell' } }] } },
+    sentUnknown,
+    createAttemptPolicy({ maxAttempts: 3, initialDelayMs: 5, jitter: 0 }),
+  )
+  assert.equal(first.outcome, 'SENT_UNKNOWN')
+  assert.equal(first.nonIdempotent, true)
+  assert.equal(first.attemptsMade, 1, '工具请求写后无头不得重放')
+  assert.equal(hits, 1)
+
+  // 2) 402（证明未执行）+ 候选链：换到下一候选后成功
+  const targets = []
+  const switchAdapter = {
+    async forwardOnce(attempt, ctl) {
+      targets.push(ctl.target)
+      attempt.onWriteBegin()
+      if (ctl.target === 'p1') {
+        attempt.onResponseHeaders({ status: 402, headers: {} })
+        return { ok: false, status: 402, headers: {}, bodyText: 'payment required' }
+      }
+      attempt.onResponseHeaders({ status: 200, headers: {} })
+      return { ok: true, status: 200, headers: {} }
+    },
+  }
+  const switched = await execute(
+    { overallMs: 3000, target: 'p1', candidates: ['p1', 'p2'], maxAttempts: 2 },
+    switchAdapter,
+    createAttemptPolicy({ maxAttempts: 2, candidates: ['p1', 'p2'] }),
+  )
+  assert.equal(switched.outcome, 'SUCCEEDED', '402 明确未执行时允许换候选')
+  assert.deepEqual(targets, ['p1', 'p2'])
+  assert.equal(switched.attempts[0].stage, STAGES.REJECTED_BEFORE_EXECUTION)
+  assert.equal(switched.attempts[1].stage, STAGES.ACCEPTED)
+
+  // 3) 402 无候选：终态保留可换候选归因，但不重发同一目标
+  let noCandidateHits = 0
+  const dead402 = {
+    async forwardOnce(attempt) {
+      noCandidateHits += 1
+      attempt.onWriteBegin()
+      attempt.onResponseHeaders({ status: 402, headers: {} })
+      return { ok: false, status: 402, headers: {}, bodyText: 'payment required' }
+    },
+  }
+  const terminal = await execute(
+    { overallMs: 3000, target: 'p1', maxAttempts: 3 },
+    dead402,
+    createAttemptPolicy({ maxAttempts: 3 }),
+  )
+  assert.equal(terminal.outcome, 'REJECTED_BEFORE_EXECUTION')
+  assert.equal(terminal.attemptsMade, 1)
+  assert.equal(noCandidateHits, 1, '没有候选时不得重发同一目标')
+  assert.equal(terminal.swapAllowed, true, '保留“可换候选”的分类供上层决策')
+  assert.equal(terminal.status, 402)
+  assert.equal(terminal.countsAsProviderFailure, false)
+})
+
+test('T-LIFE-03e 工具请求遇 429 前置限流：可等待重发（已证明未执行）', { timeout: 20000 }, async () => {
+  let hits = 0
+  const adapter = {
+    async forwardOnce(attempt) {
+      hits += 1
+      attempt.onWriteBegin()
+      if (hits === 1) {
+        attempt.onResponseHeaders({ status: 429, headers: { 'retry-after': '0' } })
+        return { ok: false, status: 429, headers: { 'retry-after': '0' }, retryAfter: 0, bodyText: 'Rate limit exceeded' }
+      }
+      attempt.onResponseHeaders({ status: 200, headers: {} })
+      return { ok: true, status: 200, headers: {} }
+    },
+  }
+  const result = await execute(
+    { overallMs: 5000, target: 'p1', maxAttempts: 2, nonIdempotent: true },
+    adapter,
+    createAttemptPolicy({ maxAttempts: 2, jitter: 0 }),
+  )
+  assert.equal(result.outcome, 'SUCCEEDED', '429 已证实未执行，工具请求也可在预算内重发')
+  assert.equal(hits, 2)
+  assert.equal(result.attempts[0].stage, STAGES.REJECTED_BEFORE_EXECUTION)
+})
+
+test('T-LIFE-03f 5xx 已收到响应头：即使 maxAttempts>1 也只命中一次（不按状态码推导可重放）', { timeout: 20000 }, async () => {
+  let hits = 0
+  const adapter = {
+    async forwardOnce(attempt) {
+      hits += 1
+      attempt.onWriteBegin()
+      attempt.onResponseHeaders({ status: 503, headers: {} })
+      return { ok: false, status: 503, headers: {}, bodyText: 'service unavailable' }
+    },
+  }
+  const result = await execute(
+    { overallMs: 5000, target: 'p1', maxAttempts: 3 },
+    adapter,
+    createAttemptPolicy({ maxAttempts: 3, initialDelayMs: 5, jitter: 0 }),
+  )
+  assert.equal(result.outcome, 'FAILED')
+  assert.equal(result.stage, STAGES.ACCEPTED)
+  assert.equal(result.attemptsMade, 1, '5xx 不得自动重放')
+  assert.equal(hits, 1)
+  assert.equal(result.status, 503)
+  assert.equal(result.countsAsProviderFailure, true)
 })

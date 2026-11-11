@@ -17,6 +17,9 @@ import http from 'node:http'
 import { EventEmitter } from 'node:events'
 import { relayStream } from '../../../src/sse.js'
 import { createBudget } from '../../../src/budget.js'
+import { execute, forwardOnce, readStreamOnce } from '../../../src/request.js'
+import { createDeadline, createLeasePool, DEADLINE_TIMEOUT } from '../../../src/deadline.js'
+import { createAttemptPolicy } from '../../../src/retry-policy.js'
 import { startGateway, startScriptedUpstream, startHangingProxy } from './harness.mjs'
 
 const CHAT_OK = JSON.stringify({
@@ -719,4 +722,274 @@ test('AC-7 慢请求 body：读取受预算约束，504 且释放连接', { time
 
   // 契约 §3：释放连接（销毁请求 socket），不得留下半截 body 的悬挂连接
   await waitFor(() => socketClosed || req.destroyed, 2000, 'AC-7 / 契约 §3：慢 body 超时后必须释放连接')
+})
+
+// ============================================================================
+// M1-1（T-LIFE-02）：单调 deadline 单一来源，覆盖排队等待、连接、写体、读头、流读取
+// 与重试等待；等待可被取消唤醒，绝不越过截止时间。确定性部分用注入时钟。
+// ============================================================================
+function createFakeClock(start = 1000) {
+  let now = start
+  let seq = 0
+  const timers = new Map()
+  const clock = {
+    start,
+    now: () => now,
+    timers: {
+      setTimeout(fn, ms) {
+        const id = ++seq
+        timers.set(id, { id, at: now + Math.max(0, Number(ms) || 0), fn })
+        return { id, unref() {} }
+      },
+      clearTimeout(handle) { if (handle && handle.id != null) timers.delete(handle.id) },
+    },
+    pending() { return [...timers.values()] },
+    nextAt() {
+      let at = Infinity
+      for (const t of timers.values()) at = Math.min(at, t.at)
+      return Number.isFinite(at) ? at : null
+    },
+    advanceTo(at) {
+      now = Math.max(now, at)
+      for (;;) {
+        let due = null
+        for (const t of timers.values()) {
+          if (t.at > now) continue
+          if (!due || t.at < due.at || (t.at === due.at && t.id < due.id)) due = t
+        }
+        if (!due) break
+        timers.delete(due.id)
+        due.fn()
+      }
+    },
+    advance(ms) { clock.advanceTo(now + Math.max(0, ms)) },
+    async drive(promise, label = 'execute') {
+      let settled = false
+      let value
+      let failure
+      const tracked = promise.then((v) => { settled = true; value = v }, (e) => { settled = true; failure = e })
+      for (let steps = 0; steps < 500 && !settled; steps++) {
+        await new Promise((r) => setImmediate(r))
+        if (settled) break
+        const next = clock.nextAt()
+        if (next == null) {
+          await new Promise((r) => setImmediate(r))
+          if (settled) break
+          if (clock.nextAt() == null) throw new Error(label + '：没有待触发的定时器但执行未结束')
+          continue
+        }
+        clock.advanceTo(next)
+      }
+      await tracked
+      if (failure) throw failure
+      return value
+    },
+  }
+  return clock
+}
+
+test('T-LIFE-02a 单调 deadline 钳制等待：5000ms 等待在 100ms 预算处醒来（注入时钟）', async () => {
+  const clock = createFakeClock()
+  const deadline = createDeadline({ overallMs: 100, now: clock.now, timers: clock.timers })
+  const waiting = deadline.wait(5000)
+  const scheduled = clock.pending().map((t) => t.at - clock.now())
+  assert.ok(scheduled.length >= 1, '等待必须排定时器')
+  assert.equal(Math.max(...scheduled), 100, '不得按 5000ms 排等待（必须被剩余预算钳制）')
+  clock.advance(100)
+  const result = await waiting
+  assert.equal(result.ok, false, '预算耗尽时等待不得成功')
+  assert.equal(result.reason, DEADLINE_TIMEOUT)
+  assert.equal(result.waitedMs, 100, '实际等待恰好是剩余预算')
+  assert.equal(deadline.timedOut(), true)
+  assert.equal(deadline.expired(), true)
+})
+
+test('T-LIFE-02b 排队等待消耗同一 deadline：到期唤醒、waiter 移除、令牌不泄漏', async () => {
+  const clock = createFakeClock()
+  const pool = createLeasePool({ concurrency: 1, now: clock.now, timers: clock.timers })
+  const holder = await pool.acquire(createDeadline({ overallMs: 0, now: clock.now, timers: clock.timers }))
+  assert.equal(pool.active(), 1)
+  const waiterDeadline = createDeadline({ overallMs: 500, now: clock.now, timers: clock.timers })
+  const waiter = pool.acquire(waiterDeadline).then(() => null, (err) => err)
+  assert.equal(pool.waiting(), 1, '第二个请求进入排队')
+  clock.advance(500)
+  const err = await waiter
+  assert.ok(err && err.aborted, '排队超 deadline 必须被唤醒并中止')
+  assert.equal(err.reason, DEADLINE_TIMEOUT)
+  assert.equal(pool.waiting(), 0, '超时的 waiter 已移出队列')
+  assert.equal(pool.active(), 1, '持有者槽位不受影响')
+  holder.release()
+  assert.equal(pool.active(), 0)
+  const fresh = await pool.acquire(createDeadline({ overallMs: 0, now: clock.now, timers: clock.timers }))
+  assert.equal(typeof fresh.release, 'function', '队列未被破坏，后续可正常获得令牌')
+  fresh.release()
+})
+
+test('T-LIFE-02b2 排队等待被取消唤醒：CANCELLED 原因、waiter 移除、令牌归还', async () => {
+  const clock = createFakeClock()
+  const pool = createLeasePool({ concurrency: 1, now: clock.now, timers: clock.timers })
+  const holder = await pool.acquire(createDeadline({ overallMs: 0, now: clock.now, timers: clock.timers }))
+  const controller = new AbortController()
+  const deadline = createDeadline({ overallMs: 0, signal: controller.signal, now: clock.now, timers: clock.timers })
+  const waiter = pool.acquire(deadline).then(() => null, (err) => err)
+  assert.equal(pool.waiting(), 1)
+  controller.abort()
+  const err = await waiter
+  assert.ok(err && err.aborted && err.reason === 'client_closed', '取消必须立即唤醒等待者')
+  assert.equal(pool.waiting(), 0)
+  assert.equal(pool.active(), 1)
+  holder.release()
+  assert.equal(pool.active(), 0, '取消的 waiter 没有泄漏令牌')
+})
+
+test('T-LIFE-02c 连接/读响应头阶段超时：同一 deadline 中止、不重试、上游连接销毁', { timeout: 20000 }, async (t) => {
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    for await (const _ of req) { /* drain */ }
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 3000)
+      timer.unref?.()
+      res.once('close', () => { clearTimeout(timer); resolve() })
+    })
+  })
+  t.after(() => upstream.stop())
+  const adapter = {
+    forwardOnce(attempt, ctl) {
+      return forwardOnce(
+        { baseUrl: upstream.base }, '/v1/chat/completions', 'POST',
+        { 'content-type': 'application/json' },
+        Buffer.from(JSON.stringify({ model: 'demo', messages: [{ role: 'user', content: 'hi' }] })),
+        { timeout: { firstByteMs: 5000, idleMs: 5000 } }, attempt, ctl,
+      )
+    },
+  }
+  const t0 = Date.now()
+  const result = await execute(
+    { overallMs: 150, target: 'p1', maxAttempts: 3 },
+    adapter,
+    createAttemptPolicy({ maxAttempts: 3, initialDelayMs: 5, jitter: 0 }),
+  )
+  const elapsed = Date.now() - t0
+  assert.equal(result.outcome, 'DEADLINE_EXCEEDED', '读头阶段预算耗尽必须按 deadline 终态收尾')
+  assert.equal(result.attemptsMade, 1, 'deadline 耗尽不得再重试')
+  assert.equal(upstream.hits.length, 1, '上游只被命中一次')
+  assert.equal(result.deadline.timedOut, true)
+  assert.ok(elapsed < 1200, '预算 150ms，实际 ' + elapsed + 'ms，不得出现超 deadline 的额外等待')
+  await waitFor(() => upstream.hits[0].closedAt !== null, 2000, '超时后上游连接必须销毁')
+})
+
+test('T-LIFE-02d 写请求体阶段受同一 deadline 约束：大 body 挂起仍按时中止', { timeout: 20000 }, async (t) => {
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    req.once('close', () => { try { res.destroy() } catch {} })
+    req.once('error', () => { try { res.destroy() } catch {} })
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 3000)
+      timer.unref?.()
+      req.once('close', () => { clearTimeout(timer); resolve() })
+      req.once('error', () => { clearTimeout(timer); resolve() })
+    })
+  })
+  t.after(() => upstream.stop())
+  const bigBody = Buffer.alloc(2 * 1024 * 1024, 0x7b)
+  const adapter = {
+    forwardOnce(attempt, ctl) {
+      return forwardOnce(
+        { baseUrl: upstream.base }, '/v1/chat/completions', 'POST',
+        { 'content-type': 'application/json' }, bigBody,
+        { timeout: { firstByteMs: 5000, idleMs: 5000 } }, attempt, ctl,
+      )
+    },
+  }
+  const t0 = Date.now()
+  const result = await execute({ overallMs: 150, target: 'p1', maxAttempts: 1 }, adapter, createAttemptPolicy({ maxAttempts: 1 }))
+  const elapsed = Date.now() - t0
+  assert.equal(result.outcome, 'DEADLINE_EXCEEDED')
+  assert.equal(result.attempts[0].writeStarted, true, '写阶段开始即记录证据')
+  assert.equal(result.attempts[0].wroteBody, true)
+  assert.equal(result.attempts[0].receivedHeaders, false, '写体阶段仍无响应头')
+  assert.equal(result.deadline.timedOut, true)
+  assert.equal(result.attemptsMade, 1, '写体超时不得重试')
+  assert.equal(upstream.hits.length, 1, '上游只收到一次请求')
+  assert.ok(elapsed < 1200, '写体阶段不得越过 deadline，实际 ' + elapsed + 'ms')
+})
+
+test('T-LIFE-02e 流读取阶段受同一 deadline 约束：超时销毁流、一次终态、不重放', { timeout: 20000 }, async (t) => {
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    for await (const _ of req) { /* drain */ }
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+    const iv = setInterval(() => {
+      if (res.destroyed || res.writableEnded) { clearInterval(iv); return }
+      res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'tick' } }] }) + '\n\n')
+    }, 40)
+    iv.unref?.()
+    res.on('close', () => clearInterval(iv))
+  })
+  t.after(() => upstream.stop())
+  const adapter = {
+    async forwardOnce(attempt, ctl) {
+      const r = await forwardOnce(
+        { baseUrl: upstream.base }, '/v1/chat/completions', 'POST',
+        { 'content-type': 'application/json' },
+        Buffer.from(JSON.stringify({ model: 'demo', messages: [{ role: 'user', content: 'hi' }], stream: true })),
+        { timeout: { firstByteMs: 5000, idleMs: 5000 } }, attempt, ctl,
+      )
+      await readStreamOnce(r.stream, ctl.deadline, {
+        onChunk(text) { if (text.includes('"delta"')) attempt.onFirstSemanticEvent({ source: 'sse' }) },
+      })
+      return r
+    },
+  }
+  const t0 = Date.now()
+  const result = await execute({ overallMs: 200, target: 'p1', maxAttempts: 3 }, adapter, createAttemptPolicy({ maxAttempts: 3 }))
+  const elapsed = Date.now() - t0
+  assert.equal(result.outcome, 'DEADLINE_EXCEEDED', '流读取预算耗尽按 deadline 终态收尾')
+  assert.equal(result.attemptsMade, 1, '流读取超时不得重放')
+  assert.ok(elapsed < 1500, '流读取不得越过 deadline 太久，实际 ' + elapsed + 'ms')
+  await waitFor(() => upstream.hits[0].closedAt !== null, 2000, '流读取超时必须销毁上游流')
+})
+
+test('T-LIFE-02f 429 Retry-After 等待计入同一 deadline（注入时钟）', async () => {
+  const clock = createFakeClock()
+  let hits = 0
+  const adapter = {
+    async forwardOnce(attempt) {
+      hits += 1
+      attempt.onWriteBegin()
+      if (hits === 1) {
+        attempt.onResponseHeaders({ status: 429, headers: { 'retry-after': '2' } })
+        return { ok: false, status: 429, headers: { 'retry-after': '2' }, retryAfter: 2000, bodyText: 'Rate limit exceeded' }
+      }
+      attempt.onResponseHeaders({ status: 200, headers: {} })
+      return { ok: true, status: 200, headers: {} }
+    },
+  }
+  const fit = await clock.drive(execute(
+    { overallMs: 10000, target: 'p1', maxAttempts: 2, now: clock.now, timers: clock.timers },
+    adapter,
+    createAttemptPolicy({ maxAttempts: 2, jitter: 0 }),
+  ))
+  assert.equal(fit.outcome, 'SUCCEEDED', '预算装得下 Retry-After → 等待后重发成功')
+  assert.equal(hits, 2)
+  assert.equal(fit.waitedMs, 2000, '等待量等于 Retry-After')
+  assert.equal(clock.now() - clock.start, 2000, '等待消耗同一单调 deadline 的时间')
+
+  const clock2 = createFakeClock()
+  let hits2 = 0
+  const adapter2 = {
+    async forwardOnce(attempt) {
+      hits2 += 1
+      attempt.onWriteBegin()
+      attempt.onResponseHeaders({ status: 429, headers: { 'retry-after': '5' } })
+      return { ok: false, status: 429, headers: { 'retry-after': '5' }, retryAfter: 5000, bodyText: 'Rate limit exceeded' }
+    },
+  }
+  const noFit = await clock2.drive(execute(
+    { overallMs: 800, target: 'p1', maxAttempts: 3, now: clock2.now, timers: clock2.timers },
+    adapter2,
+    createAttemptPolicy({ maxAttempts: 3, jitter: 0 }),
+  ))
+  assert.equal(noFit.outcome, 'REJECTED_BEFORE_EXECUTION', '预算装不下 Retry-After → 立即终态')
+  assert.equal(hits2, 1, '不得为装不下的 Retry-After 再发一次')
+  assert.equal(noFit.waitedMs, 0, '绝不空等越过 deadline')
+  assert.equal(noFit.retryAfterMs, 5000, '保留上游 Retry-After 原值')
+  assert.equal(clock2.now() - clock2.start, 0, '没有发生额外等待')
 })
