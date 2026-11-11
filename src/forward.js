@@ -826,28 +826,19 @@ async function authorizedSendOnce(input) {
   if (!ledger && (limits.requestUsd > 0 || limits.taskUsd > 0 || limits.dailyUsd > 0)) {
     throw typedSendError('ledger_required_for_cost_limits', '配置了费用上限但没有账本：拒绝发送（无法强制上限）', { status: 503 })
   }
-  let receipt = await reserveAttempt({ cfg, opts, req, bodyBuf, model, pid, ledger, log })
-  let authz
-  let identity
-  let headers
-  let deadline
-  try {
-    authz = authorizeSendTarget({ cfg, provider, pid, path, req, opts, log, catalogScoped: input.catalogScoped === true })
-    identity = classifyTarget(provider, cfg)
-    headers = buildAuthorizedHeaders(req, provider, bodyBuf, cfg, api, input.body, identity, authz, log)
-    const budgetRemaining = budget && typeof budget.remaining === 'function' ? Number(budget.remaining()) : 0
-    deadline = createDeadline({
+  // M1-3c：目标形状/授权先于账本预留 —— 非规范配置必须在产生任何 attempt 之前被拒绝。
+  const authz = authorizeSendTarget({ cfg, provider, pid, path, req, opts, log, catalogScoped: input.catalogScoped === true })
+  const identity = classifyTarget(provider, cfg)
+  const headers = buildAuthorizedHeaders(req, provider, bodyBuf, cfg, api, input.body, identity, authz, log)
+  const budgetRemaining = budget && typeof budget.remaining === 'function' ? Number(budget.remaining()) : 0
+  const deadline = createDeadline({
     // Infinity（无 overallMs）= 不设整体 deadline；不能把 Infinity 传给 setTimeout（会退化成 1ms 立即超时）。
-      overallMs: Number.isFinite(budgetRemaining) && budgetRemaining > 0 ? budgetRemaining : 0,
-      signal: signal || null,
-      now: opts && opts.now,
-      timers: opts && opts.timers,
-    })
-  } catch (e) {
-    // 授权/头构造在发送前失败：账本必须立即按"已验证未执行"释放，不能留下永久 reserved。
-    if (receipt) await closeoutLedger(ledger, receipt, 'released', log)
-    throw e
-  }
+    overallMs: Number.isFinite(budgetRemaining) && budgetRemaining > 0 ? budgetRemaining : 0,
+    signal: signal || null,
+    now: opts && opts.now,
+    timers: opts && opts.timers,
+  })
+  const receipt = await reserveAttempt({ cfg, opts, req, bodyBuf, model, pid, ledger, log })
   let relayResult = null
   const factory = typeof input.adapterFactory === 'function' ? input.adapterFactory : makeAdapter
   const adapter = factory(async (attempt) => {
