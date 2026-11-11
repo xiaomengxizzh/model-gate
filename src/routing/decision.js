@@ -238,22 +238,31 @@ function budgetLedger(raw) {
 
 function normalizeBudget(raw) {
   const b = raw || {}
+  // 金额单位契约（M3-2）：决策器自身只认 USD 数值；接线层可直接给 micro 整数并声明 unit:'micro'，
+  // 换算只在这里做一次（账本内部永远保持整数，见 src/routing/ledger.js）。
+  const unit = str(b.unit).toLowerCase() === 'micro' ? 'micro' : 'usd'
+  const conv = (v) => (unit === 'micro' ? num(v, 0) / 1e6 : num(v, 0))
   const limits = b.limits && typeof b.limits === 'object'
     ? b.limits
     : { requestUsd: b.requestUsd, taskUsd: b.taskUsd, dailyUsd: b.dailyUsd }
   const spentRaw = b.spent && typeof b.spent === 'object' ? b.spent : (b.spentUsd && typeof b.spentUsd === 'object' ? b.spentUsd : {})
   const ledger = budgetLedger(b)
   const has = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k)
+  // 账本接线（M3-2）：调用方（facts.budgetFromLedger）可以显式声明 spent 的可信度与来源，
+  // 决策器据此不再把"账本给的数"误标成"调用方随手填的数"。
+  const declaredKnown = b.spendKnown && typeof b.spendKnown === 'object' ? b.spendKnown : null
+  const declaredSource = b.spendSource && typeof b.spendSource === 'object' ? b.spendSource : null
+  const SOURCES = ['spent', 'ledger', 'unset', 'unknown']
   const spent = {}
   const spendKnown = {}
   const spendSource = {}
   for (const [key] of LIMIT_KEYS) {
     if (has(spentRaw, key)) {
-      spent[key] = num(spentRaw[key], 0)
+      spent[key] = conv(spentRaw[key])
       spendKnown[key] = true
       spendSource[key] = 'spent'
     } else if (has(ledger, key)) {
-      spent[key] = num(ledger[key], 0)
+      spent[key] = conv(ledger[key])
       spendKnown[key] = true
       spendSource[key] = 'ledger'
     } else {
@@ -262,16 +271,22 @@ function normalizeBudget(raw) {
       spendKnown[key] = false
       spendSource[key] = 'unset'
     }
+    if (declaredKnown && typeof declaredKnown[key] === 'boolean') spendKnown[key] = declaredKnown[key]
+    if (declaredSource && typeof declaredSource[key] === 'string' && SOURCES.includes(declaredSource[key])) {
+      spendSource[key] = declaredSource[key]
+    }
   }
   return {
     limits: {
-      requestUsd: num(limits.requestUsd, 0),
-      taskUsd: num(limits.taskUsd, 0),
-      dailyUsd: num(limits.dailyUsd, 0),
+      requestUsd: conv(limits.requestUsd),
+      taskUsd: conv(limits.taskUsd),
+      dailyUsd: conv(limits.dailyUsd),
     },
     spent,
     spendKnown,
     spendSource,
+    unit,
+    currency: str(b.currency) ? upper(b.currency) : null,
     enforceUnknownCost: b.enforceUnknownCost !== false,
   }
 }
@@ -354,6 +369,8 @@ function budgetSnapshot(budget, nextUsd) {
     spent: Object.assign({}, budget.spent),
     spendKnown: Object.assign({}, budget.spendKnown || {}),
     spendSource: Object.assign({}, budget.spendSource || {}),
+    unit: budget.unit || 'usd',
+    currency: budget.currency || null,
     nextUsd: nextUsd == null ? null : nextUsd,
     remaining,
     exceededBy: null,
@@ -1042,6 +1059,10 @@ function runDecision(input = {}) {
     costGate: {
       limitsConfigured: limitsConfigured(budget),
       unknownCostPolicy: budget.enforceUnknownCost ? 'fail_closed' : 'allow',
+      // 账本接线（M3-2）：回显单位/币种与各维度花费来源，便于确认"上限对着真实账本还是对着 0"。
+      unit: budget.unit || 'usd',
+      currency: budget.currency || null,
+      spendSource: Object.assign({}, budget.spendSource || {}),
     },
     // M3-1：事实与新鲜度的审计面。只记状态/来源名字，绝不记事实值（值里可能有凭据类字段）。
     facts: {
