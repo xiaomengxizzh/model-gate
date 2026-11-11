@@ -68,11 +68,25 @@ export function isTargetAuthzError(err) {
 export function canonicalizeUrlOnce(origin, path, pathPrefix) {
   const raw = String(origin == null ? '' : origin).trim()
   if (!raw) throw deny('canonicalize_failed', '缺少上游 origin/baseUrl')
+  // M1-3c：baseUrl 只允许纯 origin+path；查询串/fragment 会改变授权对象与发送对象的一致性含义。
+  if (raw.includes('?')) throw deny('target_query_not_allowed', 'baseUrl 不得包含查询串（请放到 path 或配置的 pathPrefix 之外）')
+  if (raw.includes('#')) throw deny('target_fragment_not_allowed', 'baseUrl 不得包含 fragment')
   let base = raw.replace(/\/+$/, '')
   const p = String(path == null ? '' : path)
   if (p.charAt(0) !== '/') throw deny('canonicalize_failed', '上游路径必须以 / 开头')
   if (p.startsWith('/v1/') && base.endsWith('/v1')) base = base.slice(0, -3)
   const prefix = pathPrefix == null ? '' : String(pathPrefix)
+  // M1-3c：pathPrefix 必须是干净的绝对路径段（禁止查询/fragment/穿越/协议相对 URL/双拼）。
+  if (prefix) {
+    if (prefix.includes('?')) throw deny('target_query_not_allowed', 'pathPrefix 不得包含查询串')
+    if (prefix.includes('#')) throw deny('target_fragment_not_allowed', 'pathPrefix 不得包含 fragment')
+    // 保留既有的安全细分：@ / . 开头的前缀会让 URL 拼装产生 userinfo 或 host 后缀，
+    // 交由后面的 userinfo / declared-host 校验给出更精确的拒绝码；其它非 / 开头一律 canonicalize_failed。
+    if (!prefix.startsWith('/') && !prefix.startsWith('@') && !prefix.startsWith('.')) throw deny('canonicalize_failed', 'pathPrefix 必须以 / 开头')
+    if (prefix.startsWith('//')) throw deny('target_path_not_allowed', 'pathPrefix 不得以 // 开头（协议相对 URL）')
+    if (/(^|\/)\.\.(\/|$)/.test(prefix)) throw deny('target_path_traversal', 'pathPrefix 不得包含 .. 路径穿越段')
+    if (p.startsWith(prefix)) throw deny('target_path_duplicated', 'pathPrefix 与请求 path 重复（会造成双拼前缀）')
+  }
   let url
   try { url = new URL(base + prefix + p) } catch (e) { throw deny('canonicalize_failed', '上游目标 URL 无法解析') }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {

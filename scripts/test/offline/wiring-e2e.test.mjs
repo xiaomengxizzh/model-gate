@@ -156,6 +156,78 @@ test('M1-3b catalogScoped 但 record 缺失 → 403 catalog_generation_missing�
   assert.equal(noRecordForPlain.generation, 'config-declared', '非目录参与的普通请求走可审计的 config-declared 世代')
 })
 
+test('M1-3c 非规范目标形状：发送前 403、零命中、零账本残留', { timeout: 60000 }, async (t) => {
+  const cases = [
+    { name: 'a', base: (u) => u + '/v1', prefix: '/v1', code: 'target_path_duplicated' },
+    { name: 'b', base: (u) => u + '/v1?x=1', prefix: '', code: 'target_query_not_allowed' },
+    { name: 'c', base: (u) => u, prefix: '?q=1', code: 'target_query_not_allowed' },
+    { name: 'd', base: (u) => u, prefix: '/../v2', code: 'target_path_traversal' },
+    { name: 'e', base: (u) => u, prefix: '//evil', code: 'target_path_not_allowed' },
+  ]
+  for (const c of cases) {
+    const upstream = await startScriptedUpstream(async (req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(CHAT_OK())
+    })
+    const ledgerDir = await mkdtemp(join(tmpdir(), 'm13c-ledger-'))
+    t.after(async () => { await upstream.stop(); await rm(ledgerDir, { recursive: true, force: true }) })
+    const gw = await startGateway({
+      name: 'm13c-' + c.name,
+      config: {
+        defaults: { retry: { maxAttempts: 1 }, timeout: { firstByteMs: 2000, idleMs: 2000, loopMs: 3000 } },
+        providers: { p1: { baseUrl: c.base(upstream.base), pathPrefix: c.prefix } },
+        models: { 'wire-shape': { provider: 'p1', costEstimateUsd: 0.001 } },
+        routing: { ledger: { dir: ledgerDir, currency: 'USD' } },
+      },
+    })
+    t.after(() => gw.stop())
+    const res = await gw.post('/v1/chat/completions', { model: 'wire-shape', messages: [{ role: 'user', content: 'hi' }] }, json())
+    const body = await res.json()
+    assert.equal(res.status, 403, c.name + ' 必须发送前拒绝：' + JSON.stringify(body))
+    assert.equal(body.error.code, c.code, c.name + ' 的稳定拒绝码')
+    assert.equal(upstream.hits.length, 0, c.name + ' 上游零命中')
+    let attempts = {}
+    try { attempts = JSON.parse(await readFile(join(ledgerDir, 'ledger.json'), 'utf8')).attempts || {} } catch { attempts = {} }
+    assert.equal(Object.keys(attempts).length, 0, c.name + ' 不得留下账本 attempt')
+    await gw.stop()
+  }
+})
+
+test('M1-3c 正向：既有 /v1 去重与合法 pathPrefix 不被过度收紧', { timeout: 45000 }, async (t) => {
+  const seen = []
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    seen.push(req.url)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(CHAT_OK())
+  })
+  t.after(() => upstream.stop())
+  const gw = await startGateway({
+    name: 'm13c-positive',
+    config: {
+      defaults: { retry: { maxAttempts: 1 }, timeout: { firstByteMs: 2000, idleMs: 2000, loopMs: 3000 } },
+      providers: { p1: { baseUrl: upstream.base + '/v1' } },
+      models: { 'wire-v1': { provider: 'p1' } },
+    },
+  })
+  t.after(() => gw.stop())
+  const a = await gw.post('/v1/chat/completions', { model: 'wire-v1', messages: [{ role: 'user', content: 'hi' }] }, json())
+  assert.equal(a.status, 200)
+  assert.equal(seen[0], '/v1/chat/completions', 'baseUrl 尾 /v1 的既有去重必须保留')
+
+  const gw2 = await startGateway({
+    name: 'm13c-prefix',
+    config: {
+      defaults: { retry: { maxAttempts: 1 }, timeout: { firstByteMs: 2000, idleMs: 2000, loopMs: 3000 } },
+      providers: { p1: { baseUrl: upstream.base, pathPrefix: '/api/v2' } },
+      models: { 'wire-prefix': { provider: 'p1' } },
+    },
+  })
+  t.after(() => gw2.stop())
+  const b = await gw2.post('/v1/chat/completions', { model: 'wire-prefix', messages: [{ role: 'user', content: 'hi' }] }, json())
+  assert.equal(b.status, 200)
+  assert.equal(seen[1], '/api/v2/v1/chat/completions', '合法 pathPrefix 必须原样拼接')
+})
+
 test('M1-3b 未配置 ledger + 配置费用上限 → typed 拒绝，零上游', { timeout: 30000 }, async (t) => {
   const upstream = await startScriptedUpstream(async (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(CHAT_OK()) })
   t.after(() => upstream.stop())
