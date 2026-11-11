@@ -1,7 +1,18 @@
 // 媒体能力（MG-013，Audio / Image）：请求校验、multipart 路由字段解析与能力边界。
 // 设计：只桥接 OpenAI 兼容上游；multipart 请求体原样转发（不重编码），响应二进制/JSON 原样回传。
 // 体积、预算、取消由调用方（index.js）统一控制；不支持的上游协议显式拒绝，不做伪桥接。
+import { createOptionalEndpointPolicy } from './optional/policy.js'
+
 export const MEDIA_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+// M1-4a：可选端点策略入口。audio/image 共用同一实现，只声明 capability 与校验差异。
+export const MEDIA_OPTIONAL_CAPABILITIES = Object.freeze(['audio', 'image'])
+export function createMediaPolicy(capability = 'audio', opts = {}) {
+  if (!MEDIA_OPTIONAL_CAPABILITIES.includes(capability)) {
+    throw new TypeError('media policy capability must be audio or image: ' + capability)
+  }
+  const validate = capability === 'audio' ? validateSpeechRequest : validateImageRequest
+  return createOptionalEndpointPolicy(Object.assign({ capability, validate }, opts))
+}
 
 // 上游协议是否支持媒体桥接：只支持 OpenAI 兼容（含中转站）。
 export function supportsMedia(api) { return !api || api === 'openai' }

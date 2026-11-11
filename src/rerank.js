@@ -1,6 +1,13 @@
 // Rerank 能力（MG-012）：请求校验、上游整形（OpenAI 兼容 / Cohere v2）与响应归一。
 // 入口在 src/index.js（POST /v1/rerank）；能力声明 capability=rerank。
 import { applyExtraHeaders } from './codex/auth.js'
+import { createOptionalEndpointPolicy } from './optional/policy.js'
+
+// M1-4a：可选端点策略入口（rerank 只声明 capability + 校验差异）。
+export const OPTIONAL_ENDPOINT = Object.freeze({ capability: 'rerank', mode: 'json', policy: 'optional-endpoint-policy/1' })
+export function createRerankPolicy(opts = {}) {
+  return createOptionalEndpointPolicy(Object.assign({ capability: 'rerank', validate: validateRerankRequest }, opts))
+}
 
 export const MAX_RERANK_DOCUMENTS = 2048
 
