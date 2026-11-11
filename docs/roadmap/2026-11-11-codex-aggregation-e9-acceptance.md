@@ -2,7 +2,7 @@
 
 > 分支：`dev/codex-aggregation-20261111`（基线 `ec66b24` = Draft PR #5 head）
 > 实现提交：`d373a06`（E1–E8 代码 + 测试 + CLI + UI）；文档/证据提交：本提交（`git log -2`，紧随实现提交之后）。
-> **未合并、未推送、未部署、未修改 main / 现有 Draft PR / 正式配置 / systemd / 8787。**
+> **已推送分支并创建 Draft PR #6（base: integration/modelgate-next）；未合并、未部署、未修改 main / 现有 Draft PR / 正式配置 / systemd / 8787。**
 
 ## 1. 阶段状态
 
