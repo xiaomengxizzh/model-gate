@@ -14,7 +14,7 @@ npm run docs:check
 
 ## 旧集成套件
 
-`npm run test:live -- 关键词` 运行 27 个旧套件。它们已迁移为自建隔离实例（mkdtemp 配置目录 + 动态回环端口 + 本地 mock 上游），因此只需 `MG_ALLOW_LIVE_TESTS=1`，不再要求 `MG_CONFIG_DIR`/`MG_GW`，也不会碰 8787 或真实上游。`live.mjs` 按文件独立子进程运行，退出码即结果。
+`npm run test:live -- 关键词` 运行 27 个旧套件：`scripts/test` 下 47 个顶层 `.mjs`，其中 19 个是夹具/工具，其余 28 个旧集成脚本里 `codex-v1-live.mjs` 会复制真实 `~/.codex/auth.json`、访问真实上游并真跑 `codex exec`，被显式排除，所以默认执行 27 个。它们均已迁移为自建隔离实例（mkdtemp 配置目录 + 动态回环端口 + 本地 mock 上游），因此只需 `MG_ALLOW_LIVE_TESTS=1`，不再要求 `MG_CONFIG_DIR`/`MG_GW`，也不会碰 8787 或真实上游。`live.mjs` 启动前先做 fail-closed 静态安全扫描（命中 `auth.json`/`.codex`/`chatgpt.com`/`opencode.ai`/`codex exec`/`/tmp/mg-e0` 却未显式排除即拒绝启动），通过后按文件独立子进程运行，退出码即结果；`node scripts/test/live.mjs --scan-only` 只扫描不执行。
 
 旧套件已全部隔离（MG-004）：配置读写经加密 Key 与临时目录，上游为本地 mock，默认 `npm test` 与旧套件互不影响。`user-env-fallback` 的 Windows 分支在 Linux 上打印 `N/A`（不计通过）。仍不要为了让测试通过而关闭日常网关鉴权。
 
