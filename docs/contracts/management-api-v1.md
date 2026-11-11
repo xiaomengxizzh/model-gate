@@ -176,3 +176,20 @@ POST /api/probe {"id":"mock"} → 200 {"ok":true,"results":[{"id":"mock","ok":tr
 ## 9. 与 Draft PR #2 的边界
 
 本契约只依据本仓库 `dev/gateway-audit-20261108` 的源码与离线测试。Draft PR #2 仍为 open/draft，head `9a0bfe3b7517068fb932dc4054c0192fee4e3791`；本轮未审计其实现、未将其字段纳入契约，也不以其通过代替本文件回归。
+
+## 10. Codex 管理面（/api/codex/*）M4-1a 安全边界
+
+> 2026-11-11 加固（P0-2）。本节约束 src/codex/api.js + src/codex/config.js 的模块侧行为；入口网关的 Origin/peer 前置判定属后续 M4-1b。
+
+| 项 | 契约 |
+| --- | --- |
+| 管理员 | 每个路由声明 explicitAdmin: true，只接受显式管理员会话（ctx.explicitAdmin / requireExplicitAdmin）。“实例未设置 adminToken ⇒ 放行”已删除；旧 requireAdmin 返回值不再能单独放行。 |
+| 来源 | 仅回环（127.0.0.1/::1）；显式 allowRemote=true 才放宽。 |
+| 文件选择 | 只接受 registerConfigRoot({id,path,mode}) 登记后的不透明 root id；调用方提供的 path/file/backupPath 一律 400 path_not_allowed，原始 toml/content 一律 400 raw_content_not_allowed。basename=config.toml 只在登记时校验。 |
+| 普通产品模式 | config/apply、config/rollback 一律 403 write_disabled；只有 managedRoot=true 且登记根 mode=managed（受控自管 fixture）才启用。 |
+| plan | 只回白名单字段差异：{field, from, to, redacted, owner}（归一化取值，敏感字段 <redacted>），不回行级 diff、保留行原文、整文件、路径或备份路径。 |
+| confirmToken | 服务端随机令牌，绑定 操作（apply/rollback）+ root id + 管理员 subject + 代际（before/after sha256）+ 过期（默认 5 分钟），单次使用；跨文件/跨操作/过期/复用分别返回 confirmation_binding_mismatch / confirmation_expired / confirmation_required。 |
+| apply 竞态 | 预览携带 {exists,size,sha256,mtimeMs} 快照；写入前再次快照（hash+size+mtime），外部改动 ⇒ 409 concurrent_modification，不写。 |
+| 备份 | 写后返回不透明 backupId（bk_ 32hex）；rollback 只接受 backupId，未知/跨根/路径形态一律 400/403/404，不接受文件路径。 |
+| export | GET /api/codex/config/export?root=<id> 只回所拥有字段的归一化投影；不含保留行、外部段值、凭据或整文件。 |
+| 审计 | 只记 action / root / 受控字段名 / 结果码；不记内容、路径、令牌或 hash。 |

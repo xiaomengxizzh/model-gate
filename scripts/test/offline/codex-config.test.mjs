@@ -2,7 +2,7 @@
 // 全部使用 OS 临时目录 fixture：不读 HOME、不碰 ~/.codex、不写正式配置、不联网。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,6 +10,21 @@ import { fileURLToPath } from 'node:url'
 import {
   ConfigError,
   CONFIG_CONTRACT,
+  CONFIG_ROOT_MODES,
+  CONFIRM_TTL_MS,
+  applyConfigForRoot,
+  exportOwnedFieldsForRoot,
+  issueManagementConfirmation,
+  listRegisteredRoots,
+  planConfigForRoot,
+  planRollbackForRoot,
+  publicOwnedProjection,
+  registerConfigRoot,
+  resetManagementStateForTest,
+  resolveBackupRecord,
+  resolveRegisteredRoot,
+  rollbackConfigForRoot,
+  verifyManagementConfirmation,
   OWNED_TOP_LEVEL,
   OWNED_SECTIONS,
   RESERVED_OVERRIDE_SECTIONS,
@@ -670,4 +685,187 @@ test('UI 字段所有权表覆盖三类所有者，含禁止触碰项', () => {
   assert.ok(uiCodex.FIELD_OWNERS.some((f) => f.path === '[model_providers.openai]' && f.owner === 'external-forbidden'))
   assert.equal(uiCodex.ownerLabel('modelgate').label, '受控可写')
   assert.equal(uiCodex.ownerLabel('external').label, '只读保留')
+})
+
+// ---------------------------------------------------------------------------
+// M4-1a：登记根 / 不透明备份 / 确认令牌绑定 / 字段投影
+// ---------------------------------------------------------------------------
+
+function freshState () {
+  resetManagementStateForTest()
+}
+
+test('M4-1a 登记根：不透明 id 替代任意路径；非法 id/模式/符号链接拒绝', async () => {
+  freshState()
+  const f = await fixture()
+  const linkDir = await mkdtemp(join(tmpdir(), 'mg-codex-config-link-'))
+  const link = join(linkDir, 'config.toml')
+  await symlink(f.path, link)
+  try {
+    const out = registerConfigRoot({ id: 'root-a', path: f.path, mode: CONFIG_ROOT_MODES.MANAGED })
+    assert.equal(out.id, 'root-a')
+    assert.equal(out.mode, 'managed')
+    assert.match(String(out.generation), /^[0-9a-f]{64}$/)
+    const resolved = resolveRegisteredRoot('root-a')
+    assert.equal(resolved.id, 'root-a')
+    assert.equal(resolved.mode, 'managed')
+    assert.equal(resolved.path, f.path, '登记后内部仍保存解析后的真实路径（不返回给客户端）')
+    assert.deepEqual(listRegisteredRoots(), [{ id: 'root-a', mode: 'managed' }])
+
+    expectCode(() => registerConfigRoot({ id: '../escape', path: f.path }), 'invalid_root_id')
+    expectCode(() => registerConfigRoot({ id: 'root/b', path: f.path }), 'invalid_root_id')
+    expectCode(() => registerConfigRoot({ id: 'root-c', path: 'config.toml' }), 'invalid_path')
+    expectCode(() => registerConfigRoot({ id: 'root-d', path: f.path, mode: 'root' }), 'invalid_root_mode')
+    expectCode(() => registerConfigRoot({ id: 'root-link', path: link }), 'symlink_refused')
+    expectCode(() => resolveRegisteredRoot('../etc/config.toml'), 'invalid_root_id')
+    expectCode(() => resolveRegisteredRoot('not-registered'), 'unknown_config_root')
+  } finally {
+    await rm(linkDir, { recursive: true, force: true })
+    await f.cleanup()
+  }
+})
+
+test('M4-1a 登记根：父目录被替换/搬走 ⇒ root_changed（fail closed）', async () => {
+  freshState()
+  const f = await fixture()
+  const moved = f.dir + '-moved'
+  try {
+    registerConfigRoot({ id: 'root-move', path: f.path })
+    await rename(f.dir, moved)
+    expectCode(() => resolveRegisteredRoot('root-move'), 'root_changed')
+  } finally {
+    await rm(f.dir, { recursive: true, force: true })
+    await rm(moved, { recursive: true, force: true })
+  }
+})
+
+test('M4-1a 确认令牌：绑定 root/操作/管理员/代际；跨用/过期/重复使用拒绝', () => {
+  freshState()
+  const base = {
+    operation: 'apply',
+    rootId: 'root-a',
+    adminSubject: 'admin-a',
+    generation: 'g1',
+    beforeSha256: 'before',
+    afterSha256: 'after',
+  }
+  const issued = issueManagementConfirmation(Object.assign({ now: 1000 }, base))
+  assert.match(issued.token, /^cf_[a-f0-9]{48}$/)
+  assert.equal(issued.expiresAt, 1000 + CONFIRM_TTL_MS)
+  assert.doesNotThrow(() => verifyManagementConfirmation(Object.assign({ token: issued.token, now: 1001 }, base)))
+  // 已消费
+  expectCode(() => verifyManagementConfirmation(Object.assign({ token: issued.token, now: 1002 }, base)), 'confirmation_required')
+
+  const t2 = issueManagementConfirmation(Object.assign({ now: 2000 }, base)).token
+  expectCode(() => verifyManagementConfirmation(Object.assign({}, base, { token: t2, operation: 'rollback', now: 2001 })), 'confirmation_binding_mismatch')
+  expectCode(() => verifyManagementConfirmation(Object.assign({}, base, { token: t2, rootId: 'root-b', now: 2001 })), 'confirmation_binding_mismatch')
+  expectCode(() => verifyManagementConfirmation(Object.assign({}, base, { token: t2, adminSubject: 'admin-b', now: 2001 })), 'confirmation_binding_mismatch')
+  expectCode(() => verifyManagementConfirmation(Object.assign({}, base, { token: t2, generation: 'g2', now: 2001 })), 'confirmation_binding_mismatch')
+  expectCode(() => verifyManagementConfirmation(Object.assign({}, base, { token: t2, now: 2000 + CONFIRM_TTL_MS + 1 })), 'confirmation_expired')
+  expectCode(() => verifyManagementConfirmation(Object.assign({}, base, { token: 'nope', now: 2001 })), 'confirmation_required')
+})
+
+test('M4-1a 字段投影：归一化取值 + 敏感字段只回 <redacted>', () => {
+  const owned = {
+    topLevel: {
+      model: { present: true, raw: '"gpt-5"' },
+      model_provider: { present: true, raw: 'openai' },
+      model_catalog_json: { present: false, raw: '' },
+      api_key: { present: true, raw: '"sk-SENTINEL-OWNED"' },
+    },
+    sections: { features: { present: true, keys: { multi_agent: { present: true, raw: 'true' } } } },
+  }
+  const out = publicOwnedProjection(owned)
+  assert.equal(out.topLevel.model.value, 'gpt-5')
+  assert.equal(out.topLevel.model_provider.value, 'openai')
+  assert.equal(out.topLevel.model_catalog_json.present, false)
+  assert.equal(out.topLevel.model_catalog_json.value, null)
+  assert.equal(out.topLevel.api_key.value, '<redacted>')
+  assert.equal(out.topLevel.api_key.redacted, true)
+  assert.equal(out.sections.features.keys.multi_agent.value, true)
+  assert.equal(JSON.stringify(out).includes('sk-SENTINEL-OWNED'), false)
+})
+
+test('M4-1a 登记根级 plan/apply：CAS 令牌 + 备份不透明 id + 回滚可恢复', async () => {
+  freshState()
+  const f = await fixture()
+  try {
+    registerConfigRoot({ id: 'root-apply', path: f.path, mode: CONFIG_ROOT_MODES.MANAGED })
+    const plan = planConfigForRoot({ rootId: 'root-apply', adminSubject: 'admin-a', desired: desiredFor() })
+    assert.equal(plan.wrote, false)
+    assert.match(plan.confirmToken, /^cf_/)
+    assert.equal(plan.existing.topLevel.model.value, 'gpt-5')
+    assert.equal(JSON.stringify(plan).includes('sk-'), false)
+    assert.equal(JSON.stringify(plan).includes('file-only'), false)
+
+    // 外部改写后 CAS 失败，文件字节不变
+    await writeFile(f.path, USER_CONFIG + '\n# external\n', 'utf8')
+    const raced = expectCode(() => applyConfigForRoot({ rootId: 'root-apply', adminSubject: 'admin-a', desired: desiredFor(), expected: plan.before, confirmToken: plan.confirmToken }), 'concurrent_modification')
+    void raced
+    assert.ok((await readFile(f.path, 'utf8')).includes('# external'))
+
+    const plan2 = planConfigForRoot({ rootId: 'root-apply', adminSubject: 'admin-a', desired: desiredFor() })
+    const applied = applyConfigForRoot({ rootId: 'root-apply', adminSubject: 'admin-a', desired: desiredFor(), expected: plan2.before, confirmToken: plan2.confirmToken })
+    assert.match(applied.backupId, /^bk_[a-f0-9]{32}$/)
+    assert.equal(await readFile(f.path + '.bak', 'utf8'), USER_CONFIG + '\n# external\n')
+    assert.equal(resolveBackupRecord('root-apply', applied.backupId).path, f.path + '.bak')
+    expectCode(() => resolveBackupRecord('missing-root', applied.backupId), 'backup_scope_mismatch')
+    expectCode(() => resolveBackupRecord('root-apply', '../x'), 'invalid_backup_id')
+
+    // 回滚令牌绑定同一 root/generation；跨登记根不可复用
+    // 备份被替换成符号链接 ⇒ 拒绝（防通过 .bak 链读任意文件）
+    const realBak = await readFile(f.path + '.bak', 'utf8')
+    const outside = join(f.dir, 'outside.txt')
+    await writeFile(outside, 'outside-secret', 'utf8')
+    await rm(f.path + '.bak')
+    await symlink(outside, f.path + '.bak')
+    expectCode(() => planRollbackForRoot({ rootId: 'root-apply', adminSubject: 'admin-a', backupId: applied.backupId }), 'symlink_refused')
+    await rm(f.path + '.bak')
+    await writeFile(f.path + '.bak', realBak, 'utf8')
+
+    const rbPlan = planRollbackForRoot({ rootId: 'root-apply', adminSubject: 'admin-a', backupId: applied.backupId })
+    assert.equal(rbPlan.expectedSha256, applied.after.sha256)
+    expectCode(() => verifyManagementConfirmation({
+      token: rbPlan.confirmToken,
+      operation: 'rollback',
+      rootId: 'root-apply',
+      adminSubject: 'admin-b',
+      generation: rbPlan.generation,
+      beforeSha256: rbPlan.expectedSha256,
+      afterSha256: rbPlan.restore.sha256,
+    }), 'confirmation_binding_mismatch')
+    const rolled = rollbackConfigForRoot({ rootId: 'root-apply', adminSubject: 'admin-a', backupId: applied.backupId, expectedSha256: rbPlan.expectedSha256, confirmToken: rbPlan.confirmToken })
+    assert.match(rolled.safetyBackupId, /^bk_/)
+    assert.equal(await readFile(f.path, 'utf8'), USER_CONFIG + '\n# external\n')
+  } finally {
+    await f.cleanup()
+  }
+})
+
+test('M4-1a 只读登记根 / 跨根备份 / export 投影', async () => {
+  freshState()
+  const a = await fixture()
+  const b = await fixture()
+  try {
+    registerConfigRoot({ id: 'root-ro', path: a.path, mode: CONFIG_ROOT_MODES.READONLY })
+    expectCode(() => applyConfigForRoot({ rootId: 'root-ro', adminSubject: 'admin-a', desired: desiredFor() }), 'write_disabled')
+
+    registerConfigRoot({ id: 'root-a', path: a.path, mode: CONFIG_ROOT_MODES.MANAGED })
+    registerConfigRoot({ id: 'root-b', path: b.path, mode: CONFIG_ROOT_MODES.MANAGED })
+    const planA = planConfigForRoot({ rootId: 'root-a', adminSubject: 'admin-a', desired: desiredFor() })
+    const appliedA = applyConfigForRoot({ rootId: 'root-a', adminSubject: 'admin-a', desired: desiredFor(), expected: planA.before, confirmToken: planA.confirmToken })
+    expectCode(() => resolveBackupRecord('root-b', appliedA.backupId), 'backup_scope_mismatch')
+
+    const exported = exportOwnedFieldsForRoot({ rootId: 'root-a' })
+    assert.equal(exported.exists, true)
+    assert.equal(exported.owned.topLevel.model.value, 'mg/gpt-5-aggregate')
+    assert.equal(JSON.stringify(exported).includes('sk-'), false)
+    assert.equal(JSON.stringify(exported).includes('approval_policy'), false, '等保外部字段不进 export 的 owned 投影')
+    const missing = exportOwnedFieldsForRoot({ rootId: 'root-b' })
+    assert.equal(missing.exists, true)
+    assert.equal(missing.owned.topLevel.model.value, 'gpt-5')
+  } finally {
+    await a.cleanup()
+    await b.cleanup()
+  }
 })

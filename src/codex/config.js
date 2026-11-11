@@ -11,7 +11,7 @@
 //  * tmp + fsync + rename 原子替换；旧内容存 .bak；写失败/校验失败自动用 .bak 恢复。
 //  * 绝不读写 auth.json；绝不整文件覆盖；不读 HOME —— 所有函数只接受显式绝对路径，
 //    便于服务端路由直接调用，也便于测试用临时目录 fixture。
-import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs'
+import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 
@@ -70,6 +70,9 @@ function assertBackupPath (target, backupPath) {
   if (!(bak === target + '.bak' || bak.startsWith(target + '.bak'))) {
     throw new ConfigError('invalid_path', '备份路径必须位于 ' + target + '.bak* 名下，拒绝任意文件读取。')
   }
+  let bst = null
+  try { bst = lstatSync(bak) } catch {}
+  if (bst && bst.isSymbolicLink()) throw new ConfigError('symlink_refused', '备份文件是符号链接，拒绝读取（fail closed）。')
   return bak
 }
 
@@ -512,6 +515,180 @@ function restoreSilently (path, backupPath, mode) {
   } catch { return false }
 }
 
+// ---------------------------------------------------------------------------
+// M4-1a：登记根 / 不透明备份 / 显式管理员确认令牌
+// 管理面不再接受调用方给的任意路径与原始 TOML；只能引用服务端登记的不透明 id。
+// 这些注册表是**进程内状态**：由受控启动流程（M4-1b）登记，浏览器无法创建/枚举路径。
+// ---------------------------------------------------------------------------
+
+export const CONFIG_ROOT_MODES = Object.freeze({ MANAGED: 'managed', READONLY: 'readonly' })
+export const CONFIRM_TTL_MS = 5 * 60 * 1000
+const ROOT_ID_RE = /^[a-z0-9][a-z0-9._-]{1,63}$/
+const BACKUP_ID_RE = /^bk_[a-f0-9]{32}$/
+const configRoots = new Map()
+const backupRecords = new Map()
+const confirmations = new Map()
+
+export function resetManagementStateForTest () {
+  configRoots.clear()
+  backupRecords.clear()
+  confirmations.clear()
+}
+
+function generationOf (snapshot) {
+  return snapshot && snapshot.exists ? String(snapshot.sha256) : 'absent'
+}
+
+// 登记根：登记时做一次基名校验/符号链接校验，并把父目录 realpath 固化；运行期只认 id。
+export function registerConfigRoot (opts = {}) {
+  const id = typeof opts.id === 'string' ? opts.id.trim() : ''
+  if (!ROOT_ID_RE.test(id)) throw new ConfigError('invalid_root_id', '登记根 id 必须是 2-64 位小写字母/数字/._-（不透明引用，不接受路径）')
+  const mode = opts.mode === undefined ? CONFIG_ROOT_MODES.READONLY : String(opts.mode)
+  if (mode !== CONFIG_ROOT_MODES.MANAGED && mode !== CONFIG_ROOT_MODES.READONLY) {
+    throw new ConfigError('invalid_root_mode', '登记根 mode 只能是 managed / readonly')
+  }
+  const target = assertConfigPath(opts.path)
+  let realDir
+  try { realDir = realpathSync(dirname(target)) } catch (e) {
+    throw new ConfigError('root_unavailable', '登记根的父目录不存在或不可解析：' + (e && e.message ? e.message : '未知错误'))
+  }
+  const realPath = join(realDir, basename(target))
+  let st = null
+  try { st = lstatSync(realPath) } catch {}
+  if (st && st.isSymbolicLink()) throw new ConfigError('symlink_refused', '登记根是符号链接，拒绝登记（fail closed）')
+  const record = Object.freeze({ id, path: realPath, mode, registeredAt: Date.now() })
+  configRoots.set(id, record)
+  const generation = st && st.isFile() && st.size <= MAX_CONFIG_BYTES ? sha256Hex(readFileSync(realPath)) : (st && st.isFile() ? 'oversize' : 'absent')
+  return { id, mode, generation }
+}
+
+export function resolveRegisteredRoot (id) {
+  const key = typeof id === 'string' ? id.trim() : ''
+  if (!ROOT_ID_RE.test(key)) throw new ConfigError('invalid_root_id', '配置登记根 id 不合法（必须使用服务端返回的不透明 id，不接受路径）')
+  const record = configRoots.get(key)
+  if (!record) throw new ConfigError('unknown_config_root', '未知的配置登记根：' + key + '（只能使用服务端登记后的不透明 id）')
+  // 运行期再验一次：父目录 realpath 与目标都不是符号链接；被替换/搬走即 fail closed。
+  let realDir
+  try { realDir = realpathSync(dirname(record.path)) } catch {
+    throw new ConfigError('root_changed', '配置登记根的父目录已不可解析：' + key)
+  }
+  if (join(realDir, basename(record.path)) !== record.path) {
+    throw new ConfigError('root_changed', '配置登记根路径已变化（父目录 realpath 不一致）：' + key)
+  }
+  let st = null
+  try { st = lstatSync(record.path) } catch {}
+  if (st && st.isSymbolicLink()) throw new ConfigError('symlink_refused', '配置登记根在登记后变成了符号链接，拒绝访问：' + key)
+  return { id: record.id, path: record.path, mode: record.mode }
+}
+
+export function listRegisteredRoots () {
+  return [...configRoots.values()].map((r) => ({ id: r.id, mode: r.mode }))
+}
+
+function registerBackupRecord (rootId, backupPath, meta = {}) {
+  const id = 'bk_' + randomBytes(16).toString('hex')
+  const resolved = resolve(backupPath)
+  backupRecords.set(id, Object.freeze({ id, rootId, path: resolved, sha256: meta.sha256 || null, generation: meta.generation || null, createdAt: Date.now() }))
+  return id
+}
+
+export function resolveBackupRecord (rootId, backupId) {
+  const key = typeof backupId === 'string' ? backupId.trim() : ''
+  if (!BACKUP_ID_RE.test(key)) throw new ConfigError('invalid_backup_id', '备份必须使用服务端返回的不透明 backupId（不接受路径）')
+  const record = backupRecords.get(key)
+  if (!record) throw new ConfigError('backup_not_found', '未知或已过期的备份 id：' + key)
+  if (record.rootId !== rootId) throw new ConfigError('backup_scope_mismatch', '备份 id 不属于该配置登记根，拒绝跨文件回滚')
+  const root = resolveRegisteredRoot(rootId)
+  assertBackupPath(root.path, record.path)
+  return record
+}
+
+export function issueManagementConfirmation (opts = {}) {
+  const operation = String(opts.operation || '')
+  if (operation !== 'apply' && operation !== 'rollback') throw new ConfigError('invalid_operation', '确认令牌只用于 apply / rollback')
+  const rootId = typeof opts.rootId === 'string' ? opts.rootId.trim() : ''
+  const adminSubject = typeof opts.adminSubject === 'string' ? opts.adminSubject.trim() : ''
+  if (!ROOT_ID_RE.test(rootId) || !adminSubject) throw new ConfigError('invalid_confirmation_binding', '确认令牌必须绑定登记根与显式管理员')
+  const ttl = Number(opts.ttlMs === undefined ? CONFIRM_TTL_MS : opts.ttlMs)
+  const now = Number(opts.now === undefined ? Date.now() : opts.now)
+  for (const [tokenKey, rec] of confirmations) if (now > rec.expiresAt) confirmations.delete(tokenKey)
+  const token = 'cf_' + randomBytes(24).toString('hex')
+  const record = Object.freeze({
+    token,
+    operation,
+    rootId,
+    adminSubject,
+    generation: String(opts.generation === undefined ? '' : opts.generation),
+    beforeSha256: String(opts.beforeSha256 === undefined ? '' : opts.beforeSha256),
+    afterSha256: String(opts.afterSha256 === undefined ? '' : opts.afterSha256),
+    issuedAt: now,
+    expiresAt: now + ttl,
+  })
+  confirmations.set(token, record)
+  return { token, expiresAt: record.expiresAt, operation, rootId, generation: record.generation }
+}
+
+export function verifyManagementConfirmation (opts = {}) {
+  const token = typeof opts.token === 'string' ? opts.token.trim() : ''
+  if (!token) throw new ConfigError('confirmation_required', '缺少确认令牌：写入前必须先 plan 并回传 confirmToken')
+  const record = confirmations.get(token)
+  if (!record) throw new ConfigError('confirmation_required', '未知或已使用过的确认令牌：请重新 plan')
+  const now = Number(opts.now === undefined ? Date.now() : opts.now)
+  if (now > record.expiresAt) {
+    confirmations.delete(token)
+    throw new ConfigError('confirmation_expired', '确认令牌已过期：请重新 plan')
+  }
+  const mismatch = record.operation !== String(opts.operation || '') ||
+    record.rootId !== String(opts.rootId || '') ||
+    record.adminSubject !== String(opts.adminSubject || '') ||
+    record.generation !== String(opts.generation === undefined ? '' : opts.generation) ||
+    record.beforeSha256 !== String(opts.beforeSha256 === undefined ? '' : opts.beforeSha256) ||
+    record.afterSha256 !== String(opts.afterSha256 === undefined ? '' : opts.afterSha256)
+  if (mismatch) throw new ConfigError('confirmation_binding_mismatch', '确认令牌与本次文件/操作/管理员/代际不匹配（不可跨文件或跨操作复用）')
+  if (opts.consume !== false) confirmations.delete(token)
+  return record
+}
+
+// 敏感字段名（只用于把“值”替换成 <redacted>；绝不回显原文）。
+export const SENSITIVE_FIELD_RE = /(api[_-]?key|token|secret|password|passwd|authorization|bearer|cookie|credential|env)/i
+export function redactValue (field, value) {
+  if (value === undefined || value === null || value === '') return ''
+  if (SENSITIVE_FIELD_RE.test(String(field || ''))) return '<redacted>'
+  return value
+}
+
+// 把 owned 字段的 TOML 原始 atom 转为归一化值（字符串去引号、布尔/数字还原）；仍受 redactValue 保护。
+export function normalizeOwnedValue (entry) {
+  if (!entry || !entry.present) return null
+  const raw = String(entry.raw === undefined ? '' : entry.raw).trim()
+  if (raw === '') return ''
+  if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
+    try { return JSON.parse(raw) } catch { return raw.slice(1, -1) }
+  }
+  if (raw.length >= 2 && raw.startsWith("'") && raw.endsWith("'")) return raw.slice(1, -1)
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  if (/^-?\d+(?:\.\d+)?$/.test(raw)) return Number(raw)
+  return raw
+}
+
+export function publicOwnedProjection (owned) {
+  const topLevel = {}
+  for (const [key, entry] of Object.entries((owned && owned.topLevel) || {})) {
+    const value = normalizeOwnedValue(entry)
+    topLevel[key] = { present: !!entry.present, value: entry.present ? redactValue(key, value) : null, redacted: entry.present && SENSITIVE_FIELD_RE.test(key) }
+  }
+  const sections = {}
+  for (const [name, sec] of Object.entries((owned && owned.sections) || {})) {
+    sections[name] = { present: !!sec.present, keys: {} }
+    for (const [key, entry] of Object.entries(sec.keys || {})) {
+      const value = normalizeOwnedValue(entry)
+      sections[name].keys[key] = { present: !!entry.present, value: entry.present ? redactValue(name + '.' + key, value) : null, redacted: entry.present && SENSITIVE_FIELD_RE.test(key) }
+    }
+  }
+  return { topLevel, sections }
+}
+
 function buildPlan (opts = {}) {
   const pathOpts = { allowNonStandardName: !!opts.allowNonStandardName }
   const target = assertConfigPath(opts.path, pathOpts)
@@ -555,6 +732,9 @@ function assertExpected (before, expected) {
   if (expected.size !== undefined && Number(expected.size) !== Number(before.size)) {
     throw new ConfigError('concurrent_modification', '目标文件大小与快照不一致（外部已修改），已中止。')
   }
+  if (expected.mtimeMs !== undefined && Number(expected.mtimeMs) !== Number(before.mtimeMs)) {
+    throw new ConfigError('concurrent_modification', '目标文件 mtime 与快照不一致（外部已改动），已中止。')
+  }
 }
 
 function assertConfirm (token, expectedToken) {
@@ -587,15 +767,15 @@ export function planConfigApply (opts = {}) {
   return view
 }
 
-export function applyConfigChange (opts = {}) {
+// 写盘提交（预览 -> 校验 -> 二次快照 -> 备份 -> 原子写 -> 写后校验）；
+// 供旧 path 级 API 与 M4-1a 的登记根 API 共用，避免两条实现漂移。
+export function commitConfigPlan (plan, opts = {}) {
   const pathOpts = { allowNonStandardName: !!opts.allowNonStandardName }
-  const plan = buildPlan(opts)
-  assertExpected(plan.before, opts.expected)
-  assertConfirm(opts.confirmToken, plan.confirmToken)
-  // 写入前再取一次快照：把 TOCTOU 窗口压到一次 stat+read。
+  // 写入前再取一次快照：把 TOCTOU 窗口压到一次 stat+read（hash + size + mtime）。
   const recheck = snapshotConfigFile(plan.target, pathOpts)
-  if (recheck.exists !== plan.before.exists || recheck.sha256 !== plan.before.sha256 || recheck.size !== plan.before.size) {
-    throw new ConfigError('concurrent_modification', '另一进程在预览后修改了 config.toml（sha256/大小变化），已中止本次写入。')
+  if (recheck.exists !== plan.before.exists || recheck.sha256 !== plan.before.sha256 ||
+      recheck.size !== plan.before.size || recheck.mtimeMs !== plan.before.mtimeMs) {
+    throw new ConfigError('concurrent_modification', '另一进程在预览后修改了 config.toml（sha256/大小/mtime 变化），已中止本次写入。')
   }
   let backupPath = null
   if (plan.before.exists) backupPath = writeBackup(plan.target, plan.beforeText, opts.backupDir)
@@ -615,8 +795,8 @@ export function applyConfigChange (opts = {}) {
     ok: true,
     contract: CONFIG_CONTRACT,
     path: plan.target,
-    before: { exists: plan.before.exists, size: plan.before.size, sha256: plan.before.sha256 },
-    after: { size: after.size, sha256: after.sha256 },
+    before: { exists: plan.before.exists, size: plan.before.size, sha256: plan.before.sha256, mtimeMs: plan.before.mtimeMs },
+    after: { size: after.size, sha256: after.sha256, mtimeMs: after.mtimeMs },
     changed: plan.changed,
     warnings: plan.warnings,
     preserved: plan.preserved,
@@ -624,6 +804,14 @@ export function applyConfigChange (opts = {}) {
     backupPath,
     confirmToken: plan.confirmToken,
   }
+}
+
+export function applyConfigChange (opts = {}) {
+  const pathOpts = { allowNonStandardName: !!opts.allowNonStandardName }
+  const plan = buildPlan(opts)
+  assertExpected(plan.before, opts.expected)
+  assertConfirm(opts.confirmToken, plan.confirmToken)
+  return commitConfigPlan(plan, opts)
 }
 
 export function planRollback (opts = {}) {
@@ -647,12 +835,7 @@ export function planRollback (opts = {}) {
   }
 }
 
-export function rollbackConfigChange (opts = {}) {
-  const plan = planRollback(opts)
-  if (opts.expectedSha256 !== undefined && String(opts.expectedSha256) !== plan.current.sha256) {
-    throw new ConfigError('concurrent_modification', '当前文件 sha256 与预期不一致（外部已修改），回滚中止。')
-  }
-  assertConfirm(opts.confirmToken, plan.confirmToken)
+export function commitConfigRollback (plan) {
   const currentText = plan.current.exists ? readFileSync(plan.path, 'utf8') : ''
   const bakBuf = readFileSync(plan.backupPath)
   // 回滚前把"当前状态"另存一份，避免回滚本身成为不可逆操作。
@@ -680,7 +863,179 @@ export function rollbackConfigChange (opts = {}) {
     restoredFrom: plan.backupPath,
     safetyBackupPath: safetyPath,
     before: { sha256: plan.current.sha256 },
-    after: { sha256: after.sha256 },
+    after: { sha256: after.sha256, size: after.size, mtimeMs: after.mtimeMs },
+  }
+}
+
+export function rollbackConfigChange (opts = {}) {
+  const plan = planRollback(opts)
+  if (opts.expectedSha256 !== undefined && String(opts.expectedSha256) !== plan.current.sha256) {
+    throw new ConfigError('concurrent_modification', '当前文件 sha256 与预期不一致（外部已修改），回滚中止。')
+  }
+  assertConfirm(opts.confirmToken, plan.confirmToken)
+  return commitConfigRollback(plan)
+}
+
+// —— M4-1a：登记根 + 显式管理员绑定的管理面操作（不透明 id，绝不接受路径/原始 TOML）——
+
+function requireAdminSubject (adminSubject) {
+  const subject = typeof adminSubject === 'string' ? adminSubject.trim() : ''
+  if (!subject) throw new ConfigError('admin_subject_required', '受控写入必须绑定显式管理员身份（adminSubject）')
+  return subject
+}
+
+function pathOptsForRoot () {
+  return { allowNonStandardName: false }
+}
+
+export function planConfigForRoot (opts = {}) {
+  const root = resolveRegisteredRoot(opts.rootId)
+  const adminSubject = requireAdminSubject(opts.adminSubject)
+  const plan = buildPlan({
+    path: root.path,
+    desired: opts.desired,
+    expected: opts.expected,
+    allowCreate: opts.allowCreate === true,
+  })
+  const generation = generationOf(plan.before)
+  const confirmation = issueManagementConfirmation({
+    operation: 'apply',
+    rootId: root.id,
+    adminSubject,
+    generation,
+    beforeSha256: plan.before.sha256,
+    afterSha256: plan.after.sha256,
+    now: opts.now,
+    ttlMs: opts.ttlMs,
+  })
+  return {
+    rootId: root.id,
+    generation,
+    before: plan.before,
+    after: plan.after,
+    existing: publicOwnedProjection(plan.existing),
+    changed: plan.changed,
+    warnings: plan.warnings,
+    preserved: plan.preserved,
+    createdSections: plan.createdSections,
+    confirmToken: confirmation.token,
+    expiresAt: confirmation.expiresAt,
+    requiresConfirmation: true,
+    wrote: false,
+  }
+}
+
+export function applyConfigForRoot (opts = {}) {
+  const root = resolveRegisteredRoot(opts.rootId)
+  if (root.mode !== CONFIG_ROOT_MODES.MANAGED) {
+    throw new ConfigError('write_disabled', '该登记根是只读模式（readonly）：apply 仅在受控自管 fixture（managed）中启用')
+  }
+  const adminSubject = requireAdminSubject(opts.adminSubject)
+  const plan = buildPlan({
+    path: root.path,
+    desired: opts.desired,
+    expected: opts.expected,
+    allowCreate: opts.allowCreate === true,
+  })
+  const generation = generationOf(plan.before)
+  verifyManagementConfirmation({
+    token: opts.confirmToken,
+    operation: 'apply',
+    rootId: root.id,
+    adminSubject,
+    generation,
+    beforeSha256: plan.before.sha256,
+    afterSha256: plan.after.sha256,
+    now: opts.now,
+  })
+  const result = commitConfigPlan(plan, pathOptsForRoot())
+  const backupId = result.backupPath
+    ? registerBackupRecord(root.id, result.backupPath, { sha256: plan.before.sha256, generation })
+    : null
+  return Object.assign({}, result, { rootId: root.id, generation, backupId })
+}
+
+export function planRollbackForRoot (opts = {}) {
+  const root = resolveRegisteredRoot(opts.rootId)
+  const adminSubject = requireAdminSubject(opts.adminSubject)
+  const backup = resolveBackupRecord(root.id, opts.backupId)
+  const plan = planRollback({ path: root.path, backupPath: backup.path })
+  const generation = generationOf(plan.current)
+  const confirmation = issueManagementConfirmation({
+    operation: 'rollback',
+    rootId: root.id,
+    adminSubject,
+    generation,
+    beforeSha256: plan.current.sha256,
+    afterSha256: plan.restore.sha256,
+    now: opts.now,
+    ttlMs: opts.ttlMs,
+  })
+  return {
+    rootId: root.id,
+    generation,
+    backupId: backup.id,
+    current: plan.current,
+    restore: plan.restore,
+    expectedSha256: plan.current.sha256,
+    confirmToken: confirmation.token,
+    expiresAt: confirmation.expiresAt,
+    requiresConfirmation: true,
+  }
+}
+
+export function rollbackConfigForRoot (opts = {}) {
+  const root = resolveRegisteredRoot(opts.rootId)
+  if (root.mode !== CONFIG_ROOT_MODES.MANAGED) {
+    throw new ConfigError('write_disabled', '该登记根是只读模式（readonly）：rollback 仅在受控自管 fixture（managed）中启用')
+  }
+  const adminSubject = requireAdminSubject(opts.adminSubject)
+  const backup = resolveBackupRecord(root.id, opts.backupId)
+  const plan = planRollback({ path: root.path, backupPath: backup.path })
+  const generation = generationOf(plan.current)
+  if (opts.expectedSha256 !== undefined && String(opts.expectedSha256) !== plan.current.sha256) {
+    throw new ConfigError('concurrent_modification', '当前文件 sha256 与预期不一致（外部已修改），回滚中止。')
+  }
+  verifyManagementConfirmation({
+    token: opts.confirmToken,
+    operation: 'rollback',
+    rootId: root.id,
+    adminSubject,
+    generation,
+    beforeSha256: plan.current.sha256,
+    afterSha256: plan.restore.sha256,
+    now: opts.now,
+  })
+  const result = commitConfigRollback(plan)
+  const safetyBackupId = result.safetyBackupPath
+    ? registerBackupRecord(root.id, result.safetyBackupPath, { generation })
+    : null
+  return Object.assign({}, result, { rootId: root.id, generation, backupId: backup.id, safetyBackupId })
+}
+
+// export 只回“声明所有权”的字段归一化投影；不含保留行/整文件/凭据。
+export function exportOwnedFieldsForRoot (opts = {}) {
+  const root = resolveRegisteredRoot(opts.rootId)
+  let snapshot = null
+  try { snapshot = snapshotConfigFile(root.path) } catch (e) {
+    if (e && e.code === 'config_not_found') snapshot = { exists: false, sha256: '', size: 0, mtimeMs: 0 }
+    else throw e
+  }
+  if (!snapshot.exists) {
+    return {
+      rootId: root.id,
+      generation: 'absent',
+      exists: false,
+      owned: publicOwnedProjection(readOwnedFields('')),
+    }
+  }
+  const text = readFileSync(root.path, 'utf8')
+  if (Buffer.byteLength(text, 'utf8') > MAX_CONFIG_BYTES) throw new ConfigError('too_large', 'config.toml 超过 ' + MAX_CONFIG_BYTES + ' 字节，拒绝导出。')
+  return {
+    rootId: root.id,
+    generation: sha256Hex(text),
+    exists: true,
+    owned: publicOwnedProjection(readOwnedFields(text)),
   }
 }
 
