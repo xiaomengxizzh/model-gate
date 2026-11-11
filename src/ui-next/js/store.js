@@ -48,19 +48,19 @@ export async function loadAuth() {
   }
 }
 
-export async function loadStatus() {
-  setPhase('status', 'loading')
+export async function loadStatus(opts = {}) {
+  if (!opts.silent) setPhase('status', 'loading')
   try {
     const status = await api.status()
     state.status = status
     state.loadedAt = Date.now()
     state.lastError = null
-    setPhase('status', status ? 'ready' : 'empty')
+    if (!opts.silent) setPhase('status', status ? 'ready' : 'empty')
     emit('status', status)
     return status
   } catch (e) {
     state.lastError = e
-    setPhase('status', 'error')
+    if (!opts.silent) setPhase('status', 'error')
     throw e
   }
 }

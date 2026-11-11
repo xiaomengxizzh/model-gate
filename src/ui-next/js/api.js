@@ -51,8 +51,10 @@ export async function request(path, opts = {}) {
   let data = null
   const type = res.headers.get('content-type') || ''
   try { data = type.includes('application/json') ? await res.json() : await res.text() } catch { data = null }
-  // 401/403 都视为控制面会话失效：清空已渲染的敏感投影，避免保留 stale 数据。
-  if ((res.status === 401 || res.status === 403) && opts.authEvent !== false) {
+  // 只有 401 是“会话失效”（清 token/清数据/锁屏）。
+  // 功能级 403（write_disabled / explicit_admin_required / path_not_allowed 等）必须抛给调用方，
+  // 由对应视图/卡片进入局部 error 态；绝不清 token、不清其它视图数据、不跳登录。
+  if (res.status === 401 && opts.authEvent !== false) {
     if (unauthorizedHandler) unauthorizedHandler({ status: res.status, path })
   }
   if (!res.ok) throw new ApiError(errorMessage(data, res.status), res.status, data)
