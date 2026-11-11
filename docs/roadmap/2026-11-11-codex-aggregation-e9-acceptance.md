@@ -37,19 +37,21 @@
 
 ```text
 npm run check        → 0（UI modules 16/16）
-npm test             → 43/43 隔离套件通过
+npm test             → 44/44 隔离套件通过
 npm run docs:check   → PASS
 node scripts/check-metadata.mjs → PASS (21 checks)
 scripts/test/codex-e2e.mjs  → 9/9（真实 Codex CLI × 双 mock）
 scripts/test/codex-live.mjs → 5/5（真实 Codex CLI × 真实官方后端 × 本地第三方 mock）
+scripts/test/codex-live-real.mjs → 7/7（真实官方后端 + 真实 OpenCode Go 同线程）
+scripts/test/codex-config-e2e.mjs → 14/14（真实 /api/codex/* 写入链）
+MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs → 27/27 旧集成套件文件通过
+node scripts/test/ui-browser-check.mjs --port 8790 --token fixture-admin-token → 14/14
 ```
 
-旧集成套件（`MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs`）**未纳入默认门禁，本轮 NOT_RUN**：
-它包含需要 CDP Chrome:9222 的 `ui-browser-check` 与常驻 fixture 服务，本机无该浏览器会话时会阻塞/报错（实测 `connect ECONNREFUSED 127.0.0.1:9222`），
-因此不作为聚合改动的回归证据；默认白名单 43 套件才是本仓库的回归闸门。
+旧集成套件与浏览器套件按仓库文档单独运行：`live.mjs` 现在显式排除常驻夹具（`ui-fixture.mjs`）与需要 `--port/--token` 的浏览器套件；
+浏览器验收用 `ui-fixture`（隔离端口）+ 本地 headless Chrome + `ui-browser-check`，本轮 **14/14**，含 401 锁定/解锁、六个路由、409 冲突、XSS 文本化、主题与 390px 响应式。
 
-> 另：`ui-browser-check` 的 dashboard 断言在“部分上游熔断”状态下会得到 `13/14`（该断言读 `/api/status` 的熔断态，与本次 Codex 改动无关，clients 页检查本身 PASS、0 页面异常）；未修改该历史脚本。
-
+`ui-browser-check` 的 dashboard 断言曾出现 `13/14`（读 `/api/status` 的熔断态，属 fixture 播种竞态，与聚合改动无关）；本轮同一脚本 14/14 通过，未修改其断言。
 ## 4. 复现（隔离，不触碰正式环境）
 
 ```bash
