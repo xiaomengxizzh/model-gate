@@ -8,9 +8,9 @@
 ## 0. 先说数字口径（避免误读）
 
 - **交付点权威数字（E 在纯检出上实跑，lead 复核一致；总数以此为准）**：
-  - **57 套件 / 545 pass / 0 fail / 1 skip**（`node scripts/test/run.mjs`）。
+  - **59 套件 / 562 pass / 0 fail / 1 skip**（`node scripts/test/run.mjs`）。
     **1 skip = `MG_CODEX_VERIFY=1` 门控的真实 CLI 用例**（`offline/codex-catalog` 内），默认不执行真实 CLI。
-  - `npm run docs:check` → **`Documentation paths: PASS`**（交付报告记录 **60 files / 210 links**；脚本本身只打印 PASS）
+  - `npm run docs:check` → **`Documentation paths: PASS`**（交付报告记录 **60 files / 213 links**；脚本本身只打印 PASS）
   - `node scripts/check-metadata.mjs` → **Metadata: PASS (32 checks)**
   - `npm run check` → exit 0，UI **16/16** 语法 OK
   - 清单不变量：磁盘 `scripts/test/offline/*.test.mjs` = **54**，登记 **54**，**missing=[] ghost=[]**
@@ -114,7 +114,7 @@
 
 | 等级 | 行数 | 说明 |
 | --- | --- | --- |
-| `PASS(mock)` | 25 | 交付点 57 套件全部通过（含仅交付点可跑的 fixture 入口，见 B9）；本机分支复现见 §0 判读规则 |
+| `PASS(mock)` | 25 | 交付点 59 套件全部通过（含仅交付点可跑的 fixture 入口，见 B9）；本机分支复现见 §0 判读规则 |
 | `PASS(real)` | **0** | 本轮零真实上游、零真实 CLI、零真实 UHR；不把 mock 写成真实 |
 | `NOT_RUN` | 10 | B1–B5、B7–B8、B10–B12（含 1 条依赖未接线） |
 | `BLOCKED` | 1 | B6（真实 UHR：缺现行授权接口与写集） |
@@ -129,5 +129,5 @@
 5. **管理面 = 单令牌**（C4）：没有按操作的最小权限；令牌泄露即全量管理权限。
 6. **额度读数必须带观测时间**（M4-3a 收紧）：注入快照没有 `observedAt` 时按 `unknown`（`freshness_unproven`）处理，
    不再当成当下值；接线方必须把"读到的时间"一并传入，并配置合理的 `codexQuota.maxAgeMs`（默认 5 分钟）。
-7. **数字随分支变化**：交付点 57 套件 / 545 pass 是**本交付点**的实测，回滚到较早里程碑后总数与断言数都会变；
+7. **数字随分支变化**：交付点 59 套件 / 562 pass 是**本交付点**的实测，回滚到较早里程碑后总数与断言数都会变；
    不要把任何固定数字写进 CI 断言，判读以当次输出为准。

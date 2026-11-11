@@ -36,10 +36,10 @@ git -C "$DEPLOY" log --oneline -10    # 找到要回滚到的里程碑
 
 | 回滚到 | 必跑门禁 | 额外核对 |
 | --- | --- | --- |
-| `64a5c96`（基线采纳） | 五条（该点套件很少，摘要行以当次输出为准，**不要拿 57 套件去比**） | 确认 runner 是旧格式（`Isolated suites: n/n passed`）时不要误判为失败；`/healthz` 与 `/v1/models` |
+| `64a5c96`（基线采纳） | 五条（该点套件很少，摘要行以当次输出为准，**不要拿 59 套件去比**） | 确认 runner 是旧格式（`Isolated suites: n/n passed`）时不要误判为失败；`/healthz` 与 `/v1/models` |
 | `dacc564`（Key 三态） | 五条 + `offline/admin-origin`、`offline/admin-secrets` | 数据面 Key 三态（缺失/错误/有效）行为、`MG_CLIENT_KEY` 设置后的 401/200 判定 |
 | `9ebb2d5`（入口收口） | 五条 + `offline/admin-entry`、`offline/codex-api` | 确认自管 apply/rollback 在**普通产品模式仍是 DISABLED**（C7），fixture 模式才可用 |
-| `<最终集成 SHA，见交付报告 R01>`（交付点） | 五条（期望 57 套件 / 545 pass / 0 fail / 1 skip、docs 60 files/210 links、metadata 32 checks） | 与[支持矩阵](../roadmap/2026-11-11-support-matrix.md) §0 的数字逐项对齐 |
+| `<最终集成 SHA，见交付报告 R01>`（交付点） | 五条（期望 59 套件 / 562 pass / 0 fail / 1 skip、docs 60 files/213 links、metadata 32 checks） | 与[支持矩阵](../roadmap/2026-11-11-support-matrix.md) §0 的数字逐项对齐 |
 
 ## 2. 回滚命令
 
@@ -72,14 +72,14 @@ git -C "$DEPLOY" status --short       # 必须为空
 ```bash
 node --version                       # 必须 >= 18
 npm run check                        # 语法自检，不起服务
-node scripts/test/run.mjs            # 期望摘要行 "suites: <N> passed, 0 failed, ..."（本交付点 57 passed / 545 pass / 0 failed / 1 skip），退出码 0
-npm run docs:check                   # 期望 "Documentation paths: PASS"（交付报告记录 60 files / 210 links；脚本只打印 PASS）
+node scripts/test/run.mjs            # 期望摘要行 "suites: <N> passed, 0 failed, ..."（本交付点 59 passed / 562 pass / 0 failed / 1 skip），退出码 0
+npm run docs:check                   # 期望 "Documentation paths: PASS"（交付报告记录 60 files / 213 links；脚本只打印 PASS）
 node scripts/check-metadata.mjs      # 期望 "Metadata: PASS (32 checks)"（本交付点；分支/旧里程碑的文档更少，数字会更小，PASS 才是判据）
 ```
 
 判读规则：
 
-- 摘要行格式为 `suites: <N> passed, 0 failed, ...`（本交付点：**57 passed / 545 pass / 0 failed / 1 skip**，
+- 摘要行格式为 `suites: <N> passed, 0 failed, ...`（本交付点：**59 passed / 562 pass / 0 failed / 1 skip**，
   其中 1 skip 是 `MG_CODEX_VERIFY=1` 门控的真实 CLI 用例）。若看到旧的 `Isolated suites: n/n passed`，
   说明跑的是 M0-1 之前的旧 runner，以实际输出为准。
 - `<N>` **随分支/里程碑变化**：57 是**本交付点**的数字，不是永久常量。不要在任何脚本或文档里把 `N` 写死，
