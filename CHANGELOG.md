@@ -2,6 +2,14 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-11 Codex 聚合 M2 LIVE 边界：v2 加密任务显式阻断
+
+### Verified
+- 官方主代理（真实 chatgpt.com）成功调用 spawn_agent 派生第三方子代理（真实 OpenCode Go），model 覆盖生效；子代理请求含加密 agent_message 时网关返回 v2_encrypted_task_unsupported，主代理如实回显错误并结束轮次。未解析/未删除/未伪造密文，未静默降级 v1。证据 docs/evidence/2026-11-11-e4-v2-live-blocked.md。
+
+### NOT_RUN
+- 真实 v2 子代理成功闭环：被加密边界阻断（D3 设计内结果）；明文重新委派与官方子代理路径未实现。
+
 ## 2026-11-11 Codex 聚合补丁：OpenCode Go 会话头与真实第三方复验
 
 ### Fixed

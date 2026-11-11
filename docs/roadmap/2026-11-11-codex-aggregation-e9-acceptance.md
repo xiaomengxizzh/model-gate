@@ -26,7 +26,7 @@
 | 同一目录 /model 可见 | ✅ | ✅（catalog 生效，无 fallback 告警） | NOT_RUN | 目录 14 模型 |
 | GPT→第三方→GPT 同线程 | ✅ 9/9 | ✅ **LIVE 5/5 + LIVE-REAL 7/7** | NOT_RUN | 真实 chatgpt.com + 真实 OpenCode Go（deepseek-v4.1-flash）同线程三轮 |
 | SSE 与历史重放 | ✅ | ✅ 连续三轮 resume | NOT_RUN | 流内 completed 正常 |
-| v2 子代理工具闭环 | ✅ 映射/阻断 | NOT_RUN（需真实第三方 v2） | NOT_RUN | 加密任务显式 `v2_encrypted_task_unsupported` |
+| v2 子代理工具闭环 | ✅ 映射/阻断 15/15 | ⛔ BLOCKED（显式） | NOT_RUN | 官方主代理成功 spawn 第三方子代理；子代理请求含加密 agent_message，网关返回 v2_encrypted_task_unsupported（证据 docs/evidence/2026-11-11-e4-v2-live-blocked.md） |
 | v2 加密失败显式 | ✅ | NOT_RUN | 适用时 NOT_RUN | 无"解密成功"假象 |
 | 智能 Fallback | ✅ 10/10 | 经授权可复测 | — | 429/5xx/402/404/断流/取消/预算全注入 |
 | 配置 diff/冲突/回滚 | ✅ | 隔离目录 | 隔离目录 | 真实 `~/.codex/config.toml` 写入 NOT_RUN |
