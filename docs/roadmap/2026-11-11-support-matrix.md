@@ -7,17 +7,35 @@
 
 ## 0. 先说数字口径（避免误读）
 
-- 下表各套件/断言数字来自本卡验收时的**实测**：分支 `work/d`（代码基线 `a7b969e`，含 M4-3a 的历史/额度加固），
-  隔离 `HOME`/`TMPDIR`、无网络，命令 `node scripts/test/run.mjs`：
-  - **49 套件全部通过**（输出 `Isolated suites: 49/49 passed`，退出码 0）
-  - node:test 用例 **408**：407 通过、**1 SKIP**（`MG_CODEX_VERIFY=1` 才执行的真实 CLI 用例）、0 失败
-  - 3 个旧式验收脚本：`virtual-models` 18/18、`effort-normalize` 20/20、`upstream-side-4xx` 7/7
-  - `npm run check` 退出码 0；`npm run docs:check` → `Documentation paths: PASS`
-- **集成线口径（总数以此为准）**：lead 合并后为 **53 套件**；node:test 用例总数以交付报告实测为准
-  （**`<见交付报告>`**）。本分支没有 integration ref，无法复现集成线总数，所以上面的 49/408
-  **只用于核对"每个套件的断言数是否与下表一致"**，不作为集成线总数写进任何对外结论。
-  按本轮合并的相对增量推算：503 + 9（history 3→9 即 +6、quota 6→9 即 +3）= **512 pass**；仍以交付报告为准。
-- 凡依赖集成线交付的行，证据列写 `<见交付报告>` 并同时标 `NOT_RUN(本分支不可复现)`，而不是写成通过。
+- **交付点权威数字（E 在纯检出上实跑，lead 复核一致；总数以此为准）**：
+  - **57 套件 / 545 pass / 0 fail / 1 skip**（`node scripts/test/run.mjs`）。
+    **1 skip = `MG_CODEX_VERIFY=1` 门控的真实 CLI 用例**（`offline/codex-catalog` 内），默认不执行真实 CLI。
+  - `npm run docs:check` → **`Documentation paths: PASS`**（交付报告记录 **60 files / 210 links**；脚本本身只打印 PASS）
+  - `node scripts/check-metadata.mjs` → **Metadata: PASS (32 checks)**
+  - `npm run check` → exit 0，UI **16/16** 语法 OK
+  - 清单不变量：磁盘 `scripts/test/offline/*.test.mjs` = **54**，登记 **54**，**missing=[] ghost=[]**
+- 这组数字是**本交付点**的实测，随分支/清单增删变化，**不是永久常量**；回滚到较早里程碑后总数会变
+  （判读规则见[回滚与禁用](../how-to/rollback-and-disable.md) §3）。下表每行的"套件断言数"是该交付点树上的
+  逐套件实测值；换分支跑出的**总数**可能更少，但**每个套件的断言数**应一致，用于核对下面各格。
+- 最终集成 HEAD：**`<最终集成 SHA，见交付报告 R01>`**。
+- 本轮里程碑（sha 可直接用于回滚）：
+
+  | SHA | 里程碑 |
+  | --- | --- |
+  | `6bc6441` | 远端 main（本轮基线起点） |
+  | `64a5c96` | 基线采纳（ff #5+#6，真实祖先链） |
+  | `9a3b26f` | M0-1 离线验证入口（显式清单 runner） |
+  | `a3fb0a7` | M0-1b 旧 runner fail-closed |
+  | `dacc564` | M0-2/P0-1 数据面 Key 三态 |
+  | `695b346` | M0-3 配置/Key 同代际事务 |
+  | `5e8196d` | M0-1c 正向白名单 |
+  | `6980377` | M3-1b legacy 能力信任 + D7 闸门 |
+  | `daefdfa` | M5-2b + M5-3 支持矩阵 |
+  | `039195f` | M4-1a（P0-2 模块侧） |
+  | `9ebb2d5` | M4-1b（P0-2 入口收口） |
+  | `74f21e6` | M1-4a 可选端点策略 + 视频幂等 |
+  | `4f0226f` | CHANGELOG + 文档索引 |
+- 凡依赖交付点新增套件/入口的行，证据列写清套件名并标注"交付点实测"；本分支复现不了的，标 `NOT_RUN(本分支不可复现)`，不写成通过。
 - 证据白名单：`scripts/test/offline/<suite>.test.mjs`、`scripts/test/*.mjs`（旧式或被门控的脚本）、
   `docs/evidence/**`、`docs/contracts/**`、本轮回执日志
   （`/home/xiaomengxizi/ai/tmp/modelgate-runtime-20261111-a1/d/logs/`，机器本地，不入库）。
@@ -73,7 +91,7 @@
 | B6 | 真实 UHR 委派（submit/getResult/cancel 对真实服务） | `BLOCKED(缺现行授权接口与写集)` | 本轮交付 `offline/mcp-uhr-contract` 15 + 契约 `docs/contracts/uhr-mcp-v1.md` | 需要读到现行 UHR 授权接口并单独立项/写集；mock 契约不等于真实集成 |
 | B7 | 账本接线（`reserve → 发送 → settle/release/markUnknown`，`receipt.status !== 'released' ⇒ 可能已提交`） | `NOT_RUN(未接线)` | `grep -rn "routing/ledger" src` 只命中 `decision.js`/`facts.js` 注释；`src/forward.js` 的 `codexBudgetOf` 仍把 `spent` 恒填 0；账本能力由 `offline/routing-ledger` 14 证明 | 由 B/M1-3a 接线；本卡不碰 `forward.js` |
 | B8 | 费用上限强制（`taskUsd` / `dailyUsd` 真正约束消费） | `NOT_RUN(依赖 B7)` | `docs/reference/configuration.md` §预算明确写"未接费用账本，spent 恒 0（NOT_RUN）"；`docs/explanation/fallback-decision.md` §10.5 同 | 接线前**不得**宣称费用上限生效；只声明"模块已就绪" |
-| B9 | 管理面自管 `apply/rollback`（受控 fixture 模式） | `NOT_RUN(本分支不可复现)` | M4-1a 交付在集成线，`<见交付报告>`；本分支 `grep` 无自管 apply/rollback 端点 | 普通产品模式应为 DISABLED（见 C6），fixture 模式需集成线证据 |
+| B9 | 管理面自管 `apply/rollback`（**受控 fixture 模式**） | `PASS(mock)` | 交付点实测：`offline/codex-api` 26 + `offline/admin-entry`（自管 apply/rollback 入口；本分支无该文件，按交付点登记）；普通产品模式仍 DISABLED（C7） | 只在受控 fixture 模式验证；真实产品入口不开放 |
 | B10 | 控制台真实浏览器验收（CSP/交互/截图） | `NOT_RUN(本轮未跑)` | `scripts/test/ui-browser-check.mjs` 需已启动的 CDP Chrome + 显式 `--port/--token`，被 `live.mjs` 排除 | 需真实浏览器与隔离实例；不做自动化假通过 |
 | B11 | 真实计费 / 账单对账 | `NOT_RUN(无真实账单输入)` | `offline/routing-ledger` 14 只证明本地整数记账能力 | 真实账单口径、发票与退款不在本轮范围 |
 | B12 | 可选端点真实上游（embeddings/rerank/media/video） | `NOT_RUN(本轮零真实上游)` | 协议侧 `offline/embeddings` 7、`rerank` 6、`media` 8、`video` 6；README 原表述"真实上游尚未验收" | 端点已接线 ≠ 上游可用 |
@@ -88,7 +106,7 @@
 | C4 | 远程管理面（未配置令牌时） | `DISABLED(默认拒绝)` | `offline/admin-origin` 4（非回环绑定时匿名读/写 403、跨源/Host 校验）、`offline/admin-secrets` 1 | 开启 = `MG_ADMIN_TOKEN` + `server.host` 绑定/反代。风险：令牌泄露等于管理面完全暴露；令牌存 keys 库，重启不失效 |
 | C5 | MCP ↔ UHR 委派入口 | `DISABLED(未接线)` | `src/mcp/` 是隔离目录，`src/index.js` 无注册/HTTP 入口；边界拒绝由 `offline/mcp-uhr-contract` 15 覆盖 | 开启 = 由接线卡（M1-3/M3-3）决定注册；风险：委派会把任务摘要与引用送出进程边界，必须保持只读意图与引用白名单 |
 | C6 | 新控制台（`/ui-next`）作为**默认**入口 | `DISABLED(非默认)` | `offline/ui-next` 2（静态树/CSP/遍历防护）、README 明确"未经所有者批准不做默认入口替换"；旧 `/` 与 `/admin` 保留 | 开启 = 所有者批准后改默认入口。风险：面板状态与新接口契约不匹配时用户误操作（保存会重写 providers/models） |
-| C7 | 管理面**自管 apply/rollback** 入口（普通产品模式） | `DISABLED(不启用)` | 本分支无该入口（M4-1a 在集成线，`<见交付报告>`，见 B9）；现有管理写操作只有配置保存/重载/令牌/Key 元数据，受 `offline/admin-contract` 2、`admin-projection` 4、`admin-origin` 4、`admin-secrets` 1 约束 | 开启 = 集成线的受控自管 fixture 模式（需回滚点 + 人工确认）。风险：apply 会真实改写配置与目录，误触即改路由；没有"撤销"按钮，只能靠回滚点 |
+| C7 | 管理面**自管 apply/rollback** 入口（普通产品模式） | `DISABLED(不启用)` | 普通产品模式无该入口；fixture 模式的入口证据见 B9（`offline/admin-entry`）；现有管理写操作只有配置保存/重载/令牌/Key 元数据，受 `offline/admin-contract` 2、`admin-projection` 4、`admin-origin` 4、`admin-secrets` 1 约束 | 开启 = 受控自管 fixture 模式（需回滚点 + 人工确认）。风险：apply 会真实改写配置与目录，误触即改路由；没有"撤销"按钮，只能靠回滚点 |
 | C8 | **额度不足时自动切换身份/provider** | `DISABLED(硬约束)` | `offline/codex-quota` **9** 的 D7 断言：`routing.autoSwitch=false` 恒真；未确认应急时 `switchAllowed=false`、`changeSessionProvider=false`、动作列表无自动切换项；只有显式应急态才 `switchAllowed=true`（仍 `autoSwitch=false`） | 开启 = 修改 `routing` 语义（当前禁止）。风险：额度不足时自动离开官方池会违反 D7（擅自切到第三方/账单身份、跨身份发送凭据） |
 | C9 | **历史迁移执行**（写入真实 sessions 目录） | `DISABLED(拒绝)` | `offline/codex-history` **9** 的断言：`applySelectiveMigration()` 与 `planSelectiveMigration({apply:true})` 恒抛 `not_authorized`；计划里 `plan.apply.supported=false`；零写入用例另证前后 hash/mtime/目录清单一致 | 开启 = 需实现"备份 + tmp/rename + 回滚演练"并单独立项（当前无写入口）。风险：误写真实历史不可逆，可能破坏客户端会话可见性 |
 
@@ -96,9 +114,9 @@
 
 | 等级 | 行数 | 说明 |
 | --- | --- | --- |
-| `PASS(mock)` | 24 | 全部可在本机隔离环境复现（49 套件，见 §0 实测口径） |
+| `PASS(mock)` | 25 | 交付点 57 套件全部通过（含仅交付点可跑的 fixture 入口，见 B9）；本机分支复现见 §0 判读规则 |
 | `PASS(real)` | **0** | 本轮零真实上游、零真实 CLI、零真实 UHR；不把 mock 写成真实 |
-| `NOT_RUN` | 11 | B1–B5、B7–B12（含 1 条依赖未接线） |
+| `NOT_RUN` | 10 | B1–B5、B7–B8、B10–B12（含 1 条依赖未接线） |
 | `BLOCKED` | 1 | B6（真实 UHR：缺现行授权接口与写集） |
 | `DISABLED` | 9 | C1–C9，均有拒绝路径或默认关闭/硬约束证据 |
 
@@ -111,5 +129,5 @@
 5. **管理面 = 单令牌**（C4）：没有按操作的最小权限；令牌泄露即全量管理权限。
 6. **额度读数必须带观测时间**（M4-3a 收紧）：注入快照没有 `observedAt` 时按 `unknown`（`freshness_unproven`）处理，
    不再当成当下值；接线方必须把"读到的时间"一并传入，并配置合理的 `codexQuota.maxAgeMs`（默认 5 分钟）。
-7. **数字随分支变化**：回滚到较早里程碑后套件数与断言数都会变（本表各套件数来自本分支实测，集成线总数见交付报告），
-   不要把任何固定数字写进 CI 断言。
+7. **数字随分支变化**：交付点 57 套件 / 545 pass 是**本交付点**的实测，回滚到较早里程碑后总数与断言数都会变；
+   不要把任何固定数字写进 CI 断言，判读以当次输出为准。
