@@ -68,6 +68,7 @@ export const SUITES = [
   'scripts/test/offline/sse-chunking.test.mjs',
   'scripts/test/offline/ui-contract.test.mjs',
   'scripts/test/offline/ui-next.test.mjs',
+  'scripts/test/offline/ui-state.test.mjs',
   'scripts/test/offline/user-env.test.mjs',
   'scripts/test/offline/video.test.mjs',
   'scripts/test/offline/wire-format.test.mjs',
