@@ -8,7 +8,7 @@
 //
 // 本模块只做**决策**（返回要转发的头 / 拒绝原因），不发请求、不记头值；日志只允许头名。
 
-import { hostOf, isOfficialHost } from './identity.js'
+import { hostOf, isOfficialHost, isLoopbackHost } from './identity.js'
 
 export const PASSTHROUGH_ENV = 'MG_CODEX_OFFICIAL_PASSTHROUGH'
 // 官方端点允许的路径前缀：OpenAI API（/v1/...）与 ChatGPT 后端的 Codex 路径。
@@ -141,10 +141,6 @@ export function applyExtraHeaders(headers, extra) {
     headers[name] = v
   }
   return { blocked }
-}
-
-function isLoopbackHost(host) {
-  return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]'
 }
 
 function safePathname(pathPrefix, path) {

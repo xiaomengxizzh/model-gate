@@ -390,3 +390,27 @@ test('重定向不跟随：302 不把请求/凭据送到 Location', { timeout: 3
   assert.equal(target.hits.length, 0, '绝不跟随重定向')
   assert.equal(redirector.hits.length, 1, '只请求原始上游一次')
 })
+
+test('targetDeny 旧入参形状保持兼容：拒绝消息不含头值/密钥，身份域/凭据不变量不变', () => {
+  const cfg = {}
+  const provider = { id: 'o', baseUrl: 'https://api.openai.com', apiKey: 'sk-SENTINEL-OFFICIAL', _def: {} }
+  const identity = classifyTarget(provider, cfg)
+  // 既有调用方（forward.js / index.js）的四件套入参形状
+  assert.equal(targetDeny({ identity, provider, cfg, path: '/v1/chat/completions', env: {} }), null)
+  assert.equal(targetDeny({ identity, provider, cfg, path: '/backend-api/codex/responses', env: {} }), null)
+
+  const shadow = { id: 'shadow', baseUrl: 'https://evil.test', codexIdentity: 'official', apiKey: 'sk-SENTINEL-OFFICIAL' }
+  const denied = targetDeny({ identity: classifyTarget(shadow, cfg), provider: shadow, cfg, path: '/v1/x', env: {} })
+  assert.equal(denied.code, 'target_identity_unknown')
+  assert.equal(JSON.stringify(denied).includes('sk-SENTINEL-OFFICIAL'), false, '拒绝消息不得包含 key')
+
+  // 只带 identity.host/scheme 的最小旧形状也不崩
+  const minimal = { kind: 'official', host: 'api.openai.com', scheme: 'https:', credential: 'provider-key' }
+  assert.equal(targetDeny({ identity: minimal, provider: { id: 'o' }, cfg, path: '/v1/models', env: {} }), null)
+  assert.equal(targetDeny({ identity: { kind: 'thirdParty' }, provider: { id: 't' }, cfg, path: '/v1/x', env: {} }), null)
+
+  // 身份域与凭据模式是两个维度：官方 host + 无 key = 客户端订阅透传；第三方 + 有 key = 自有 key
+  assert.equal(classifyTarget({ id: 'x', baseUrl: 'https://chatgpt.com' }, cfg).credential, 'client-passthrough')
+  assert.equal(classifyTarget({ id: 'y', baseUrl: 'https://api.deepseek.com', apiKey: 'k' }, cfg).credential, 'provider-key')
+  assert.equal(classifyTarget({ id: 'z', baseUrl: 'https://api.openai.com', apiKey: 'k' }, cfg).credential, 'provider-key')
+})
