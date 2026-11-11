@@ -1139,7 +1139,7 @@ function makeHandler(state) {
       // 鉴权、来源、路径护栏与 confirmToken 链都在 src/codex/api.js；这里只负责读 body 与回写 JSON。
       if (isCodexApiPath(path)) {
         const rawBody = (req.method === 'POST')
-          ? await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024, { budget, signal: budget.signal })
+          ? await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
           : undefined
         const out = await handleCodexApi({ method: req.method, url, path, cfg: state.cfg, log, req, res, rawBody, requireAdmin: () => requireAdmin(req, res) })
         if (out) sendJson(res, out.status, out.body)

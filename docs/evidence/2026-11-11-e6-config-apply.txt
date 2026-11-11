@@ -1,0 +1,30 @@
+E6 端到端验收：受控 config.toml 写入（2026-11-11）
+=================================================
+
+对象：临时目录中的真实形状 config.toml（含注释、model/model_provider、[features]、[mcp_servers.local]、
+[permissions]、未知段），经真实 HTTP /api/codex/* 走 plan → apply → rollback。
+未触碰 ~/.codex；所有路径都在 mkdtemp 临时目录内。
+
+复现：node scripts/test/codex-config-e2e.mjs
+
+结果：14/14 PASS
+
+PASS  未鉴权 → 401
+PASS  auth.json 被路径护栏拒绝（403 forbidden_path）
+PASS  plan 200 且返回 confirmToken
+PASS  plan 后文件未被写入（sha256 不变）
+PASS  plan 报告有变更项（5 项）
+PASS  apply 200
+PASS  所有权字段已更新（model_provider=openai / openai_base_url / model / model_catalog_json）
+PASS  MCP/权限/未知段/注释逐字保留
+PASS  features.multi_agent_v2 写入且 multi_agent 保留
+PASS  .bak 保存原始内容
+PASS  rollback 200
+PASS  回滚后与原始字节一致（sha256 相等）
+PASS  外部并发修改 → 409 concurrent_modification
+PASS  冲突时文件保持外部版本
+
+同时修复：index.js 挂载 /api/codex/* 时把数据面 budget 传进 collectBody（budget 此时为 null），
+导致 POST 管理请求 502 `Cannot read properties of null (reading 'signal')`。管理面读 body 改为不带 budget 的 collectBody。
+
+边界：真实 ~/.codex/config.toml 写入与客户端重载仍未执行（需所有者逐次确认）；本轮只证明写入链在隔离目录成立。

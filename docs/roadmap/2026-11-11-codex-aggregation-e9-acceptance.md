@@ -24,7 +24,7 @@
 | --- | --- | --- | --- | --- |
 | 官方/第三方认证头隔离 | ✅ 必须 | ✅ 本轮 | NOT_RUN | 逐头断言 + 真实请求抓包（只记头名） |
 | 同一目录 /model 可见 | ✅ | ✅（catalog 生效，无 fallback 告警） | NOT_RUN | 目录 14 模型 |
-| GPT→第三方→GPT 同线程 | ✅ 9/9 | ✅ **LIVE 5/5** | NOT_RUN | 第 1/3 轮为真实 chatgpt.com 请求 |
+| GPT→第三方→GPT 同线程 | ✅ 9/9 | ✅ **LIVE 5/5 + LIVE-REAL 7/7** | NOT_RUN | 真实 chatgpt.com + 真实 OpenCode Go（deepseek-v4.1-flash）同线程三轮 |
 | SSE 与历史重放 | ✅ | ✅ 连续三轮 resume | NOT_RUN | 流内 completed 正常 |
 | v2 子代理工具闭环 | ✅ 映射/阻断 | NOT_RUN（需真实第三方 v2） | NOT_RUN | 加密任务显式 `v2_encrypted_task_unsupported` |
 | v2 加密失败显式 | ✅ | NOT_RUN | 适用时 NOT_RUN | 无"解密成功"假象 |
