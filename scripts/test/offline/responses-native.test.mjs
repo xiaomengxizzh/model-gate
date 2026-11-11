@@ -65,12 +65,20 @@ test('原生 Responses 流式：SSE 事件逐字节透传（不翻译、不追�
   assert.equal(text.includes('data: [DONE]'), false)
 })
 
-test('原生 Responses：拒绝矩阵与能力隔离仍然生效', { timeout: 30000 }, async (t) => {
+test('原生 Responses legacy 拒绝矩阵（无 nativeContract）：明确 unsupported_native_parameter 且零上游', { timeout: 30000 }, async (t) => {
   const upstream = await startScriptedUpstream(async (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(RESP)) })
   const gw = await startGateway({ name: 'mg015n-reject', config: { providers: { mock: { baseUrl: upstream.base } }, models: { demo: { provider: 'mock', api: 'responses' }, emb: { provider: 'mock', api: 'responses', capability: 'embedding' } } } })
   t.after(async () => { await gw.stop(); await upstream.stop() })
-  const a = await gw.post('/v1/responses', { model: 'demo', input: 'hi', store: true }, json())
-  assert.equal(a.status, 400); assert.equal((await a.json()).error.type, 'unsupported_parameter')
+
+  // M1-2：原生分支不再套用 Chat 桥的泛化 rejected；未声明 nativeContract 时
+  // store/previous_response_id/background/truncation 返回明确 typedUnsupported 码。
+  for (const patch of [{ store: true }, { previous_response_id: 'resp_x' }, { background: true }, { truncation: 'auto' }]) {
+    const a = await gw.post('/v1/responses', Object.assign({ model: 'demo', input: 'hi' }, patch), json())
+    assert.equal(a.status, 400, JSON.stringify(patch))
+    const err = (await a.json()).error
+    assert.equal(err.type, 'unsupported_native_parameter', JSON.stringify(patch))
+    assert.match(String(err.message), /nativeContract/)
+  }
   const b = await gw.post('/v1/responses', { model: 'emb', input: 'hi' }, json())
   assert.equal(b.status, 400); assert.equal((await b.json()).error.type, 'unsupported_model')
   assert.equal(upstream.hits.length, 0)

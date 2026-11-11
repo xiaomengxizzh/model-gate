@@ -11,7 +11,7 @@ import {
   normalizeInputToolCall, detectOpaqueV2Task, analyzeToolPairs, flattenAgentMessage,
   UNSUPPORTED_TOOL, V2_ENCRYPTED_TASK_UNSUPPORTED,
 } from '../../../src/codex/interop.js'
-import { responsesToChat, chatToResponse, makeSSEWriter } from '../../../src/responses.js'
+import { responsesToChat, bridge, chatToResponse, makeSSEWriter, UNSUPPORTED_NATIVE_PARAMETER } from '../../../src/responses.js'
 
 const lossyHas = (list, needle) => (list || []).some((x) => String(x).includes(needle))
 
@@ -231,7 +231,7 @@ test('§4 可读 agent_message（纯文本）：降级为 user 消息并显式�
 // ============================================================================
 // responsesToChat：native 模式（宿主 Responses 透传前置校验）
 // ============================================================================
-test('§4 native 模式只做顶层拒绝矩阵：v2 agent_message / 未知 input / namespace 工具不误拒', () => {
+test('§4 native 模式不受 Chat 桥限制污染：v2 agent_message / 托管工具 / namespace 原样放行', () => {
   const body = {
     model: 'native', input: [ENCRYPTED_AGENT_MESSAGE], tools: [V1_NAMESPACE, { type: 'web_search' }], include: ['reasoning.encrypted_content'],
   }
@@ -239,15 +239,33 @@ test('§4 native 模式只做顶层拒绝矩阵：v2 agent_message / 未知 inpu
   assert.equal(n.rejected, null, '原生透传不得因 v2 密文/托管工具被拒')
   assert.equal(n.body, null, 'native 模式不产出 Chat body')
   assert.equal(n.mode, 'native')
+  // 桥方向默认仍是显式错误（避免静默丢弃密文）
+  assert.equal(responsesToChat(body).rejected.code, V2_ENCRYPTED_TASK_UNSUPPORTED)
+})
 
-  // 顶层拒绝矩阵仍然生效
+test('§4 native legacy 拒绝矩阵（无 nativeContract）：明确 unsupported_native_parameter', () => {
   for (const patch of [{ store: true }, { previous_response_id: 'resp_1' }, { background: true }, { truncation: 'auto' }]) {
     const r = responsesToChat(Object.assign({ model: 'native', input: 'hi' }, patch), { mode: 'native' })
     assert.ok(r.rejected, JSON.stringify(patch) + ' native 模式仍须拒绝')
-    assert.equal(r.rejected.code, 'unsupported_parameter')
+    assert.equal(r.rejected.code, UNSUPPORTED_NATIVE_PARAMETER, '不得再用泛化 unsupported_parameter')
+    assert.match(String(r.rejected.message), /nativeContract/)
   }
-  // 桥方向默认仍是显式错误（避免静默丢弃密文）
-  assert.equal(responsesToChat(body).rejected.code, V2_ENCRYPTED_TASK_UNSUPPORTED)
+})
+
+test('§4 native nativeContract 显式驱动：声明支持的字段放行、未声明仍拒绝', () => {
+  const full = { store: true, previous_response_id: 'resp_1', background: true, truncation: 'auto' }
+  const contract = { store: true, previous_response_id: true, background: true, truncation: true }
+  const allowed = bridge(Object.assign({ model: 'native', input: 'hi' }, full), { mode: 'native', nativeContract: contract })
+  assert.equal(allowed.rejected, null, '契约声明支持时必须放行')
+  assert.equal(allowed.body, null)
+
+  const partial = bridge({ model: 'native', input: 'hi', store: true }, { mode: 'native', nativeContract: { supported: ['previous_response_id'] } })
+  assert.equal(partial.rejected.code, UNSUPPORTED_NATIVE_PARAMETER, '白名单未声明的字段仍拒绝')
+
+  const unsupportedList = bridge({ model: 'native', input: 'hi', store: true }, { mode: 'native', nativeContract: { unsupported: ['store'] } })
+  assert.equal(unsupportedList.rejected.code, UNSUPPORTED_NATIVE_PARAMETER)
+  const notListed = bridge({ model: 'native', input: 'hi', previous_response_id: 'r' }, { mode: 'native', nativeContract: { unsupported: ['store'] } })
+  assert.equal(notListed.rejected, null, '黑名单未列出的字段按支持处理')
 })
 
 // ============================================================================

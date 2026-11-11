@@ -4,8 +4,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  responsesToChat, chatToResponse, mapUsage, finishToStatus, makeSSEWriter, encodeSSE, canonEffort,
+  responsesToChat, bridge, LEGACY_BRIDGE_COMPAT, chatToResponse, mapUsage, finishToStatus, makeSSEWriter, encodeSSE, canonEffort,
+  UNSUPPORTED_NATIVE_PARAMETER, UNSUPPORTED_FIELD, UNSUPPORTED_CONTROL_ITEM,
+  UNSUPPORTED_ALLOWED_TOOLS, TOOL_PAIRING_INVALID, OPAQUE_CONTINUATION_UNSUPPORTED,
 } from '../../../src/responses.js'
+
+const V2_ENCRYPTED_TASK_UNSUPPORTED = 'v2_encrypted_task_unsupported'
 
 // 把 writer 返回的一串 SSE 帧拆成 [{type,data}]
 function frames(s) {
@@ -77,6 +81,7 @@ test('§4 function_call / function_call_output / role=tool 映射', () => {
     input: [
       { type: 'function_call', call_id: 'call_1', name: 'search', arguments: '{"q":"x"}' },
       { type: 'function_call_output', call_id: 'call_1', output: 'ok' },
+      { type: 'function_call', call_id: 'call_2', name: 'other', arguments: '{}' },
       { role: 'tool', call_id: 'call_2', content: [{ type: 'text', text: 'done' }] },
     ],
   })
@@ -87,7 +92,11 @@ test('§4 function_call / function_call_output / role=tool 映射', () => {
   ], '契约 §4：call_id→id，name/arguments 原样')
   assert.deepEqual(r.body.messages[1], { role: 'tool', tool_call_id: 'call_1', content: 'ok' },
     '契约 §4：function_call_output → role=tool，call_id→tool_call_id')
-  assert.deepEqual(r.body.messages[2], { role: 'tool', tool_call_id: 'call_2', content: 'done' })
+  assert.equal(r.body.messages[2].role, 'assistant')
+  assert.deepEqual(r.body.messages[2].tool_calls, [
+    { id: 'call_2', type: 'function', function: { name: 'other', arguments: '{}' } },
+  ])
+  assert.deepEqual(r.body.messages[3], { role: 'tool', tool_call_id: 'call_2', content: 'done' })
 })
 
 test('§4 custom tool：format 有损；custom_tool_call 自由文本编码为 {"input":...}', () => {
@@ -137,7 +146,6 @@ test('§4 拒绝矩阵：store/previous_response_id/background/include/truncatio
     [{ include: ['reasoning.encrypted_content', 'file_search_call.results'] }, /include/],
     [{ include: 'reasoning.encrypted_content' }, /include 必须是字符串数组/],
     [{ truncation: 'auto' }, /truncation/],
-    [{ input: [{ type: 'item_reference', id: 'x' }] }, /input item/],
   ]
   for (const [patch, re] of cases) {
     const r = responsesToChat(Object.assign({ model: 'demo', input: 'hi' }, patch))
@@ -171,6 +179,12 @@ test('§4 拒绝矩阵：store/previous_response_id/background/include/truncatio
     assert.equal(tc.body.tool_choice, 'auto')
     assert.ok(lossyHas(tc.lossy, 'tool_choice_dropped:ns1'))
   }
+
+  // M1-2：不透明 item_reference/continuation 在桥方向必须发送前拒绝（稳定 code）。
+  const ref = responsesToChat({ model: 'demo', input: [{ type: 'item_reference', id: 'x' }] })
+  assert.equal(ref.body, null)
+  assert.equal(ref.rejected.code, 'opaque_continuation_unsupported')
+  assert.match(ref.rejected.message, /continuation/)
 
   // 真实客户端（Codex/DSH）固定发的 include 项必须可用，但显式记 lossy
   const inc = responsesToChat({ model: 'demo', input: 'hi', include: ['reasoning.encrypted_content', 'output_text.logprobs'] })
@@ -378,4 +392,188 @@ test('canonEffort：off/none/disabled/false 归一为 none，其它小写', () =
   for (const v of ['off', 'none', 'disabled', 'false', ' OFF ']) assert.equal(canonEffort(v), 'none')
   assert.equal(canonEffort('High'), 'high')
   assert.equal(canonEffort(null), '')
+})
+
+// ============================================================================
+// M1-2（T-SSE-02 相邻的桥契约）：严格默认、显式有损、作用域、配对、v2、native
+// ============================================================================
+test('M1-2 bridge() 严格默认：托管工具/控制项/未知字段 typedUnsupported；显式有损才放行', () => {
+  const tools = [
+    { type: 'web_search' },
+    { type: 'function', name: 'ping', parameters: { type: 'object' } },
+  ]
+  const strict = bridge({ model: 'demo', input: 'hi', tools })
+  assert.equal(strict.body, null, '托管工具默认必须拒绝，不得静默丢弃')
+  assert.equal(strict.rejected.code, 'unsupported_tool')
+  assert.match(strict.rejected.message, /web_search/)
+
+  const compat = responsesToChat({ model: 'demo', input: 'hi', tools })
+  assert.equal(compat.rejected, null, '产品便捷入口保持旧客户端兼容（显式 LEGACY_BRIDGE_COMPAT）')
+  assert.deepEqual(compat.body.tools.map((t) => t.function.name), ['ping'])
+  assert.ok(compat.lossy.includes('tool_dropped:web_search'), '有损丢弃必须记录')
+  assert.equal(LEGACY_BRIDGE_COMPAT.allowLossy, true)
+
+  const explicit = bridge({ model: 'demo', input: 'hi', tools }, { onUnsupportedTool: 'drop' })
+  assert.equal(explicit.rejected, null, '显式有损模式才允许丢弃')
+  assert.deepEqual(explicit.body.tools.map((t) => t.function.name), ['ping'])
+
+  const control = bridge({ model: 'demo', input: [{ type: 'message', role: 'user', content: 'hi' }, { type: 'configuration_update', model: 'x' }] })
+  assert.equal(control.rejected.code, UNSUPPORTED_CONTROL_ITEM, '控制项默认必须 typedUnsupported')
+  const controlCompat = responsesToChat({ model: 'demo', input: [{ type: 'message', role: 'user', content: 'hi' }, { type: 'configuration_update', model: 'x' }] })
+  assert.equal(controlCompat.rejected, null)
+  assert.ok(controlCompat.lossy.includes('input_dropped:configuration_update'))
+
+  const unknown = bridge({ model: 'demo', input: 'hi', vendorExtension: { a: 1 } })
+  assert.equal(unknown.body, null)
+  assert.equal(unknown.rejected.code, UNSUPPORTED_FIELD)
+  const unknownCompat = responsesToChat({ model: 'demo', input: 'hi', vendorExtension: { a: 1 } })
+  assert.equal(unknownCompat.rejected, null)
+  assert.ok(unknownCompat.lossy.includes('unknown_field:vendorExtension'))
+
+  // 文档化的可接受有损项（metadata/user）在严格模式下仍只记 lossy，不阻断。
+  const meta = bridge({ model: 'demo', input: 'hi', metadata: { trace: 't' }, user: 'u' })
+  assert.equal(meta.rejected, null)
+  assert.ok(meta.lossy.includes('metadata'))
+  assert.ok(meta.lossy.includes('user'))
+})
+
+test('M1-2 allowed_tools 作用域：精确表达保留；子集默认拒绝（不放宽）；有损模式才降级', () => {
+  const tools = [{ type: 'function', name: 'a' }, { type: 'function', name: 'b' }]
+  const exact = bridge({
+    model: 'demo', input: 'hi', tools,
+    tool_choice: { type: 'allowed_tools', mode: 'required', tools: [{ type: 'function', name: 'a' }, { type: 'function', name: 'b' }] },
+  })
+  assert.equal(exact.rejected, null, '允许列表等于全部工具时可精确表达')
+  assert.equal(exact.body.tool_choice, 'required')
+  assert.equal(exact.lossy.includes('allowed_tools'), false, '精确表达不应记有损')
+
+  const subset = bridge({
+    model: 'demo', input: 'hi', tools,
+    tool_choice: { type: 'allowed_tools', mode: 'auto', tools: [{ type: 'function', name: 'a' }] },
+  })
+  assert.equal(subset.body, null, '子集不能降级为 auto（会放宽作用域）')
+  assert.equal(subset.rejected.code, UNSUPPORTED_ALLOWED_TOOLS)
+
+  const subsetLossy = bridge({
+    model: 'demo', input: 'hi', tools,
+    tool_choice: { type: 'allowed_tools', mode: 'auto', tools: [{ type: 'function', name: 'a' }] },
+  }, { onUnsupportedTool: 'drop' })
+  assert.equal(subsetLossy.rejected, null)
+  assert.equal(subsetLossy.body.tool_choice, 'auto')
+  assert.ok(subsetLossy.lossy.includes('allowed_tools'), '降级必须显式记有损')
+})
+
+test('M1-2 配对阻断：孤儿 tool_output / 缺 id 的结果 / 重复 call_id 不发送；待执行调用不阻断', () => {
+  const orphan = bridge({
+    model: 'demo',
+    input: [
+      { type: 'function_call', call_id: 'c1', name: 'a', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'ghost', output: 'x' },
+    ],
+  })
+  assert.equal(orphan.body, null)
+  assert.equal(orphan.rejected.code, TOOL_PAIRING_INVALID)
+  assert.ok(orphan.pairing.problems.some((p) => p.code === 'tool_output_without_call'))
+
+  const missingId = bridge({ model: 'demo', input: [{ type: 'function_call_output', output: 'x' }] })
+  assert.equal(missingId.rejected.code, TOOL_PAIRING_INVALID)
+  assert.ok(missingId.pairing.problems.some((p) => p.code === 'tool_output_missing_call_id'))
+
+  const duplicate = bridge({
+    model: 'demo',
+    input: [
+      { type: 'function_call', call_id: 'c1', name: 'a', arguments: '{}' },
+      { type: 'function_call', call_id: 'c1', name: 'b', arguments: '{}' },
+    ],
+  })
+  assert.equal(duplicate.rejected.code, TOOL_PAIRING_INVALID)
+  assert.ok(duplicate.pairing.problems.some((p) => p.code === 'duplicate_call_id'))
+
+  const pending = bridge({ model: 'demo', input: [{ type: 'function_call', call_id: 'c1', name: 'a', arguments: '{}' }] })
+  assert.equal(pending.rejected, null, '只有调用没有结果可能是待执行调用，不阻断发送')
+  assert.ok(pending.pairing.problems.some((p) => p.code === 'tool_call_without_output'))
+})
+
+test('M1-2 v2 密文顶层与嵌套扫描；opaque agent 任务/continuation 发送前拒绝', () => {
+  const top = bridge({ model: 'demo', input: 'hi', encrypted_content: 'CIPHER-VALUE' })
+  assert.equal(top.body, null)
+  assert.equal(top.rejected.code, V2_ENCRYPTED_TASK_UNSUPPORTED)
+  assert.equal(top.rejected.message.includes('CIPHER-VALUE'), false, '错误不得回显密文')
+  assert.ok(top.signals || top.rejected, '保留信号/拒绝结构')
+
+  const nested = bridge({ model: 'demo', input: 'hi', metadata: { nested: { encrypted_task_id: 'CIPHER-VALUE' } } })
+  assert.equal(nested.rejected.code, V2_ENCRYPTED_TASK_UNSUPPORTED)
+
+  const readable = bridge({ model: 'demo', input: [{ type: 'agent_message', id: 'a1', author: '/root', recipient: '/root/t', content: [{ type: 'input_text', text: 'hello' }] }] })
+  assert.equal(readable.rejected, null, '纯文本 agent_message 可降级')
+  assert.ok(readable.lossy.includes('agent_message_text_flattened'))
+
+  const opaque = bridge({ model: 'demo', input: [{ type: 'agent_message', id: 'a1', content: [{ type: 'input_text', text: 'x' }, { type: 'input_image', image_url: 'https://example.invalid/x.png' }] }] })
+  assert.equal(opaque.body, null)
+  assert.equal(opaque.rejected.code, OPAQUE_CONTINUATION_UNSUPPORTED)
+})
+
+test('M1-2 nativeContract：未提供 → 明确 typedUnsupported；提供后按契约放行/拒绝；原生不受桥限制', () => {
+  for (const patch of [{ store: true }, { previous_response_id: 'resp_1' }, { background: true }, { truncation: 'auto' }]) {
+    const legacy = responsesToChat(Object.assign({ model: 'native', input: 'hi' }, patch), { mode: 'native' })
+    assert.equal(legacy.body, null)
+    assert.equal(legacy.rejected.code, UNSUPPORTED_NATIVE_PARAMETER, 'legacy 拒绝矩阵保留，但使用明确 code')
+    assert.match(legacy.rejected.message, /nativeContract/)
+
+    const allowed = bridge(Object.assign({ model: 'native', input: 'hi' }, patch), {
+      mode: 'native',
+      nativeContract: { store: true, previous_response_id: true, background: true, truncation: true },
+    })
+    assert.equal(allowed.rejected, null, JSON.stringify(patch) + ' 契约声明支持时必须放行')
+    assert.equal(allowed.body, null, 'native 模式不产出 Chat body')
+  }
+
+  const partial = bridge({ model: 'native', input: 'hi', store: true }, { mode: 'native', nativeContract: { supported: ['previous_response_id'] } })
+  assert.equal(partial.rejected.code, UNSUPPORTED_NATIVE_PARAMETER, '白名单未声明的字段仍拒绝')
+
+  // 原生分支不受 Chat 桥的 v2/托管工具限制污染。
+  const nativeOpaque = bridge({
+    model: 'native', input: [{ type: 'agent_message', id: 'a1', content: [{ type: 'encrypted_content', encrypted_content: 'CIPHER' }] }],
+    tools: [{ type: 'web_search' }],
+  }, { mode: 'native', nativeContract: { store: true } })
+  assert.equal(nativeOpaque.rejected, null)
+})
+
+test('M1-2 writer：多 callId 交错 delta 不串线，item id 贯穿 add/delta/done/completed', () => {
+  const w = makeSSEWriter({ id: 'resp_multi', model: 'demo', createdAt: 1700000000 })
+  const out = w.created()
+    + w.beginMessage('msg_multi')
+    + w.textDelta('Hel', { itemId: 'msg_multi' })
+    + w.textDelta('lo', { itemId: 'msg_multi' })
+    + w.endMessage('Hello', { itemId: 'msg_multi' })
+    + w.beginToolCall({ id: 'fc_a', call_id: 'call_a', name: 'fa' })
+    + w.beginToolCall({ id: 'fc_b', call_id: 'call_b', name: 'fb' })
+    + w.toolArgsDelta('{"a":', { callId: 'call_a' })
+    + w.toolArgsDelta('{"b":', { callId: 'call_b' })
+    + w.toolArgsDelta('1}', { callId: 'call_a' })
+    + w.toolArgsDelta('2}', { callId: 'call_b' })
+    + w.endToolCall('{"a":1}', { callId: 'call_a' })
+    + w.endToolCall('{"b":2}', { callId: 'call_b' })
+    + w.completed({
+      id: 'resp_multi', object: 'response', status: 'completed', model: 'demo',
+      output: [
+        { id: 'msg_multi', type: 'message', status: 'completed', role: 'assistant', content: [{ type: 'output_text', text: 'Hello', annotations: [] }] },
+        { id: 'fc_a', type: 'function_call', status: 'completed', call_id: 'call_a', name: 'fa', arguments: '{"a":1}' },
+        { id: 'fc_b', type: 'function_call', status: 'completed', call_id: 'call_b', name: 'fb', arguments: '{"b":2}' },
+      ],
+    })
+  const evs = frames(out)
+  const adds = evs.filter((e) => e.type === 'response.output_item.added')
+  assert.deepEqual(adds.map((e) => e.data.item.id), ['msg_multi', 'fc_a', 'fc_b'])
+  assert.equal(adds[0].data.item.id, 'msg_multi')
+  const textDeltas = evs.filter((e) => e.type === 'response.output_text.delta')
+  assert.deepEqual(textDeltas.map((e) => e.data.item_id), ['msg_multi', 'msg_multi'])
+  const argDeltas = evs.filter((e) => e.type === 'response.function_call_arguments.delta')
+  assert.deepEqual(argDeltas.map((e) => e.data.item_id), ['fc_a', 'fc_b', 'fc_a', 'fc_b'], '交错 delta 必须回到各自 item')
+  assert.deepEqual(argDeltas.map((e) => e.data.delta), ['{"a":', '{"b":', '1}', '2}'])
+  const argDone = evs.filter((e) => e.type === 'response.function_call_arguments.done')
+  assert.deepEqual(argDone.map((e) => [e.data.item_id, e.data.arguments]), [['fc_a', '{"a":1}'], ['fc_b', '{"b":2}']])
+  const completed = evs.find((e) => e.type === 'response.completed')
+  assert.deepEqual(completed.data.response.output.map((o) => o.id), ['msg_multi', 'fc_a', 'fc_b'], 'completed.output 必须与 item 事件同 id')
+  assert.equal(evs.filter((e) => e.type === 'response.completed').length, 1)
 })

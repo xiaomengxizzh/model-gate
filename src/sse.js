@@ -34,6 +34,116 @@ export function writeUpstreamHeaders(client, upstream, extra) {
 const WRITE_WAIT_MS = 30000
 const MAX_CLIENT_BUFFER_BYTES = 8 * 1024 * 1024
 
+// ── SSE 帧解码（M1-2）──
+// 旧实现 buf += chunk.toString('utf8') + indexOf('\n\n') 有三个真实缺陷：
+//   ① UTF-8 多字节字符被 chunk 边界切开会乱码（StringDecoder/TextDecoder stream 才能正确拼接）；
+//   ② 只认 LF 空行，CRLF（\r\n\r\n）或 CR-only 的上游会整条流不产出事件；
+//   ③ 单帧/未闭合缓冲无上界，恶意或故障上游可用一个永不出现空行的超长行打爆内存。
+// 这里用流式 TextDecoder + 行终止符状态机（\r\n / \n / \r 混用均按 SSE 规范处理），
+// 并对单帧与待解析缓冲分别设上限；超限抛 code=SSE_FRAME_TOO_LARGE，调用方必须终止而不是续传。
+export const MAX_SSE_FRAME_BYTES = 1024 * 1024
+export const MAX_SSE_BUFFER_BYTES = 2 * 1024 * 1024
+
+export function sseFrameError(message, bytes) {
+  const e = new Error(message)
+  e.code = 'SSE_FRAME_TOO_LARGE'
+  e.bytes = Number(bytes) || 0
+  return e
+}
+
+function byteLength(s) { return Buffer.byteLength(String(s), 'utf8') }
+
+// 行终止符：\r\n（2） / \n（1） / \r（1）；数据不足以判定 CRLF 时返回 null（等下一 chunk）。
+function readLineEnd(s, i) {
+  if (i >= s.length) return null
+  const ch = s[i]
+  if (ch === '\n') return 1
+  if (ch !== '\r') return 0
+  if (i + 1 >= s.length) return null
+  return s[i + 1] === '\n' ? 2 : 1
+}
+
+// 找“空行”边界：连续两个行终止符。返回 { contentEnd, end }，不完整返回 null。
+function findFrameBoundary(s) {
+  let prevStart = -1
+  let prevEnd = -1
+  let i = 0
+  while (i < s.length) {
+    const len = readLineEnd(s, i)
+    if (len === null) return null
+    if (len === 0) { i += 1; continue }
+    if (prevEnd === i) return { contentEnd: prevStart, end: i + len }
+    prevStart = i
+    prevEnd = i + len
+    i = prevEnd
+  }
+  return null
+}
+
+/** 帧内行终止符统一为 \n（保留 Content 本身，不做 trim）。 */
+export function normalizeSseFrame(raw) {
+  return String(raw).replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+}
+
+/**
+ * 有界 SSE 帧解码器：push(chunk) -> string[]（每个元素一个完整事件帧，内部行以 \n 分隔）。
+ *  - chunk 可为 Buffer/Uint8Array/string；流式 UTF-8，多字节字符跨 chunk 不丢；
+ *  - \r\n、\n、\r 及其混用的空行都识别为帧边界；
+ *  - 单帧字节数 > maxFrameBytes 或待解析缓冲 > maxBufferBytes 抛 SSE_FRAME_TOO_LARGE；
+ *  - flush() 返回未闭合的尾部文本（不合成半截帧），用于调用方决定中断语义。
+ */
+export function createSSEFrameDecoder(opts = {}) {
+  const maxFrameBytes = Number(opts.maxFrameBytes) > 0 ? Number(opts.maxFrameBytes) : MAX_SSE_FRAME_BYTES
+  const maxBufferBytes = Number(opts.maxBufferBytes) > 0 ? Number(opts.maxBufferBytes) : MAX_SSE_BUFFER_BYTES
+  const decoder = new TextDecoder('utf-8')
+  let buf = ''
+  let failed = null
+  const fail = (message, bytes) => { failed = sseFrameError(message, bytes); return failed }
+
+  function push(chunk) {
+    if (failed) throw failed
+    let text
+    try {
+      text = typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true })
+    } catch (err) {
+      failed = err
+      throw err
+    }
+    buf += text
+    const frames = []
+    for (;;) {
+      const boundary = findFrameBoundary(buf)
+      if (!boundary) break
+      const raw = buf.slice(0, boundary.contentEnd)
+      buf = buf.slice(boundary.end)
+      const bytes = byteLength(raw)
+      if (bytes > maxFrameBytes) throw fail('SSE 单帧超过上限 ' + maxFrameBytes + ' 字节（实际 ' + bytes + '）', bytes)
+      frames.push(normalizeSseFrame(raw))
+    }
+    const buffered = byteLength(buf)
+    if (buffered > maxBufferBytes) throw fail('SSE 待解析缓冲超过上限 ' + maxBufferBytes + ' 字节（实际 ' + buffered + '）', buffered)
+    return frames
+  }
+
+  function flush() {
+    if (failed) throw failed
+    const tail = decoder.decode()
+    if (tail) buf += tail
+    const buffered = byteLength(buf)
+    if (buffered > maxBufferBytes) throw fail('SSE 待解析缓冲超过上限 ' + maxBufferBytes + ' 字节（实际 ' + buffered + '）', buffered)
+    const rest = buf
+    buf = ''
+    return rest
+  }
+
+  return {
+    push,
+    flush,
+    get bufferedBytes() { return byteLength(buf) },
+    get failed() { return failed },
+  }
+}
+
 function extractData(ev) {
   let out = []
   for (const line of ev.split('\n')) if (line.startsWith('data:')) out.push(line.slice(5).trim())
@@ -237,7 +347,9 @@ export async function relayStream(client, firstUpstream, opts) {
 
   async function pump(stream) {
     const myGen = ++gen
-    let buf = ''
+    // 每个泵一个流式解码器：UTF-8 跨 chunk、CRLF、单帧/缓冲上界都在这里统一处理。
+    const decoder = createSSEFrameDecoder({ maxFrameBytes: opts.maxFrameBytes, maxBufferBytes: opts.maxBufferBytes })
+    let fatal = null
     const arm = () => { clearIdle(); if (idleMs) idleT = setTimeout(() => judgeDead('idle-timeout'), idleMs) }
     lastDataEventAt = Date.now(); armNoEv()
     arm()
@@ -248,21 +360,30 @@ export async function relayStream(client, firstUpstream, opts) {
         if (budgetTimedOut()) { budgetHit = true; stream.destroy && stream.destroy(); break }
         if (done || clientGoneAt.t != null || client.destroyed) { stream.destroy && stream.destroy(); break }
         clearIdle(); arm()
-        buf += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
-        let sep
-        while ((sep = buf.indexOf('\n\n')) !== -1) {
-          const ev = buf.slice(0, sep)
-          buf = buf.slice(sep + 2)
+        let events
+        try { events = decoder.push(chunk) } catch (e) {
+          if (e && e.code === 'SSE_FRAME_TOO_LARGE') {
+            // 有界拒绝：单帧/缓冲超限是上游协议故障，不续传（重放整个请求可能重复副作用），
+            // 直接销毁上游并让调用方以一次中断终态收尾。
+            fatal = e
+            pendReason = 'sse-frame-too-large'
+            log && log.warn('sse 帧超限，中止且不续传', 'bytes=' + (e.bytes || 0))
+            destroyUpstream()
+            break
+          }
+          throw e
+        }
+        for (const ev of events) {
           if (ev.trim() === '') continue
           await handleEvent(ev, extractData(ev))
           if (done) break
         }
-        if (done) break
+        if (done || fatal) break
         await keepalive()
       }
       clearIdle(); clearNoEv()
       if (done || clientGoneAt.t != null) return
-      if (budgetHit) return
+      if (budgetHit || fatal) return
       if (myGen !== gen) { pendReason = null; return } // 已被更代（重连换流掐掉了本流）：续传链由现役泵负责
       const reason = pendReason; pendReason = null
       if (protocol === 'openai') return resume(reason || (pendingError ? ('error:' + (pendingError.code || pendingError.message)) : 'end')) // 必须 await/return 续传链：否则 main 在续传完成前就继续并 end() 掐断

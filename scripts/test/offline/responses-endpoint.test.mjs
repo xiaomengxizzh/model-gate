@@ -2,6 +2,9 @@
 // 覆盖：非流式对象整形、拒绝矩阵、SSE 事件序列与终态、工具参数分片、上游错误透传、方法限制。
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
+import { Readable } from 'node:stream'
+import { createResponsesStream } from '../../../src/responses-stream.js'
 import { startGateway, startScriptedUpstream } from './harness.mjs'
 
 const json = () => ({ 'content-type': 'application/json' })
@@ -173,4 +176,199 @@ test('Responses 方法限制：GET /v1/responses → 405', { timeout: 30000 }, a
   t.after(() => gw.stop())
   const res = await gw.get('/v1/responses')
   assert.equal(res.status, 405)
+})
+
+// ============================================================================
+// M1-2（T-SSE-02）：流式桥的 item id / callId 配对 / 唯一终态；入口拒绝零上游
+// ============================================================================
+function fakeStreamRes() {
+  const res = new EventEmitter()
+  res.chunks = []
+  res.statusCode = null
+  res.headers = null
+  res.writableLength = 0
+  res.writableEnded = false
+  res.destroyed = false
+  res.writeHead = (code, headers) => { res.statusCode = code; res.headers = headers }
+  res.write = (s) => { res.chunks.push(String(s)); return true }
+  res.end = (s) => { if (s) res.chunks.push(String(s)); res.writableEnded = true }
+  res.destroy = () => { res.destroyed = true; res.emit('close') }
+  return res
+}
+function parseResponsesSSE(text) {
+  return String(text).split('\n\n').filter((b) => b.trim() !== '').map((block) => {
+    let event = ''
+    let data = ''
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) event = line.slice(6).trim()
+      if (line.startsWith('data:')) data = (data ? data + '\n' : '') + line.slice(5).trim()
+    }
+    return { event, data: data ? JSON.parse(data) : null }
+  })
+}
+const chatFrame = (obj) => 'data: ' + JSON.stringify(obj) + '\n\n'
+
+test('T-SSE-02a 流式桥：两个 callId 交错 delta 不串线、item id 贯穿完成帧、恰好一个 completed', { timeout: 15000 }, async () => {
+  const res = fakeStreamRes()
+  const session = createResponsesStream(res, { model: 'demo', id: 'resp_multi', createdAt: 1700000000 })
+  const chunks = [
+    chatFrame({ choices: [{ delta: { content: 'po' } }] }),
+    chatFrame({ choices: [{ delta: { content: 'ng' } }] }),
+    chatFrame({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_a', function: { name: 'fa', arguments: '{"a":' } }] } }] }),
+    chatFrame({ choices: [{ delta: { tool_calls: [{ index: 1, id: 'call_b', function: { name: 'fb', arguments: '{"b":' } }] } }] }),
+    chatFrame({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '1}' } }] } }] }),
+    chatFrame({ choices: [{ delta: { tool_calls: [{ index: 1, function: { arguments: '2}' } }] } }] }),
+    chatFrame({ choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 } }),
+    'data: [DONE]\n\n',
+  ]
+  const result = await session.relay(Readable.from(chunks), { idleMs: 0, maxReconnects: 0, noEventMs: 0 })
+  assert.equal(result.completed, true)
+  const evs = parseResponsesSSE(res.chunks.join(''))
+  const types = evs.map((e) => e.event)
+  assert.equal(types.filter((t) => t === 'response.created').length, 1)
+  assert.equal(types.filter((t) => t === 'response.completed').length, 1, '恰好一个 completed 终态')
+  assert.equal(types.filter((t) => t === 'response.failed').length, 0)
+  assert.equal(types.includes('response.output_text.done'), true)
+
+  const adds = evs.filter((e) => e.event === 'response.output_item.added').map((e) => e.data.item)
+  assert.deepEqual(adds.map((i) => i.id), ['resp_multi_msg', 'resp_multi_fc_call_a', 'resp_multi_fc_call_b'], 'item id 稳定且可预测')
+  const textDeltas = evs.filter((e) => e.event === 'response.output_text.delta')
+  assert.deepEqual(textDeltas.map((e) => e.data.item_id), ['resp_multi_msg', 'resp_multi_msg'])
+  assert.deepEqual(textDeltas.map((e) => e.data.delta), ['po', 'ng'])
+  const textDone = evs.find((e) => e.event === 'response.output_text.done')
+  assert.equal(textDone.data.item_id, 'resp_multi_msg')
+  assert.equal(textDone.data.text, 'pong', '文本终态必须完整（delta 累加而非最后一片）')
+  const msgDone = evs.filter((e) => e.event === 'response.output_item.done' && e.data.item.type === 'message')
+  assert.equal(msgDone[0].data.item.id, 'resp_multi_msg', 'message item id 贯穿 done')
+
+  const argDeltas = evs.filter((e) => e.event === 'response.function_call_arguments.delta')
+  assert.deepEqual(argDeltas.map((e) => [e.data.item_id, e.data.delta]), [
+    ['resp_multi_fc_call_a', '{"a":'], ['resp_multi_fc_call_b', '{"b":'],
+    ['resp_multi_fc_call_a', '1}'], ['resp_multi_fc_call_b', '2}'],
+  ], '交错 delta 必须回到各自 item，不得串线')
+  const argDone = evs.filter((e) => e.event === 'response.function_call_arguments.done')
+  assert.deepEqual(argDone.map((e) => [e.data.item_id, e.data.arguments]), [
+    ['resp_multi_fc_call_a', '{"a":1}'], ['resp_multi_fc_call_b', '{"b":2}'],
+  ])
+  const completed = evs.find((e) => e.event === 'response.completed').data.response
+  assert.deepEqual(completed.output.map((o) => o.id), ['resp_multi_msg', 'resp_multi_fc_call_a', 'resp_multi_fc_call_b'], 'completed.output 与 item 事件同 id')
+  assert.deepEqual(completed.output.filter((o) => o.type === 'function_call').map((o) => [o.call_id, o.arguments]), [
+    ['call_a', '{"a":1}'], ['call_b', '{"b":2}'],
+  ])
+  assert.equal(completed.output_text, 'pong')
+  assert.equal(res.writableEnded, true)
+})
+
+test('T-SSE-02b 半截流：恰好一个 response.failed、无 completed；重复 finish 不写第二次', { timeout: 15000 }, async () => {
+  const res = fakeStreamRes()
+  const session = createResponsesStream(res, { model: 'demo', id: 'resp_half', createdAt: 1700000000 })
+  const upstream = (async function* () {
+    yield chatFrame({ choices: [{ delta: { content: 'x' } }] })
+    throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })
+  })()
+  const result = await session.relay(upstream, { idleMs: 0, maxReconnects: 0, noEventMs: 0 })
+  assert.equal(result.interrupted, true)
+  result.finish('half stream')
+  result.finish('half stream again')
+  const evs = parseResponsesSSE(res.chunks.join(''))
+  const types = evs.map((e) => e.event)
+  assert.equal(types.filter((t) => t === 'response.failed').length, 1, '半截流恰好一个失败终态')
+  assert.equal(types.filter((t) => t === 'response.completed').length, 0, '失败后不得再写 completed')
+  const failed = evs.find((e) => e.event === 'response.failed')
+  assert.equal(failed.data.error.code, 'STREAM_INTERRUPTED')
+})
+
+test('T-SSE-02c 取消/预算：客户端断开只销毁上游且不写二次终态；预算终态恰好一次', { timeout: 15000 }, async () => {
+  // 客户端断开（取消）：Responses 契约 §6.7 不为已断开的客户端伪造终态；上游必须销毁且不重连。
+  const res = fakeStreamRes()
+  let wakeCancel = null
+  const upstream = {
+    destroyed: false,
+    destroy() { this.destroyed = true; if (wakeCancel) wakeCancel() },
+    async *[Symbol.asyncIterator]() {
+      yield chatFrame({ choices: [{ delta: { content: 'first' } }] })
+      const stopped = new Promise((resolve) => { wakeCancel = resolve })
+      res.emit('close') // 客户端断开：relayStream 会同步 destroy 上游
+      await stopped
+    },
+  }
+  const session = createResponsesStream(res, { model: 'demo', id: 'resp_cancel' })
+  const result = await session.relay(upstream, { idleMs: 0, maxReconnects: 0, noEventMs: 0 })
+  assert.equal(result.clientGone, true)
+  assert.equal(upstream.destroyed, true, '取消必须销毁上游')
+  const cancelTypes = parseResponsesSSE(res.chunks.join('')).map((e) => e.event)
+  assert.equal(cancelTypes.includes('response.failed'), false, '客户端已断开时不得再写终态')
+  assert.equal(cancelTypes.includes('response.completed'), false)
+  session.fail('after cancel')
+  assert.equal(parseResponsesSSE(res.chunks.join('')).length, cancelTypes.length, '断开后的 finish 不得补写第二次终态')
+
+  // 预算/服务端取消（客户端仍可写）：失败终态恰好一次，code=REQUEST_TIMEOUT。
+  const res2 = fakeStreamRes()
+  const controller = new AbortController()
+  const budget = { timedOut: () => true, signal: controller.signal }
+  let wakeTimeout = null
+  const hung = {
+    destroyed: false,
+    destroy() { this.destroyed = true; if (wakeTimeout) wakeTimeout() },
+    async *[Symbol.asyncIterator]() { await new Promise((resolve) => { wakeTimeout = resolve }) },
+  }
+  const session2 = createResponsesStream(res2, { model: 'demo', id: 'resp_timeout' })
+  const p = session2.relay(hung, { idleMs: 0, maxReconnects: 0, noEventMs: 0, signal: controller.signal, budget })
+  setTimeout(() => controller.abort(), 10)
+  const r2 = await p
+  r2.finish('timeout', { timeout: true })
+  r2.finish('timeout again', { timeout: true })
+  const types2 = parseResponsesSSE(res2.chunks.join('')).map((e) => e.event)
+  assert.equal(types2.filter((t) => t === 'response.failed').length, 1)
+  assert.equal(types2.filter((t) => t === 'response.completed').length, 0)
+  const failed = parseResponsesSSE(res2.chunks.join('')).find((e) => e.event === 'response.failed')
+  assert.equal(failed.data.error.code, 'REQUEST_TIMEOUT')
+})
+
+test('M1-2 入口：孤儿 tool_output / v2 顶层密文在发送前 400，零上游命中', { timeout: 30000 }, async (t) => {
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(CHAT_OK))
+  })
+  const gw = await startGateway({ name: 'mg015-bridge-guard', config: { providers: { mock: { baseUrl: upstream.base } }, models: { demo: { provider: 'mock' } } } })
+  t.after(async () => { await gw.stop(); await upstream.stop() })
+
+  const orphan = await post(gw, {
+    model: 'demo',
+    input: [
+      { type: 'function_call', call_id: 'c1', name: 'f', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'ghost', output: 'x' },
+    ],
+  })
+  assert.equal(orphan.status, 400)
+  assert.equal((await orphan.json()).error.type, 'tool_pairing_invalid')
+  assert.equal(upstream.hits.length, 0, '配对失败不得触达上游')
+
+  const v2 = await post(gw, { model: 'demo', input: 'hi', encrypted_content: 'CIPHER-VALUE' })
+  assert.equal(v2.status, 400)
+  const v2err = (await v2.json()).error
+  assert.equal(v2err.type, 'v2_encrypted_task_unsupported')
+  assert.equal(JSON.stringify(v2err).includes('CIPHER-VALUE'), false, '错误不得回显密文')
+  assert.equal(upstream.hits.length, 0, 'v2 密文不得触达上游')
+})
+
+test('M1-2 入口：桥流式断流 → 恰好一个 response.failed，无 completed', { timeout: 30000 }, async (t) => {
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    for await (const _ of req) { /* drain */ }
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+    res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'po' } }] }) + '\n\n')
+    setTimeout(() => { try { res.destroy() } catch {} }, 30)
+  })
+  const gw = await startGateway({ name: 'mg015-bridge-half', config: { providers: { mock: { baseUrl: upstream.base } }, models: { demo: { provider: 'mock' } } } })
+  t.after(async () => { await gw.stop(); await upstream.stop() })
+
+  const res = await post(gw, { model: 'demo', input: 'hi', stream: true })
+  assert.equal(res.status, 200)
+  const text = await res.text()
+  const events = parseSSE(text)
+  const types = events.map((e) => e.event)
+  assert.equal(types.filter((x) => x === 'response.created').length, 1)
+  assert.equal(types.filter((x) => x === 'response.failed').length, 1, '断流恰好一个失败终态')
+  assert.equal(types.filter((x) => x === 'response.completed').length, 0, '断流不得再写 completed')
+  assert.equal(text.includes('data: [DONE]'), false, 'Responses 协议不使用 [DONE]')
 })
