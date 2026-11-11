@@ -31,7 +31,7 @@
 | 智能 Fallback | ✅ 10/10 | 经授权可复测 | — | 429/5xx/402/404/断流/取消/预算全注入 |
 | 配置 diff/冲突/回滚 | ✅ | 隔离目录 | 隔离目录 | 真实 `~/.codex/config.toml` 写入 NOT_RUN |
 | 历史只读诊断 | ✅ 合成 3/3 | ✅ **真实 40 会话 / 7056 加密项 / 0 解析错误** | 适用时同 CLI | 证据 docs/evidence/2026-11-11-e7-real-history-readonly.txt；写入仍 not_authorized |
-| 历史选择性迁移 | ✅ 模拟 | NOT_RUN 未授权 | NOT_RUN 未授权 | 写入接口 `not_authorized`；真实迁移需备份+回滚演练 |
+| 历史选择性迁移 | ✅ 合成演练 **11/11** | NOT_RUN 未授权 | NOT_RUN 未授权 | 流程演练见 docs/evidence/2026-11-11-e7-migration-drill.txt；写入接口 `not_authorized` |
 | 官方额度/应急 | ✅ | NOT_RUN | NOT_RUN | 无可靠额度源 → UNKNOWN |
 
 ## 3. 门禁真值（最终一次）
