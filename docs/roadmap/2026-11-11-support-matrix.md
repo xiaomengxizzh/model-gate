@@ -8,7 +8,7 @@
 ## 0. 先说数字口径（避免误读）
 
 - **交付点权威数字（E 在纯检出上实跑，lead 复核一致；总数以此为准）**：
-  - **59 套件 / 562 pass / 0 fail / 1 skip**（`node scripts/test/run.mjs`）。
+  - **59 套件 / 564 pass / 0 fail / 1 skip**（`node scripts/test/run.mjs`）。
     **1 skip = `MG_CODEX_VERIFY=1` 门控的真实 CLI 用例**（`offline/codex-catalog` 内），默认不执行真实 CLI。
   - `npm run docs:check` → **`Documentation paths: PASS`**（交付报告记录 **60 files / 213 links**；脚本本身只打印 PASS）
   - `node scripts/check-metadata.mjs` → **Metadata: PASS (32 checks)**
@@ -17,7 +17,7 @@
 - 这组数字是**本交付点**的实测，随分支/清单增删变化，**不是永久常量**；回滚到较早里程碑后总数会变
   （判读规则见[回滚与禁用](../how-to/rollback-and-disable.md) §3）。下表每行的"套件断言数"是该交付点树上的
   逐套件实测值；换分支跑出的**总数**可能更少，但**每个套件的断言数**应一致，用于核对下面各格。
-- 最终集成 HEAD：**`<最终集成 SHA，见交付报告 R01>`**。
+- 最终集成 HEAD：**`2d82ea2e663db5726c866fa261be36fc09f8d8b3（R00 受审交付点）`**。
 - 本轮里程碑（sha 可直接用于回滚）：
 
   | SHA | 里程碑 |
@@ -129,5 +129,5 @@
 5. **管理面 = 单令牌**（C4）：没有按操作的最小权限；令牌泄露即全量管理权限。
 6. **额度读数必须带观测时间**（M4-3a 收紧）：注入快照没有 `observedAt` 时按 `unknown`（`freshness_unproven`）处理，
    不再当成当下值；接线方必须把"读到的时间"一并传入，并配置合理的 `codexQuota.maxAgeMs`（默认 5 分钟）。
-7. **数字随分支变化**：交付点 59 套件 / 562 pass 是**本交付点**的实测，回滚到较早里程碑后总数与断言数都会变；
+7. **数字随分支变化**：交付点 59 套件 / 564 pass 是**本交付点**的实测，回滚到较早里程碑后总数与断言数都会变；
    不要把任何固定数字写进 CI 断言，判读以当次输出为准。

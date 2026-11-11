@@ -21,6 +21,7 @@
 | 安装、升级、回滚与停机语义 | [部署与回滚](how-to/deploy-and-rollback.md) |
 | 回滚、降级与紧急禁用开关 | [回滚与禁用](how-to/rollback-and-disable.md) |
 | 查询能力支持矩阵（已实现/禁用/证据要求） | [支持矩阵](roadmap/2026-11-11-support-matrix.md) |
+| 本轮加固循环的交付结论、P0 收口证据与未执行项 | [加固循环交付报告](roadmap/2026-11-11-hardening-delivery.md) |
 | 查询 Node/平台支持边界 | [兼容矩阵](reference/compatibility.md) |
 | 既有后端/前端重建目标 | [G0–G4](roadmap/2026-11-07-gateway-platform-plan.md)、[F0–F5](roadmap/2026-11-07-frontend-rebuild-plan.md) |
 | 理解项目术语 | [术语表](reference/glossary.md) |
