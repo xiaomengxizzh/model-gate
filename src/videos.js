@@ -135,3 +135,144 @@ export function findTaskByIdem(tasks, idem) {
   for (const t of Object.values(tasks)) if (t.idem === idem) return t
   return null
 }
+
+// ============================================================================
+// M1-4a：视频创建幂等（PENDING_SEND 先落盘，再调上游）
+// ============================================================================
+// 关键顺序：本地任务记录（PENDING_SEND + 主体 + 目标 + 幂等键 + 输入指纹）必须先
+// 原子落盘，之后才调用上游 create。并发/失联/重启时只复用本地记录，绝不重复计费。
+// 任务表是单进程单写者：不做跨进程锁（与 config-transaction 的语义无关）。
+import { createHash } from 'node:crypto'
+
+export const VIDEO_PENDING_SEND = 'pending_send'
+export const VIDEO_UNKNOWN = 'unknown'
+export const VIDEO_TERMINAL = Object.freeze(['succeeded', 'failed', 'canceled'])
+
+// 规范化 JSON（递归排序键）：相同的逻辑输入 ⇒ 相同指纹，与键顺序无关。
+export function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return '[' + value.map((v) => stableStringify(v)).join(',') + ']'
+  const keys = Object.keys(value).sort()
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(value[k])).join(',') + '}'
+}
+export function videoInputHash(input) {
+  return createHash('sha256').update(stableStringify(input == null ? {} : input)).digest('hex')
+}
+
+// 同一主体 + 同一幂等键：只有同输入才能复用；不同主体永远互不可见。
+export function findSubjectTask(tasks, subject, idem) {
+  if (!subject || !idem) return null
+  for (const t of Object.values(tasks || {})) if (t && t.subject === subject && t.idem === idem) return t
+  return null
+}
+
+// 重启恢复：进程在 PENDING_SEND 期间死亡 ⇒ 上游结果未知，只允许查状态/人工核对，禁止再次 create。
+export function recoverInterruptedVideoTasks(tasks, now = Date.now) {
+  let changed = false
+  for (const t of Object.values(tasks || {})) {
+    if (!t) continue
+    if (t.status === VIDEO_PENDING_SEND) {
+      t.status = VIDEO_UNKNOWN
+      t.error = 'process interrupted before upstream result was known'
+      t.updatedAt = now()
+      changed = true
+    }
+  }
+  return changed
+}
+
+export class VideoTaskStore {
+  constructor (opts = {}) {
+    if (!opts.file) throw new TypeError('VideoTaskStore requires opts.file（真实视频任务表路径）')
+    this.file = opts.file
+    this.now = typeof opts.now === 'function' ? opts.now : Date.now
+    this.idFactory = typeof opts.idFactory === 'function' ? opts.idFactory : () => 'vid_' + randomUUID()
+    this.tasks = loadVideoTasks(opts.file)
+    if (recoverInterruptedVideoTasks(this.tasks, this.now)) this.persist()
+  }
+  persist () { saveVideoTasks(this.file, this.tasks) }
+  list () { return Object.values(this.tasks).sort((a, b) => b.createdAt - a.createdAt) }
+  get (id) { return this.tasks[id] || null }
+  find (subject, idem) { return findSubjectTask(this.tasks, subject, idem) }
+  // create：返回 { ok, reused?, conflict?, unknown?, task, status?, error? }
+  //   send(task) 必须是注入的上游创建调用（index.js 接线时传真实 HTTP）。
+  async create (opts = {}) {
+    const subject = typeof opts.subject === 'string' ? opts.subject.trim() : ''
+    if (!subject) return { ok: false, status: 401, error: { type: 'unauthorized', code: 'missing_subject', message: '视频创建需要可识别的调用主体' } }
+    const idem = opts.idem == null ? null : String(opts.idem).trim() || null
+    const input = opts.input == null ? {} : opts.input
+    const inputHash = videoInputHash(input)
+    if (idem) {
+      const existing = findSubjectTask(this.tasks, subject, idem)
+      if (existing) {
+        if (existing.inputHash !== inputHash) {
+          return { ok: false, status: 409, conflict: true, task: clientTask(existing), error: { type: 'idempotency_conflict', code: 'idempotency_key_reused', message: '幂等键已用于不同输入，拒绝创建' } }
+        }
+        // 同键同输入：复用（包括 pending_send / unknown），绝不再次调用上游。
+        return { ok: true, reused: true, task: clientTask(existing), internal: existing }
+      }
+    }
+    const now = this.now()
+    const task = {
+      id: this.idFactory(),
+      object: 'video',
+      subject,
+      idem,
+      inputHash,
+      target: opts.target ? { provider: opts.target.provider || null, path: opts.target.path || null, model: opts.target.model || null } : null,
+      model: (opts.target && opts.target.model) || opts.model || '',
+      provider: (opts.target && opts.target.provider) || opts.provider || '',
+      status: VIDEO_PENDING_SEND,
+      upstreamId: null,
+      createdAt: now,
+      updatedAt: now,
+      prompt: typeof (input.prompt) === 'string' ? input.prompt.slice(0, 2000) : '',
+      progress: null,
+      result: null,
+      error: null,
+      lastPollAt: 0,
+    }
+    this.tasks[task.id] = task
+    this.persist() // ← 必须先落盘，再发起上游调用
+    const send = opts.send
+    if (typeof send !== 'function') {
+      task.status = VIDEO_UNKNOWN
+      task.error = 'no upstream sender injected'
+      task.updatedAt = this.now()
+      this.persist()
+      return { ok: false, status: 500, unknown: true, task: clientTask(task), internal: task, error: { type: 'internal_error', code: 'missing_sender', message: task.error } }
+    }
+    let upstream
+    try {
+      upstream = await send(task)
+    } catch (err) {
+      const aborted = !!(err && (err.aborted || err.code === 'client_closed' || (opts.signal && opts.signal.aborted)))
+      task.status = aborted ? 'canceled' : VIDEO_UNKNOWN
+      task.error = aborted ? 'client canceled before upstream result' : ('upstream create failed: ' + ((err && err.message) || 'unknown'))
+      task.updatedAt = this.now()
+      this.persist()
+      return { ok: false, status: aborted ? 499 : 504, unknown: !aborted, canceled: aborted, task: clientTask(task), internal: task, error: { type: aborted ? 'canceled' : 'upstream_unknown', code: aborted ? 'request_canceled' : 'video_upstream_unknown', message: task.error } }
+    }
+    const json = (upstream && upstream.json) || upstream || null
+    const upstreamId = upstreamTaskId(json)
+    if (upstreamId) task.upstreamId = upstreamId
+    applyUpstreamStatus(task, json || {})
+    if (task.status === VIDEO_PENDING_SEND) task.status = 'queued'
+    if (!task.upstreamId && task.status === 'queued') task.error = 'upstream 未返回任务 id，无法轮询'
+    task.updatedAt = this.now()
+    this.persist()
+    return { ok: true, created: true, task: clientTask(task), internal: task, upstreamId: task.upstreamId }
+  }
+  // 终态只允许一次：取消只对非终态任务生效。
+  cancel (id, reason = 'canceled') {
+    const task = this.tasks[id]
+    if (!task) return null
+    if (VIDEO_TERMINAL.includes(task.status)) return task
+    task.status = 'canceled'
+    task.error = reason
+    task.updatedAt = this.now()
+    this.persist()
+    return task
+  }
+}
+

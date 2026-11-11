@@ -2,6 +2,14 @@
 // 保持 Node 内置模块、零第三方依赖；承载入口在 src/index.js（/v1/embeddings）。
 import { embeddingAdapterFor, supportsEmbeddings } from './format.js'
 import { applyExtraHeaders } from './codex/auth.js'
+import { createOptionalEndpointPolicy } from './optional/policy.js'
+
+// M1-4a：可选端点策略入口。本模块只声明 embedding 的差异（校验 + 上游整形）；
+// 身份、取消、限流、429 归因与能力开关全部走 src/optional/policy.js 的同一实现。
+export const OPTIONAL_ENDPOINT = Object.freeze({ capability: 'embedding', mode: 'json', policy: 'optional-endpoint-policy/1' })
+export function createEmbeddingPolicy(opts = {}) {
+  return createOptionalEndpointPolicy(Object.assign({ capability: 'embedding', validate: validateEmbeddingRequest }, opts))
+}
 
 export const MAX_EMBEDDING_INPUTS = 2048
 
