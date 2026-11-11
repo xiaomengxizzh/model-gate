@@ -257,6 +257,77 @@ export function resolveHealth(input, candidate, opts = {}) {
 }
 
 /**
+ * 金额单位常量。账本（src/routing/ledger.js）内部一律用 micro 整数记账；
+ * 这里提供"入/出边界"的唯一换算点，供接线层把整数账本视图喂给决策器（决策器契约是 USD 数值）。
+ */
+export const MONEY_UNIT = Object.freeze({ USD: 'usd', MICRO: 'micro' })
+export const MICRO_PER_CURRENCY = 1_000_000
+
+const MONEY_ERR = Object.freeze({
+  UNIT_MISMATCH: 'FACT_BUDGET_UNIT_MISMATCH',
+  CURRENCY_MISMATCH: 'FACT_BUDGET_CURRENCY_MISMATCH',
+})
+
+function moneyError(code, message) {
+  const e = new Error(message)
+  e.code = code
+  return e
+}
+
+/** micro 整数 → 货币数值（仅在边界使用；内部累加仍是整数）。 */
+export function usdFromMicro(micro) {
+  if (typeof micro !== 'number' || !Number.isSafeInteger(micro) || micro < 0) {
+    throw moneyError(MONEY_ERR.UNIT_MISMATCH, 'usdFromMicro 只接受非负整数 micro')
+  }
+  return micro / MICRO_PER_CURRENCY
+}
+
+/** 货币数值 → micro 整数。唯一允许浮点进入的入口：一次四舍五入，之后全整数。 */
+export function microFromUsd(usd) {
+  const n = Number(usd)
+  if (!Number.isFinite(n) || n < 0) throw moneyError(MONEY_ERR.UNIT_MISMATCH, 'microFromUsd 只接受非负有限数值')
+  return Math.round(n * MICRO_PER_CURRENCY)
+}
+
+/**
+ * 账本视图 → 决策器 budget 的纯读取适配（不改证据信封语义、不做任何 IO）。
+ * 输入是 ledger.usage()/recover() 的脱敏视图（micro 整数 + 显式币种）。
+ *   · 三个维度只要账本给了数，就把 spendKnown 标 true、spendSource 标 ledger，
+ *     决策器不再报 budget_unverified；
+ *   · 币种不一致直接抛错（绝不换算）；单位不是 micro 直接抛错（避免把整数当美元用）。
+ * @param {object} usage ledger usage 视图 { currency, unit, requestMicro, taskMicro, dayMicro }
+ * @param {object} options { limitsMicro{requestMicro,taskMicro,dayMicro}, currency, enforceUnknownCost }
+ * @returns {object} decision 期望的 budget 形状（USD 数值 + 币种/单位标注）
+ */
+export function budgetFromLedger(usage, options = {}) {
+  const u = usage && typeof usage === 'object' ? usage : null
+  if (!u) throw moneyError(MONEY_ERR.UNIT_MISMATCH, 'budgetFromLedger 需要账本 usage 视图')
+  if (u.unit !== MONEY_UNIT.MICRO) throw moneyError(MONEY_ERR.UNIT_MISMATCH, 'budgetFromLedger 只接受 micro 账本视图')
+  const wantCurrency = options.currency == null ? null : String(options.currency).toUpperCase()
+  const usageCurrency = u.currency == null ? null : String(u.currency).toUpperCase()
+  if (wantCurrency && usageCurrency && wantCurrency !== usageCurrency) {
+    throw moneyError(MONEY_ERR.CURRENCY_MISMATCH, '账本币种与调用方声明不一致：拒绝隐式换算')
+  }
+  const limitsMicro = options.limitsMicro && typeof options.limitsMicro === 'object' ? options.limitsMicro : {}
+  const limit = (key) => (limitsMicro[key + 'Micro'] == null ? 0 : usdFromMicro(limitsMicro[key + 'Micro']))
+  const known = (key) => typeof u[key + 'Micro'] === 'number' && Number.isSafeInteger(u[key + 'Micro'])
+  const spent = (key) => (known(key) ? usdFromMicro(u[key + 'Micro']) : 0)
+  return {
+    limits: { requestUsd: limit('request'), taskUsd: limit('task'), dailyUsd: limit('day') },
+    spent: { requestUsd: spent('request'), taskUsd: spent('task'), dailyUsd: spent('day') },
+    spendKnown: { requestUsd: known('request'), taskUsd: known('task'), dailyUsd: known('day') },
+    spendSource: {
+      requestUsd: known('request') ? 'ledger' : 'unset',
+      taskUsd: known('task') ? 'ledger' : 'unset',
+      dailyUsd: known('day') ? 'ledger' : 'unset',
+    },
+    currency: usageCurrency,
+    unit: MONEY_UNIT.USD,
+    enforceUnknownCost: options.enforceUnknownCost !== false,
+  }
+}
+
+/**
  * 便捷构造：把一组已观测事实打包成候选（供接入层与测试使用）。
  * 只做形状组装，不做任何"补全"——缺哪条就不给哪条。
  */
