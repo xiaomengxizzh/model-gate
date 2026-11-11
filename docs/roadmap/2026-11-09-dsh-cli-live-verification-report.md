@@ -130,7 +130,7 @@ PATTERN_DONE suspects=0
 3. **【已排除】baseURL/`v1` 双拼、SSE 分帧/usage、tool call id/arguments、同 SID 续传、reasoningEffort 透传**：本次均未复现问题，证据见 B1/B2/B4。
 4. **【网关文案】502 兜底耗时描述误导**，见 §3 B3。
 
-本轮**未修改 DSH 源码**（没有可归因到代码的复现）；相关配置配方与注入方式已写入 [headless 操作规范](../../../../../harness/deepseek/docs/headless-runbook.md)。
+本轮**未修改 DSH 源码**（没有可归因到代码的复现）；相关配置配方与注入方式已写入 DSH 仓库的 `docs/headless-runbook.md`（跨仓文件，不在 model-gateway 检出内，故不建立指向仓库外的相对链接）。
 
 ## 5. 任务 D：收口与未验证项
 

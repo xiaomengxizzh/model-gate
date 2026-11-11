@@ -10,7 +10,7 @@
 | 运行时第三方依赖 | 无 | `package.json` 无 `dependencies` / `devDependencies`；源码只用 `node:` 内置模块 |
 | 模块形态 | ESM（`"type": "module"`） | `package.json` |
 | 许可 | MIT | `package.json` 的 `license` 与 [LICENSE](../../LICENSE) 实际文件 |
-| CI 版本矩阵 | 18 / 20 / 22，仅 `workflow_dispatch` 手动触发 | [.github/workflows/check.yml](../../.github/workflows/check.yml) |
+| CI 版本矩阵 | 18 / 20 / 22，`push` / `pull_request` / `workflow_dispatch` 触发（零下载探测 runner 自带 node） | [.github/workflows/check.yml](../../.github/workflows/check.yml) |
 
 `scripts/check-metadata.mjs` 会强制核对“CI 矩阵必须包含 `engines` 下限”，改一处忘另一处会以非 0 退出码失败。
 
@@ -24,7 +24,7 @@
 | 24 | **本地执行通过** | 未验证 | 未验证 | 2026-11-08 本机 `node v24.22.2`：语法/文档/元数据全绿，离线套件 11/11 通过 |
 
 - “未执行”不等于失败：本机只装了 Node 24，按[资源门禁](../../RESOURCE_APPROVAL.md)不得为验收自行下载其它 Node 版本。
-- **GitHub Actions 远程执行：未远程执行（NOT_RUN）**。工作流只在手动 dispatch 时运行，本轮没有触发，也不声称 CI 已通过。
+- **GitHub Actions 远程执行：未远程执行（NOT_RUN）**。工作流在 `push` / `pull_request` / 手动 dispatch 时触发；本轮没有触发 GitHub runner，也不声称 CI 已通过。
 - Windows/macOS 需要各自宿主：Windows 侧还涉及 `start.bat`、`mg-tray.cs`（csc 编译）等本机组件，不在本轮范围。
 
 ## 本地验证证据（2026-11-08）

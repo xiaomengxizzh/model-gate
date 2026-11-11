@@ -138,7 +138,7 @@
 | MG-004 | 27 个旧套件迁移为 OS 临时目录 + 动态端口 + 本地 mock（新增 isolate.mjs/README 证据表），utils 删掉"读改写目标配置"入口与 SKIP 语义，live.mjs 每文件独立子进程 | MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs → 27/27 文件、133 PASS、0 FAIL/SKIP |
 | MG-006 | 指标口径分离：一次请求只计一次对话请求（token/缓存回调只累加数值）、状态字典按当前配置裁剪、对话/模型统计硬上限 | offline/metrics.test.mjs（2 组）；src/index.js、src/forward.js |
 | MG-007 | 统一关闭接口 close()（定时器清理 → 排空连接 → 原子落盘）、SIGTERM/SIGINT 优雅退出、损坏 stats 先备份再重建 | offline/lifecycle.test.mjs（2 组）；src/index.js |
-| MG-010 | Node 18/20/22 CI 矩阵（仅手动触发、零下载探测 runner 自带 node）、元数据核对脚本、LICENSE、部署/回滚与兼容矩阵文档 | scripts/check-metadata.mjs（21 项 PASS）；.github/workflows/check.yml；远程 CI **未执行** |
+| MG-010 | Node 18/20/22 CI 矩阵（push/pull_request/手动触发、零下载探测 runner 自带 node）、元数据核对脚本、LICENSE、部署/回滚与兼容矩阵文档 | scripts/check-metadata.mjs（32 项 PASS）；.github/workflows/check.yml；远程 CI **未执行** |
 | MG-009（服务端+面板） | D-2 保存剥离投影运行时字段（未知扩展保留）；`/api/keys` id 白名单（§8.3 并集 + meta 写保护）；D-7 Key 保存带版本；D-3 dirty 冻结 baseVersion | offline/admin-projection.test.mjs（4 组）；npm test 15/15；live 27/27 |
 | MG-002 | 新增 `src/budget.js`（请求级 deadline + AbortSignal 单一来源）；预算覆盖读 body/全部排队（QPS、provider/模型并发、429 退避）/代理 CONNECT/等头/非流式读体/SSE 中继与续传，并钳制 `loopMs`；排队 waiter 可取消（移除 + 归还 QPS 令牌 + release 恰好一次）；SSE 背压（write=false 暂停读上游、等待 drain，30s/8MiB 上限）；预算耗尽 504 `request_timeout`（流式则 `code=REQUEST_TIMEOUT` 错误事件 + `[DONE]`）；客户端断开始终取消且不熔断 | offline/deadline.test.mjs（13 用例，AC-1..AC-7）；docs/contracts/request-lifecycle-v1.md；npm test 14/14；npm run check 0 |
 
@@ -176,7 +176,7 @@ MG-002 已闭环（离线故障注入），其余条目均为 **TODO**；下列�
 | MG-015 / P1 | **代码已闭环（2026-11-09）**：Chat 桥（映射 + SSE 事件桥）+ 原生 `api:"responses"` 透传（JSON model 回写/SSE 逐字节）；剩余真实 Codex/DSH 对照与 Draft PR #2 审计（均 **UNVERIFIED**，需授权/联网） | MG-002、MG-004、MG-016 | 工具 call_id/arguments/custom tool、SSE 顺序、完成/失败、取消/usage/权限/配额全部 wire 测试；真实 Codex CLI/桌面与 DSH 对照单独授权；不改官方 auth.json |
 | MG-008 / P2 | 已闭环（2026-11-09）：适配器 wire 保真（22 例）+ 模型解析单一入口 + 错误信封映射；剩余真实上游对照（MG-015/单独授权） | MG-002、MG-004、MG-006 | 固定 wire fixtures；分片/断流/重连/多 tool-call 索引测试；显式列出有损转换；探测、预热、failback 采用一致模型解析 |
 | MG-009 / P2 | **代码闭环（2026-11-09）**：D-2 投影字段剥离、D-7 Key 版本、D-3 baseVersion、`/api/keys` 白名单（§8.3）、D-1 面板不透明袋、D-6 只读配置投影 `GET /api/config`；浏览器真实鉴权与保存回读 **PASS**（Headless Chrome，见 docs/audit-20261109-browser-smoke.md）；剩余双标签 409/完整 UI 交互与托盘 smoke（**NOT EXECUTED**）、provider 删除联动清 Key | MG-003、MG-005 | 浏览器真实鉴权和保存回读；未知字段保留；无静默洗配置；Linux/Windows 托盘有单独 smoke 记录，价格为用户输入。离线回归已过；浏览器/托盘实跑 **NOT EXECUTED** |
-| MG-010 / P2 | 已交付：CI 矩阵 18/20/22（手动触发、零下载探测 runner 自带 node）、元数据核对脚本、LICENSE、部署/回滚与兼容矩阵文档 | MG-004、MG-007 | 本地 21 项元数据 PASS + 启动/关闭/恢复实测；**远程 CI 未执行**；Windows/macOS 与 Node 18/20 实跑未验证 |
+| MG-010 / P2 | 已交付：CI 矩阵 18/20/22（push/pull_request/手动触发、零下载探测 runner 自带 node）、元数据核对脚本、LICENSE、部署/回滚与兼容矩阵文档 | MG-004、MG-007 | 本地 32 项元数据 PASS + 启动/关闭/恢复实测；**远程 CI 未执行**；Windows/macOS 与 Node 18/20 实跑未验证 |
 
 ## 第三阶段：能力扩展（按卡启动，不一次铺开）
 

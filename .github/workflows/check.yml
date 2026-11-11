@@ -1,7 +1,10 @@
-# 手动触发的离线检查。资源门禁见 RESOURCE_APPROVAL.md：
+# 离线检查：push / pull_request / 手动触发。资源门禁见 RESOURCE_APPROVAL.md：
 # 本 workflow 不安装依赖、不下载 Node 工具链、不拉模型或容器镜像，只使用 runner 既有的 node/npm。
+# 触发方式与命令集合由 scripts/check-metadata.mjs 强制核对；改这里要同步该脚本。
 name: Offline check (existing runtime only)
 on:
+  push:
+  pull_request:
   workflow_dispatch:
 permissions:
   contents: read

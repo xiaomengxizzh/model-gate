@@ -1,7 +1,9 @@
 // 发布元数据一致性核对（离线、零第三方依赖、不联网）。
 //   node scripts/check-metadata.mjs
-// 核对项：package.json 版本/许可/engines、LICENSE 实际文件与 license 字段、
-//         CHANGELOG 版本标题、README 的版本与 Node 下限声明、CI 版本矩阵与 engines 下限。
+// 核对项：package.json 版本/名称/许可/engines、LICENSE 实际文件与 license 字段、
+//         CHANGELOG 版本标题、README 的版本与 Node 下限/项目名声明、
+//         manifest.yaml（存在时）的 project/version/engines 声明、
+//         CI workflow 的触发方式、Node 矩阵与 engines 下限、依赖与工具链下载禁令。
 // 输出 PASS/FAIL 行，任一失败时退出码为 1。
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -20,6 +22,15 @@ const cmpVersion = (a, b) => {
   for (let i = 0; i < 3; i++) if (pa[i] !== pb[i]) return pa[i] - pb[i]
   return 0
 }
+const floorOf = s => {
+  const m = typeof s === 'string' ? s.match(/^>=\s*(\d+)/) : null
+  return m ? m[1] : ''
+}
+// 取 manifest.yaml 顶层标量（只解析本仓库需要的简单键值，不引入 YAML 依赖）。
+const yamlScalar = (text, key) => {
+  const m = text.match(new RegExp('^' + key + ':\\s*["\\x27]?([^"\\x27\\n]+)["\\x27]?\\s*$', 'm'))
+  return m ? m[1].trim() : ''
+}
 
 // —— 1. package.json ——
 let pkg = null
@@ -29,9 +40,12 @@ else {
   try { pkg = JSON.parse(pkgRaw); ok('package.json 可解析') } catch (e) { fail('package.json 可解析', e.message) }
 }
 const version = pkg && typeof pkg.version === 'string' ? pkg.version : ''
+const name = pkg && typeof pkg.name === 'string' ? pkg.name.trim() : ''
 if (pkg) {
   if (semver(version)) ok('package.json version 为 x.y.z', version)
   else fail('package.json version 为 x.y.z', JSON.stringify(pkg.version))
+  if (/^[a-z0-9][a-z0-9._-]*$/.test(name)) ok('package.json name 合法', name)
+  else fail('package.json name 合法', JSON.stringify(pkg.name))
   const licenseId = typeof pkg.license === 'string' ? pkg.license.trim() : ''
   if (licenseId) ok('package.json license 字段存在', licenseId)
   else fail('package.json license 字段存在', '缺失或非字符串')
@@ -93,11 +107,15 @@ else {
   }
 }
 
-// —— 4. README 版本与 Node 下限声明 ——
+// —— 4. README 版本、项目名与 Node 下限声明 ——
 const readme = readText('README.md')
 if (readme === null) fail('README.md 存在', '缺失')
 else {
   ok('README.md 存在')
+  const title = (readme.match(/^#\s+(.+)$/m) || [])[1] || ''
+  if (!title) fail('README 标题声明项目名与 package.json 一致', '未找到一级标题')
+  else if (name && title.includes(name)) ok('README 标题声明项目名与 package.json 一致', title)
+  else fail('README 标题声明项目名与 package.json 一致', JSON.stringify(title) + ' 未包含 ' + JSON.stringify(name))
   const claims = []
   for (const m of readme.matchAll(/model-gateway@(\d+\.\d+\.\d+)/g)) claims.push({ where: 'model-gateway@', v: m[1] })
   for (const m of readme.matchAll(/版本\s*(?:为|:|：)?\s*v?(\d+\.\d+\.\d+)/g)) claims.push({ where: '版本', v: m[1] })
@@ -116,10 +134,31 @@ else {
   else fail('README Node 下限声明与 engines 一致', 'README >= ' + readmeFloor[1] + ' ≠ engines ' + pkg.engines.node)
 }
 
-// —— 5. CI 版本矩阵与 engines 下限 ——
+// —— 5. manifest.yaml（存在时）声明与 package.json 一致 ——
+const manifest = readText('manifest.yaml')
+if (manifest === null) ok('manifest.yaml 存在（可选）', '不存在，跳过 manifest 声明核对')
+else {
+  ok('manifest.yaml 存在（可选）', '已发现，核对声明')
+  const manifestProject = yamlScalar(manifest, 'project')
+  if (!manifestProject) fail('manifest.yaml project 与 package.json name 一致', '缺少顶层 project 字段')
+  else if (name && manifestProject === name) ok('manifest.yaml project 与 package.json name 一致', manifestProject)
+  else fail('manifest.yaml project 与 package.json name 一致', manifestProject + ' ≠ ' + (name || '(package.json name 缺失)'))
+  const manifestVersion = yamlScalar(manifest, 'version')
+  if (!manifestVersion) ok('manifest.yaml version 与 package.json 一致', 'manifest 未声明 version，无需比对')
+  else if (manifestVersion === version) ok('manifest.yaml version 与 package.json 一致', manifestVersion)
+  else fail('manifest.yaml version 与 package.json 一致', manifestVersion + ' ≠ ' + version)
+  const enginesBlock = manifest.match(/^engines:\s*\n((?:[ \t]+[^\n]*\n?)*)/m)
+  const manifestNode = enginesBlock ? ((enginesBlock[1].match(/^[ \t]+node:\s*["\x27]?([^"\x27\n]+)/m) || [])[1] || '').trim() : ''
+  if (!manifestNode) ok('manifest.yaml engines.node 与 package.json 一致', 'manifest 未声明 engines.node，无需比对')
+  else if (floorOf(manifestNode) && floorOf(manifestNode) === floorOf(pkg && pkg.engines && pkg.engines.node)) ok('manifest.yaml engines.node 与 package.json 一致', manifestNode)
+  else fail('manifest.yaml engines.node 与 package.json 一致', manifestNode + ' ≠ ' + JSON.stringify(pkg && pkg.engines && pkg.engines.node))
+}
+
+// —— 6. CI workflow：触发方式、Node 矩阵、命令与零下载 ——
 const workflow = readText('.github/workflows/check.yml')
 if (workflow === null) fail('CI workflow 存在', '.github/workflows/check.yml 缺失')
 else {
+  ok('CI workflow 存在', '.github/workflows/check.yml')
   const matrixMatch = workflow.match(/^\s*node:\s*\[([^\]]*)\]/m)
   const majors = matrixMatch ? [...matrixMatch[1].matchAll(/\d+/g)].map(x => Number(x[0])) : []
   if (!majors.length) fail('CI 固定 Node 版本矩阵', '未在 check.yml 找到 node: [ ... ] 矩阵')
@@ -130,10 +169,23 @@ else {
     else if (majors.includes(Number(floorMatch[1]))) ok('CI 矩阵覆盖 engines 下限', '包含 ' + floorMatch[1])
     else fail('CI 矩阵覆盖 engines 下限', '矩阵 ' + majors.join('/') + ' 未包含 engines 下限 ' + floorMatch[1])
   }
-  if (/workflow_dispatch/.test(workflow)) ok('CI 支持手动触发（workflow_dispatch）')
-  else fail('CI 支持手动触发（workflow_dispatch）', '缺少 workflow_dispatch')
-  if (/^\s{2}(push|pull_request|schedule):/m.test(workflow)) fail('CI 不自动触发', '存在 push/pull_request/schedule 触发器')
-  else ok('CI 不自动触发', '无 push/pull_request/schedule 触发器')
+  for (const trigger of ['push', 'pull_request', 'workflow_dispatch']) {
+    if (new RegExp('^\\s{2}' + trigger + ':', 'm').test(workflow)) ok('CI 支持触发: ' + trigger)
+    else fail('CI 支持触发: ' + trigger, '缺少 on.' + trigger)
+  }
+  if (/^\s{2}schedule:/m.test(workflow)) fail('CI 不按计划自动触发', '存在 schedule 触发器')
+  else ok('CI 不按计划自动触发')
+  if (/^\s{4}runs-on:\s*ubuntu-latest\s*$/m.test(workflow)) ok('CI 使用 ubuntu-latest', '固定 runner 类型')
+  else fail('CI 使用 ubuntu-latest', '未找到 runs-on: ubuntu-latest')
+  const commands = [
+    ['语法检查', /npm run check\b/],
+    ['离线测试', /(npm test\b|node scripts\/test\/run\.mjs)/],
+    ['文档链接检查', /(npm run docs:check\b|node scripts\/check-docs\.mjs)/],
+    ['元数据核对', /node scripts\/check-metadata\.mjs/]
+  ]
+  const missing = commands.filter(([, re]) => !re.test(workflow)).map(([label]) => label)
+  if (missing.length) fail('CI 复用仓库既有检查命令', '缺少: ' + missing.join(', '))
+  else ok('CI 复用仓库既有检查命令', commands.map(([label]) => label).join('/'))
   if (/npm ci|npm install|pnpm install|yarn install|actions\/setup-node/.test(workflow)) fail('CI 不下载依赖或工具链', '出现 npm ci/install 或 setup-node')
   else ok('CI 不下载依赖或工具链', '仅使用 runner 既有 node/npm')
 }
