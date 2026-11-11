@@ -33,3 +33,15 @@ npm test
 原生 ChatGPT/直连流量默认不经过网关；可在「安全与设置」启用只读的 Codex sessions 采集，在「监控与诊断」中把原生用量与代理流量分开展示。
 
 配置与变量见[参考](docs/reference/configuration.md)，运行与凭据边界见[操作指南](docs/how-to/operations.md)。日常进程在线状态、私有配置、价格均不由本 README 证明。
+
+## 能力与验证状态（2026-11-11 加固轮）
+
+本轮交付的验证状态按 `PASS(mock)` / `PASS(real)` / `NOT_RUN(原因)` / `BLOCKED(原因)` / `DISABLED(默认关闭)` 分开记录，**不把 mock 通过写成真实接入通过**；逐格证据（套件名 + 断言数或历史证据）见[支持矩阵](docs/roadmap/2026-11-11-support-matrix.md)。
+
+- 离线可复现（`PASS(mock)`）：Chat/Responses/SSE 协议与映射、Codex 目录与配置、身份域与额度、智能调度决策、预算账本、UHR 推理回执、MCP 契约、管理面与旧/新控制台静态资源等。本分支实测 49 套件全绿（`node scripts/test/run.mjs`）；集成线 53 套件，数字见交付报告。
+- 未验证（`NOT_RUN`）：真实官方/第三方上游、真实流式链路、真实 Codex CLI 三轮回环（`MG_CODEX_VERIFY=1`）、Desktop GUI、真实浏览器验收、真实计费。
+- 阻塞（`BLOCKED`）：真实 UHR 委派（需现行授权接口与明确写集）；本轮只交付 mock UHR + 契约。
+- 默认关闭/拒绝（`DISABLED`）：原生 v2 密文跨域（硬拒绝、无开关）、受控官方聚合实验、匿名远程管理面、MCP 委派（未接线）、新控制台默认入口。
+- 账本已交付但**未接线**：`defaults.codexBudget.taskUsd/dailyUsd` 在接线前不生效，不要据此宣称已限费。
+
+回滚点、回滚门禁与降级开关见[回滚与禁用](docs/how-to/rollback-and-disable.md)。
