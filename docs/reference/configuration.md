@@ -24,13 +24,21 @@
     ],
     "preheat": [],                          // 主动缓存预热：[{ "model": "xx", "system": "<长 system 前缀>", "everyMs": 300000 }]
     "affinityTtlMs": 300000,                // 缓存亲和有效期：超时后主上游可被重新试用（0=不过期，亲和永不失效）
+    "codexOfficialHosts": ["api.openai.com", "chatgpt.com", "chat.openai.com"],  // 官方目标 host 白名单（替换内置清单，见「Codex 聚合身份域」）
+    "aggregatePrefixes": ["mg-", "mg/"],    // Codex 聚合保留 ID 前缀：命中但未配置 → 404 unknown_model，不回落默认上游
+    "codexFallback": false,                 // Codex 智能 Fallback 总开关（聚合 slug 自动启用；true 时非聚合模型也受决策器约束）
+    "codexFallbackLimits": { "maxSameProviderAttempts": 1, "maxFailovers": 2, "maxTotalAttempts": 3, "maxWaitMs": 30000 },
+    "codexBudget": { "requestUsd": 0, "taskUsd": 0, "dailyUsd": 0, "enforceUnknownCost": false },
+    "codexEmergency": false,                // D7 手动应急：true 或 {"acknowledged":true} 才允许官方额度耗尽后切第三方
     "failbackProbe": { "enabled": true, "everyMs": 30000, "successStreak": 2, "system": "ping" }  // 主上游回切探活
   },
   "providers": {
     "deepseek-official": { "baseUrl": "https://api.deepseek.com", "apiKeyEnv": "DEEPSEEK_API_KEY", "api": "openai", "extraHeaders": {} },
     "claude":           { "baseUrl": "https://api.anthropic.com", "apiKeyEnv": "ANTHROPIC_API_KEY", "api": "anthropic", "circuit": { "maxFailures": 3, "openDurationMs": 10000 } },
     "gemini":           { "baseUrl": "https://generativelanguage.googleapis.com", "apiKeyEnv": "GEMINI_API_KEY", "api": "gemini" },
-    "local-ollama":     { "baseUrl": "http://127.0.0.1:11434", "apiKeyEnv": "" }
+    "local-ollama":     { "baseUrl": "http://127.0.0.1:11434", "apiKeyEnv": "" },
+    // Codex 聚合：官方目标示例（codexIdentity 可省略——官方 host 自动判定；第三方可显式声明 thirdParty）
+    "codex-official":   { "baseUrl": "https://chatgpt.com/backend-api/codex", "codexIdentity": "official", "apiKeyEnv": "" }
   },
   "models": {
     "deepseek-chat": { "provider": "deepseek-official", "alias": ["ds"], "maxConcurrent": 0, "qps": 0 },
@@ -80,9 +88,65 @@
 - **管理面来源策略（MG-001）**：① Host 只接受 IP 字面量与 `localhost`/`server.host`/`server.allowedHosts` 中的名字，其他域名返回 403（DNS 重绑定防护）；② 带 `Origin` 的浏览器请求必须同源或命中 `server.allowedOrigins`，跨源写/读一律 403（`Origin: null` 同样拒绝）；③ 无 `Origin` 的 CLI/curl 不受影响。数据面同样做 Host 校验，跨源写请求返回 403 `{error:{message,type:'forbidden'}}`。**迁移**：用自定义域名或局域网域名访问面板/网关时，把该名字加入 `server.allowedHosts`；用另一源的前端页面调用网关时，把该源加入 `server.allowedOrigins`；远程管理访问必须先配置管理令牌。（加密存于 keys 库，重启不失效），留空则关闭保护。若设了环境变量，以环境变量为准。
 - **面板门禁**：启用管理令牌后，打开控制台先显示**登录卡片**，输入正确令牌才进入主界面（令牌错误红字提示）。浏览器记住当前网关实例（按启动时间戳 `startedAt` 判定），同一实例内刷新不再要求输入；**网关重启后需重新输入令牌**。
 - **数据面鉴权**：`MG_CLIENT_KEY` 或面板里的 `clientKey` 设置后，`/v1/*` 需携带同一 Key，否则 401；未配置全局 Key 时，绑定独立 Key 的虚拟模型仍需验证其 Key；其他入口保留本地匿名访问。全局 Key 可访问全部模型；虚拟 Key 在启用全局门禁时只放行自己的入口。
-- **转发鉴权**：向各上游转发时**剥离客户端自带** `Authorization/Cookie/x-api-key/proxy-*`，统一由网关注入，杜绝绕过。
+- **转发鉴权**：向各上游转发时**剥离客户端自带** `Authorization/Cookie/x-api-key/proxy-*`，统一由网关注入，杜绝绕过；配置里的 `extraHeaders` 也不能覆盖或注入鉴权头（命中即忽略并留审计日志，只记头名）。详见下节「Codex 聚合身份域」。
 - **Key 加密落盘**：`config/keys.local.json` **始终 AES-256-GCM 加密**（文件头 `MG1:`），主密钥优先取 `MG_KEYS_MASTER`，否则自动生成并持久化到用户目录的 `master.key`。`clientKey` 同样加密存于 keys 库，不写明文。文件启动时收紧权限（Windows `icacls` / 其它 `chmod 0600`）。
 - **日志脱敏**：日志对已登记密钥/Token 值统一掩码，减少密钥落日志的风险；热更新后脱敏名单同步仍见开发计划 MG-005。
+
+## Codex 聚合身份域（E1）
+
+Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一批**会话/身份专用头**。网关按「目标身份域」逐头决定放行与否，避免官方凭据流入第三方、第三方 key 流入官方路径。
+
+判定（`src/codex/identity.js`，**provider 名字不参与**）：
+- 与 `baseUrl` 主机命中官方 host 白名单（默认 `api.openai.com` / `chatgpt.com` / `chat.openai.com`），或 `providers.<名>.codexIdentity="official"` 且主机在白名单 → **official**；
+- 其它主机 → **thirdParty**；
+- `baseUrl` 缺失/非法、`codexIdentity` 值非法、或**声明与主机冲突**（声明 official 却指向非官方 host、声明 thirdParty 却指向官方 host）→ **unknown**，一律 fail-closed（403 `target_identity_unknown`）。
+- `defaults.codexOfficialHosts` 是**替换**内置清单而非追加；自行搭建官方中转时须把原官方 host 一并列回。回环主机允许 `http`（仅隔离测试用途）。
+
+头策略：
+- **第三方目标**：剥除 `authorization`、`chatgpt-account-id`、`openai-beta`、`version`、`originator`、`session-id`、`thread-id`、`x-client-request-id` 以及 `chatgpt-*` / `openai-*` / `x-codex-*` / `x-openai-*` 前缀头；`sec-websocket-*`、`upgrade`、`connection` 等帧层/逐跳头永不转发。无自有 key 时**不发** Authorization（宁可让上游 401，也不继承客户端官方 token）。确需放行个别非凭据头时用 `providers.<名>.forwardClientHeaders: ["thread-id"]` 显式声明（凭据类与帧层头即使列出也不放行）。
+- **官方目标**：只放行白名单（`accept`/`accept-encoding`/`content-type`/`user-agent`/`originator`/`version`/`session-id`/`thread-id`/`x-client-request-id`/`openai-beta` + `x-codex-*`/`x-openai-internal-*`/`openai-*` 前缀），其余丢弃并记头名。另有两条互斥路径：
+  1. **网关自有 key**（keys/apiKeyEnv）→ 注入 `Authorization: Bearer <自有 key>`，客户端官方凭据一律丢弃；
+  2. **客户端官方凭据透传**（无自有 key）→ 默认关闭，需显式 `MG_CODEX_OFFICIAL_PASSTHROUGH=1`；关闭时返回 403 `official_passthrough_disabled`，不产生任何上游请求。
+- 官方目标还受 host/scheme/path 白名单约束：必须是 `https`（回环例外），路径前缀限 `/v1` 与 `/backend-api/codex`；错误码 `official_target_insecure_scheme` / `official_host_not_allowlisted` / `official_path_not_allowlisted`。上游 3xx 一律按上游错误处理，**不跟随重定向**（不把凭据送到 Location）。
+
+严格路由：`defaults.aggregatePrefixes`（默认 `mg-`、`mg/`）是**聚合保留 ID 前缀**。命中前缀但未在 `models` 显式声明（含别名）时，`/v1/*` 返回 404 `{type:"unknown_model", code:"unknown_model", available:[…]}` 且**零上游请求**，绝不回退 `defaults.provider`；已配置的聚合 ID 与非保留前缀的未知模型维持原行为（后者仍按 `defaults.provider` 兜底，旧接口兼容）。
+
+### Codex 动态目录与官方 provider（D2）
+
+| 字段 | 说明 |
+| --- | --- |
+| `defaults.codexCatalogBasePath` | 官方基线目录文件（`codex debug models` 导出）；网关用它 + 已配置第三方模型生成完整 Codex 目录，服务 `GET /v1/models?client_version=…`（`{models:[ModelInfo…]}`）与 `model_catalog_json`。未配置时回落旧的 `{object:"list",data:[…]}` 形状（Codex 会报 `failed to decode models response`）。目录构建失败时 fail-closed：官方/聚合 slug 按 unknown 处理并写日志。 |
+| `defaults.codexOfficialProvider` | 官方模型 slug 的上游 provider id。官方模型**不需要**出现在 `models`（目录生成器禁止复用官方 slug）；缺该字段时官方 slug 判 unknown（404），不会回落 `defaults.provider`。 |
+| 聚合 slug | 由目录生成器产出：`mg-<provider>-<model>`（`providers` id + `models` 键名净化）。请求该 slug 时网关映射到 `models.<原名>` 的上游及 `providerModels`，响应 `model` 回写 slug。 |
+| `MG_CODEX_OFFICIAL_PASSTHROUGH` | 见上文"客户端官方凭据透传"，默认关闭。 |
+
+**官方额度（D7）**：`defaults.codexQuota = { warnPercent: 80, criticalPercent: 95, source: "none" | "trusted" }`。`source:"none"` 时即使注入了读数也不采用（严格 UNKNOWN，不虚构余额）；没有可信数据时显示 `UNKNOWN`。应急态必须显式 `{acknowledged:true, reason, backupPoint}` 才能进入，记录时间线并可恢复；进入/恢复都需用户确认，绝不自动切换 provider、购买额度或退出官方登录。
+
+
+### Codex 智能 Fallback（E5）
+
+聚合 slug（`mg-<provider>-<model>`）、官方 slug，或 `defaults.codexFallback=true` 的请求由 `src/routing/decision.js` 决策：错误先分类，再按请求阶段（未发送 / 已受理无副作用 / 工具副作用 / 已交付流 / 部分提交 / 取消）判定能否重试或换候选。出现工具或托管副作用、已交付内容、部分提交、客户端取消、v2 加密任务不可读时**立即停机**，不重放。
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `defaults.codexFallback` | `false` | 总开关。聚合 slug 与官方 slug 自动启用；`true` 时对其它模型也启用（旧模型链的换模型也要先过决策器）。 |
+| `defaults.codexFallbackLimits.maxSameProviderAttempts` | `1` | 同上游最多重试次数（`retry_same`）。Codex 模式下由决策器拥有重试，`forward()` 内部重试关闭。 |
+| `defaults.codexFallbackLimits.maxFailovers` | `2` | 最多换候选次数。 |
+| `defaults.codexFallbackLimits.maxTotalAttempts` | `3` | 单请求总上游尝试上限。 |
+| `defaults.codexFallbackLimits.maxWaitMs` | `30000` | Retry-After / 退避的单次等待上限。 |
+| `defaults.codexBudget.requestUsd` | `0` | 单请求费用上限（USD；0=不限）。按 `models.<名>.costEstimateUsd` / `providers.<名>.costEstimateUsd` 的单次估算累计。 |
+| `defaults.codexBudget.taskUsd` / `dailyUsd` | `0` | 单任务 / 日累计上限。**当前未接费用账本，spent 恒 0（NOT_RUN）**；字段保留给后续接入。 |
+| `defaults.codexBudget.enforceUnknownCost` | `false` | `true` 时付费候选若没有费用估算则 fail-closed（宁可停机也不假设免费）。 |
+| `defaults.codexEmergency` | `false` | D7 手动应急。`true` 或 `{"acknowledged":true}` 才允许「官方订阅 402」后切换到第三方候选；否则返回 `MG_FB_OFFICIAL_QUOTA`。 |
+| `models.<名>.costEstimateUsd` / `providers.<名>.costEstimateUsd` | 未设置 | 单次调用费用估算（USD）。未设置时该候选费用未知。 |
+
+行为要点：
+- **候选授权**：已配置且凭据可用的第三方上游视为已授权；官方订阅（主机命中 `codexOfficialHosts`）永不进入通用 fallback 池，只在用户直接选择官方 slug 时作为主目标使用。
+- **预算耗尽停机**：任一维度 `spent >= limit` 立即 `stop_with_error`（`MG_FB_BUDGET`，HTTP 402），不切更便宜的候选。
+- **错误映射**：`MG_FB_RATE_LIMITED`→429、`MG_FB_BUDGET/MG_FB_QUOTA/MG_FB_OFFICIAL_QUOTA`→402、`MG_FB_BAD_REQUEST`→400、`MG_FB_TIMEOUT`→504、副作用/已交付/部分提交→409、其余→502；流已开始则改为流内 `stream_interrupted` 错误事件收尾。
+- **日志**：只落一行 `codex fallback decision`（model/provider/error/phase/action/target/budget），不含令牌与请求正文。
+
+> Codex 侧配置形态（`~/.codex/config.toml`）：`model_provider="openai"`、`openai_base_url="http://127.0.0.1:8787"`、`model_catalog_json="/abs/catalog.json"`。**不要**写 `[model_providers.openai]`——Codex 0.167 会以 `reserved built-in provider IDs` 启动失败。WebSocket 传输由网关回 404 触发 HTTPS 回落。
 
 ## 缓存与命中
 
@@ -173,6 +237,7 @@ model-gateway/
 | `MG_SILENT` | 置 1 关闭控制台日志（仍写文件） |
 | `MG_CONFIG_DIR` | keys/local/stats 隔离目录；未指定时为 cwd/config |
 | `MG_GW` | 旧测试目标；需显式指定可丢弃的本地实例，禁用生产端口 8787 |
+| `MG_CODEX_OFFICIAL_PASSTHROUGH` | 置 `1`/`true`/`on` 开启**客户端官方凭据透传**（官方目标无网关自有 key 时使用客户端 Bearer/chatgpt-account-id）。**默认关闭**；关闭时官方目标 403 `official_passthrough_disabled` |
 
 **`apiKeyEnv` 的解析顺序**（`resolveKey`，转发/探测/预热/回切与 `/api/status` 同源）：① 面板 Key（加密 `keys.local.json`）→ ② **网关进程**环境变量 → ③ **用户级**环境变量。③ 在 Linux/POSIX 上先查 `systemctl --user show-environment`（其中已含 `~/.config/environment.d/*.conf`），未命中再直接解析 `~/.config/environment.d/*.conf`（按文件名排序，后者覆盖前者，支持双引号转义），因此改完环境变量最多约 60s 生效，无需重启网关或 `daemon-reload`；Windows 对应 `HKCU\Environment`。读取结果按变量名带 **60s TTL 正/负缓存**（避免每请求 `spawnSync` 空查），变量名先过标识符白名单（防注入）。
 
