@@ -11,8 +11,13 @@
 //   · 预算必须 > 0 且不超过身份/策略上限；截止时间不得晚于作用域到期；
 //   · 重复提交（同 idempotencyKey 同摘要）返回同一 taskRef，不重复执行；
 //   · getTaskResult/cancelTask 必须拥有该 taskRef 或有 scoped grant；
-//   · 结果回到原 toolCallId（原样回填，不做任何改写）；
+//   · 结果回到原 toolCallId（原样回填，不做任何改写；空/缺失一律拒绝，且零提交）；
+//   · 摘要默认**不裁剪**：超硬上限即拒绝，只有显式 allowSummaryTruncation 才裁剪并留痕；
+//   · v2 密文检测是**键级**契约（只看键名，不扫描字符串值、不做语义猜测）；
 //   · 所有对外结构深度冻结、脱敏（id 哈希、结果文本脱敏+截断）。
+//
+// 信任边界（重要）：connectionIdentity 由已验证的传输层/调用方注入，adapter 只校验它的形状与授权字段。
+// 任何"让模型或工具参数控制 connectionIdentity"的接线都会绕过本模块的全部边界检查（模型只能提供 tool arguments）。
 import { createHash } from 'node:crypto'
 import { taskRefToken } from './uhr-mock.js'
 
@@ -33,6 +38,7 @@ export const UHR_REJECT = Object.freeze({
   INTENT: 'UHR_REJECT_INTENT',
   V2_OPAQUE: 'UHR_REJECT_V2_OPAQUE',
   SHAPE: 'UHR_REJECT_SHAPE',
+  SUMMARY_TOO_LARGE: 'UHR_REJECT_SUMMARY_TOO_LARGE',
   REFS: 'UHR_REJECT_REFS',
   BUDGET: 'UHR_REJECT_BUDGET',
   DEADLINE: 'UHR_REJECT_DEADLINE',
@@ -50,6 +56,8 @@ const DEFAULT_POLICY = Object.freeze({
   maxTitleLength: 200,
   maxGoalLength: 500,
   maxTags: 10,
+  // 摘要硬上限（UTF-8 字节，canonical JSON 计）：默认超限即拒绝，只有调用方显式 allowSummaryTruncation 才裁剪。
+  summaryMaxBytes: 1024,
   maxTagLength: 40,
   maxResultBytes: 16 * 1024,
   allowedIntents: ['read_only'],
@@ -61,6 +69,7 @@ const DEFAULT_POLICY = Object.freeze({
 const REQUEST_KEYS = new Set([
   'readOnlyIntent', 'budgetMicro', 'currency', 'timeMs', 'deadlineAt',
   'toolScope', 'summary', 'refs', 'parentRef', 'idempotencyKey', 'toolCallId',
+  'allowSummaryTruncation',
 ])
 const SUMMARY_KEYS = new Set(['title', 'goal', 'tags'])
 const REF_KEYS = new Set(['kind', 'ref'])
@@ -170,12 +179,39 @@ function checkIdentity(identity, now, policy) {
   }
 }
 
-function boundedSummary(raw, policy) {
-  if (raw == null) return { ok: true, value: {}, truncated: false }
+function boundedSummary(raw, policy, allowTruncation) {
+  if (raw == null) return { ok: true, value: {}, truncated: false, originalBytes: 2, bytes: 2 }
   if (!isPlain(raw)) return { ok: false, code: UHR_REJECT.SHAPE, message: 'summary 必须是对象（只允许 title/goal/tags）' }
   for (const key of Object.keys(raw)) {
     if (!SUMMARY_KEYS.has(key)) {
       return { ok: false, code: UHR_REJECT.SHAPE, message: 'summary 含不允许的字段（不转发对话/工作区内容）', details: { field: label(key, 40) || 'unknown' } }
+    }
+  }
+  // 先按"将要发送的内容"算字节数与是否需要裁剪。默认策略：需要裁剪就拒绝，
+  // 绝不静默把 5000 字符单行正文裁进摘要（那等于把完整对话偷渡出去）。
+  let originalBytes = 0
+  try {
+    originalBytes = Buffer.byteLength(canonicalJson(raw), 'utf8')
+  } catch {
+    return { ok: false, code: UHR_REJECT.SHAPE, message: 'summary 无法序列化（可能是循环引用），拒绝转发' }
+  }
+  const overBytes = originalBytes > policy.summaryMaxBytes
+  let needsFieldTrim = false
+  for (const [key, max] of [['title', policy.maxTitleLength], ['goal', policy.maxGoalLength]]) {
+    if (raw[key] != null && typeof raw[key] === 'string' && raw[key].length > max) needsFieldTrim = true
+  }
+  if (Array.isArray(raw.tags) && (raw.tags.length > policy.maxTags ||
+    raw.tags.some((tag) => typeof tag === 'string' && tag.length > policy.maxTagLength))) needsFieldTrim = true
+  if ((overBytes || needsFieldTrim) && allowTruncation !== true) {
+    return {
+      ok: false,
+      code: UHR_REJECT.SUMMARY_TOO_LARGE,
+      message: '任务摘要超过硬上限：默认拒绝裁剪（确需裁剪请显式 allowSummaryTruncation）',
+      details: {
+        reason: overBytes ? 'total_bytes' : 'field_length',
+        limit: policy.summaryMaxBytes,
+        actual: originalBytes,
+      },
     }
   }
   let truncated = false
@@ -209,7 +245,13 @@ function boundedSummary(raw, policy) {
     }
     out.tags = tags
   }
-  return { ok: true, value: out, truncated }
+  return {
+    ok: true,
+    value: out,
+    truncated,
+    originalBytes,
+    bytes: Buffer.byteLength(canonicalJson(out), 'utf8'),
+  }
 }
 
 /** 引用校验：只允许"不透明引用"，拒绝内联正文、绝对路径、穿越、带凭据 URL。 */
@@ -262,9 +304,9 @@ export function createUhrAdapter(options = {}) {
     if (!Object.values(UHR_TOOL).includes(name)) {
       return rejection(UHR_REJECT.BAD_REQUEST, '未知工具名', { reason: 'unknown_tool' })
     }
-    // toolCallId 只在 MCP 入口强制（结果必须回到原 call ID）；直接调用 API 时可省略。
-    if (typeof toolCallId !== 'string') {
-      return rejection(UHR_REJECT.BAD_REQUEST, 'toolCallId 必须是字符串')
+    // 结果必须能回到原 call ID：空/缺失一律拒绝，且拒绝发生在任何提交之前（零副作用）。
+    if (typeof toolCallId !== 'string' || toolCallId.trim() === '') {
+      return rejection(UHR_REJECT.BAD_REQUEST, 'toolCallId 必须是非空字符串（结果必须回到原 call ID）')
     }
     if (!isPlain(request)) return rejection(UHR_REJECT.BAD_REQUEST, '工具参数必须是对象')
     const now = nowMs()
@@ -298,8 +340,11 @@ export function createUhrAdapter(options = {}) {
       return rejection(UHR_REJECT.INTENT, '只允许 read_only 意图的委派', { reason: intent ? 'intent_not_allowed' : 'missing_intent' })
     }
 
-    // 4) 有界摘要。
-    const summary = boundedSummary(request.summary, policy)
+    // 4) 有界摘要：默认**不裁剪**（超硬上限即拒绝），只有显式 allowSummaryTruncation 才裁剪并留痕。
+    if (request.allowSummaryTruncation != null && typeof request.allowSummaryTruncation !== 'boolean') {
+      return rejection(UHR_REJECT.BAD_REQUEST, 'allowSummaryTruncation 必须是布尔值')
+    }
+    const summary = boundedSummary(request.summary, policy, request.allowSummaryTruncation === true)
     if (!summary.ok) return rejection(summary.code, summary.message, summary.details)
 
     // 5) 不透明引用。
@@ -401,7 +446,10 @@ export function createUhrAdapter(options = {}) {
       toolScope: payloadForDigest.toolScope,
       refs: { count: refs.value.length, kinds: refs.kinds },
       summaryDigest: sha256Hex(canonicalJson(summary.value)).slice(0, 24),
+      // 裁剪只有在调用方显式 allowSummaryTruncation 时才会发生；这里回执原始/实际字节数，便于对账。
       summaryTruncated: summary.truncated,
+      summaryOriginalBytes: summary.originalBytes,
+      summaryBytes: summary.bytes,
     }
     return deepFreeze({ ok: true, toolCallId: toStr(toolCallId), taskRef: submitted.taskRef, state: submitted.state, minimalReceipt })
   }

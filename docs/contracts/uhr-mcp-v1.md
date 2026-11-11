@@ -43,6 +43,13 @@
 }
 ```
 
+### 3.1 信任边界（必读）
+
+adapter 假定 `connectionIdentity` 由**已验证的传输层/调用方**注入（例如本地 MCP 服务器在建立连接时
+按已认证的会话构造）。adapter 只校验这个对象的形状与授权字段，**不重新认证它**：
+任何"让模型或工具参数控制 `connectionIdentity`"的接线都会绕过本模块的全部边界检查
+（模型只能提供 tool arguments，绝不应能提供 identity）。
+
 ## 4. 委派请求（只允许有界摘要 + 不透明引用）
 
 ```js
@@ -68,11 +75,30 @@
 | `summary` 里出现绝对路径 | `UHR_REJECT_SHAPE`（reason=absolute_path） |
 | `summary` 里出现 `sk-…`/Bearer/api_key/password | `UHR_REJECT_SHAPE`（reason=secret） |
 | `summary` 多行（粘贴的对话正文） | `UHR_REJECT_SHAPE`（reason=multiline） |
+| 摘要超过硬上限（默认 `summaryMaxBytes=1024` 字节；或 title>200 / goal>500 / tags>10 或单标签>40） | `UHR_REJECT_SUMMARY_TOO_LARGE`（默认**拒绝，不裁剪**） |
 | 引用带 `content/body/text/patch` 等内联正文 | `UHR_REJECT_REFS`（details.field） |
 | 引用是绝对路径 / 含 `..` / 带凭据 URL / 种类不在白名单 | `UHR_REJECT_REFS` |
 | 任何字段藏 `encrypted_content`/`encrypted_task_id`/`opaque_v2` | `UHR_REJECT_V2_OPAQUE`（跨域前拒绝，绝不解密） |
 
 `parentRef` 只接受不透明 id 形状（`[A-Za-z0-9_.:-]{1,128}`），不接受路径。
+
+### 4.1 摘要硬上限：默认拒绝，不裁剪
+
+- 硬上限：`summaryMaxBytes = 1024`（UTF-8 字节，按 canonical JSON 计）**且**字段上限
+  `title ≤ 200` / `goal ≤ 500` / `tags ≤ 10`（单标签 ≤ 40）。
+- 超过任一上限 ⇒ `UHR_REJECT_SUMMARY_TOO_LARGE`（`details.reason = 'total_bytes' | 'field_length'`），
+  **拒绝且零提交**（不产生 taskRef、executions 不增）。默认**不裁剪**：静默裁剪长正文等于把完整对话偷渡进摘要。
+- 只有调用方显式传 `allowSummaryTruncation: true` 才允许裁剪；回执带
+  `summaryTruncated: true`、`summaryOriginalBytes`、`summaryBytes`，原始长度可核对。
+- 多行 / 绝对路径 / 密钥 / 内联正文仍然一律拒绝（与是否允许裁剪无关）。
+
+### 4.2 v2 密文检测是键级契约
+
+检测只看**键名**：`encrypted_content` / `encrypted_task_id` / `encrypted_payload` / `opaque_v2`
+（任意层级、最多扫描 500 个节点）。它**不扫描字符串值内容、不做语义猜测**：
+把 base64 密文放进 `summary.title` 或 `refs[].ref` 的值里不会触发 `UHR_REJECT_V2_OPAQUE`
+（这是**设计边界**，不是 bug；若有需要，应在更深一层的协议/格式校验里做，而不是在这里猜）。
+值级安全仍由"绝对路径/密钥/多行/内联正文"规则与引用白名单兜底。
 
 ## 5. 预算 / 截止 / 工具范围
 
@@ -111,6 +137,9 @@
 }
 ```
 
+`toolCallId` **必须是非空字符串**（trim 后非空）：空/缺失 ⇒ `UHR_REJECT_BAD_REQUEST`，且拒绝发生在任何提交之前
+（不产生 taskRef、`executions` 不增）。这样"结果回到原 call ID"才不是一句空话。
+
 失败不抛异常、不泄漏内部细节：`code` 是稳定拒绝码，`message` 是中性描述。
 任务结果文本在返回前做**脱敏 + 截断**（`sk-…` ⇒ `[redacted]`，上限 16KB，`redacted/truncated` 布尔可见）。
 
@@ -125,8 +154,8 @@ mock 把任务表写到 `<dir>/uhr-tasks.json`（tmp + fsync + rename + 目录 f
 
 ## 10. 拒绝码一览
 
-`UHR_REJECT_IDENTITY` / `SCOPE` / `INTENT` / `V2_OPAQUE` / `SHAPE` / `REFS` / `BUDGET` /
-`DEADLINE` / `TOOL_SCOPE` / `NOT_OWNER` / `TASK_NOT_FOUND` / `CONFLICT` / `STATE` / `BAD_REQUEST`。
+`UHR_REJECT_IDENTITY` / `SCOPE` / `INTENT` / `V2_OPAQUE` / `SHAPE` / `SUMMARY_TOO_LARGE` / `REFS` /
+`BUDGET` / `DEADLINE` / `TOOL_SCOPE` / `NOT_OWNER` / `TASK_NOT_FOUND` / `CONFLICT` / `STATE` / `BAD_REQUEST`。
 
 ## 11. 未验证 / 非目标
 

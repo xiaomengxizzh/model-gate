@@ -160,7 +160,7 @@ test('M5-2：预算必须 > 0 且不超身份/策略上限；截止不得越过�
 // ============================================================================
 // 7. 只传有界摘要与不透明引用
 // ============================================================================
-test('M5-2：对话正文/绝对路径/密钥不得进摘要（拒绝），超长摘要被裁剪', (t) => {
+test('M5-2：对话正文/绝对路径/密钥不得进摘要（拒绝）；超长摘要默认拒绝，显式 allow 才裁剪', (t) => {
   const { adapter } = setup(t)
   const conversation = adapter.delegateTask(identity(), request({ messages: [{ role: 'user', content: '完整对话正文' }] }), { toolCallId: 'c1' })
   assert.equal(conversation.code, UHR_REJECT.SHAPE)
@@ -182,9 +182,13 @@ test('M5-2：对话正文/绝对路径/密钥不得进摘要（拒绝），超�
   assert.equal(multiline.code, UHR_REJECT.SHAPE)
   assert.equal(multiline.details.reason, 'multiline')
 
+  // M5-2b：超长摘要默认**拒绝**（不静默裁剪）；只有显式 allowSummaryTruncation 才裁剪。
   const long = adapter.delegateTask(identity(), request({ summary: { title: 'x'.repeat(400) } }), { toolCallId: 'c6' })
-  assert.equal(long.ok, true, '超长摘要按契约裁剪而不是拒绝')
-  assert.equal(long.minimalReceipt.summaryTruncated, true)
+  assert.equal(long.ok, false, '默认不得静默裁剪超长摘要')
+  assert.equal(long.code, UHR_REJECT.SUMMARY_TOO_LARGE)
+  const allowed = adapter.delegateTask(identity(), request({ allowSummaryTruncation: true, summary: { title: 'x'.repeat(400) } }), { toolCallId: 'c7' })
+  assert.equal(allowed.ok, true)
+  assert.equal(allowed.minimalReceipt.summaryTruncated, true)
 })
 
 test('M5-2：引用只能是不透明 {kind, ref}（拒绝内联正文/绝对路径/穿越/凭据 URL）', (t) => {
@@ -340,4 +344,98 @@ test('M5-2：工具描述只暴露契约字段（无实现细节），且禁止�
   assert.equal(delegate.inputSchema.properties.toolScope.type, 'array')
   assert.ok(!JSON.stringify(defs).includes('forward.js'), '工具描述不得泄漏实现路径')
   assert.ok(Object.isFrozen(defs) && Object.isFrozen(defs[0]))
+})
+// ============================================================================
+// 15. M5-2b / F-c1：摘要硬上限默认拒绝（不裁剪），显式 opt-in 才裁剪并留痕
+// ============================================================================
+test('M5-2b：5000 字符单行摘要默认拒绝且零提交；显式 allowSummaryTruncation 才裁剪', (t) => {
+  const { uhr, adapter } = setup(t)
+  const longLine = 'x'.repeat(5000)
+
+  // 1) 默认：超总字节上限 ⇒ 拒绝，不裁剪、零提交。
+  const rejected = adapter.delegateTask(identity(), request({ summary: { goal: longLine } }), { toolCallId: 'c1' })
+  assert.equal(rejected.ok, false)
+  assert.equal(rejected.code, UHR_REJECT.SUMMARY_TOO_LARGE)
+  assert.equal(rejected.details.reason, 'total_bytes')
+  assert.equal(rejected.details.limit, 1024)
+  assert.equal(rejected.details.actual, Buffer.byteLength(JSON.stringify({ goal: longLine })))
+  assert.equal(uhr.snapshot().counts.total, 0, '被拒摘要必须零提交')
+
+  // 2) 默认：字段级超限（单行、总字节未超）同样拒绝，不裁剪。
+  const fieldTooLong = adapter.delegateTask(identity(), request({ summary: { title: 'y'.repeat(300) } }), { toolCallId: 'c2' })
+  assert.equal(fieldTooLong.ok, false)
+  assert.equal(fieldTooLong.code, UHR_REJECT.SUMMARY_TOO_LARGE)
+  assert.equal(fieldTooLong.details.reason, 'field_length')
+  assert.equal(uhr.snapshot().counts.total, 0)
+
+  // 3) 显式 allowSummaryTruncation ⇒ 裁剪，并保留原始/实际字节数与标记。
+  const truncated = adapter.delegateTask(identity(), request({
+    allowSummaryTruncation: true,
+    summary: { goal: longLine },
+  }), { toolCallId: 'c3' })
+  assert.equal(truncated.ok, true)
+  assert.equal(truncated.minimalReceipt.summaryTruncated, true)
+  assert.equal(truncated.minimalReceipt.summaryOriginalBytes, Buffer.byteLength(JSON.stringify({ goal: longLine })))
+  assert.ok(truncated.minimalReceipt.summaryBytes < truncated.minimalReceipt.summaryOriginalBytes)
+  assert.ok(truncated.minimalReceipt.summaryBytes <= 1024 + 64, '裁剪后应落在硬上限附近')
+  assert.equal(uhr.executionsOf(truncated.taskRef), 1)
+
+  // 4) 小摘要不标记裁剪；非布尔 allowSummaryTruncation 拒绝。
+  const small = adapter.delegateTask(identity(), request({ idempotencyKey: 'k-small' }), { toolCallId: 'c4' })
+  assert.equal(small.ok, true)
+  assert.equal(small.minimalReceipt.summaryTruncated, false)
+  const badFlag = adapter.delegateTask(identity(), request({ idempotencyKey: 'k-flag', allowSummaryTruncation: 'yes' }), { toolCallId: 'c5' })
+  assert.equal(badFlag.code, UHR_REJECT.BAD_REQUEST)
+})
+
+// ============================================================================
+// 16. M5-2b / F-c2：空/缺失 toolCallId ⇒ BAD_REQUEST 且零提交
+// ============================================================================
+test('M5-2b：空或缺失 toolCallId 一律拒绝（零提交，不得返回 isError:false）', (t) => {
+  const { uhr, adapter } = setup(t)
+
+  const empty = adapter.handleToolCall({ name: UHR_TOOL.DELEGATE, toolCallId: '', connectionIdentity: identity(), arguments: request() })
+  assert.equal(empty.isError, true, '空 callId 不得被当成成功')
+  assert.equal(empty.structuredContent.code, UHR_REJECT.BAD_REQUEST)
+  assert.equal(empty.toolCallId, '', '回填仍是原值（空串），但不冒充成功')
+
+  const missing = adapter.handleToolCall({ name: UHR_TOOL.DELEGATE, connectionIdentity: identity(), arguments: request() })
+  assert.equal(missing.isError, true)
+  assert.equal(missing.structuredContent.code, UHR_REJECT.BAD_REQUEST)
+
+  const blank = adapter.delegateTask(identity(), request(), { toolCallId: '   ' })
+  assert.equal(blank.ok, false)
+  assert.equal(blank.code, UHR_REJECT.BAD_REQUEST)
+
+  const noMeta = adapter.delegateTask(identity(), request())
+  assert.equal(noMeta.ok, false)
+  assert.equal(noMeta.code, UHR_REJECT.BAD_REQUEST)
+
+  // 查询/取消同样要求非空 callId，否则"结果回到原 call ID"无从谈起。
+  const getEmpty = adapter.getTaskResult(identity(), { taskRef: 'task-00000000000000000000' }, { toolCallId: '' })
+  assert.equal(getEmpty.code, UHR_REJECT.BAD_REQUEST)
+  assert.equal(uhr.snapshot().counts.total, 0, '空 callId 不得提交任务')
+})
+
+// ============================================================================
+// 17. M5-2b / F-c3：v2 检测是键级契约 —— 键名拒绝，字符串值不识别（钉住边界）
+// ============================================================================
+test('M5-2b：v2 检测只看键名 —— 键级拒绝、值级不拒绝（设计边界，不是 bug）', (t) => {
+  const { adapter } = setup(t)
+
+  const keyLevel = adapter.delegateTask(identity(), request({
+    refs: [{ kind: 'file', ref: 'a.js', encrypted_content: 'gAAAAABmnoP' }],
+  }), { toolCallId: 'c1' })
+  assert.equal(keyLevel.ok, false)
+  assert.equal(keyLevel.code, UHR_REJECT.V2_OPAQUE, '键级命中必须拒绝')
+
+  const valueLevel = adapter.delegateTask(identity(), request({
+    summary: { title: 'gAAAAABmnoPqrstuv' },
+  }), { toolCallId: 'c2' })
+  assert.equal(valueLevel.ok, true, '值里的 base64 不会按 v2 识别（不做语义猜测）')
+
+  const valueInRef = adapter.delegateTask(identity(), request({
+    refs: [{ kind: 'file', ref: 'gAAAAABmnoP-labelled.b64' }],
+  }), { toolCallId: 'c3' })
+  assert.equal(valueInRef.ok, true)
 })
