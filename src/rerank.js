@@ -1,5 +1,7 @@
 // Rerank 能力（MG-012）：请求校验、上游整形（OpenAI 兼容 / Cohere v2）与响应归一。
 // 入口在 src/index.js（POST /v1/rerank）；能力声明 capability=rerank。
+import { applyExtraHeaders } from './codex/auth.js'
+
 export const MAX_RERANK_DOCUMENTS = 2048
 
 export function rerankPathFor(api) {
@@ -53,7 +55,8 @@ export function normalizeRerankResponse(api, json, model, opts = {}) {
 export function rerankHeaders(cfg, provider, api, payload) {
   const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }
   const extra = Object.assign({}, (cfg && cfg.defaults && cfg.defaults.extraHeaders) || {}, (provider && provider.extraHeaders) || {})
-  for (const [k, v] of Object.entries(extra)) headers[String(k).toLowerCase()] = v
+  // E1：extraHeaders 不得覆盖/注入鉴权头（与 forward.js buildHeaders 同一守卫）。
+  applyExtraHeaders(headers, extra)
   if (provider && provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
   if (payload && payload.length) headers['content-length'] = payload.length
   return headers

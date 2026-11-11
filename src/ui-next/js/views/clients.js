@@ -1,8 +1,22 @@
 // 客户端接入：真实 origin + 真实模型目录；不读取客户端配置，不推测连接状态。
 import { h } from '../dom.js'
 import { state } from '../store.js'
-import { pageHead, card, callout, empty, table, tag, codeBlock, copyButton, kvList, tabs } from '../components.js'
+import { pageHead, card, callout, empty, table, tag, codeBlock, copyButton, kvList, tabs, toast } from '../components.js'
 import { fmtTime } from '../format.js'
+import {
+  IDENTITY_FACTS,
+  RISK_NOTES,
+  catalogState,
+  codexExportPlan,
+  codexIdentityTemplate,
+  downloadJson,
+  downloadText,
+  ownerLabel,
+  ownershipRows,
+  previewOwnedChange,
+  probeCodexPolicy,
+  writePathState,
+} from './codex.js'
 
 const TABS = [
   { id: 'codex-cli', label: 'Codex CLI' },
@@ -13,6 +27,8 @@ const TABS = [
 ]
 const CAPS = ['chat', 'embedding', 'rerank', 'audio', 'image', 'video']
 const view = { tab: 'codex-cli', model: '' }
+// Codex 聚合卡片：只存用户粘贴的文本与预览结果，不持久化、不发请求。
+const CODEX = { pasted: '', preview: null, v2: true }
 
 function config() { return state.config || {} }
 function baseUrl() { return location.origin + '/v1' }
@@ -252,6 +268,7 @@ function codexCliTab(model, info, wire, url, keyOn) {
     h('p', { class: 'hint', text: wire.detail }),
     callout('info', h('strong', { text: '工具保真：' }), 'Codex CLI 每轮固定发送 namespace 与 web_search 等托管工具；只有原生 Responses 透传能保留它们，Chat 桥会丢弃并记 lossy（见下方工具保真表）。'),
     callout('warn', h('strong', { text: 'Codex Desktop 另算：' }), '桌面端使用自己的设置界面，不能用本模板或 CLI 的验证结果代表桌面端；请单独验证，见「Codex Desktop」标签。'),
+    callout('info', h('strong', { text: '要在同一会话切换官方与第三方？' }), '用下方「Codex 聚合（D1-A 内置 openai 身份）」卡片：它经 openai_base_url 改向，绝不生成 [model_providers.openai]（0.167 会因 reserved built-in provider ID 直接启动失败）。'),
   ]
 }
 
@@ -308,6 +325,105 @@ function customTab(model, info, wire, url, keyOn) {
     h('p', { class: 'hint', text: wire.detail }),
     callout('info', h('strong', { text: '鉴权：' }), keyOn ? '控制台检测到客户端密钥已启用；所有请求需带 Authorization: Bearer <CLIENT_KEY>（占位符，永不回显）。' : '当前未检测到客户端密钥；请求无需鉴权头。若你把网关暴露到非回环地址，请先启用客户端/管理令牌。'),
   ]
+}
+
+// —— Codex 聚合（D1-A）：只导出 + 预览，永不从浏览器写盘 ——
+function codexChangeTag (kind) {
+  if (kind === 'add') return tag('新增', 'info')
+  if (kind === 'replace') return tag('替换', 'warn')
+  if (kind === 'same') return tag('不变', 'muted')
+  return tag(String(kind), 'muted')
+}
+
+function codexPreviewBody (preview) {
+  if (!preview) {
+    return h('p', { class: 'hint', text: '把当前 ~/.codex/config.toml 全文粘贴到上面，再点「计算预览」：逐字段比对在本标签页内存中完成，不发请求、不写盘、不保存。' })
+  }
+  if (preview.empty) {
+    return empty('还没有粘贴内容', '没有当前配置文本就无法给出真实差异；本页不会编造「当前值」。')
+  }
+  const nodes = []
+  if (preview.blocked.length) nodes.push(callout('danger', h('strong', { text: '先处理阻断项：' }), preview.blocked.join(' ')))
+  if (preview.conflicts.length) {
+    nodes.push(callout('warn', h('strong', { text: '将覆盖既有值（' + preview.conflicts.length + ' 项）：' }), preview.conflicts.join('；')))
+  }
+  nodes.push(table([
+    { label: '字段', render: (r) => h('span', { class: 'mono', text: r.path }) },
+    { label: '变更', render: (r) => codexChangeTag(r.kind) },
+    { label: '当前值', render: (r) => h('span', { class: 'mono-break muted', text: r.from == null ? '—（文件中没有）' : r.from }) },
+    { label: '写入后', render: (r) => h('span', { class: 'mono-break', text: r.to }) },
+    { label: '位置', render: (r) => h('span', { class: 'muted', text: r.line == null ? '追加' : '第 ' + r.line + ' 行' }) },
+  ], preview.rows, { emptyTitle: '没有可预览的字段' }))
+  nodes.push(h('p', { class: 'hint', text: '只读保留：顶层 ' + (preview.preserved.topLevelKeys.join('、') || '无') + ' · 段 ' + (preview.preserved.sections.join('、') || '无') + (preview.preserved.mcpServers.length ? ' · MCP ' + preview.preserved.mcpServers.join('、') : '') + '。' }))
+  nodes.push(h('p', { class: 'hint', text: '预览只看字段级差异；真实写入由服务端按 mg-codex-config/1 执行（sha256 前置校验、.bak 备份、写后校验、可回滚），并拒绝改动未在所有权声明内的行。' }))
+  return h('div', null, nodes)
+}
+
+function codexAggCard (model, gatewayUrl, s, ctx) {
+  const origin = String(gatewayUrl || '').replace(/\/v1\/?$/, '')
+  const catalogPath = (s && s.codex && s.codex.catalog && s.codex.catalog.path) || ''
+  const features = CODEX.v2 ? { multi_agent_v2: true } : null
+  const opts = { openaiBaseUrl: origin, model, modelCatalogJsonPath: catalogPath, features }
+  const tpl = codexIdentityTemplate(opts)
+  const plan = codexExportPlan(opts)
+  const catalog = catalogState(s)
+  const write = writePathState(s)
+
+  // 首次渲染后探测 /api/codex/policy：只重渲染一次，把服务端声明/目录世代带进徽标。
+  if (!CODEX.probed) {
+    CODEX.probed = true
+    probeCodexPolicy().then(() => { if (ctx && typeof ctx.rerender === 'function') ctx.rerender() }).catch(() => {})
+  }
+
+  const textarea = h('textarea', { id: 'codex-config-paste', spellcheck: 'false', placeholder: '# 粘贴 ~/.codex/config.toml 全文；仅在本标签页内存中比较，不发送、不保存' })
+  textarea.value = CODEX.pasted
+  textarea.addEventListener('input', () => { CODEX.pasted = textarea.value })
+  const previewHost = h('div', { id: 'codex-preview' }, codexPreviewBody(CODEX.preview))
+
+  const v2Box = h('input', { type: 'checkbox', id: 'codex-v2', checked: CODEX.v2 !== false })
+  v2Box.addEventListener('change', () => { CODEX.v2 = !!v2Box.checked; if (ctx && typeof ctx.rerender === 'function') ctx.rerender() })
+
+  const tools = h('div', { class: 'toolbar', style: { marginTop: '10px' } },
+    h('button', { class: 'btn btn-primary', type: 'button', text: '计算预览', onclick: () => {
+      CODEX.preview = previewOwnedChange(CODEX.pasted, opts)
+      previewHost.replaceChildren(codexPreviewBody(CODEX.preview))
+    } }),
+    h('button', { class: 'btn', type: 'button', text: '导出模板 .toml', onclick: () => { downloadText('modelgate-codex-d1a.toml', tpl); toast('已导出模板片段（不含凭据）', 'success') } }),
+    h('button', { class: 'btn', type: 'button', text: '导出计划 .json', onclick: () => { downloadJson('modelgate-codex-d1a-plan.json', plan); toast('已导出计划 JSON（export-only）', 'success') } }),
+    h('label', { class: 'hint', for: 'codex-v2', style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } }, v2Box, '[features] multi_agent_v2 = true（D3 v2 优先，0.167 默认 false）'))
+
+  const ownerRows = ownershipRows().map((f) => ({ ...f }))
+  const ownership = table([
+    { label: '字段/范围', render: (r) => h('span', { class: 'mono-break', text: r.path }) },
+    { label: '范围', render: (r) => h('span', { class: 'muted', text: r.scope }) },
+    { label: '所有者', render: (r) => { const o = ownerLabel(r.owner); return tag(o.label, o.kind) } },
+    { label: '说明', render: (r) => h('span', { class: 'muted', text: r.note }) },
+  ], ownerRows)
+
+  return card('Codex 聚合（D1-A 内置 openai 身份）',
+    '同一新会话里同时看到官方 GPT 与第三方模型：沿用内置 openai 身份与官方登录，用 openai_base_url 把请求改向 ModelGate。本卡片只导出与预览；不写盘、不重启客户端、不读取凭据。',
+    h('div', null,
+      callout('warn', h('strong', { text: '身份事实（Codex 0.167 实测）：' }),
+        h('ul', { style: { margin: '6px 0 0', paddingLeft: '18px' } }, IDENTITY_FACTS.map((t) => h('li', { text: t, style: { marginBottom: '4px' } })))),
+      h('div', { class: 'toolbar', style: { margin: '10px 0 6px' } },
+        tag('model_provider = "openai"', 'info'),
+        tag('openai_base_url → ' + origin, 'info'),
+        tag('目录世代 ' + catalog.label, catalog.kind),
+        tag(write.label, write.kind)),
+      h('p', { class: 'hint', text: catalog.detail }),
+      h('p', { class: 'hint', text: write.detail }),
+      h('p', { class: 'hint', text: '模板（只含所有权字段与注释；不要写 [model_providers.openai]，也不要写 auth.json）：' }),
+      codeBlock(tpl, { copy: true }),
+      tools,
+      h('div', { class: 'field', style: { marginTop: '14px' } },
+        h('label', { for: 'codex-config-paste', text: '当前配置（本地粘贴，仅用于差异预览）' }),
+        textarea,
+        h('span', { class: 'field-help', text: '不要粘贴含密钥的文件；控制台不会把这段文本发到任何地方，也不会持久化。' })),
+      previewHost,
+      h('div', { style: { marginTop: '14px' } }, ownership),
+      callout('info', h('strong', { text: '风险与边界：' }),
+        h('ul', { style: { margin: '6px 0 0', paddingLeft: '18px' } }, RISK_NOTES.map((t) => h('li', { text: t, style: { marginBottom: '4px' } }))))),
+    { foot: 'export-only：本页不发起写请求；受控写入契约 mg-codex-config/1（字段所有权 + sha256 前置校验 + .bak + 写后校验 + 回滚），由服务端 /api/codex/* 在具备本地写权限时执行。' })
 }
 
 function tabContent(tab, model, info, wire, url, keyOn) {
@@ -511,6 +627,7 @@ export function render(root, ctx = {}) {
 
   root.append(endpointCard(models, virtuals, counts))
   root.append(templateCard(model, info, wire, url, keyOn, ctx))
+  root.append(codexAggCard(model, url, s, ctx))
   root.append(h('div', { class: 'grid grid-main' }, legendCard(), fidelityCard()))
   root.append(capabilityCard(models))
   if (virtuals.length) root.append(virtualCard(virtuals))

@@ -9,7 +9,7 @@ const ASSETS = [
   '/ui-next/js/api.js', '/ui-next/js/store.js', '/ui-next/js/router.js', '/ui-next/js/dom.js',
   '/ui-next/js/format.js', '/ui-next/js/components.js', '/ui-next/js/config-draft.js', '/ui-next/js/save-flow.js',
   '/ui-next/js/views/dashboard.js', '/ui-next/js/views/providers.js', '/ui-next/js/views/models.js',
-  '/ui-next/js/views/clients.js', '/ui-next/js/views/observability.js', '/ui-next/js/views/settings.js',
+  '/ui-next/js/views/clients.js', '/ui-next/js/views/codex.js', '/ui-next/js/views/observability.js', '/ui-next/js/views/settings.js',
 ]
 
 test('UI: static tree, CSP, auth and traversal protection', { timeout: 30000 }, async (t) => {
