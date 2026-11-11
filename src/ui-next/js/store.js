@@ -1,6 +1,9 @@
 // Application state, data loading, and light pub/sub. Views never fetch directly.
-import { api, ApiError } from './api.js'
+import { api, ApiError, clearToken, setUnauthorizedHandler } from './api.js'
 
+// 数据阶段：idle / loading / ready / empty / error。unknown 由视图在“字段缺失”时显式渲染，
+// 绝不允许把 unknown 渲染成 0 或“正常”。
+export const DATA_PHASES = ['idle', 'loading', 'ready', 'empty', 'error']
 export const state = {
   auth: { needAuth: false, startedAt: 0 },
   status: null,
@@ -9,6 +12,7 @@ export const state = {
   lastError: null,
   loading: false,
   view: 'overview',
+  phase: { auth: 'idle', status: 'idle', config: 'idle', logs: 'idle' },
 }
 
 const listeners = new Map()
@@ -22,42 +26,80 @@ export function emit(event, payload) {
   for (const fn of listeners.get(event) || []) { try { fn(payload) } catch (e) { console.error(e) } }
 }
 
+export function phaseOf(key) { return (state.phase && state.phase[key]) || 'idle' }
+export function isPhase(key, value) { return phaseOf(key) === value }
+export function setPhase(key, phase) {
+  if (!DATA_PHASES.includes(phase)) throw new Error('unknown phase: ' + phase)
+  if (!state.phase) state.phase = {}
+  state.phase[key] = phase
+  emit('phase', { key, phase })
+}
+
 export async function loadAuth() {
-  const data = await api.auth()
-  state.auth = { needAuth: !!data.needAuth, startedAt: Number(data.startedAt) || 0 }
-  return state.auth
+  setPhase('auth', 'loading')
+  try {
+    const data = await api.auth()
+    state.auth = { needAuth: !!data.needAuth, startedAt: Number(data.startedAt) || 0 }
+    setPhase('auth', 'ready')
+    return state.auth
+  } catch (e) {
+    setPhase('auth', 'error')
+    throw e
+  }
 }
 
 export async function loadStatus() {
-  const status = await api.status()
-  state.status = status
-  state.loadedAt = Date.now()
-  state.lastError = null
-  emit('status', status)
-  return status
+  setPhase('status', 'loading')
+  try {
+    const status = await api.status()
+    state.status = status
+    state.loadedAt = Date.now()
+    state.lastError = null
+    setPhase('status', status ? 'ready' : 'empty')
+    emit('status', status)
+    return status
+  } catch (e) {
+    state.lastError = e
+    setPhase('status', 'error')
+    throw e
+  }
 }
 
 export async function loadConfig() {
-  const config = await api.config()
-  state.config = config
-  emit('config', config)
-  return config
+  setPhase('config', 'loading')
+  try {
+    const config = await api.config()
+    state.config = config
+    setPhase('config', config ? 'ready' : 'empty')
+    emit('config', config)
+    return config
+  } catch (e) {
+    state.lastError = e
+    setPhase('config', 'error')
+    throw e
+  }
 }
 
 export async function loadAll() {
   state.loading = true
+  setPhase('status', 'loading')
+  setPhase('config', 'loading')
   try {
     const [status, config] = await Promise.all([api.status(), api.config()])
     state.status = status
     state.config = config
     state.loadedAt = Date.now()
     state.lastError = null
+    setPhase('status', status ? 'ready' : 'empty')
+    setPhase('config', config ? 'ready' : 'empty')
     emit('status', status)
     emit('config', config)
     emit('data', { status, config })
     return { status, config }
   } catch (e) {
     state.lastError = e
+    setPhase('status', 'error')
+    setPhase('config', 'error')
     emit('error', e)
     throw e
   } finally {
@@ -70,11 +112,29 @@ export function resetData() {
   state.config = null
   state.loadedAt = 0
   state.lastError = null
+  state.phase = { auth: state.auth ? 'idle' : 'idle', status: 'idle', config: 'idle', logs: 'idle' }
   emit('reset')
 }
 
+// 401/403 的统一收口：清 token、清敏感状态、通知界面跳登录。
+// 不在任何地方保留旧配置/目录/额度/历史快照。
+export function handleUnauthorized(info) {
+  clearToken()
+  resetData()
+  emit('unauthorized', info || {})
+}
+
+// api 层一旦遇到 401/403 就调用这里；store 导入即生效，不依赖 app 是否接线。
+setUnauthorizedHandler((info) => handleUnauthorized(info))
+
 export function configVersion() {
   return Number(state.config?.configVersion ?? state.status?.configVersion ?? 0)
+}
+
+// 运行时字段缺失时给视图一个显式的“未知”，而不是 0。
+export function unknownIfMissing(value, formatter) {
+  if (value == null || value === '' || (typeof value === 'number' && !Number.isFinite(value))) return '未知'
+  return formatter ? formatter(value) : value
 }
 
 // Derived operational warnings used by Dashboard/Settings. All from real state.

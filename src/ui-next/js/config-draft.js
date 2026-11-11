@@ -2,6 +2,29 @@
 import { clone, diffObjects } from './format.js'
 import { api, ApiError } from './api.js'
 
+// 掩码（允许首尾空白）：代表“已设置/未改动”，永远不能作为真实 Key 上送。
+export const CLIENT_KEY_MASK_RE = /^\s*\*{8}\s*$/
+
+// 保存 payload 的唯一构造入口（M4-2 T-UI-01）：
+//  - 未编辑的字段完全不出现在 defaults 里（尤其是 clientKey：省略=保留，空串=清空）。
+//  - 仅掩码（含 '********  '）同样不上送，避免误清空数据面 Key。
+//  - 只提交可编辑投影字段，不携带任何服务端私有/凭据字段。
+export function buildSavePayload(draft) {
+  const data = (draft && draft.data) || {}
+  const defaults = Object.assign({}, data.defaults || {})
+  const diff = typeof draft.diff === 'function' ? draft.diff() : []
+  const editedClientKey = diff.some((d) => d.path === 'defaults.clientKey')
+  const value = defaults.clientKey
+  if (!editedClientKey || (value != null && CLIENT_KEY_MASK_RE.test(String(value)))) delete defaults.clientKey
+  return {
+    version: Number(draft && draft.baseVersion) || 0,
+    providers: data.providers || {},
+    models: data.models || {},
+    defaults,
+    virtualModels: Array.isArray(data.virtualModels) ? data.virtualModels : [],
+  }
+}
+
 export class ConflictError extends Error {
   constructor(currentVersion) {
     super('远端配置已变化，请重新加载后再保存')
@@ -71,13 +94,7 @@ export class ConfigDraft {
     const errors = this.validate()
     if (errors.length) throw new Error(errors[0])
     try {
-      const res = await api.saveConfig({
-        version: this.baseVersion,
-        providers: this.data.providers,
-        models: this.data.models,
-        defaults: this.data.defaults,
-        virtualModels: this.data.virtualModels,
-      })
+      const res = await api.saveConfig(buildSavePayload(this))
       const nextVersion = Number(res?.status?.configVersion ?? this.baseVersion + 1)
       return { ok: true, version: nextVersion, status: res?.status || null }
     } catch (e) {

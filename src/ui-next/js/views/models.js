@@ -76,18 +76,31 @@ function probeShort(probe) {
 function expiryInputValue(value) {
   const s = String(value == null ? '' : value).trim()
   if (!s) return ''
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s + 'T00:00'
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) return s
   const n = Number(s)
-  if (!Number.isFinite(n) || n <= 0) return s
+  if (!Number.isFinite(n) || n <= 0) {
+    // ISO（带时区）→ 本机 datetime-local 展示；只做格式转换，状态判定仍由后端 expiresAtState 给出。
+    const t = new Date(s).getTime()
+    if (!Number.isFinite(t)) return ''
+    const d = new Date(t)
+    const pad = (x) => String(x).padStart(2, '0')
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes())
+  }
   const d = new Date(n)
   const pad = (x) => String(x).padStart(2, '0')
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes())
 }
+// 只做格式白名单与透传：真正的解析/时区/过期判定由后端 parseVirtualExpiry + expiresAtState 负责，
+// 避免前端与后端两个时钟/时区口径。
 function normalizeExpiry(text) {
   const s = String(text || '').trim()
   if (!s) return ''
-  if (/^\d+$/.test(s)) return s
-  const t = new Date(s).getTime()
-  return Number.isFinite(t) ? String(t) : null
+  if (/^\d{10,16}$/.test(s)) return s
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) return s
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/.test(s)) return s
+  return null
 }
 function fmtExpiry(ts) {
   const n = Number(ts)
@@ -509,16 +522,22 @@ function directoryCell(entries) {
     tag(e && e.mode === 'onFail' ? 'onFail' : 'afterAll', e && e.mode === 'onFail' ? 'warn' : 'info'),
     h('span', { text: ' · ' + (e && asArray(e.providers).length ? asArray(e.providers).join(', ') : '按模型主/备上游') }))))
 }
+// M0-2 的单一真源：有效期状态只来自后端投影 expiresAtState，前端不自行比较时钟。
+export function virtualExpiryLabel(v) {
+  const state = v && v.expiresAtState
+  if (state === 'invalid') return { label: '有效期无效（拒绝放行）', kind: 'bad', diagnostic: (v && v.expiresAtDiagnostic) || '' }
+  if (state === 'expired') return { label: '已过期', kind: 'bad' }
+  if (state === 'valid') return { label: '限期', kind: 'info' }
+  if (state === 'none') return { label: '不限制', kind: 'muted' }
+  return { label: '未知（后端未返回状态）', kind: 'muted' }
+}
 function expiryCell(v) {
-  const text = expiryText(v.expiresAt)
-  const numeric = expiryIsNumeric(v.expiresAt)
-  const hasValue = String(v.expiresAt == null ? '' : v.expiresAt).trim() !== ''
+  const label = virtualExpiryLabel(v)
   return h('div', null,
     h('div', { class: 'flex flex-wrap' },
-      h('span', { text: text }),
-      numeric && expiryExpired(v.expiresAt) ? tag('已过期', 'bad') : null,
-      hasValue && !numeric ? tag('非数字', 'warn') : null),
-    hasValue && !numeric ? h('div', { class: 'cell-sub', style: { whiteSpace: 'normal' }, text: '后端按数字比较有效期；非数字值不会触发过期。' }) : null,
+      h('span', { text: expiryText(v.expiresAt) }),
+      tag(label.label, label.kind)),
+    label.diagnostic ? h('div', { class: 'cell-sub', style: { whiteSpace: 'normal' }, text: '诊断码：' + label.diagnostic }) : null,
     v.note ? h('div', { class: 'cell-sub', style: { whiteSpace: 'normal' }, text: v.note }) : null)
 }
 function virtualColumns(draft, rerender) {
@@ -669,7 +688,7 @@ function openVirtualDialog(draft, virtualName, rerender) {
       labeled('maxConcurrent', quotaInputs.maxConcurrent, { help: '0 = 不限' }),
       labeled('qps', quotaInputs.qps, { help: '0 = 不限' })),
     sectionHeading('有效期与备注', '存于 keys 元数据；expiresAt 为空表示不设置。'),
-    labeled('expiresAt', expiresInput, { help: '为空=不设置；输入日期时间会转换为毫秒时间戳（后端按数字比较有效期）。' }),
+    labeled('expiresAt', expiresInput, { help: '为空=不设置；支持 YYYY-MM-DDTHH:mm（本机时区）、带时区 ISO8601 或毫秒时间戳。保存后由后端规范化并返回 expiresAtState。' }),
     labeled('备注', noteInput, { help: '可选；会随虚拟模型元数据保存并在投影中回显。' }))
 
   const cancel = h('button', { class: 'btn', type: 'button', text: '取消' })
