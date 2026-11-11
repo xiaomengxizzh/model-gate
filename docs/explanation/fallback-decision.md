@@ -92,6 +92,23 @@ unsent --上游受理--> accepted_no_side_effect --出现工具/hosted 副作用
 - **legacy（兼容）**：没有 `facts` 的旧扁平候选（当前 `forward.js` 形状），按调用方显式声明的字段放行，
   语义与 M3-1 之前一致；`audit.board.skipped[].factMode` 与 `audit.facts.candidates` 会标出用了哪一层。
 
+**混池规则（M3-1b 返工，E 的对抗用例）**：只要候选池里**存在任一 evidence 候选**，legacy 候选的
+**能力声明就不得用于入围/排序**（按 `capability_unproven` 处理）。否则"把请求工具复制进候选"这种伪造能力
+可以击败合法 evidence 候选（实测老实现 `eligible=2` 且选中 forged-legacy）。legacy-only 池仍然可用，
+但审计必须留痕：`audit.facts.capabilityTrust = 'legacy_only'`、`audit.board.legacyUnverifiedCapability = ['model|provider', ...]`，
+被选中的目标带 `capabilitySource: 'legacy_declared'`（legacy-only）或 `'evidence'`。
+
+> **生产候选必须用 `facts` 构造。** `src/forward.js` 把请求里的工具复制成候选能力
+> （`tools:{types: requestInfo.tools.slice(), hosted: ...}`）是**已知的待接线缺陷**，由 M1-3/M3-3 修复；
+> 在接线完成前，线上走的就是 legacy 语义 + 上面这些审计标记，不能宣称"能力已被证据支持"。
+
+**官方订阅判定只有一个入口（`identityOf`，M3-1b）**：evidence 看
+`facts.identity.value.kind ∈ { official, official_subscription }`（大小写/空白归一化，`value.official === true` 也算），
+legacy 看 `providerKind`、显式 `official/subscription` 标记，以及调用方传入的 `officialIdentities` 名单（如 `['openai']`）。
+**只写身份名字却没有任何 kind 的 legacy 候选按"身份未证明"处理**，不再默认当第三方放行。
+D7 的 402 闸门走同一个入口：官方命中（或 evidence 模式下身份无法证明）⇒ `MG_FB_OFFICIAL_QUOTA` 停机，
+不会自动换到第三方/账单身份。
+
 | 顺序 | 检查（evidence 模式） | 拒绝原因码 |
 | --- | --- | --- |
 | 1 | 授权事实 proven 且 `value === true` | `authorization_unproven`（缺证据/过期）/ `unauthorized` |
@@ -141,7 +158,8 @@ evidence 模式现在要求候选自己带 `capabilities` 证据；顶层 `tools
 | 重放不安全（阶段/风险） | `stop_with_error / MG_FB_SIDE_EFFECT_REPLAY_BLOCKED` |
 | 可重试 + 次数未用尽 + 等待在预算内 + 费用闸门通过 | `retry_same`（`MG_FB_RETRY_<CLASS>`） |
 | 可换候选 + 次数未用尽 + 存在可用候选 | `failover`（`MG_FB_FAILOVER_<CLASS>`） |
-| 候选池为空或全被过滤 | `stop_with_error / MG_FB_NO_CANDIDATE` |
+| 候选池为空或全被过滤（混合原因） | `stop_with_error / MG_FB_NO_CANDIDATE` |
+| 全部候选只因预算/报价原因出局 | `stop_with_error / MG_FB_BUDGET_EXCEEDED`（F-b2；`audit.board.exclusionCause='budget'`） |
 | 重试/换模型次数用尽 | `stop_with_error / MG_FB_ATTEMPTS_EXHAUSTED` |
 | 其他 | `stop_with_error / MG_FB_<CLASS>` |
 
@@ -158,6 +176,8 @@ evidence 模式现在要求候选自己带 `capabilities` 证据；顶层 `tools
 - **未知费用 fail-closed**：证据模式 + 已配置上限 + 没有可信报价 = 拒绝（`quote_unknown`，审计 `exceededBy=unknown_cost`）；legacy 模式保持旧语义（付费候选报 `cost_unknown`）。绝不假设免费。
 - **已花费不可验证也 fail-closed**：配置了 `taskUsd/dailyUsd` 上限却没给对应 `spent`（且没给 `ledger`）时报 `budget_unverified`——不再把"不知道"当成 0。
 - **不降级**：任一维度 `spent >= limit` 直接停机；重试预计会突破上限也停机，不会改选更便宜候选来绕过上限。
+- **停机码可区分预算**：换模型/选候选时如果所有候选都只因预算类原因出局，返回 `MG_FB_BUDGET_EXCEEDED`
+  （`audit.board.exclusionCause='budget'`），而不是笼统的 `MG_FB_NO_CANDIDATE`；混合原因保持 NO_CANDIDATE。
 - **最坏情况**：证据模式可用 `pricing.worstCaseUsd`；`spent + worstCase` 超限即 `worst_case_exceeds_budget`。
 
 ### 7.1 持久预算账本（`src/routing/ledger.js`，M3-2）
@@ -217,8 +237,13 @@ evidence 模式现在要求候选自己带 `capabilities` 证据；顶层 `tools
 （`provenance` 只含 status/source/observedAt；来源名经 `sanitizeSource`，疑似凭据/URL → `redacted`；有回归断言）。
 
 `stop_with_error` 的稳定码除 `MG_FB_<CLASS>` 外还有：`MG_FB_CANCELLED`（调用方取消）、`MG_FB_DEADLINE`（截止已到）、
-`MG_FB_STOP_RECONCILE`（可能已提交且无可信续传：先对账，不得换下一个候选）。动作集合仍是 4 个（`ACTION`），
+`MG_FB_STOP_RECONCILE`（可能已提交且无可信续传：先对账，不得换下一个候选）、
+`MG_FB_BUDGET_EXCEEDED`（F-b2：全部候选只因预算/报价类原因出局，与"没有合格候选"区分开）。动作集合仍是 4 个（`ACTION`），
 对账停机用 `action=stop_with_error` + `code=STOP.RECONCILE` 表达，接线请判 `code` 而不是猜动作。
+
+预算类排除原因（`budget_exceeded` / `quote_unknown` / `cost_unknown` / `worst_case_exceeds_budget` /
+`budget_unverified`）**全部命中**才升级为 `MG_FB_BUDGET_EXCEEDED`；只要混入健康/授权/能力等原因，
+仍报 `MG_FB_NO_CANDIDATE`，并把归因写进 `audit.board.exclusionCause`（`budget` / `mixed`），避免把问题归错因。
 
 ## 9. 与 D4 / D7 的对应
 
@@ -269,6 +294,8 @@ evidence 模式现在要求候选自己带 `capabilities` 证据；顶层 `tools
 ### 10.4 授权与官方候选
 
 - `authorized` = 已配置且凭据可用的**第三方**上游（配置即授权）；官方订阅 `authorized=false`。
+- 官方订阅判定统一走 `identityOf`（见 §5）：`providerKind` / identity 事实 / `officialIdentities` 名单三路归一，
+  `kind:'official'` 与只写身份名字的 legacy 候选都不再能混进通用池；402 闸门同样按此判定（含 evidence 形状）。
 - 循环里对非主目标的官方 provider 直接跳过（"官方订阅不进通用池"）；用户直接选择的官方 slug 仍作为主目标（current）。
 - 未授权候选即使更便宜也不会被选中；全部候选不可用时 `stop（MG_FB_NO_CANDIDATE）`。
 
@@ -295,9 +322,10 @@ evidence 模式现在要求候选自己带 `capabilities` 证据；顶层 `tools
 ## 11. 验证
 
 - 决策单元套件：`node --test scripts/test/offline/codex-fallback.test.mjs`（29 项，全绿；旧契约不变）。
-- 证据/排序/对账套件：`node --test scripts/test/offline/routing-decision.test.mjs`（15 项）：授权/能力/健康/价格证据化、
+- 证据/排序/对账套件：`node --test scripts/test/offline/routing-decision.test.mjs`（19 项）：授权/能力/健康/价格证据化、
   官方订阅排除、身份冲突、同分确定性（含乱序同审计）、过期健康降权、`STOP_RECONCILE`、取消/截止、脱敏、预算账本不可验证 fail-closed、
-  旧形状兼容。
+  旧形状兼容，以及 **M3-1b 返工回归**：混池里 legacy 伪造能力不得入围、legacy-only 池留痕、
+  evidence 形状官方 + 402 必须停机、官方判定归一化（`kind:'official'`/名字-only/`officialIdentities`）。
 - 预算账本套件：`node --test scripts/test/offline/routing-ledger.test.mjs`（13 项，真实临时目录）：整数/币种、
   幂等不双记、未知保留与 reconcile、超预估封顶、跨日 1ms 边界与原预留日归属、并发不越限、重启恢复、
   锁争用（活进程 BUSY / 死进程残锁抢占）、损坏拒绝启动、脱敏、报价时效、`budgetFromLedger` 与决策器集成。
@@ -318,6 +346,10 @@ evidence 模式现在要求候选自己带 `capabilities` 证据；顶层 `tools
 - 账本 caps 的 `request` 维度是"本请求累计"（同一 requestId 的多次尝试叠加），`task`/`day` 是跨请求累计；
   一旦实际结算超过 caps，额度会显示为负剩余，后续预留被拒——这是"如实记账"的代价，不做静默修正。
 - 账本只保证单机目录内的一致性；多机共享同一目录不在验证范围内（锁文件语义依赖本地 pid 可见性）。
+- 混池会把 legacy 候选整体排除（能力按未证明处理），因此"混池"只适合过渡期：一旦接入层开始产出 evidence 候选，
+  同池其它 legacy 候选就不可选中。这是刻意的保守面，不是 bug。
+- `officialIdentities` 名单由接入方配置（decision 是纯函数，不读配置）；不配置时"只写身份名字"的 legacy 候选
+  只会被判成"身份未证明"而排除，不会被误认成官方。
 - 客户端执行类工具（local_shell 等）在 `accepted` 阶段的 5xx 被视为可重放；若未来出现上游侧执行同类工具的路径，需要把风险标为 `possible`。
 - `context_unverified` 默认不拦截（兼容 `maxContext=0` 表示不限的既有语义）；需要严格上下文保证时打开 `requireVerifiedContext`。
 - 阶段推进依赖接入方在每个可观测点显式调用；漏标会让状态机过于乐观，因此接入时必须成对测试。

@@ -180,7 +180,8 @@ test('M3-1：超预算与最坏情况超预算都不入选', () => {
   const over = factCand({ pricing: ev({ paid: true, estimatedCostUsd: 0.6 }, 'catalog') })
   const d = decide(REQ(), [over], null, null, BUDGET({ limits: { requestUsd: 0.5 }, spent: { requestUsd: 0 } }))
   assert.deepEqual(reasonsOf(d, 'mg/a/chat'), [EXCLUDE.BUDGET_EXCEEDED])
-  assert.equal(d.code, STOP.NO_CANDIDATE)
+  // F-b2：全部候选只因预算类原因出局时，停机码必须能区分"预算不足"（不再笼统 NO_CANDIDATE）。
+  assert.equal(d.code, STOP.BUDGET_EXCEEDED)
 
   const worst = factCand({ pricing: ev({ paid: true, estimatedCostUsd: 0.1, worstCaseUsd: 0.9 }, 'catalog') })
   const w = decide(REQ(), [worst], null, null, BUDGET({ limits: { requestUsd: 0.5 }, spent: { requestUsd: 0 } }))
@@ -410,4 +411,223 @@ test('M3-1：旧形状候选（无 facts）继续按原语义入选', () => {
     budget: BUDGET(),
   })
   assert.deepEqual(oldSkip.audit.board.skipped[0].reasons, ['unauthorized'])
+})
+// ============================================================================
+// 13. M3-1b 返工：混池规则（E 的对抗用例原文）
+// ============================================================================
+test('M3-1b：混池里 legacy 的能力声明不得入围（伪造能力不能击败 evidence 候选）', () => {
+  // 生产接入层正是这样把请求的工具复制进候选的（forward.js 复制 requestInfo.tools 的已知待接线缺陷）。
+  const forged = {
+    model: 'forged-legacy',
+    provider: 'p9',
+    authorized: true,
+    capability: 'chat',
+    modalities: ['text'],
+    tools: { types: ['function'], hosted: [] },
+    estimatedCostUsd: 0.001,
+    health: { state: 'closed' },
+  }
+  const legit = factCand({ model: 'mg/a/chat', provider: 'p1', pricing: ev({ paid: true, estimatedCostUsd: 0.5 }, 'catalog') })
+
+  const d = decide(REQ(), [forged, legit], null, null, BUDGET())
+  assert.equal(d.action, ACTION.CONTINUE)
+  assert.equal(d.target.model, 'mg/a/chat', '伪造能力不得击败合法 evidence 候选')
+  assert.equal(d.audit.board.eligible, 1, '混池里 legacy 候选按 unproven 处理，不参与入围')
+  const forgedRow = d.excluded.find((e) => e.model === 'forged-legacy')
+  assert.ok(forgedRow, '伪造候选必须出现在排除列表')
+  assert.deepEqual(forgedRow.reasons, [EXCLUDE.CAPABILITY_UNPROVEN])
+  assert.equal(forgedRow.factMode, 'legacy')
+  assert.equal(d.audit.facts.capabilityTrust, 'mixed')
+  assert.deepEqual(d.audit.board.legacyUnverifiedCapability, [], '混池里不得有任何 legacy 能力被采信')
+  assert.equal(d.target.capabilitySource, 'evidence')
+
+  // 输入顺序无关：反过来也一样。
+  const reversed = decide(REQ(), [legit, forged], null, null, BUDGET())
+  assert.equal(reversed.target.model, 'mg/a/chat')
+  assert.deepEqual(reversed.excluded, d.excluded)
+})
+
+test('M3-1b：legacy-only 池仍可用，但审计必须标出 capability 来自未验证声明', () => {
+  const legacy = {
+    model: 'mg/legacy/chat',
+    provider: 'p1',
+    providerKind: 'third_party',
+    authorized: true,
+    capability: 'chat',
+    modalities: ['text'],
+    tools: { types: ['function'], hosted: [] },
+    estimatedCostUsd: 0.02,
+    health: { state: 'closed' },
+  }
+  const d = decide(REQ(), [legacy], null, null, BUDGET())
+  assert.equal(d.action, ACTION.CONTINUE, 'legacy-only 池保持向后兼容')
+  assert.equal(d.target.model, 'mg/legacy/chat')
+  assert.equal(d.audit.facts.capabilityTrust, 'legacy_only')
+  assert.deepEqual(d.audit.board.legacyUnverifiedCapability, ['mg/legacy/chat|p1'])
+  assert.equal(d.target.capabilitySource, 'legacy_declared')
+  assert.equal(d.audit.board.selected.capabilitySource, 'legacy_declared')
+
+  // 旧单对象签名同样留痕（forward.js 走的就是这条）。
+  const old = decide({ now: NOW, phase: PHASE.UNSENT, candidates: [legacy], budget: BUDGET() })
+  assert.equal(old.action, ACTION.CONTINUE)
+  assert.equal(old.audit.facts.capabilityTrust, 'legacy_only')
+  assert.deepEqual(old.audit.board.legacyUnverifiedCapability, ['mg/legacy/chat|p1'])
+})
+
+// ============================================================================
+// 14. M3-1b 返工：D7 闸门必须同时接受 identity 事实（E 的对抗用例原文）
+// ============================================================================
+function failoverInput(current, candidates = [factCand({ model: 'mg/a/chat', provider: 'p1' })]) {
+  return {
+    now: NOW,
+    phase: PHASE.ACCEPTED,
+    error: { status: 402 },
+    current,
+    candidates,
+    budget: BUDGET(),
+    attempts: { total: 1, sameProvider: 1, failovers: 0 },
+  }
+}
+
+test('M3-1b：evidence 形状的官方候选 + 402 ⇒ 停机（不得自动离开官方池）', () => {
+  const officialCurrent = factCand({
+    model: 'official/gpt',
+    provider: 'openai',
+    identity: ev({ kind: 'official_subscription', name: 'openai' }),
+  })
+  const d = decide(failoverInput(officialCurrent))
+  assert.equal(d.action, ACTION.STOP, 'evidence 形状必须和 legacy 一样停在你不能自动换池')
+  assert.equal(d.code, STOP.OFFICIAL_QUOTA)
+  assert.equal(d.target, null)
+  assert.equal(d.willIncurCost, false)
+  assert.deepEqual(d.audit.facts.d7, { official: true, identityStatus: 'proven', unprovable: false })
+
+  // 用户显式确认应急后才允许换到第三方。
+  const acked = decide(Object.assign({}, failoverInput(officialCurrent), { emergency: { acknowledged: true } }))
+  assert.equal(acked.action, ACTION.FAILOVER)
+  assert.equal(acked.target.model, 'mg/a/chat')
+
+  // kind 写成 'official' 也必须被识别（不是只有 official_subscription）。
+  const kindOfficial = factCand({ model: 'official/gpt2', provider: 'openai', identity: ev({ kind: 'official', name: 'openai' }) })
+  assert.equal(decide(failoverInput(kindOfficial)).code, STOP.OFFICIAL_QUOTA)
+
+  // legacy 形状继续停机（旧契约不回退）。
+  const legacyOfficial = {
+    model: 'official/gpt3', provider: 'openai', providerKind: 'official_subscription',
+    authorized: true, capability: 'chat', modalities: ['text'], tools: { types: [], hosted: [] },
+    estimatedCostUsd: 1, health: { state: 'closed' },
+  }
+  assert.equal(decide(failoverInput(legacyOfficial)).code, STOP.OFFICIAL_QUOTA)
+
+  // 证据模式下身份无法证明（缺失）⇒ fail-closed：不能证明"不是官方"就不许自动离开。
+  const unproven = factCand({ model: 'mg/unproven', provider: 'px', identity: undefined })
+  const unprovenDecision = decide(failoverInput(unproven))
+  assert.equal(unprovenDecision.code, STOP.OFFICIAL_QUOTA)
+  assert.equal(unprovenDecision.audit.facts.d7.unprovable, true)
+
+  // 明确的第三方身份 + 402 仍可正常 failover（不误杀）。
+  const thirdParty = factCand({ model: 'mg/tp', provider: 'pt', identity: ev({ kind: 'third_party', name: 'vendor-t' }) })
+  const tp = decide(failoverInput(thirdParty))
+  assert.equal(tp.action, ACTION.FAILOVER)
+  assert.equal(tp.audit.facts.d7.official, false)
+})
+
+// ============================================================================
+// 15. M3-1b：官方身份判定归一化（kind 大小写 / official / 只写名字 / 官方名单）
+// ============================================================================
+test('M3-1b：官方判定只有一个入口 —— kind 归一化，legacy 名字/标记也映射进来', () => {
+  const noTools = REQ({ tools: [] })
+
+  // evidence：大写/空白 kind 也要识别。
+  const upperKind = factCand({ model: 'official/up', provider: 'openai', identity: ev({ kind: '  OFFICIAL  ', name: 'openai' }) })
+  const u = decide(noTools, [upperKind], null, null, BUDGET())
+  assert.deepEqual(u.excluded.find((e) => e.model === 'official/up').reasons, [EXCLUDE.OFFICIAL])
+
+  // legacy：providerKind='official' 视为官方（不是只有 official_subscription）。
+  const legacyOfficialKind = {
+    model: 'official/l', provider: 'openai', providerKind: 'official',
+    authorized: true, capability: 'chat', modalities: ['text'], tools: { types: [], hosted: [] },
+    estimatedCostUsd: 1, health: { state: 'closed' },
+  }
+  const l = decide(noTools, [legacyOfficialKind], null, null, BUDGET())
+  assert.deepEqual(l.excluded.find((e) => e.model === 'official/l').reasons, [EXCLUDE.OFFICIAL])
+
+  // legacy：只写身份名字、不写 kind ⇒ 无法证明非官方（fail-closed，不得进池）。
+  const nameOnly = {
+    model: 'mg/name-only', provider: 'p1', identity: 'openai',
+    authorized: true, capability: 'chat', modalities: ['text'], tools: { types: [], hosted: [] },
+    estimatedCostUsd: 0.01, health: { state: 'closed' },
+  }
+  const n = decide(noTools, [nameOnly], null, null, BUDGET())
+  assert.deepEqual(n.excluded.find((e) => e.model === 'mg/name-only').reasons, [EXCLUDE.IDENTITY_UNPROVEN])
+
+  // 调用方给出官方身份名单后，同名 legacy 候选按官方判定（而不是"未证明"）。
+  const listed = decide(noTools, [nameOnly], null, null, BUDGET(), { officialIdentities: ['OpenAI'] })
+  assert.deepEqual(listed.excluded.find((e) => e.model === 'mg/name-only').reasons, [EXCLUDE.OFFICIAL])
+
+  // 显式 official 标记同样生效。
+  const flagged = Object.assign({}, nameOnly, { model: 'mg/flagged', official: true, identity: undefined })
+  const f = decide(noTools, [flagged], null, null, BUDGET())
+  assert.deepEqual(f.excluded.find((e) => e.model === 'mg/flagged').reasons, [EXCLUDE.OFFICIAL])
+
+  // 第三方名字 + providerKind 写清楚 ⇒ 正常可用（不把合规候选误杀）。
+  const thirdParty = {
+    model: 'mg/tp', provider: 'p1', identity: 'vendor-t', providerKind: 'third_party',
+    authorized: true, capability: 'chat', modalities: ['text'], tools: { types: [], hosted: [] },
+    estimatedCostUsd: 0.01, health: { state: 'closed' },
+  }
+  assert.equal(decide(noTools, [thirdParty], null, null, BUDGET()).action, ACTION.CONTINUE)
+})
+// ============================================================================
+// 16. F-b2：预算类全归因 ⇒ 稳定停机码 MG_FB_BUDGET_EXCEEDED（混因仍 NO_CANDIDATE）
+// ============================================================================
+test('F-b2：全部排除原因都是预算类时用 MG_FB_BUDGET_EXCEEDED', () => {
+  // 1) 直接超预算
+  const over = decide(REQ(), [factCand({ pricing: ev({ paid: true, estimatedCostUsd: 0.9 }, 'catalog') })], null, null,
+    BUDGET({ limits: { requestUsd: 0.5 }, spent: { requestUsd: 0 } }))
+  assert.equal(over.action, ACTION.STOP)
+  assert.equal(over.code, STOP.BUDGET_EXCEEDED)
+  assert.equal(over.audit.board.exclusionCause, 'budget')
+  assert.deepEqual(over.excluded[0].reasons, [EXCLUDE.BUDGET_EXCEEDED])
+
+  // 2) 报价未知（有上限）
+  const noQuote = decide(REQ(), [factCand({ pricing: undefined })], null, null, BUDGET())
+  assert.equal(noQuote.code, STOP.BUDGET_EXCEEDED)
+  assert.deepEqual(noQuote.excluded[0].reasons, [EXCLUDE.QUOTE_UNKNOWN])
+
+  // 3) task/daily 花费不可验证
+  const unverified = decide(REQ(), [factCand()], null, null, { limits: { taskUsd: 1 }, spent: {}, enforceUnknownCost: true })
+  assert.equal(unverified.code, STOP.BUDGET_EXCEEDED)
+  assert.deepEqual(unverified.excluded[0].reasons, [EXCLUDE.BUDGET_UNVERIFIED])
+
+  // 4) 多候选但全部是预算原因
+  const allOver = decide(REQ(), [
+    factCand({ model: 'mg/a', pricing: ev({ paid: true, estimatedCostUsd: 0.9 }, 'catalog') }),
+    factCand({ model: 'mg/b', pricing: undefined }),
+  ], null, null, BUDGET({ limits: { requestUsd: 0.5 }, spent: { requestUsd: 0 } }))
+  assert.equal(allOver.code, STOP.BUDGET_EXCEEDED)
+
+  // 5) 混合原因（一个超预算 + 一个冷却中）⇒ 仍用 NO_CANDIDATE，别把问题归错因
+  const mixed = decide(REQ(), [
+    factCand({ model: 'mg/pricey', pricing: ev({ paid: true, estimatedCostUsd: 0.9 }, 'catalog') }),
+    factCand({ model: 'mg/cooling', health: ev({ state: 'open', cooldownUntilMs: NOW + 5000 }, 'probe') }),
+  ], null, null, BUDGET({ limits: { requestUsd: 0.5 }, spent: { requestUsd: 0 } }))
+  assert.equal(mixed.code, STOP.NO_CANDIDATE)
+  assert.equal(mixed.audit.board.exclusionCause, 'mixed')
+
+  // 6) 换模型路径同样区分：备用候选全因预算出局 ⇒ BUDGET_EXCEEDED，且仍不停在错误码上"降级"
+  const failoverAllBudget = decide({
+    now: NOW,
+    phase: PHASE.ACCEPTED,
+    error: { status: 500 },
+    current: factCand({ model: 'mg/current', provider: 'p0' }),
+    candidates: [factCand({ model: 'mg/pricey', provider: 'p2', pricing: ev({ paid: true, estimatedCostUsd: 0.9 }, 'catalog') })],
+    budget: BUDGET({ limits: { requestUsd: 0.5 }, spent: { requestUsd: 0 } }),
+    attempts: { total: 2, sameProvider: 1, failovers: 1 },
+  })
+  assert.equal(failoverAllBudget.action, ACTION.STOP)
+  assert.equal(failoverAllBudget.code, STOP.BUDGET_EXCEEDED)
+  assert.equal(failoverAllBudget.target, null)
+  assert.equal(failoverAllBudget.willIncurCost, false)
+  assert.equal(failoverAllBudget.audit.board.exclusionCause, 'budget')
 })
