@@ -3,22 +3,28 @@
 // 设计约束：
 //  * 不读 req/res、不自己发响应：handleCodexApi(ctx) 返回 { status, body }，由 index.js 的
 //    sendJson 落盘；唯一例外是 ctx.res.headersSent 已经被注入的鉴权函数占用时返回 null。
-//  * 鉴权：ctx.requireAdmin（由 index.js 注入）返回 true/false；本模块自己写 401/403 响应体。
+//  * 鉴权：只认显式管理员（ctx.explicitAdmin===true 或 ctx.requireExplicitAdmin()===true）。
+//    旧 requireAdmin 的“实例未设置 adminToken ⇒ true”语义已删除，不再作为放行依据。
 //  * 来源：只放行本机（loopback）；ctx.isLocal / ctx.remoteAddress / ctx.req.socket.remoteAddress
 //    任一可用即可判定；显式 ctx.allowRemote === true 才放宽（默认严格）。
-//  * 写入：只经 src/codex/config.js 的 plan → confirmToken → apply/rollback 链；
-//    路径必须是绝对路径且 basename=config.toml；拒 auth.json / sessions / 符号链接。
-//  * 审计：只记 action / path / 受控字段名 / 结果码，绝不记文件内容或令牌。
+//  * 文件选择：只接受服务端登记后的不透明 root/backup id；调用方路径与原始 TOML 一律拒绝。
+//  * 写入：plan（白名单字段差异+脱敏）→ confirmToken（绑定管理员/root/代际/操作/TTL）→ apply；
+//    apply/rollback 在普通产品模式（ctx.managedRoot!==true 或根 mode=readonly）一律 403 disabled。
+//  * 审计：只记 action / root / 受控字段名 / 结果码，绝不记文件内容、路径、令牌或 hash。
 import { statSync } from 'node:fs'
 import { basename, isAbsolute, normalize, sep } from 'node:path'
 import {
   CONFIG_CONTRACT,
   ConfigError,
-  applyConfigChange,
+  applyConfigForRoot,
   describeConfigPolicy,
-  planConfigApply,
-  planRollback,
-  rollbackConfigChange,
+  exportOwnedFieldsForRoot,
+  normalizeOwnedValue,
+  planConfigForRoot,
+  planRollbackForRoot,
+  redactValue,
+  rollbackConfigForRoot,
+  SENSITIVE_FIELD_RE,
   sha256Hex,
 } from './config.js'
 
@@ -27,13 +33,23 @@ export const MAX_DIFF_ROWS = 400
 const MAX_SLUG_LIMIT = 200
 const DEFAULT_SLUG_LIMIT = 50
 
+// 每个路由都要求显式管理员（explicitAdmin）；"未设置 adminToken 即放行" 的旧语义已删除。
+// write=true 的路由还要求 ctx.managedRoot === true 且登记根 mode=managed（普通产品模式 403 disabled）。
 export const CODEX_API_ROUTES = Object.freeze([
-  { method: 'GET', path: '/api/codex/policy', name: 'policy', write: false, desc: '字段所有权 + 目录摘要 + 路由清单' },
-  { method: 'POST', path: '/api/codex/config/plan', name: 'config_plan', write: false, desc: '只读预览：diff/所有权/confirmToken，绝不写盘' },
-  { method: 'POST', path: '/api/codex/config/apply', name: 'config_apply', write: true, desc: '受控写入：二次快照 + 原子写 + 备份 + 写后校验' },
-  { method: 'POST', path: '/api/codex/config/rollback', name: 'config_rollback', write: true, desc: '用 .bak 回滚，并把回滚前状态另存' },
-  { method: 'GET', path: '/api/codex/catalog/status', name: 'catalog_status', write: false, desc: '目录世代/计数/slugs 摘要（截断，不回全量目录）' },
+  { method: 'GET', path: '/api/codex/policy', name: 'policy', write: false, explicitAdmin: true, desc: '字段所有权 + 目录摘要 + 路由清单' },
+  { method: 'POST', path: '/api/codex/config/plan', name: 'config_plan', write: false, explicitAdmin: true, desc: '只读预览：白名单字段差异/脱敏值/confirmToken，绝不写盘' },
+  { method: 'POST', path: '/api/codex/config/apply', name: 'config_apply', write: true, explicitAdmin: true, desc: '受控写入：二次快照 + 原子写 + 备份 + 写后校验（仅 managed）' },
+  { method: 'POST', path: '/api/codex/config/rollback', name: 'config_rollback', write: true, explicitAdmin: true, desc: '按不透明 backupId 回滚（仅 managed），回滚前状态另存' },
+  { method: 'GET', path: '/api/codex/config/export', name: 'config_export', write: false, explicitAdmin: true, desc: '只回所拥有字段的归一化投影（无保留行/无凭据）' },
+  { method: 'GET', path: '/api/codex/catalog/status', name: 'catalog_status', write: false, explicitAdmin: true, desc: '目录世代/计数/slugs 摘要（截断，不回全量目录）' },
 ])
+
+export const EXPLICIT_ADMIN_OPERATIONS = Object.freeze(CODEX_API_ROUTES.map((r) => r.name))
+
+// 入口侧（M4-1b）与测试共用：该操作是否必须已通过显式管理员认证。
+export function requiresExplicitAdmin (operation) {
+  return EXPLICIT_ADMIN_OPERATIONS.includes(String(operation || ''))
+}
 
 // index.js 一行挂载用：path 是否属于 Codex 管理面。
 export function isCodexApiPath (path) {
@@ -44,6 +60,22 @@ export function isCodexApiPath (path) {
 // ConfigError.code → HTTP 状态。写入类失败一律 5xx，绝不回显文件内容。
 const STATUS_BY_CODE = Object.freeze({
   invalid_path: 400,
+  path_not_allowed: 400,
+  raw_content_not_allowed: 400,
+  invalid_root_id: 400,
+  invalid_root_mode: 400,
+  invalid_backup_id: 400,
+  invalid_operation: 400,
+  invalid_confirmation_binding: 400,
+  admin_subject_required: 403,
+  explicit_admin_required: 403,
+  write_disabled: 403,
+  unknown_config_root: 404,
+  backup_scope_mismatch: 403,
+  root_changed: 409,
+  root_unavailable: 404,
+  confirmation_expired: 400,
+  confirmation_binding_mismatch: 409,
   invalid_desired: 400,
   not_owned_field: 400,
   unsupported_value: 400,
@@ -134,34 +166,105 @@ export function resolveLocality (ctx = {}) {
   return { local: LOOPBACK.has(clean) || LOOPBACK.has(addr), source: 'remoteAddress', address: addr }
 }
 
+// 显式管理员（P0-2）：只认 ctx.explicitAdmin === true 或受控 ctx.requireExplicitAdmin() === true。
+// 旧 ctx.requireAdmin 的 “实例未设置 adminToken ⇒ true” 不再能作为放行依据；它仍可被调用以
+// 让入口侧写自己的 401 响应，但本模块不会因为它的返回值为 true 而放行。
 async function authorize (ctx) {
-  if (typeof ctx.requireAdmin === 'function') {
-    let ok
-    try {
-      ok = await ctx.requireAdmin(ctx)
-    } catch {
-      ok = false
+  let explicit = !!(ctx && ctx.explicitAdmin === true)
+  if (!explicit && ctx && typeof ctx.requireExplicitAdmin === 'function') {
+    try { explicit = (await ctx.requireExplicitAdmin(ctx)) === true } catch { explicit = false }
+  }
+  if (!explicit && ctx && typeof ctx.requireAdmin === 'function') {
+    try { await ctx.requireAdmin(ctx) } catch {}
+  }
+  if (!explicit) {
+    if (ctx && ctx.res && ctx.res.headersSent) return { ok: false, sent: true }
+    return {
+      ok: false,
+      response: {
+        status: 403,
+        body: errorBody('explicit_admin_required', 'Codex 管理接口要求显式管理员会话：未设置/未验证管理令牌时一律拒绝（旧“无 token 即放行”语义已移除）'),
+      },
     }
-    if (!ok) {
-      // 注入的鉴权函数可能已经写过响应（index.js 现有 requireAdmin 就是这种），
-      // 这时返回 null，避免二次写头。
-      if (ctx.res && ctx.res.headersSent) return { ok: false, sent: true }
-      return { ok: false, response: { status: 401, body: errorBody('unauthorized', '未授权：Codex 管理接口需要管理令牌（MG_ADMIN_TOKEN / server.adminToken）') } }
-    }
-  } else if (ctx.isAdmin !== true) {
-    return { ok: false, response: { status: 401, body: errorBody('unauthorized', '未授权：未注入 requireAdmin 且未声明 isAdmin，拒绝访问（fail closed）') } }
   }
   const locality = resolveLocality(ctx)
   if (!locality.local) {
     return { ok: false, response: { status: 403, body: errorBody('remote_forbidden', '拒绝非本机来源的 Codex 管理请求：该接口只在 127.0.0.1/::1 上可用') } }
   }
-  return { ok: true, locality }
+  const adminSubject = String((ctx && (ctx.adminSubject || ctx.adminPrincipal)) || '').trim()
+  return { ok: true, locality, adminSubject }
+}
+
+// —— P0-2 请求形状护栏：只接受不透明 root/backup id，绝不接受调用方路径或原始 TOML ——
+const CALLER_PATH_FIELDS = Object.freeze(['path', 'file', 'filePath', 'backupPath'])
+const CALLER_RAW_FIELDS = Object.freeze(['toml', 'content', 'rawToml', 'rawContent', 'document'])
+
+function rejectCallerPathOrRaw (body) {
+  if (!body || typeof body !== 'object') return null
+  for (const key of CALLER_PATH_FIELDS) {
+    if (body[key] !== undefined && body[key] !== null) {
+      return { status: 400, body: errorBody('path_not_allowed', '管理面只接受服务端登记后的不透明 root id；调用方提供的路径一律拒绝（' + key + '）') }
+    }
+  }
+  for (const key of CALLER_RAW_FIELDS) {
+    if (body[key] !== undefined && body[key] !== null) {
+      return { status: 400, body: errorBody('raw_content_not_allowed', '管理面不接受原始 TOML/文件内容；只接受白名单字段声明（desired）') }
+    }
+  }
+  return null
+}
+
+function rootIdOf (body) {
+  if (!body || typeof body.root !== 'string' || !body.root.trim()) return ''
+  const id = body.root.trim()
+  if (id.includes('/') || id.includes('\\') || id.includes('..')) return ''
+  return id
+}
+
+function requireManagedContext (ctx) {
+  if (ctx && ctx.managedRoot === true) return null
+  return { status: 403, body: errorBody('write_disabled', '普通产品模式下 apply/rollback 关闭；只有受控自管 fixture（ctx.managedRoot=true 且登记根 mode=managed）才启用') }
+}
+
+function normalizeChangedValue (field, raw) {
+  let text = String(raw === undefined || raw === null ? '' : raw).trim()
+  const leaf = String(field || '').split('.').pop()
+  const eq = text.indexOf('=')
+  if (eq > 0 && text.slice(0, eq).trim() === leaf) text = text.slice(eq + 1).trim()
+  const value = normalizeOwnedValue({ present: true, raw: text })
+  return redactValue(field, value)
+}
+
+function sanitizeChanged (changed) {
+  return (Array.isArray(changed) ? changed : []).slice(0, MAX_DIFF_ROWS).map((c) => {
+    const field = String(c && c.path ? c.path : '')
+    const from = c && c.from !== undefined && c.from !== null ? normalizeChangedValue(field, c.from) : null
+    const to = c && c.to !== undefined && c.to !== null ? normalizeChangedValue(field, c.to) : null
+    return { field, from, to, redacted: SENSITIVE_FIELD_RE.test(field), owner: 'modelgate' }
+  })
+}
+
+function sanitizeWarnings (warnings) {
+  return (Array.isArray(warnings) ? warnings : []).slice(0, 20).map((w) => String(w).slice(0, 300))
+}
+
+function preservedSummary (preserved) {
+  const p = preserved || {}
+  return {
+    topLevelKeyCount: Array.isArray(p.topLevelKeys) ? p.topLevelKeys.length : 0,
+    sectionCount: Array.isArray(p.sections) ? p.sections.length : 0,
+    mcpServerNames: (Array.isArray(p.mcpServers) ? p.mcpServers : []).slice(0, 20),
+    hasProjects: p.hasProjects === true,
+    hasPermissions: p.hasPermissions === true,
+    reservedOverrides: (Array.isArray(p.reservedOverrides) ? p.reservedOverrides : []).slice(0, 10),
+  }
 }
 
 function audit (ctx, action, info = {}) {
   const log = ctx && ctx.log
   if (!log) return
   const parts = ['audit', 'codex', action]
+  if (info.root) parts.push('root=' + info.root)
   if (info.path) parts.push('path=' + info.path)
   if (info.fields && info.fields.length) parts.push('fields=' + info.fields.slice(0, 20).join(','))
   parts.push('result=' + (info.result || 'ok'))
@@ -283,115 +386,141 @@ function requireObject (body, label) {
 }
 
 // —— 各端点 ——
-function handlePolicy (ctx, query) {
+function handlePolicy (ctx, query, auth) {
   const catalog = summarizeCodexCatalog(ctx.cfg, { limit: query.limit })
   const locality = resolveLocality(ctx)
+  const managed = ctx.managedRoot === true
   return {
     status: 200,
     body: okBody({
       policy: describeConfigPolicy(),
       catalog,
       write: {
-        available: true,
+        available: managed,
+        applyEnabled: managed,
+        rollbackEnabled: managed,
         plan: '/api/codex/config/plan',
         apply: '/api/codex/config/apply',
         rollback: '/api/codex/config/rollback',
+        export: '/api/codex/config/export',
+        requiresExplicitAdmin: true,
+        requiresManagedRoot: true,
         requiresConfirmToken: true,
         requiresExpectedSnapshot: true,
+        rootIdRequired: true,
         neverWritesAuthJson: true,
         restartsClient: false,
       },
-      auth: { adminRequired: true, localOnly: !(ctx.allowRemote === true), localitySource: locality.source },
-      paths: { requiredBasename: 'config.toml', absoluteOnly: true, forbidden: ['auth.json', 'sessions/**'] },
-      routes: CODEX_API_ROUTES.map((r) => ({ method: r.method, path: r.path, write: r.write, desc: r.desc })),
-      audit: { fields: ['action', 'path', 'fields', 'result'], storesContent: false },
+      auth: { explicitAdminRequired: true, adminSubjectBound: !!(auth && auth.adminSubject), localOnly: !(ctx.allowRemote === true), localitySource: locality.source },
+      paths: {
+        rootIdRequired: true,
+        opaqueRootIdsOnly: true,
+        callerPathsRejected: true,
+        rawTomlRejected: true,
+        requiredBasenameAtRegistration: 'config.toml',
+        forbidden: ['auth.json', 'sessions/**'],
+      },
+      routes: CODEX_API_ROUTES.map((r) => ({ method: r.method, path: r.path, name: r.name, write: r.write, explicitAdmin: r.explicitAdmin === true, desc: r.desc })),
+      audit: { fields: ['action', 'root', 'fields', 'result'], storesContent: false, storesTokens: false },
       ui: { probePath: '/api/codex/policy', exportOnlyFallback: true },
     }),
   }
 }
 
-function handleConfigPlan (ctx, body) {
+function handleConfigPlan (ctx, body, auth) {
   const shaped = requireObject(body, '请求体')
   if (!shaped.ok) return shaped
-  const pathCheck = validateCodexConfigPath(shaped.body.path)
-  if (!pathCheck.ok) return { status: pathCheck.status, body: errorBody(pathCheck.code, pathCheck.message) }
+  const rejected = rejectCallerPathOrRaw(shaped.body)
+  if (rejected) return rejected
+  const rootId = rootIdOf(shaped.body)
+  if (!rootId) return { status: 400, body: errorBody('invalid_root_id', '必须提供 root：服务端登记后的不透明 id（不接受路径/原始 TOML）') }
   if (!isPlainObject(shaped.body.desired)) return { status: 400, body: errorBody('invalid_body', 'desired 必须是对象：{ topLevel, sections? }') }
+  if (!auth.adminSubject) return { status: 403, body: errorBody('admin_subject_required', 'plan 必须绑定显式管理员身份（adminSubject）') }
   try {
-    const plan = planConfigApply({
-      path: pathCheck.path,
+    const plan = planConfigForRoot({
+      rootId,
+      adminSubject: auth.adminSubject,
       desired: shaped.body.desired,
+      expected: shaped.body.expected,
       allowCreate: shaped.body.allowCreate === true,
+      now: ctx.now,
+      ttlMs: ctx.confirmationTtlMs,
     })
-    const merged = capDiff(plan.diff)
-    audit(ctx, 'config_plan', { path: plan.path, fields: (plan.changed || []).map((c) => c.path), result: 'ok' })
+    audit(ctx, 'config_plan', { root: rootId, fields: (plan.changed || []).map((c) => c.path), result: 'ok' })
     return {
       status: 200,
       body: okBody({
-        path: plan.path,
-        before: plan.before,
-        after: plan.after,
+        root: rootId,
+        generation: plan.generation,
+        before: { exists: plan.before.exists, size: plan.before.size, sha256: plan.before.sha256, mtimeMs: plan.before.mtimeMs },
+        after: { size: plan.after.size, sha256: plan.after.sha256 },
         existing: plan.existing,
-        changed: plan.changed,
-        warnings: plan.warnings,
-        preserved: plan.preserved,
+        changed: sanitizeChanged(plan.changed),
+        warnings: sanitizeWarnings(plan.warnings),
+        preserved: preservedSummary(plan.preserved),
         createdSections: plan.createdSections,
-        diff: merged.diff,
-        diffTruncated: merged.diffTruncated,
-        diffTotal: merged.diffTotal,
         confirmToken: plan.confirmToken,
-        backupPath: plan.backupPath,
+        expiresAt: plan.expiresAt,
         requiresConfirmation: true,
         wrote: false,
       }),
     }
   } catch (e) {
     if (e instanceof ConfigError) {
-      audit(ctx, 'config_plan', { path: pathCheck.path, result: e.code })
+      audit(ctx, 'config_plan', { root: rootId, result: e.code })
       return configErrorResponse(e)
     }
     throw e
   }
 }
 
-function handleConfigApply (ctx, body) {
+function handleConfigApply (ctx, body, auth) {
   const shaped = requireObject(body, '请求体')
   if (!shaped.ok) return shaped
-  const pathCheck = validateCodexConfigPath(shaped.body.path)
-  if (!pathCheck.ok) return { status: pathCheck.status, body: errorBody(pathCheck.code, pathCheck.message) }
+  const rejected = rejectCallerPathOrRaw(shaped.body)
+  if (rejected) return rejected
+  const rootId = rootIdOf(shaped.body)
+  if (!rootId) return { status: 400, body: errorBody('invalid_root_id', '必须提供 root：服务端登记后的不透明 id（不接受路径/原始 TOML）') }
+  const notManaged = requireManagedContext(ctx)
+  if (notManaged) return notManaged
   if (!isPlainObject(shaped.body.desired)) return { status: 400, body: errorBody('invalid_body', 'desired 必须是对象：{ topLevel, sections? }') }
   if (!isPlainObject(shaped.body.expected)) {
-    return { status: 400, body: errorBody('snapshot_required', '必须提供 expected 快照 { exists, size, sha256 }（先调用 /config/plan）') }
+    return { status: 400, body: errorBody('snapshot_required', '必须提供 expected 快照 { exists, size, sha256, mtimeMs }（先调用 /config/plan）') }
   }
   if (typeof shaped.body.confirmToken !== 'string' || !shaped.body.confirmToken.trim()) {
     return { status: 400, body: errorBody('confirmation_required', '必须提供 plan 返回的 confirmToken；缺令牌的写入一律拒绝') }
   }
+  if (!auth.adminSubject) return { status: 403, body: errorBody('admin_subject_required', 'apply 必须绑定显式管理员身份（adminSubject）') }
   try {
-    const result = applyConfigChange({
-      path: pathCheck.path,
+    const result = applyConfigForRoot({
+      rootId,
+      adminSubject: auth.adminSubject,
       desired: shaped.body.desired,
       expected: shaped.body.expected,
       confirmToken: shaped.body.confirmToken,
       allowCreate: shaped.body.allowCreate === true,
+      now: ctx.now,
     })
     let rollback = null
-    if (result.backupPath) {
+    if (result.backupId) {
       try {
-        const rp = planRollback({ path: result.path, backupPath: result.backupPath })
-        rollback = { backupPath: rp.backupPath, expectedSha256: result.after.sha256, confirmToken: rp.confirmToken, restoreSha256: rp.restore.sha256 }
+        const rp = planRollbackForRoot({ rootId, adminSubject: auth.adminSubject, backupId: result.backupId, now: ctx.now, ttlMs: ctx.confirmationTtlMs })
+        rollback = { backupId: rp.backupId, confirmToken: rp.confirmToken, expiresAt: rp.expiresAt, expectedSha256: rp.expectedSha256 }
       } catch { rollback = null }
     }
-    audit(ctx, 'config_apply', { path: result.path, fields: (result.changed || []).map((c) => c.path), result: 'ok' })
+    audit(ctx, 'config_apply', { root: rootId, fields: (result.changed || []).map((c) => c.path), result: 'ok' })
     return {
       status: 200,
       body: okBody({
-        path: result.path,
-        before: result.before,
-        after: result.after,
-        changed: result.changed,
-        warnings: result.warnings,
-        preserved: result.preserved,
+        root: rootId,
+        generation: result.generation,
+        before: { exists: result.before.exists, size: result.before.size, sha256: result.before.sha256 },
+        after: { size: result.after.size, sha256: result.after.sha256 },
+        changed: sanitizeChanged(result.changed),
+        warnings: sanitizeWarnings(result.warnings),
+        preserved: preservedSummary(result.preserved),
         createdSections: result.createdSections,
-        backupPath: result.backupPath,
+        backupId: result.backupId,
         rollback,
         restartsClient: false,
         wrote: true,
@@ -399,25 +528,24 @@ function handleConfigApply (ctx, body) {
     }
   } catch (e) {
     if (e instanceof ConfigError) {
-      audit(ctx, 'config_apply', { path: pathCheck.path, result: e.code })
+      audit(ctx, 'config_apply', { root: rootId, result: e.code })
       return configErrorResponse(e)
     }
     throw e
   }
 }
 
-function handleConfigRollback (ctx, body) {
+function handleConfigRollback (ctx, body, auth) {
   const shaped = requireObject(body, '请求体')
   if (!shaped.ok) return shaped
-  const pathCheck = validateCodexConfigPath(shaped.body.path)
-  if (!pathCheck.ok) return { status: pathCheck.status, body: errorBody(pathCheck.code, pathCheck.message) }
-  const backupPath = shaped.body.backupPath
-  if (typeof backupPath !== 'string' || !isAbsolute(backupPath)) {
-    return { status: 400, body: errorBody('invalid_path', '必须提供备份文件绝对路径（config.toml.bak）') }
-  }
-  const normalizedBackup = normalize(backupPath)
-  if (!(normalizedBackup === pathCheck.path + '.bak' || normalizedBackup.startsWith(pathCheck.path + '.bak'))) {
-    return { status: 400, body: errorBody('invalid_path', '备份路径必须位于 ' + pathCheck.path + '.bak* 名下，拒绝读取任意文件') }
+  const rejected = rejectCallerPathOrRaw(shaped.body)
+  if (rejected) return rejected
+  const rootId = rootIdOf(shaped.body)
+  if (!rootId) return { status: 400, body: errorBody('invalid_root_id', '必须提供 root：服务端登记后的不透明 id') }
+  const notManaged = requireManagedContext(ctx)
+  if (notManaged) return notManaged
+  if (typeof shaped.body.backupId !== 'string' || !shaped.body.backupId.trim()) {
+    return { status: 400, body: errorBody('invalid_backup_id', '必须提供 apply 返回的不透明 backupId（不接受路径）') }
   }
   if (typeof shaped.body.expectedSha256 !== 'string' || !shaped.body.expectedSha256.trim()) {
     return { status: 400, body: errorBody('snapshot_required', '必须提供 expectedSha256（当前文件 sha256），回滚不做盲写') }
@@ -425,30 +553,60 @@ function handleConfigRollback (ctx, body) {
   if (typeof shaped.body.confirmToken !== 'string' || !shaped.body.confirmToken.trim()) {
     return { status: 400, body: errorBody('confirmation_required', '必须提供 planRollback 派生出的 confirmToken；缺令牌的回滚一律拒绝') }
   }
+  if (!auth.adminSubject) return { status: 403, body: errorBody('admin_subject_required', 'rollback 必须绑定显式管理员身份（adminSubject）') }
   try {
-    const result = rollbackConfigChange({
-      path: pathCheck.path,
-      backupPath,
+    const result = rollbackConfigForRoot({
+      rootId,
+      adminSubject: auth.adminSubject,
+      backupId: shaped.body.backupId,
       expectedSha256: shaped.body.expectedSha256,
       confirmToken: shaped.body.confirmToken,
-      allowCreate: shaped.body.allowCreate === true,
+      now: ctx.now,
     })
-    audit(ctx, 'config_rollback', { path: result.path, result: 'ok' })
+    audit(ctx, 'config_rollback', { root: rootId, result: 'ok' })
     return {
       status: 200,
       body: okBody({
-        path: result.path,
-        restoredFrom: result.restoredFrom,
-        safetyBackupPath: result.safetyBackupPath,
-        before: result.before,
-        after: result.after,
+        root: rootId,
+        backupId: result.backupId,
+        safetyBackupId: result.safetyBackupId,
+        before: { sha256: result.before.sha256 },
+        after: { sha256: result.after.sha256, size: result.after.size },
         restartsClient: false,
         wrote: true,
       }),
     }
   } catch (e) {
     if (e instanceof ConfigError) {
-      audit(ctx, 'config_rollback', { path: pathCheck.path, result: e.code })
+      audit(ctx, 'config_rollback', { root: rootId, result: e.code })
+      return configErrorResponse(e)
+    }
+    throw e
+  }
+}
+
+// export：只回“声明所有权”字段的归一化投影；不读/不返回保留行原文。
+function handleConfigExport (ctx, query, auth) {
+  const rootId = rootIdOf({ root: query.root })
+  if (!rootId) return { status: 400, body: errorBody('invalid_root_id', '必须提供 root：服务端登记后的不透明 id') }
+  try {
+    const out = exportOwnedFieldsForRoot({ rootId })
+    audit(ctx, 'config_export', { root: rootId, result: 'ok' })
+    return {
+      status: 200,
+      body: okBody({
+        root: rootId,
+        generation: out.generation,
+        exists: out.exists,
+        owned: out.owned,
+        readOnly: true,
+        fullFileReturned: false,
+        retainedLinesReturned: false,
+      }),
+    }
+  } catch (e) {
+    if (e instanceof ConfigError) {
+      audit(ctx, 'config_export', { root: rootId, result: e.code })
       return configErrorResponse(e)
     }
     throw e
@@ -485,13 +643,15 @@ export async function handleCodexApi (ctx = {}) {
     return { status: 405, body: errorBody('method_not_allowed', '该接口只支持 ' + route.method) }
   }
 
-  if (route.name === 'policy') return handlePolicy(ctx, query)
+  if (route.name === 'policy') return handlePolicy(ctx, query, auth)
   if (route.name === 'catalog_status') return handleCatalogStatus(ctx, query)
+  // export 走 GET query，无请求体；鉴权先于任何文件读取。
+  if (route.name === 'config_export') return handleConfigExport(ctx, query, auth)
 
   const body = readBody(ctx)
   if (body === undefined) return { status: 400, body: errorBody('invalid_body', '请求体必须是合法 JSON 对象') }
-  if (route.name === 'config_plan') return handleConfigPlan(ctx, body)
-  if (route.name === 'config_apply') return handleConfigApply(ctx, body)
-  if (route.name === 'config_rollback') return handleConfigRollback(ctx, body)
+  if (route.name === 'config_plan') return handleConfigPlan(ctx, body, auth)
+  if (route.name === 'config_apply') return handleConfigApply(ctx, body, auth)
+  if (route.name === 'config_rollback') return handleConfigRollback(ctx, body, auth)
   return { status: 404, body: errorBody('unknown_endpoint', '未知的 Codex 管理接口：' + path) }
 }
