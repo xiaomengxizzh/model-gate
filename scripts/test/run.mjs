@@ -43,6 +43,7 @@ export const SUITES = [
   'scripts/test/offline/codex-routing-catalog.test.mjs',
   'scripts/test/offline/config-projection.test.mjs',
   'scripts/test/offline/config-schema.test.mjs',
+  'scripts/test/offline/config-transaction.test.mjs',
   'scripts/test/offline/deadline.test.mjs',
   'scripts/test/offline/embeddings.test.mjs',
   'scripts/test/offline/hosted-tools.test.mjs',
