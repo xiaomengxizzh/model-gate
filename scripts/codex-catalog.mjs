@@ -27,9 +27,13 @@ import {
   validateCatalog,
   versionFileName,
 } from '../src/codex/catalog.js'
+import {
+  generationRecordFromBuilt,
+  persistAndSwapValidatedGeneration,
+} from '../src/codex/catalog-generation.js'
 
 const EXIT = { OK: 0, USAGE: 2, INVALID: 3, CONFLICT: 4, IO: 5, VERIFY: 6 }
-const CONFLICT_CODES = new Set(['stable_id_rebinding', 'retired_id_reuse', 'slug_collision', 'official_slug_reuse'])
+const CONFLICT_CODES = new Set(['stable_id_rebinding', 'retired_id_reuse', 'slug_collision', 'official_slug_reuse', 'identity_collision', 'generation_conflict', 'generation_not_monotonic'])
 const USAGE_CODES = new Set(['usage', 'unsafe_out_path'])
 const STATE_FILE = 'state.json'
 
@@ -90,7 +94,7 @@ function usage() {
     '  --models <gateway.json>      ModelGate 配置（读取 models/providers），省略则只输出官方模型',
     '  --format catalog-json|codex-models   两种出路同一 ModelsResponse 结构（默认 catalog-json）',
     '  --state-dir <目录>           版本/回滚状态目录（默认 <out 目录>/.codex-catalog）',
-    '  --template-model <slug>      第三方条目继承的官方模板模型（默认首个可见官方模型）',
+    '  --template-model <slug>      记录/校验用的官方模板模型（默认首个可见官方模型；不再向第三方继承行为字段）',
     '  --official-provider <id>     视为官方直连的 provider id（可重复，默认 openai/chatgpt/codex/...）',
     '  --history-limit <n>          保留最近 n 个版本（默认 5）',
     '  --priority-start <n>         第三方模型 priority 起始值（默认官方最大 priority + 1）',
@@ -302,6 +306,8 @@ function generate(args) {
       priorityStart,
       strict: !!args.strict,
       allowUnknownEfforts: !!args['allow-unknown-efforts'],
+      // 墓碑 ID 参与生成前零碰撞检查：别名/真实模型不得复活已下架聚合 ID。
+      retiredSlugs: Object.keys(state.retiredBindings || {}),
     },
   })
   const catalog = built.catalog
@@ -344,6 +350,22 @@ function generate(args) {
     options: { priorityStart: priorityStart === undefined ? null : priorityStart },
   })
   const generatedAt = startedAt.toISOString()
+  // 世代记录：generation key 显式包含 wire 配置指纹（同名模型改 api/providerModels/effortFormat/
+  // maxContext/capability 等都会产生新世代，避免旧读者/路由跨代）。
+  const record = generationRecordFromBuilt({
+    generation: version,
+    built,
+    text,
+    base: { path: base.path, sha256: base.sha256 },
+    config: config ? config.data : null,
+    options: {
+      templateModel: meta.templateModel,
+      officialProviders: args.officialProviders.length ? args.officialProviders : undefined,
+      priorityStart: priorityStart === undefined ? null : priorityStart,
+      format: args.format,
+    },
+    format: args.format,
+  })
 
   const summary = {
     ok: true,
@@ -352,6 +374,9 @@ function generate(args) {
     out,
     format: args.format,
     version,
+    generation: record.generation,
+    generationKey: record.key,
+    configFingerprint: record.configFingerprint,
     sha256: digest,
     counts: meta.counts,
     skipped: meta.skipped,
@@ -395,59 +420,79 @@ function generate(args) {
     return { code: EXIT.OK, summary }
   }
 
-  // 落盘顺序：版本文件(可校验) -> out -> state（state 是提交点）。
-  mkdirSync(join(stateDir, 'versions'), { recursive: true })
-  const staged = join(stateDir, '.staging-' + process.pid + '.json')
-  writeFileSync(staged, text, { mode: 0o600 })
-  try {
-    let verified = null
-    if (args['verify-codex']) verified = verifyWithCodex(staged, { codexBin: args['codex-bin'], codexHome: args['codex-home'] })
-    const versionPath = join(stateDir, 'versions', fileName)
-    renameSync(staged, versionPath)
-    atomicWrite(join(stateDir, 'versions', fileName.replace(/\.json$/, '.meta.json')), JSON.stringify({
-      ...meta,
-      catalogVersion: version,
-      generatedAt,
-      format: args.format,
-      sourceFingerprint: fingerprint,
-      verified,
-    }, null, 2) + '\n')
-    atomicWrite(out, text)
-    const baseState = retireBindings(state, bindingDiff.removed, version)
-    const nextState = recordVersion(baseState, {
-      version,
-      file: join('versions', fileName),
-      sha256: digest,
-      generatedAt,
-      format: args.format,
-      counts: meta.counts,
-      sourceFingerprint: fingerprint,
-      bindings: meta.bindings,
-      verified,
-    }, { historyLimit })
-    atomicWrite(join(stateDir, STATE_FILE), JSON.stringify(nextState, null, 2) + '\n')
-    summary.verified = verified
-    summary.versionFile = join('versions', fileName)
-    if (args.json) printJson(summary)
-    else {
-      process.stdout.write('catalog v' + version + ' -> ' + out + '\n')
-      process.stdout.write('format: ' + args.format + ' | schema: ' + (meta.catalogSchema || '') + '\n')
-      process.stdout.write('models: ' + meta.counts.total + ' (official ' + meta.counts.official + ', third-party ' + meta.counts.thirdParty + ')\n')
-      if (diff) {
-        process.stdout.write('diff vs v' + (state.current ? state.current.version : '?') + ': +' + diff.counts.added + ' -' + diff.counts.removed + ' ~' + diff.counts.changed + '\n')
-        for (const line of formatDiffLines(diff, meta.bindings)) process.stdout.write(line + '\n')
-      } else {
-        process.stdout.write('diff: 无上一版本，按全量新增处理\n')
+  // 原子发布（CAS）：期望世代 = 本次读取到的 currentVersion；并发发布者版本不一致即拒绝。
+  // commit 内 stage 版本文件 → 校验 → rename → out → state（state 最后写 = 提交点）；失败保留旧代。
+  const baseState = retireBindings(state, bindingDiff.removed, version)
+  const nextState = recordVersion(baseState, {
+    version,
+    file: join('versions', fileName),
+    sha256: digest,
+    generatedAt,
+    format: args.format,
+    counts: meta.counts,
+    sourceFingerprint: fingerprint,
+    key: record.key,
+    configFingerprint: record.configFingerprint,
+    catalogFingerprint: record.catalogFingerprint,
+    bindings: meta.bindings,
+    verified: null,
+  }, { historyLimit })
+  const next = { generation: version, key: record.key, digest, state: nextState, verified: null, record }
+  const io = {
+    readState: () => readState(stateDir).state,
+    commit: (rec) => {
+      mkdirSync(join(stateDir, 'versions'), { recursive: true })
+      const staged = join(stateDir, '.staging-' + process.pid + '.json')
+      writeFileSync(staged, record.text, { mode: 0o600 })
+      try {
+        let verified = null
+        if (args['verify-codex']) verified = verifyWithCodex(staged, { codexBin: args['codex-bin'], codexHome: args['codex-home'] })
+        const versionPath = join(stateDir, 'versions', fileName)
+        renameSync(staged, versionPath)
+        atomicWrite(join(stateDir, 'versions', fileName.replace(/\.json$/, '.meta.json')), JSON.stringify({
+          ...meta,
+          catalogVersion: version,
+          generation: record.generation,
+          generationKey: record.key,
+          configFingerprint: record.configFingerprint,
+          generatedAt,
+          format: args.format,
+          sourceFingerprint: fingerprint,
+          verified,
+        }, null, 2) + '\n')
+        atomicWrite(out, record.text)
+        const committedState = Object.assign({}, rec.state, {
+          current: Object.assign({}, rec.state.current, { verified }),
+        })
+        atomicWrite(join(stateDir, STATE_FILE), JSON.stringify(committedState, null, 2) + '\n')
+        rec.verified = verified
+        rec.state = committedState
+      } finally {
+        rmSync(staged, { force: true })
       }
-      process.stdout.write('version: ' + join('versions', fileName) + ' (history ' + Math.min(historyLimit, nextState.history.length) + ')\n')
-      process.stdout.write('state: ' + join(stateDir, STATE_FILE) + '\n')
-      if (summary.verified) process.stdout.write('verified: codex ' + summary.verified.codexVersion + ', ' + summary.verified.modelCount + ' models parsed\n')
-      printWarnings(meta, args.json)
-    }
-    return { code: EXIT.OK, summary }
-  } finally {
-    rmSync(staged, { force: true })
+    },
   }
+  persistAndSwapValidatedGeneration(state.currentVersion, next, io)
+  summary.verified = next.verified
+  summary.versionFile = join('versions', fileName)
+  if (args.json) printJson(summary)
+  else {
+    process.stdout.write('catalog v' + version + ' -> ' + out + '\n')
+    process.stdout.write('format: ' + args.format + ' | schema: ' + (meta.catalogSchema || '') + '\n')
+    process.stdout.write('models: ' + meta.counts.total + ' (official ' + meta.counts.official + ', third-party ' + meta.counts.thirdParty + ')\n')
+    if (diff) {
+      process.stdout.write('diff vs v' + (state.current ? state.current.version : '?') + ': +' + diff.counts.added + ' -' + diff.counts.removed + ' ~' + diff.counts.changed + '\n')
+      for (const line of formatDiffLines(diff, meta.bindings)) process.stdout.write(line + '\n')
+    } else {
+      process.stdout.write('diff: 无上一版本，按全量新增处理\n')
+    }
+    process.stdout.write('version: ' + join('versions', fileName) + ' (history ' + Math.min(historyLimit, next.state.history.length) + ')\n')
+    process.stdout.write('generation: ' + record.generation + ' key ' + record.key.slice(0, 12) + '\n')
+    process.stdout.write('state: ' + join(stateDir, STATE_FILE) + '\n')
+    if (summary.verified) process.stdout.write('verified: codex ' + summary.verified.codexVersion + ', ' + summary.verified.modelCount + ' models parsed\n')
+    printWarnings(meta, args.json)
+  }
+  return { code: EXIT.OK, summary }
 }
 
 function status(args) {
@@ -537,6 +582,11 @@ function rollback(args) {
     throw fail('rollback_integrity', '回滚目标文件 sha256 与状态记录不一致：' + target.file)
   }
   const at = new Date().toISOString()
+  // 回滚同样是 CAS：读取后若已有并发发布，拒绝覆盖（避免把新代回滚成旧代）。
+  const fresh = readState(stateDir).state
+  if (fresh.currentVersion !== state.currentVersion) {
+    throw fail('generation_conflict', '回滚期间目录世代已变化（期望 ' + state.currentVersion + '，当前 ' + fresh.currentVersion + '），拒绝发布')
+  }
   if (args['dry-run']) {
     const payload = { ok: true, mode: 'rollback', dryRun: true, out, from: state.current ? state.current.version : null, to: target.version, file: target.file }
     if (args.json) printJson(payload)

@@ -8,6 +8,11 @@ import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import * as C from '../../../src/codex/catalog.js'
+import * as G from '../../../src/codex/catalog-generation.js'
+import { createRouter } from '../../../src/router.js'
+import { summarizeCodexCatalog } from '../../../src/codex/api.js'
+import { classifyTarget } from '../../../src/codex/identity.js'
+import { authorizeFinalTarget, TARGET_DOMAINS } from '../../../src/codex/target-authz.js'
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url))
 const CLI = join(ROOT, 'scripts', 'codex-catalog.mjs')
@@ -193,8 +198,20 @@ test('完整 ModelInfo 合并：官方直通 + 第三方补充，绑定可追溯
   assert.equal(deepseek.visibility, 'list')
   assert.equal(deepseek.supported_in_api, true)
   assert.equal(deepseek.priority, 3, '第三方 priority 从官方最大值 +1 开始')
-  assert.equal(deepseek.base_instructions, 'You are Codex, a fixture agent.', '指令从官方模板继承')
-  assert.equal(deepseek.multi_agent_version, 'v2', '客户端行为字段从模板继承')
+  // P1：第三方条目不得继承官方模板的 tool/search/patch/agent/hosted-tools 行为字段。
+  assert.equal(deepseek.base_instructions, C.NEUTRAL_BASE_INSTRUCTIONS, '使用中性指令，不继承官方模板指令')
+  assert.notEqual(deepseek.base_instructions, 'You are Codex, a fixture agent.')
+  assert.equal(deepseek.shell_type, 'disabled', '未证实 shell 能力 → disabled')
+  assert.equal(deepseek.support_verbosity, false)
+  assert.deepEqual(deepseek.experimental_supported_tools, [])
+  assert.equal(deepseek.web_search_tool_type, undefined, '不得继承官方 web_search_tool_type')
+  assert.equal(deepseek.apply_patch_tool_type, undefined, '不得继承官方 apply_patch_tool_type')
+  assert.equal(deepseek.multi_agent_version, undefined, '不得继承官方 multi_agent_version')
+  assert.equal(deepseek.tool_mode, undefined, '不得继承官方 tool_mode')
+  assert.equal(deepseek.use_responses_lite, undefined)
+  assert.equal(deepseek.supports_search_tool, undefined)
+  assert.equal(deepseek.truncation_policy.mode, 'tokens')
+  assert.ok(deepseek.truncation_policy.limit >= deepseek.context_window)
   assert.equal(deepseek.comp_hash, undefined, '不继承官方 comp_hash')
 
   const binding = built.meta.bindings['mg-opencode-go-deepseek-v3']
@@ -208,7 +225,9 @@ test('完整 ModelInfo 合并：官方直通 + 第三方补充，绑定可追溯
   assert.equal(meta.sources.contextWindow.confidence, 'declared')
   assert.equal(meta.sources.contextWindow.origin, 'models.deepseek-v3.maxContext')
   assert.equal(meta.sources.reasoningLevels.origin, 'models.deepseek-v3.effortOptions')
-  assert.equal(meta.sources.baseInstructions.confidence, 'inherited')
+  assert.equal(meta.sources.baseInstructions.confidence, 'conservative')
+  assert.deepEqual(meta.inheritedFields, [], '没有任何官方模板字段被继承')
+  assert.equal(meta.templateFieldsNotInherited.includes('web_search_tool_type'), true)
   assert.ok(C.validateCatalog(built.catalog).ok, '生成结果自身必须通过校验闸门')
 })
 
@@ -244,7 +263,11 @@ test('codex 覆盖：上下文、模态、档位、优先级可显式声明；�
     reasoningLevels: [{ effort: 'low', description: 'fast' }, { effort: 'max', description: 'deep' }],
     defaultReasoningLevel: 'max',
     priority: 7,
-    multiAgentVersion: 'v1',
+    capabilities: { multiAgentVersion: 'v1', webSearchToolType: 'text_and_image' },
+    evidence: {
+      multiAgentVersion: { source: 'https://vendor.example/docs/models', observedAt: '2026-11-11' },
+      webSearchToolType: { source: 'https://vendor.example/docs/models', observedAt: '2026-11-11' },
+    },
   }
   const built = C.buildCatalog({ base: officialCatalog(), config })
   const glm = built.catalog.models.find(m => m.slug === 'mg-opencode-go-glm-5')
@@ -254,9 +277,12 @@ test('codex 覆盖：上下文、模态、档位、优先级可显式声明；�
   assert.deepEqual(glm.supported_reasoning_levels.map(l => l.effort), ['low', 'max'])
   assert.equal(glm.default_reasoning_level, 'max')
   assert.equal(glm.priority, 7)
-  assert.equal(glm.multi_agent_version, 'v1')
+  assert.equal(glm.multi_agent_version, 'v1', '显式能力 + 证据才写入')
+  assert.equal(glm.web_search_tool_type, 'text_and_image')
   const meta = built.meta.models.find(m => m.slug === 'mg-opencode-go-glm-5')
   assert.equal(meta.sources.inputModalities.confidence, 'declared')
+  assert.equal(meta.sources.capabilities.evidence.multiAgentVersion.source, 'https://vendor.example/docs/models')
+  assert.equal(meta.sources.capabilities.evidence.multiAgentVersion.observedAt, '2026-11-11')
 
   config.models['glm-5'].codex = { contexWindow: 1 }
   assert.throws(() => C.buildCatalog({ base: officialCatalog(), config }), err => err.code === 'unknown_override_field')
@@ -279,7 +305,8 @@ test('模板模型可注入，缺失时明确报错', () => {
   const built = C.buildCatalog({ base: officialCatalog(), config: gatewayConfig(), options: { templateModel: 'gpt-test-hidden' } })
   assert.equal(built.meta.templateModel, 'gpt-test-hidden')
   const clone = built.catalog.models.find(m => m.slug === 'mg-opencode-go-deepseek-v3')
-  assert.equal(clone.multi_agent_version, 'v1')
+  assert.equal(clone.multi_agent_version, undefined, '模板只用于元数据记录，不再泄漏行为字段')
+  assert.notEqual(clone.base_instructions, 'You are Codex, a fixture agent.')
   assert.throws(() => C.buildCatalog({ base: officialCatalog(), config: gatewayConfig(), options: { templateModel: 'nope' } }), err => err.code === 'template_model_missing')
 })
 
@@ -514,6 +541,261 @@ test('CLI：真实 codex 可解析生成物（离线，需 MG_CODEX_VERIFY=1）'
     assert.equal(payload.verified.modelCount, payload.counts.total)
     const status = runCli(['--status', '--out', fx.out, '--state-dir', fx.state, '--json'])
     assert.equal(JSON.parse(status.stdout).published.verified.modelCount, payload.counts.total)
+  } finally {
+    rmSync(fx.dir, { recursive: true, force: true })
+  }
+})
+// ---------------------------------------------------------------------------
+// M2-2 / P1：目录世代、零碰撞、墓碑、第三方能力证据
+// ---------------------------------------------------------------------------
+
+test('P1：第三方能力必须带 source+observedAt；缺失/非法证据 fail-closed', () => {
+  const config = gatewayConfig()
+  config.models['glm-5'].codex = { capabilities: { webSearchToolType: 'text_and_image' } }
+  assert.throws(() => C.buildCatalog({ base: officialCatalog(), config }), err => err.code === 'capability_evidence_missing' && err.details.field === 'webSearchToolType')
+
+  config.models['glm-5'].codex.evidence = { webSearchToolType: { source: 'vendor-doc', observedAt: 'not-a-date' } }
+  assert.throws(() => C.buildCatalog({ base: officialCatalog(), config }), err => err.code === 'capability_evidence_missing')
+
+  // 旧字段同样是能力声明：没有证据也必须拒绝
+  config.models['glm-5'].codex = { multiAgentVersion: 'v2' }
+  assert.throws(() => C.buildCatalog({ base: officialCatalog(), config }), err => err.code === 'capability_evidence_missing')
+
+  // 保守声明（false / 空数组 / disabled）不需要证据
+  config.models['glm-5'].codex = { capabilities: { supportsSearchTool: false, experimentalSupportedTools: [], shellType: 'disabled' } }
+  const built = C.buildCatalog({ base: officialCatalog(), config })
+  const glm = built.catalog.models.find(m => m.slug === 'mg-opencode-go-glm-5')
+  assert.equal(glm.supports_search_tool, false)
+  assert.deepEqual(glm.experimental_supported_tools, [])
+  assert.equal(glm.shell_type, 'disabled')
+})
+
+test('P1：真实模型 / 别名 / 虚拟模型 / 保留名零碰撞；别名指向墓碑硬拒绝', () => {
+  const aliased = { models: { a: { provider: 'p', alias: ['b'] }, b: { provider: 'p' } } }
+  const hits = C.zeroCollisionsAcrossRealModelsAliasesVirtualAndReservedNames(aliased)
+  assert.ok(hits.some(h => h.code === 'name_collision' && h.name === 'b'))
+  assert.throws(() => C.assertZeroCollisions(aliased), err => err.code === 'identity_collision')
+
+  const vm = { models: { a: { provider: 'p' } }, virtualModels: [{ name: 'a' }] }
+  assert.ok(C.zeroCollisionsAcrossRealModelsAliasesVirtualAndReservedNames(vm).some(h => h.code === 'name_collision'))
+  assert.throws(() => C.assertZeroCollisions(vm), err => err.code === 'identity_collision')
+
+  const reserved = JSON.parse('{"models":{"__proto__":{"provider":"p"}}}')
+  assert.ok(C.zeroCollisionsAcrossRealModelsAliasesVirtualAndReservedNames(reserved).some(h => h.code === 'reserved_name'))
+
+  const retired = { models: { m: { provider: 'p', alias: ['mg-p-old'] } } }
+  const retiredHits = C.zeroCollisionsAcrossRealModelsAliasesVirtualAndReservedNames(retired, { retiredSlugs: ['mg-p-old'] })
+  assert.equal(retiredHits.some(h => h.code === 'alias_to_retired_id' && h.name === 'mg-p-old'), true)
+
+  // buildCatalog 在生成前也 fail-closed
+  const cfg = { providers: { p: { baseUrl: 'http://127.0.0.1:1' } }, models: { a: { provider: 'p', maxContext: 1000, alias: ['b'] }, b: { provider: 'p', maxContext: 1000 } } }
+  assert.throws(() => C.buildCatalog({ base: officialCatalog(), config: cfg }), err => err.code === 'identity_collision')
+
+  // 生成的聚合 slug 与配置真实模型名同名 → slug_collision
+  const slugClash = { providers: { p: { baseUrl: 'http://127.0.0.1:1' } }, models: { a: { provider: 'p', maxContext: 1000 }, 'mg-p-a': { provider: 'p', maxContext: 1000 } } }
+  assert.throws(() => C.buildCatalog({ base: officialCatalog(), config: slugClash }), err => err.code === 'slug_collision')
+})
+
+test('P1：目录外 / 墓碑 / 别名指向墓碑全部 hard reject，不回退默认模型', () => {
+  const record = G.buildGenerationRecord({ generation: 1, base: officialCatalog(), config: gatewayConfig() })
+  const bindingSlug = 'mg-opencode-go-deepseek-v3'
+  const view = G.toCatalogView(record, { retiredSlugs: ['mg-opencode-go-glm-5'] })
+
+  const hit = G.resolveCatalogId(view, bindingSlug)
+  assert.equal(hit.kind, 'binding')
+  assert.equal(hit.binding.model, 'deepseek-v3')
+  assert.equal(G.resolveCatalogId(view, 'gpt-test-sol').kind, 'official')
+
+  const aliasHit = G.resolveCatalogId(view, 'alias-ok', { aliases: { 'alias-ok': bindingSlug } })
+  assert.equal(aliasHit.kind, 'alias')
+  assert.equal(aliasHit.target, bindingSlug)
+
+  assert.throws(() => G.resolveCatalogId(view, 'mg-ghost-model'), err => err.code === 'unknown_catalog_id')
+  assert.throws(() => G.resolveCatalogId(view, 'mg-opencode-go-glm-5'), err => err.code === 'retired_catalog_id')
+  assert.throws(() => G.resolveCatalogId(view, 'old-alias', { aliases: { 'old-alias': 'mg-opencode-go-glm-5' } }), err => err.code === 'alias_to_retired_id')
+  assert.throws(() => G.resolveCatalogId(view, 'bad-alias', { aliases: { 'bad-alias': 'mg-missing' } }), err => err.code === 'alias_target_missing')
+  assert.throws(() => G.resolveCatalogId(view, ''), err => err.code === 'unknown_catalog_id')
+})
+
+test('P1：同一世代贯穿 /v1/models 投影、router.resolve 与管理投影', () => {
+  const record = G.buildGenerationRecord({ generation: 4, base: officialCatalog(), config: gatewayConfig() })
+  const view = G.toCatalogView(record)
+  assert.equal(view.key, record.key)
+  assert.equal(view.generation, record.generation)
+
+  const baseCfg = gatewayConfig()
+  const modelsWithoutPassthrough = Object.fromEntries(Object.entries(baseCfg.models).filter(([name]) => name !== 'gpt-test-sol'))
+  const cfg = {
+    defaults: { provider: 'opencode-go', codexOfficialProvider: 'openai' },
+    providers: { 'opencode-go': { baseUrl: 'http://127.0.0.1:1' }, openai: { baseUrl: 'https://api.openai.com' } },
+    models: modelsWithoutPassthrough,
+    _codexCatalog: view,
+  }
+  const router = createRouter(cfg)
+  assert.equal(router.resolve('mg-opencode-go-deepseek-v3').known, true)
+  assert.equal(router.resolve('gpt-test-sol').def.codexOfficial, true)
+
+  // /v1/models 投影就是 view.models 本身（同一份，不复制）
+  const projected = C.renderCodexModels({ models: view.models })
+  assert.equal(projected.models.length, record.catalog.models.length)
+  assert.deepEqual(projected.models.map(m => m.slug), record.catalog.models.map(m => m.slug))
+
+  const status = summarizeCodexCatalog(cfg)
+  assert.equal(status.available, true)
+  assert.equal(status.generation, C.sha256Hex(view.key).slice(0, 12), '管理投影必须引用同一 generation key')
+  assert.equal(status.counts.total, view.models.length)
+  assert.equal(status.counts.official, view.officialSlugs.length)
+  assert.equal(status.counts.thirdParty, Object.keys(view.bindings).length)
+})
+
+test('P1：cache/generation key 包含 wire 配置指纹；同名模型改配置 ⇒ 新世代，运行时统计不触发', () => {
+  const base = officialCatalog()
+  const cfg = gatewayConfig()
+  const baseStat = { mtimeMs: 111, size: 222 }
+  const key = G.generationCacheKey({ basePath: '/x/catalog.json', baseStat, config: cfg })
+
+  const noisy = JSON.parse(JSON.stringify(cfg))
+  noisy.models['deepseek-v3'].probe = { ok: true }
+  noisy.models['deepseek-v3'].requests = 42
+  noisy.models['deepseek-v3'].st = { openUntil: 1 }
+  noisy.providers['opencode-go'].keyOk = true
+  noisy.providers['opencode-go'].hasKey = true
+  assert.equal(G.generationCacheKey({ basePath: '/x/catalog.json', baseStat, config: noisy }), key, '运行时字段不产生新世代')
+  assert.equal(G.configWireFingerprint(noisy), G.configWireFingerprint(cfg))
+
+  for (const [field, value] of [
+    ['api', 'anthropic'],
+    ['effortFormat', 'thinking'],
+    ['maxContext', 64000],
+    ['providerModels', { 'opencode-go': 'deepseek/real' }],
+    ['capability', 'embedding'],
+  ]) {
+    const changed = JSON.parse(JSON.stringify(cfg))
+    changed.models['deepseek-v3'][field] = value
+    assert.notEqual(G.generationCacheKey({ basePath: '/x/catalog.json', baseStat, config: changed }), key, 'wire 配置变化必须换 key: ' + field)
+    assert.notEqual(G.configWireFingerprint(changed), G.configWireFingerprint(cfg), 'wire 指纹变化: ' + field)
+  }
+
+  const r1 = G.buildGenerationRecord({ generation: 1, base, config: cfg })
+  const changed = JSON.parse(JSON.stringify(cfg))
+  changed.models['deepseek-v3'].api = 'anthropic'
+  const r2 = G.buildGenerationRecord({ generation: 2, base, config: changed })
+  assert.notEqual(r1.key, r2.key)
+  assert.notEqual(r1.configFingerprint, r2.configFingerprint)
+  assert.equal(r1.generation + 1, r2.generation)
+})
+
+test('P1：并发读固定捕获开始时的世代；CAS 发布拒绝；失败保留旧代；回滚整代替换', () => {
+  const r1 = G.buildGenerationRecord({ generation: 1, base: officialCatalog(), config: gatewayConfig() })
+  const r2 = G.buildGenerationRecord({ generation: 2, base: officialCatalog(), config: gatewayConfig() })
+  const r3 = G.buildGenerationRecord({ generation: 3, base: officialCatalog(), config: gatewayConfig() })
+  const reg = new G.CatalogGenerationRegistry(r1)
+
+  const reader = reg.beginRead()
+  assert.equal(reader.generation, 1)
+  reg.publish(r2, { expectedGeneration: 1 })
+  assert.equal(reader.generation, 1, '旧读者必须继续看到旧代')
+  assert.equal(reader.record, r1)
+  assert.equal(reg.current().generation, 2)
+
+  assert.throws(() => reg.publish(r3, { expectedGeneration: 1 }), err => err.code === 'generation_conflict')
+  assert.throws(() => reg.publish(r1, { expectedGeneration: 2 }), err => err.code === 'generation_not_monotonic')
+  reg.rollbackTo(r1)
+  assert.equal(reg.current(), r1, '回滚只换整代')
+  assert.equal(reg.publish(r3, { expectedGeneration: 1 }).generation, 3, '高水位不回退，仍单调')
+
+  // 文件发布 CAS + 失败保留旧代（注入式内存 io）
+  let state = { currentVersion: 0 }
+  const io = {
+    readState: () => state,
+    commit: (next) => { state = next.state },
+  }
+  G.persistAndSwapValidatedGeneration(0, { generation: 1, key: 'k1', digest: 'd1', state: { currentVersion: 1 } }, io)
+  assert.equal(state.currentVersion, 1)
+  assert.throws(() => G.persistAndSwapValidatedGeneration(0, { generation: 2, key: 'k2', digest: 'd2', state: { currentVersion: 2 } }, io), err => err.code === 'generation_conflict')
+  assert.throws(() => G.persistAndSwapValidatedGeneration(1, { generation: 1, key: 'k1', digest: 'd1', state: { currentVersion: 1 } }, io), err => err.code === 'generation_not_monotonic')
+  const failing = { readState: () => state, commit: () => { throw new Error('disk full') } }
+  assert.throws(() => G.persistAndSwapValidatedGeneration(1, { generation: 2, key: 'k2', digest: 'd2', state: { currentVersion: 2 } }, failing), /disk full/)
+  assert.equal(state.currentVersion, 1, 'commit 失败必须保留旧代')
+})
+
+test('M2-1 接口闭环：generation record 生成 authorize binding，验证标志单一来源', () => {
+  const record = G.buildGenerationRecord({ generation: 5, base: officialCatalog(), config: gatewayConfig() })
+  const provider = { id: 'opencode-go', baseUrl: 'http://127.0.0.1:19001', apiKey: 'sk-fixture' }
+  const identity = classifyTarget(provider, {})
+  const binding = G.generationAuthzBinding(record, {
+    domain: TARGET_DOMAINS.THIRD_PARTY,
+    origin: provider.baseUrl,
+    path: '/v1/chat/completions',
+    identity,
+    provider,
+    cfg: {},
+    providerId: provider.id,
+    modelBinding: { model: 'mg-opencode-go-deepseek-v3', serving: 'deepseek-v3' },
+  })
+  assert.equal(binding.generation, 5)
+  assert.equal(binding.thirdPartyVerified, true)
+  assert.equal(binding.officialVerified, false)
+  const authz = authorizeFinalTarget({ domain: TARGET_DOMAINS.THIRD_PARTY, caller: { incoming: {}, threadId: 't1', sessionHeader: 'x-opencode-session' } }, 5, binding)
+  assert.equal(authz.generation, 5)
+  assert.equal(authz.redirect, 'error')
+
+  assert.throws(() => authorizeFinalTarget({ domain: TARGET_DOMAINS.OFFICIAL, caller: { incoming: {} } }, 5, binding), err => err.code === 'target_not_verified')
+  assert.throws(() => authorizeFinalTarget({ domain: TARGET_DOMAINS.THIRD_PARTY, caller: { incoming: {} } }, 4, binding), err => err.code === 'generation_mismatch')
+  assert.throws(() => authorizeFinalTarget({ domain: TARGET_DOMAINS.THIRD_PARTY, caller: { incoming: {} } }, parseInt('5', 10) + 1, binding), err => err.code === 'generation_mismatch')
+})
+
+test('P1：官方条目保留必要字段与来源版本；第三方不带未证实能力字段', () => {
+  const base = officialCatalog()
+  const record = G.buildGenerationRecord({ generation: 2, base, config: gatewayConfig() })
+  assert.equal(record.meta.counts.official, 2)
+  assert.deepEqual([...record.meta.officialSlugs], ['gpt-test-hidden', 'gpt-test-sol'])
+  for (const original of base.models) {
+    const kept = record.catalog.models.find(m => m.slug === original.slug)
+    assert.deepEqual(kept, original, '官方条目必须逐字段保留：' + original.slug)
+    for (const field of C.SERDE_REQUIRED_MODEL_FIELDS) assert.notEqual(kept[field], undefined, '官方必填字段 ' + field)
+  }
+  assert.equal(record.baseFingerprint, C.sha256Hex(C.stableStringify(base)))
+  assert.equal(record.verified.by, 'catalog-generation')
+  assert.equal(record.verified.official, true)
+  assert.equal(record.verified.thirdParty, true)
+
+  const third = record.catalog.models.find(m => m.slug === 'mg-opencode-go-deepseek-v3')
+  assert.equal(third.shell_type, 'disabled')
+  for (const field of ['web_search_tool_type', 'apply_patch_tool_type', 'multi_agent_version', 'tool_mode', 'use_responses_lite', 'supports_search_tool']) {
+    assert.equal(third[field], undefined, '第三方不得声明未证实能力：' + field)
+  }
+})
+
+test('CLI：世代号单调（回滚后不复用版本号）+ 状态记录 generation key', () => {
+  const fx = cliFixture('monotonic')
+  try {
+    const first = runCli(['--base', fx.base, '--models', fx.models, '--out', fx.out, '--state-dir', fx.state, '--json'])
+    assert.equal(first.status, 0, first.stderr)
+    const v1 = JSON.parse(first.stdout)
+    assert.equal(v1.version, 1)
+    assert.match(String(v1.generationKey), /^[0-9a-f]{64}$/)
+    assert.equal(v1.generation, 1)
+
+    const second = runCli(['--base', fx.base, '--models', fx.models, '--out', fx.out, '--state-dir', fx.state, '--json'])
+    assert.equal(second.status, 0, second.stderr)
+    assert.equal(JSON.parse(second.stdout).version, 2)
+
+    const rollback = runCli(['--rollback', 'prev', '--out', fx.out, '--state-dir', fx.state, '--json'])
+    assert.equal(rollback.status, 0, rollback.stderr)
+    assert.equal(JSON.parse(rollback.stdout).to, 1)
+
+    const third = runCli(['--base', fx.base, '--models', fx.models, '--out', fx.out, '--state-dir', fx.state, '--json'])
+    assert.equal(third.status, 0, third.stderr)
+    const v3 = JSON.parse(third.stdout)
+    assert.equal(v3.version, 3, '回滚只换整代，版本号不复用（高水位单调）')
+
+    const state = JSON.parse(readFileSync(join(fx.state, 'state.json'), 'utf8'))
+    assert.equal(state.currentVersion, 3)
+    assert.equal(state.highWaterVersion, 3)
+    assert.equal(state.current.key, v3.generationKey)
+    assert.equal(state.current.configFingerprint, v3.configFingerprint)
+    assert.match(String(state.current.catalogFingerprint), /^[0-9a-f]{64}$/)
   } finally {
     rmSync(fx.dir, { recursive: true, force: true })
   }
