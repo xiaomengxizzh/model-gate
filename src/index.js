@@ -205,7 +205,8 @@ function configProjection(state) {
   // 一次「读→改→保存」会把它们当作已删除而清空（与虚拟模型 Key 的孤儿风险同类）。
   const virtualModels = (cfg.virtualModels || []).map((v) => {
     const meta = (cfg._keys && cfg._keys['__mg_vm_meta_' + v.name]) || {}
-    return { name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps, expiresAt: meta.expiresAt || '', note: meta.note || '' }
+    // T-KEY-02：expiresAt 原值 + 后端判定的状态；前端只展示，不自行比较时间。
+    return { name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps, ...virtualExpiryProjection(meta.expiresAt), note: meta.note || '' }
   })
   return { configVersion: cfg.configVersion || 0, providers, models, defaults, virtualModels }
 }
@@ -361,7 +362,7 @@ function buildStatus(state) {
     const dk = (s.daily && s.daily[v.name] && s.daily[v.name][todayKey()]) || { tokens: 0, hit: 0, miss: 0 }
     const keyId = '__mg_vm_' + v.name
     const meta = (state.cfg._keys && state.cfg._keys['__mg_vm_meta_' + v.name]) || {}
-    return { name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps, keySet: !!(state.cfg._keys && state.cfg._keys[keyId]), expiresAt: meta.expiresAt || '', note: meta.note || '', requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate: (dk.hit + dk.miss) > 0 ? Math.round(dk.hit / (dk.hit + dk.miss) * 1000) / 10 : null }
+    return { name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps, keySet: !!(state.cfg._keys && state.cfg._keys[keyId]), ...virtualExpiryProjection(meta.expiresAt), note: meta.note || '', requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate: (dk.hit + dk.miss) > 0 ? Math.round(dk.hit / (dk.hit + dk.miss) * 1000) / 10 : null }
   })
   return {
     needAuth: !!state.adminToken,
@@ -510,12 +511,16 @@ async function doSaveConfig(state, body) {
   // 未回传字段（affinityTtlMs / failbackProbe / preheat 等自定义或扩展项）保留现有值——任何保存都不再冲掉自定义配置。
   // 代价：字段无法经保存接口删除（需要时直接编辑 gateway.local.json 或 /api/config/reload 后手改）。
   const defaults = Object.assign({}, cur.defaults || {}, body.defaults || {})
-  // 客户端 Key：'********' 掩码视为未改动（不清空）；其它值（含清空 ''）写入加密 keys 库，不再明文进 local，与 provider key 同样加密落盘
+  // 客户端 Key 三态（P0-1）：先看**原始补丁**是否自有该字段（早于 defaults 合并），再决定保留/迁移/清空/替换/拒绝。
+  // 任何情况下都不把明文写进 local：落盘的 defaults.clientKey 恒为 ''，真值只进加密 keys 库。
+  const clientKeyPlan = planClientKeyUpdate(body, cur)
+  if (clientKeyPlan.action === 'INVALID_400') {
+    return { error: 'defaults.clientKey 必须为非空字符串（省略该字段或回传掩码 ' + CLIENT_KEY_MASK + ' 表示保持现有 Key；显式清空请发送空字符串）' }
+  }
   let newClientKey = null
-  if (defaults && typeof defaults.clientKey === 'string' && defaults.clientKey !== '********') { newClientKey = defaults.clientKey }
+  if (clientKeyPlan.action === 'EXPLICIT_CLEAR') newClientKey = ''
+  else if (clientKeyPlan.action === 'MIGRATE_EXISTING_VALUE' || clientKeyPlan.action === 'REPLACE_WITH_SEALED') newClientKey = clientKeyPlan.value
   defaults.clientKey = ''
-  // 掩码=未改动：若存在旧版明文 defaults.clientKey，迁移进加密 keys 库并清掉明文，避免掩码保存导致 key 丢失
-  if (newClientKey == null) { const legacy = (cur.defaults && cur.defaults.clientKey) || ''; if (legacy && legacy !== '********') newClientKey = legacy }
   for (const [mn, m] of Object.entries(models)) {
     if (!providers[m.provider]) return { error: '模型「' + mn + '」引用了不存在的上游 ' + m.provider }
     for (const fb of m.fallbacks || []) if (!providers[fb]) return { error: '模型「' + mn + '」的备用上游 ' + fb + ' 不存在' }
@@ -571,6 +576,7 @@ async function doSaveConfig(state, body) {
   // —— virtualModels 强校验（面板保存路径；loadConfig 另有容错规范化，手改坏配置不宕机）——
   const vmsIn = body.virtualModels !== undefined ? body.virtualModels : (cur.virtualModels || [])
   const vmNames = new Set()
+  const vmExpiryStored = new Map()
   for (const vm of vmsIn) {
     if (!vm || typeof vm.name !== 'string' || !vm.name.trim()) return { error: '虚拟模型缺少名称' }
     const name = vm.name.trim()
@@ -587,6 +593,15 @@ async function doSaveConfig(state, body) {
       for (const pr of (e.providers || [])) if (pr && !providers[pr]) return { error: '虚拟模型「' + name + '」目录引用了不存在的上游 ' + pr }
     }
     for (const f of ['dailyQuota', 'quota', 'maxContext', 'maxConcurrent', 'qps']) if (vm[f] != null && (!Number.isFinite(Number(vm[f])) || Number(vm[f]) < 0)) return { error: '虚拟模型「' + name + '」的 ' + f + ' 必须为非负数字' }
+    // T-KEY-02：过期时间在写盘前解析校验；非法/歧义值 400 且不落盘。
+    const parsedExpiry = parseVirtualExpiry(vm.expiresAt)
+    if (parsedExpiry.kind === 'invalid') {
+      return { error: '虚拟模型「' + name + '」的 Key 过期时间无效（code: ' + parsedExpiry.code + '；支持毫秒值、带时区 ISO8601、旧 datetime-local YYYY-MM-DDTHH:mm）' }
+    }
+    // 旧日期格式保留原值以兼容历史读回；其余已解析值统一落显式时区 ISO。
+    vmExpiryStored.set(name, parsedExpiry.kind === 'valid'
+      ? (parsedExpiry.source === 'legacy_local_date' ? String(vm.expiresAt).trim() : parsedExpiry.normalized)
+      : '')
   }
   const cleanVms = vmsIn.map(vm => ({ name: vm.name.trim(), directory: vm.directory.map(e => ({ model: e.model, mode: e.mode === 'onFail' ? 'onFail' : 'afterAll', providers: (e.providers || []).filter(Boolean) })), quota: Number(vm.quota) || 0, dailyQuota: Number(vm.dailyQuota) || 0, maxContext: Number(vm.maxContext) || 0, maxConcurrent: Number(vm.maxConcurrent) || 0, qps: Number(vm.qps) || 0 }))
   // 删除虚拟模型时同步清理其独立 Key 与元数据，防孤儿 key 被同名新建继承
@@ -598,7 +613,7 @@ async function doSaveConfig(state, body) {
   for (const vmRaw of vmsIn) {
     const vmName = vmRaw.name.trim()
     const mid = '__mg_vm_meta_' + vmName
-    const exp = typeof vmRaw.expiresAt === 'string' ? vmRaw.expiresAt.trim() : ''
+    const exp = vmExpiryStored.get(vmName) || ''
     const note = typeof vmRaw.note === 'string' ? vmRaw.note.trim() : ''
     const want = (exp || note) ? { expiresAt: exp, note } : null
     const curMeta = keys[mid]
@@ -631,6 +646,8 @@ async function doSaveConfig(state, body) {
   if (removedProviders.size || removedModels.size) localOut._removed = { providers: [...removedProviders], models: [...removedModels] }
   writeJsonAtomic(state.paths.local, localOut)
   reloadConfig(state)
+  // 管理员审计：只记录动作 + 配置代际，绝不记录 Key 值。
+  if (state.log) state.log.info('审计：配置保存', 'version=' + newVersion, 'clientKeyAction=' + clientKeyPlan.action)
   return { version: newVersion }
 }
 function saveKeys(state, body) { return withConfigWriteLock(() => doSaveKeys(state, body)) }
@@ -746,6 +763,116 @@ function ensureSt(state, pid) {
 function keysFileEncrypted(path) { try { return readFileSync(path, 'utf8').trimStart().startsWith('MG1:') } catch { return false } }
 // 数据面客户端 Key：环境变量优先，其次加密 keys 库（__mg_client），最后兼容旧 defaults.clientKey
 function currentClientKey(state) { return process.env.MG_CLIENT_KEY || (state.cfg._keys && state.cfg._keys.__mg_client) || (state.cfg.defaults && state.cfg.defaults.clientKey) || '' }
+
+// —— M0-2 / T-KEY-01：客户端 Key 三态（省略或掩码=保留；''=显式清空；非空值=替换）——
+// P0-1 根因：先合并 defaults 再判空，会让"省略该字段的补丁"继承历史空串并被误判为显式清空。
+// 因此判定必须基于**原始补丁**的 hasOwnProperty（早于任何 defaults 合并），并由调用方按 action 执行写盘。
+export const CLIENT_KEY_MASK = '********'
+export const CLIENT_KEY_ACTIONS = Object.freeze(['KEEP', 'MIGRATE_EXISTING_VALUE', 'EXPLICIT_CLEAR', 'INVALID_400', 'REPLACE_WITH_SEALED'])
+export function isValidClientKeyValue(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 8192) return false
+  if (value.trim().length === 0) return false
+  return !/[\u0000-\u001f\u007f]/.test(value)
+}
+export function planClientKeyUpdate(patch, current) {
+  const cfg = current || {}
+  const sealed = cfg._keys && cfg._keys.__mg_client
+  const legacy = cfg.defaults && cfg.defaults.clientKey
+  const hasSealed = typeof sealed === 'string' && sealed.length > 0
+  const hasLegacy = typeof legacy === 'string' && legacy.length > 0 && legacy !== CLIENT_KEY_MASK
+  const patchDefaults = patch && isPlainObject(patch.defaults) ? patch.defaults : null
+  const present = !!patchDefaults && Object.prototype.hasOwnProperty.call(patchDefaults, 'clientKey')
+  const value = present ? patchDefaults.clientKey : undefined
+  if (!present || value === CLIENT_KEY_MASK) {
+    if (hasSealed) return { action: 'KEEP' }
+    if (hasLegacy) return { action: 'MIGRATE_EXISTING_VALUE', value: legacy }
+    return { action: 'KEEP' }
+  }
+  if (value === '') return { action: 'EXPLICIT_CLEAR' }
+  if (!isValidClientKeyValue(value)) return { action: 'INVALID_400', code: 'invalid_client_key' }
+  return { action: 'REPLACE_WITH_SEALED', value }
+}
+
+// —— M0-2 / T-KEY-02：虚拟 Key 过期时间单一真源 ——
+// 支持：毫秒值（number 或 10~16 位数字串）、带时区 ISO8601、旧 datetime-local（YYYY-MM-DDTHH:mm，按本机时区解释）、
+// 旧日期 YYYY-MM-DD（本机零点，兼容历史配置）。无时区的秒级 ISO 无法确定时区 → 判歧义拒绝。
+// 非法/歧义：保存返回 400 且不落盘；鉴权一律 deny 并在日志给出 diagnostic code。
+export const EXPIRY_FORMATS = Object.freeze(['epoch_ms', 'iso_zoned', 'legacy_local_datetime', 'legacy_local_date'])
+function expiryInvalid(code) { return { kind: 'invalid', code } }
+function makeExpiry(epochMs, source) {
+  if (!Number.isFinite(epochMs) || Math.abs(epochMs) > 8.64e15) return expiryInvalid('expiry_out_of_range')
+  return { kind: 'valid', epochMs, normalized: new Date(epochMs).toISOString(), source }
+}
+function daysInMonth(year, month) { return new Date(Date.UTC(year, month, 0)).getUTCDate() }
+function validYmd(year, month, day) {
+  return Number.isInteger(year) && Number.isInteger(month) && Number.isInteger(day) &&
+    month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(year, month) && year >= 1970 && year <= 9999
+}
+export function parseVirtualExpiry(persisted) {
+  if (persisted === undefined || persisted === null) return { kind: 'none' }
+  if (typeof persisted === 'number') {
+    if (!Number.isFinite(persisted)) return expiryInvalid('expiry_not_finite')
+    return makeExpiry(persisted, 'epoch_ms')
+  }
+  if (typeof persisted !== 'string') return expiryInvalid('expiry_unsupported_type')
+  const raw = persisted.trim()
+  if (raw === '') return { kind: 'none' }
+  if (/^\d{10,16}$/.test(raw)) return makeExpiry(Number(raw), 'epoch_ms')
+  const zoned = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})$/.exec(raw)
+  if (zoned) {
+    const year = +zoned[1]; const month = +zoned[2]; const day = +zoned[3]
+    const hour = +zoned[4]; const minute = +zoned[5]
+    const second = zoned[6] === undefined ? 0 : +zoned[6]
+    const milli = zoned[7] === undefined ? 0 : Number((zoned[7] + '00').slice(0, 3))
+    if (!validYmd(year, month, day) || hour > 23 || minute > 59 || second > 59) return expiryInvalid('expiry_invalid_calendar')
+    const offsetMin = zoned[8] === 'Z' ? 0 : (zoned[8][0] === '-' ? -1 : 1) * (Number(zoned[8].slice(1, 3)) * 60 + Number(zoned[8].slice(4, 6)))
+    if (Math.abs(offsetMin) > 14 * 60) return expiryInvalid('expiry_invalid_offset')
+    const epochMs = Date.UTC(year, month - 1, day, hour, minute, second, milli) - offsetMin * 60000
+    const back = new Date(epochMs + offsetMin * 60000)
+    if (back.getUTCFullYear() !== year || back.getUTCMonth() !== month - 1 || back.getUTCDate() !== day ||
+        back.getUTCHours() !== hour || back.getUTCMinutes() !== minute || back.getUTCSeconds() !== second) {
+      return expiryInvalid('expiry_invalid_calendar')
+    }
+    return makeExpiry(epochMs, 'iso_zoned')
+  }
+  const local = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(raw)
+  if (local) {
+    const year = +local[1]; const month = +local[2]; const day = +local[3]; const hour = +local[4]; const minute = +local[5]
+    if (!validYmd(year, month, day) || hour > 23 || minute > 59) return expiryInvalid('expiry_invalid_calendar')
+    const dt = new Date(year, month - 1, day, hour, minute, 0, 0)
+    if (dt.getFullYear() !== year || dt.getMonth() !== month - 1 || dt.getDate() !== day || dt.getHours() !== hour || dt.getMinutes() !== minute) {
+      return expiryInvalid('expiry_invalid_calendar')
+    }
+    return makeExpiry(dt.getTime(), 'legacy_local_datetime')
+  }
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw)
+  if (dateOnly) {
+    const year = +dateOnly[1]; const month = +dateOnly[2]; const day = +dateOnly[3]
+    if (!validYmd(year, month, day)) return expiryInvalid('expiry_invalid_calendar')
+    const dt = new Date(year, month - 1, day, 0, 0, 0, 0)
+    if (dt.getFullYear() !== year || dt.getMonth() !== month - 1 || dt.getDate() !== day) return expiryInvalid('expiry_invalid_calendar')
+    return makeExpiry(dt.getTime(), 'legacy_local_date')
+  }
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(raw)) return expiryInvalid('expiry_ambiguous_timezone')
+  return expiryInvalid('expiry_unrecognized_format')
+}
+// 到期判定：沿用既有 now > expiresAt 语义（到期瞬间仍视为有效）。nowMs 可注入，便于边界测试。
+export function isVirtualKeyExpired(persisted, nowMs = Date.now()) {
+  const parsed = parseVirtualExpiry(persisted)
+  if (parsed.kind === 'none') return { expired: false, state: 'none', parsed }
+  if (parsed.kind === 'invalid') return { expired: true, state: 'invalid', code: parsed.code, parsed }
+  const now = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  const expired = now > parsed.epochMs
+  return { expired, state: expired ? 'expired' : 'valid', epochMs: parsed.epochMs, parsed }
+}
+// 投影：返回存储原值 + 后端判定的状态（前端只展示，不自行比较时间）。
+export function virtualExpiryProjection(persisted, nowMs = Date.now()) {
+  const parsed = parseVirtualExpiry(persisted)
+  const state = parsed.kind === 'none' ? 'none' : parsed.kind === 'invalid' ? 'invalid' : (Number(nowMs) > parsed.epochMs ? 'expired' : 'valid')
+  const out = { expiresAt: typeof persisted === 'string' ? persisted : '', expiresAtState: state, expiresAtMs: parsed.kind === 'valid' ? parsed.epochMs : null }
+  if (parsed.kind === 'invalid') out.expiresAtDiagnostic = parsed.code
+  return out
+}
 
 // —— MG-013 媒体上游代理：multipart 原样转发 / 二进制响应 / 体积上限 / 预算与取消 / fallback ——
 async function handleMediaProxy(state, budget, log, opts) {
@@ -1259,8 +1386,10 @@ function makeHandler(state) {
         }
         const vmKey = vm && state.cfg._keys && state.cfg._keys['__mg_vm_' + vm.name]
         const meta = vm && state.cfg._keys && state.cfg._keys['__mg_vm_meta_' + vm.name]
-        const expired = meta && meta.expiresAt && Date.now() > Number(meta.expiresAt)
-        if ((clientKey || vmKey) && !(vmKey && !expired && clientAuthOk(req, vmKey))) {
+        // T-KEY-02：单一真源解析过期时间；非法/歧义值 deny（不再因 Number() NaN 永久放行）。
+        const expiry = isVirtualKeyExpired(meta && meta.expiresAt)
+        if (vmKey && expiry.state === 'invalid' && state.log) state.log.warn('虚拟模型 Key 过期时间无效，已拒绝放行', 'model=' + (vm && vm.name), 'code=' + expiry.code)
+        if ((clientKey || vmKey) && !(vmKey && !expiry.expired && clientAuthOk(req, vmKey))) {
           sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } })
           return
         }

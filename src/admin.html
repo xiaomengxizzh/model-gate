@@ -470,6 +470,11 @@ function renderStatsPanel(){const title=$('#gTitle'),box=$('#global');if(!title)
   if(!names.length){box.innerHTML='<div class="empty">无匹配模型</div>';return}
   box.innerHTML=names.map(n=>{const S=(ST.byM&&ST.byM[n])||{requests:0,errors:0,tokens:0,today:0,hitRate:null};const m=C.models[n];return '<div class="kvrow"><span class="k">'+esc(n)+' <small>· '+esc(m?m.provider:'')+'</small>'+(m&&m.dailyQuota>0?'<small>· 日限 '+msFmt(m.dailyQuota)+'</small>':'')+'</span><span class="v"><em>'+msShort(S.today||0)+'</em> 今日 · '+msShort(S.tokens||0)+' 总计<br><small>请求'+(S.requests||0)+' · 错'+(S.errors||0)+' · 缓存 '+(S.hitRate==null?'—':S.hitRate+'%')+'</small></span></div>'}).join('')}
 let _persistTimer=null, _dragIdx=-1, _tplName=''
+// M0-2 / P0-1：客户端 Key 三态。未编辑 → 保存时不发送 clientKey；输入新值=替换；「清空」按钮=显式清空。
+// 绝不能用空输入代替“未改动”，否则面板每次保存都会把服务端 Key 清掉。
+let _clientKeyDirty=false, _clientKeyClear=false, _clientKeyDraft=''
+function clientKeyDisplay(){if(_clientKeyClear)return '';if(_clientKeyDirty)return _clientKeyDraft;return (C.defaults&&C.defaults.clientKey)||''}
+function clientKeyPayload(defaultsIn){const out=Object.assign({},defaultsIn);if(_clientKeyClear)out.clientKey='';else if(_clientKeyDirty)out.clientKey=_clientKeyDraft;else delete out.clientKey;return out}
 function persistDir(){clearTimeout(_persistTimer);_persistTimer=setTimeout(()=>{dirty&&saveAll()},700)}
 // FLIP 平滑重排：before→after 用 translateY 过渡实现"挤压"
 function flipTransition(parent){
@@ -487,7 +492,8 @@ function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
   // 控制区：API 地址（只读，随网关端口变化）+ 虚拟模型名 + 客户端Key + 加入已有模型
   const apiUrl='http://'+((ST.server&&ST.server.host)||'127.0.0.1')+':'+((ST.server&&ST.server.port)||8787)+'/v1';
   ctrl.innerHTML='<div class="dirrow apiRow" title="OpenAI 兼容格式：各 Agent 的 Base URL 填这里"><label>API 地址</label><input class="input" id="apiBase" value="'+esc(apiUrl)+'" readonly><span class="apiTag">OpenAI 格式</span></div>'
-   +'<div class="dirrow"><label>客户端接入 Key</label><input class="input" id="vmKey" value="'+esc(C.defaults.clientKey||'')+'" placeholder="留空=不鉴权"></div>'
+   +'<div class="dirrow"><label>客户端接入 Key</label><input class="input" id="vmKey" value="'+esc(clientKeyDisplay())+'" placeholder="'+(C.defaults.clientKey?'已设置：输入新值=替换':'未设置：输入=设置')+'"'+(_clientKeyClear?' disabled':'')+'><button class="mini del" id="vmKeyClear" title="显式清空/恢复客户端 Key">'+(_clientKeyClear?'恢复':'清空')+'</button></div>'
+   +(_clientKeyClear?'<div class="hint2" style="color:var(--err)">已标记「清空」：保存后全局客户端 Key 将被删除（数据面不再要求该 Key）。</div>':'')
    +'<div class="dirrow"><label>虚拟共用模型名</label><input class="input" id="vmName" value="'+esc(C.defaults.model||'')+'" placeholder="如 auto"></div>'
    +'<div class="dirrow" title="把当前「默认上游目录」保存为模板，可快速切换/删除"><label>模板</label><select class="select" id="tplSel" style="flex:1"><option value="">— 选模板 —</option>'+(Object.keys(getTemplates()).map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''))+'</select><input class="input" id="tplName" value="'+esc(_tplName)+'" placeholder="模板名" style="flex:1"><button class="mini" id="tplSave" title="保存当前目录为新模板">存</button><button class="mini" id="tplApply" title="应用所选模板">用</button><button class="mini del" id="tplDel" title="删除所选模板">×</button></div>'
    +'<div class="dirrow"><label>加入已有模型</label><select class="select" id="dirAdd"><option value="">— 选择 —</option>'+(Object.keys(C.models).filter(n=>!dir.some(e=>e.model===n)).map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''))+'</select></div>';
@@ -504,7 +510,8 @@ function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
     +'<span class="rm" data-role="rm" title="移出目录">×</span>'
     +'</div>'}).join('')}
   const vmN=$('#vmName');if(vmN){vmN.oninput=()=>{C.defaults.model=vmN.value.trim();markDirty()};vmN.onchange=()=>persistDir()}
-  const vmK=$('#vmKey');if(vmK){vmK.oninput=()=>{C.defaults.clientKey=vmK.value.trim();markDirty()};vmK.onchange=()=>persistDir()}
+  const vmK=$('#vmKey');if(vmK){vmK.oninput=()=>{_clientKeyDirty=true;_clientKeyClear=false;_clientKeyDraft=vmK.value.trim();markDirty()}}
+  const vmKC=$('#vmKeyClear');if(vmKC)vmKC.onclick=()=>{if(_clientKeyClear){_clientKeyClear=false;_clientKeyDirty=false;_clientKeyDraft='';renderRoute();markDirty();return}if(!clientKeyDisplay()){toast('当前未设置客户端 Key','');return}_clientKeyClear=true;_clientKeyDirty=true;_clientKeyDraft='';renderRoute();markDirty()}
   const dirAdd=$('#dirAdd');if(dirAdd)dirAdd.onchange=()=>{if(dirAdd.value){C.defaults.directory.push({model:dirAdd.value,mode:'afterAll',providers:[]});renderRoute();markDirty();persistDir()}}
   // 模型目录模板：保存当前目录 / 应用模板 / 删除模板（存 localStorage，随面板持久）
   const tplSel=$('#tplSel'),tplName=$('#tplName'),tplSave=$('#tplSave'),tplApply=$('#tplApply'),tplDel=$('#tplDel');
@@ -542,6 +549,8 @@ function renderRoute(){const box=$('#route'),ctrl=$('#dirCtrl');
 /* 虚拟模型管理器：折叠列表 + 展开编辑器（输入 oninput 直改 C 不重绘；结构变化才重绘，规避轮询打断输入） */
 const _vmOpen=new Set()
 const _vmKeyDraft={} // 独立 Key 输入草稿：key 值不经 C（直接提交 /api/keys），重绘时恢复草稿防丢字
+// M0-2：过期时间单一真源在后端；这里只做展示格式转换与状态徽标，不自行比较时间。
+function expToLocalInput(s){if(!s)return '';if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s+'T00:00';if(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s))return s;const d=new Date(s);if(isNaN(d.getTime()))return '';const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes())}
 function renderVirtualModels(){
   // 编辑中跳过重绘：轮询（3s）重建编辑器会导致输入闪烁/丢字；配置数据在轮询间不变，跳过安全（结构变化由用户操作主动触发重绘）
   if(document.activeElement&&document.activeElement.closest&&document.activeElement.closest('.vmEdit'))return
@@ -552,7 +561,7 @@ function renderVirtualModels(){
   box.innerHTML=list.map((v,i)=>{
     const open=_vmOpen.has(v.name)
     const dirSummary=(v.directory||[]).map(e=>e.model).join(' → ')||'(空目录)'
-    const expBadge=v.expiresAt?((new Date(v.expiresAt)<new Date())?'<span class="badge perr">已过期</span>':'<span class="badge">限期</span>'):''
+    const expBadge=v.expiresAtState==='expired'?'<span class="badge perr">已过期</span>':(v.expiresAtState==='invalid'?'<span class="badge perr">过期时间无效</span>':(v.expiresAt?'<span class="badge">限期</span>':''))
     const keyBadge=v.keySet?'<span class="badge pok">Key·设</span>':'<span class="badge off">无Key</span>'
     const head='<div class="vmrow" data-i="'+i+'" data-vrole="toggle"><span class="vmArrow">'+(open?'▾':'▸')+'</span><span class="vmName">'+esc(v.name)+'</span>'+keyBadge+expBadge+'<span class="vmSum" title="'+esc(dirSummary)+'">'+esc(dirSummary.length>34?dirSummary.slice(0,34)+'…':dirSummary)+'</span></div>'
     if(!open)return head
@@ -570,7 +579,8 @@ function renderVirtualModels(){
       +'<div class="dirrow"><label>加入已有模型</label><select class="select" data-vrole="vadd"><option value="">— 选择 —</option>'+(Object.keys(C.models).filter(n=>!(v.directory||[]).some(e=>e.model===n)).map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''))+'</select></div>'
       +'<div class="dirList">'+(dirRows||'<div class="dirEmpty">目录为空：从上方「加入已有模型」添加，首项即默认。</div>')+'</div>'
       +'<div class="dirrow"><label>独立 Key</label><input class="input" type="password" data-vrole="vmkey" value="'+esc(_vmKeyDraft[v.name]||'')+'" placeholder="'+(v.keySet?'已存储（输入新值=更换；清空后失焦=删除）':'未设置（回退全局 Key）')+'" style="flex:1"></div>'
-      +'<div class="dirrow"><label>Key 过期</label><input class="input" type="datetime-local" data-vrole="exp" value="'+esc(v.expiresAt||'')+'" style="flex:1.2"><label style="flex:none">备注</label><input class="input" data-vrole="note" value="'+esc(v.note||'')+'" placeholder="备注" style="flex:1"></div>'
+      +'<div class="dirrow"><label>Key 过期</label><input class="input" type="datetime-local" data-vrole="exp" value="'+esc(expToLocalInput(v.expiresAt))+'" style="flex:1.2"><label style="flex:none">备注</label><input class="input" data-vrole="note" value="'+esc(v.note||'')+'" placeholder="备注" style="flex:1"></div>'
+      +((v.expiresAtState==='invalid')?'<div class="hint2" style="color:var(--err)">后端判定过期时间无效（'+esc(v.expiresAtDiagnostic||'invalid')+'）：该虚拟 Key 已被拒绝，请重选时间并保存。</div>':'')
       +'<div class="dirrow"><label>额度/限流</label><input class="input" data-vrole="quota" value="'+(v.quota||0)+'" title="总额度 token（0=不限）" style="width:88px"><input class="input" data-vrole="dailyQuota" value="'+(v.dailyQuota||0)+'" title="日额度 token（0=不限）" style="width:88px"><input class="input" data-vrole="maxContext" value="'+(v.maxContext||0)+'" title="上下文上限（0=不限）" style="width:104px"><input class="input" data-vrole="maxConcurrent" value="'+(v.maxConcurrent||0)+'" title="并发（0=不限）" style="width:76px"><input class="input" data-vrole="qps" value="'+(v.qps||0)+'" title="QPS（0=不限）" style="width:66px"></div>'
       +'<div class="dirrow"><button class="mini" data-vrole="preview">🔍 试算路由</button><button class="mini del" data-vrole="vdel">删除</button><span class="vmHint">改动后点顶部「保存配置」生效</span></div>'
       +'</div>'
@@ -642,7 +652,7 @@ const _MODEL_KEYS=['capability','provider','alias','fallbacks','maxConcurrent','
 function buildCfrom(s){C.providers={};for(const p of s.providers||[])C.providers[p.id]={baseUrl:p.baseUrl,apiKeyEnv:p.apiKeyEnv||'',pathPrefix:p.pathPrefix||'',extraHeaders:p.extraHeaders||{},keyOk:p.hasKey,keySource:p.keySource,api:p.api||'openai',circuit:p.circuit||null,proxy:p.proxy||'',_extra:extraOf(p,_PROVIDER_KEYS,['id','hasKey','st','probe'])};
   C.models={};for(const m of s.models||[])C.models[m.name]={capability:m.capability||'chat',provider:m.provider,alias:m.alias||[],fallbacks:m.fallbacks||[],maxConcurrent:m.maxConcurrent||0,qps:m.qps||0,reasoning:m.reasoning||'',effortOptions:m.effortOptions||[],effortFormat:m.effortFormat||'',dailyQuota:m.dailyQuota||0,quota:m.quota||0,maxContext:m.maxContext||0,maxTokensMax:m.maxTokensMax||0,api:m.api||'',providerModels:m.providerModels||{},probe:m.probe||null,requests:m.requests||0,errors:m.errors||0,avgMs:m.avgMs!=null?m.avgMs:null,_extra:extraOf(m,_MODEL_KEYS,['name'])};
   C.defaults={provider:(s.defaults&&s.defaults.provider)||null,model:(s.defaults&&s.defaults.model)||'',clientKey:(s.defaults&&s.defaults.clientKey)||'',directory:(s.defaults&&s.defaults.directory)||[],retry:(s.defaults&&s.defaults.retry)||{},timeout:(s.defaults&&s.defaults.timeout)||{},concurrency:(s.defaults&&s.defaults.concurrency)||{},extraHeaders:(s.defaults&&s.defaults.extraHeaders)||{},proxy:(s.defaults&&s.defaults.proxy)||'',proxyMode:(s.defaults&&s.defaults.proxyMode)||'auto'};
-  C.virtualModels=(s.virtualModels||[]).map(v=>({name:v.name,directory:v.directory||[],quota:v.quota||0,dailyQuota:v.dailyQuota||0,maxContext:v.maxContext||0,maxConcurrent:v.maxConcurrent||0,qps:v.qps||0,keySet:!!v.keySet,expiresAt:v.expiresAt||'',note:v.note||''}));
+  C.virtualModels=(s.virtualModels||[]).map(v=>({name:v.name,directory:v.directory||[],quota:v.quota||0,dailyQuota:v.dailyQuota||0,maxContext:v.maxContext||0,maxConcurrent:v.maxConcurrent||0,qps:v.qps||0,keySet:!!v.keySet,expiresAt:v.expiresAt||'',expiresAtState:v.expiresAtState||'',expiresAtDiagnostic:v.expiresAtDiagnostic||'',note:v.note||''}));
   Cinit=true}
 function ingestStatus(s){if(s.startedAt)startedAt=s.startedAt;(s.needAuth!=null)&&(ST.needAuth=s.needAuth);
   // D-3：脏状态期间不覆盖已冻结的基准版本（否则每 3s 轮询会把 409 保护洗掉）；另存服务端版本用于展示
@@ -741,8 +751,8 @@ $('#testAllModels').addEventListener('click',async()=>{const names=Object.keys(C
 
 function refresh(){renderProviders();renderModels();renderParams();renderStatsPanel();renderRoute();renderVirtualModels();renderModelStats()}
 
-async function saveAll(){const r=await jpost('/api/config/save',{providers:serializeMap(C.providers),models:serializeMap(C.models),defaults:C.defaults,virtualModels:C.virtualModels,version:(baseVersion==null?ST.configVersion:baseVersion)});
-  if(r.ok){dirty=false;baseVersion=null;if(r.d.status)ingestStatus(r.d.status);toast('配置已保存并生效','ok')}
+async function saveAll(){const r=await jpost('/api/config/save',{providers:serializeMap(C.providers),models:serializeMap(C.models),defaults:clientKeyPayload(C.defaults),virtualModels:C.virtualModels,version:(baseVersion==null?ST.configVersion:baseVersion)});
+  if(r.ok){dirty=false;baseVersion=null;_clientKeyDirty=false;_clientKeyClear=false;_clientKeyDraft='';if(r.d.status){if(r.d.status.defaults)C.defaults.clientKey=r.d.status.defaults.clientKey||'';ingestStatus(r.d.status)}toast('配置已保存并生效','ok')}
   else if(r.status===409){if(confirm('配置已被他处更新（版本过期）。加载最新配置将丢弃当前未保存修改，继续？')){dirty=false;baseVersion=null;await pollStatus();toast('已加载最新配置，请重新修改','ok')}}
   else toast((r.d&&r.d.error)||'保存失败','err')}
 $('#saveAll').addEventListener('click',saveAll);

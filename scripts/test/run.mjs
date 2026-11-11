@@ -265,8 +265,12 @@ export function displayName(file) {
   return file.replace(/^scripts\/test\//, '')
 }
 
-export function summarize(results) {
+// 汇总语义：套件级 skipped 必须是派生值（当前运行器没有“跳过套件”机制，恒 0，但不得硬编码掩盖未来变化）；
+// 未运行的套件（selected - results）单列 notRun，与 node:test 的测试级 skip 分开统计。
+export function summarize(results, options = {}) {
   const failed = results.filter((r) => !r.ok)
+  const skipped = results.filter((r) => r.skipped === true)
+  const selected = Number.isFinite(options.selected) ? options.selected : results.length
   const aggregate = { pass: 0, fail: 0, skipped: 0, reported: 0 }
   for (const r of results) {
     if (!r.counts) continue
@@ -277,9 +281,11 @@ export function summarize(results) {
   }
   return {
     total: results.length,
+    selected,
+    notRun: Math.max(0, selected - results.length),
     passed: results.length - failed.length,
     failed: failed.length,
-    skipped: 0,
+    skipped: skipped.length,
     timedOut: results.filter((r) => r.timedOut).length,
     tests: aggregate,
     durationMs: results.reduce((sum, r) => sum + r.durationMs, 0),
@@ -317,10 +323,10 @@ export async function main(argv = process.argv.slice(2), parentEnv = process.env
     }
   }
 
-  const summary = summarize(results)
+  const summary = summarize(results, { selected: selected.length })
   const seconds = (summary.durationMs / 1000).toFixed(1)
   console.log('\n== summary ==')
-  console.log('suites: ' + summary.passed + ' passed, ' + summary.failed + ' failed, ' + summary.skipped + ' skipped, ' + summary.timedOut + ' timed out (manifest ' + summary.total + '/selected ' + selected.length + ')')
+  console.log('suites: ' + summary.passed + ' passed, ' + summary.failed + ' failed, ' + summary.skipped + ' skipped, ' + summary.timedOut + ' timed out, ' + summary.notRun + ' not run (manifest ' + summary.total + '/selected ' + selected.length + ')')
   console.log('tests:  ' + summary.tests.pass + ' passed, ' + summary.tests.fail + ' failed, ' + summary.tests.skipped + ' skipped (' + summary.tests.reported + '/' + summary.total + ' suites reported node:test counts)')
   console.log('total time: ' + seconds + 's')
   return summary.failed ? 1 : 0

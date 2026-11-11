@@ -237,6 +237,22 @@ test('白名单构造：危险 NODE_OPTIONS 被剔除，配置入口被清空', 
   assert.equal(sanitizeNodeOptions(undefined), '')
 })
 
+test('汇总语义：套件级 skipped 派生、未运行套件单列 notRun、测试级 skip 独立统计', async () => {
+  const { summarize } = await import('../run.mjs')
+  const summary = summarize([
+    { ok: true, counts: { tests: 3, pass: 2, fail: 0, skipped: 1 }, durationMs: 10 },
+    { ok: false, counts: null, durationMs: 20, timedOut: true },
+    { ok: true, skipped: true, counts: null, durationMs: 5 },
+  ], { selected: 4 })
+  assert.equal(summary.total, 3)
+  assert.equal(summary.selected, 4)
+  assert.equal(summary.passed, 2)
+  assert.equal(summary.failed, 1)
+  assert.equal(summary.skipped, 1, '套件级 skipped 必须来自结果派生，不得硬编码')
+  assert.equal(summary.notRun, 1, '未运行套件单独计数')
+  assert.equal(summary.tests.skipped, 1, 'node:test 测试级 skip 单独统计')
+})
+
 // ============================================================================
 // M0-1b：旧 runner 的授权边界（fail-closed 静态扫描 + 显式排除 + 前置守卫）
 // ============================================================================
