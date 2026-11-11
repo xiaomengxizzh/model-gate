@@ -16,6 +16,16 @@
 
 export const DEFAULT_OFFICIAL_HOSTS = Object.freeze(['api.openai.com', 'chatgpt.com', 'chat.openai.com'])
 
+// ChatGPT 订阅身份可用的入口 host（/backend-api/codex）。api.openai.com 是 API Key 计费端点，
+// 订阅身份不得用于该域（target-authz 会显式拒绝）。
+export const OFFICIAL_SUBSCRIPTION_HOSTS = Object.freeze(['chatgpt.com', 'chat.openai.com'])
+
+// 本机回环：允许 http（自建 mock/本机代理）与自定义端口；其它 host 必须 https + 默认端口。
+export function isLoopbackHost(host) {
+  const h = String(host == null ? '' : host).trim().toLowerCase()
+  return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]'
+}
+
 // 聚合保留 ID 前缀（E2 目录 slug 形状 mg-<provider>-<model>；mg/ 形式作为别名一并保留）。
 // 命中前缀但未在 config.models 显式声明的 ID 一律 unknown_model，绝不回落 defaults.provider。
 export const DEFAULT_AGGREGATE_PREFIXES = Object.freeze(['mg-', 'mg/'])
