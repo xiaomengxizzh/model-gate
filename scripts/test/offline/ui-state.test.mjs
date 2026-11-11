@@ -147,7 +147,7 @@ test('状态完备：loading / ready / error 可由 phaseOf 区分，error 不�
   assert.equal(empty.status, null)
 })
 
-test('401/403：清空状态与已渲染的敏感投影，跳登录，不保留 stale 数据', async () => {
+test('401 会话失效：清空状态与已渲染敏感投影并锁屏；功能级 403 只做局部错误', async () => {
   resetAppState()
   setToken('stale-token')
   state.status = { configVersion: 7, providers: [{ id: 'SENSITIVE-PROVIDER' }], global: { requests: 42 } }
@@ -166,14 +166,31 @@ test('401/403：清空状态与已渲染的敏感投影，跳登录，不保留 
   assert.equal(overlay.hidden, false, '登录层应显示')
   assert.equal(getToken(), '', '令牌必须清除')
 
-  // api 层：403 也必须触发同一收口（不只是 401）
+  // api 层：401 必须走会话失效（清空 + 清 token）
   resetAppState()
-  setToken('token-123')
+  setToken('token-401')
   state.config = sampleConfig()
-  stubFetch(() => jsonRes(403, { error: 'forbidden' }))
-  await assert.rejects(api.config(), (e) => e instanceof ApiError && e.status === 403)
-  assert.equal(state.config, null, '403 后必须清空已渲染投影')
-  assert.equal(getToken(), '', '403 同样清除令牌')
+  stubFetch(() => jsonRes(401, { error: 'unauthorized' }))
+  await assert.rejects(api.config(), (e) => e instanceof ApiError && e.status === 401)
+  assert.equal(state.config, null, '401 后必须清空已渲染投影')
+  assert.equal(getToken(), '', '401 清除令牌')
+
+  // api 层：功能级 403 绝不能当会话失效（不清 token / 不清数据 / 不锁屏）
+  resetAppState()
+  setToken('token-keep')
+  state.status = { configVersion: 8, providers: [{ id: 'KEEP-VIEW-DATA' }] }
+  state.config = sampleConfig()
+  const root2 = document.getElementById('view-root')
+  root2.textContent = 'KEEP-VIEW-DATA'
+  const overlay2 = document.getElementById('auth-overlay')
+  overlay2.hidden = true
+  stubFetch(() => jsonRes(403, { error: 'write disabled', code: 'write_disabled' }))
+  await assert.rejects(api.config(), (e) => e instanceof ApiError && e.status === 403 && e.data && e.data.code === 'write_disabled')
+  assert.equal(getToken(), 'token-keep', '功能级 403 不得清除令牌')
+  assert.notEqual(state.config, null, '功能级 403 不得清空其它视图数据')
+  assert.notEqual(state.status, null)
+  assert.equal(root2.textContent.includes('KEEP-VIEW-DATA'), true, 'DOM 不得被清空')
+  assert.equal(overlay2.hidden, true, '功能级 403 不得锁屏')
 })
 
 test('409 冲突：保留用户草稿逐字段不变，不覆盖用户输入', async () => {
@@ -278,3 +295,55 @@ test('客户端导出：只含客户端字段，零凭据零服务端私有字�
   assert.equal(exported.clientKey, '已设置', 'Key 只给状态不给值')
   assert.equal(exported.baseUrl, 'http://127.0.0.1:8787/v1')
 })
+
+test('loading 骨架：首屏/刷新/切路由在数据到达前可达，旧数据不得顶替', async () => {
+  resetAppState()
+  // 切路由：phase=loading 且内存里仍有旧数据 → 必须显示骨架，不得渲染旧数据
+  state.status = { configVersion: 1, providers: [{ id: 'STALE-SENTINEL' }], global: {} }
+  state.config = sampleConfig()
+  setPhase('status', 'loading')
+  const root = document.getElementById('view-root')
+  app.renderRoute('providers')
+  assert.equal(root.textContent.includes('STALE-SENTINEL'), false, 'loading 时不得用旧数据顶替')
+  assert.ok(root.textContent.includes('正在读取控制面'), '切路由时必须出现 loading 骨架')
+
+  // 首屏 bootstrap：延迟 status/config，响应到达前必须是骨架，到达后才是真实视图
+  resetAppState()
+  let releaseStatus
+  let releaseConfig
+  stubFetch((url) => {
+    if (url.includes('/api/auth')) return Promise.resolve(jsonRes(200, { needAuth: false, startedAt: 1 }))
+    if (url.includes('/api/status')) return new Promise((resolve) => { releaseStatus = () => resolve(jsonRes(200, { configVersion: 3, providers: [], models: [], virtualModels: [], global: {} })) })
+    if (url.includes('/api/config')) return new Promise((resolve) => { releaseConfig = () => resolve(jsonRes(200, sampleConfig())) })
+    return Promise.resolve(jsonRes(404, {}))
+  })
+  const booting = app.bootstrap(true)
+  await new Promise((r) => setTimeout(r, 15))
+  assert.ok(root.textContent.includes('正在读取控制面'), '首屏在 API 返回前必须显示 loading 骨架（' + root.textContent.slice(0, 80) + '）')
+  releaseStatus()
+  releaseConfig()
+  await booting
+  assert.ok(root.textContent.includes('一切模型，尽在掌控。'), '数据到达后应切换为真实视图')
+})
+
+test('clients：功能级 403 只做局部提示，页面正常渲染、会话与其它数据保留', async () => {
+  resetAppState()
+  setToken('token-keep')
+  state.status = { configVersion: 2, defaults: {}, providers: [], models: [], virtualModels: [], codex: {}, global: {} }
+  state.config = sampleConfig({ providers: {}, models: {}, virtualModels: [] })
+  stubFetch((url) => {
+    if (url.includes('/api/codex/policy')) return Promise.resolve(jsonRes(403, { ok: false, code: 'write_disabled', error: 'write disabled' }))
+    return Promise.resolve(jsonRes(404, {}))
+  })
+  const root = document.getElementById('view-root')
+  const clients = await import('../../../src/ui-next/js/views/clients.js')
+  const rerender = () => { root.textContent = ''; clients.render(root, { rerender }) }
+  clients.render(root, { rerender })
+  await new Promise((r) => setTimeout(r, 40))
+  assert.ok(root.textContent.includes('客户端接入'), '页面必须正常渲染，不得白屏')
+  assert.ok(root.textContent.includes('受控写入未启用'), '必须出现功能级 403 的局部提示（' + root.textContent.slice(0, 140) + '）')
+  assert.equal(root.textContent.includes('控制面已锁定'), false, '功能级 403 不得锁屏')
+  assert.equal(getToken(), 'token-keep', '功能级 403 不得清 token')
+  assert.notEqual(state.status, null, '功能级 403 不得清空其它视图数据')
+})
+

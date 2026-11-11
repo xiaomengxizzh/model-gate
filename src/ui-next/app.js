@@ -139,11 +139,13 @@ function syncDirtyChip() {
   }
 }
 
-function renderRoute(route) {
+export function renderRoute(route) {
   currentRoute = route
   const view = views[route] || views.overview
   const root = document.getElementById('view-root')
   if (!root) return
+  // 数据未到达（首次/刷新/切路由）必须先渲染 loading 骨架，不能用旧数据顶替。
+  if (phaseOf('status') === 'loading' || phaseOf('config') === 'loading') { renderLoading(); return }
   clear(root)
   document.getElementById('current-view').textContent = (ROUTES.find((r) => r.id === route) || ROUTES[0]).title
   document.querySelectorAll('.nav-link').forEach((b) => {
@@ -153,7 +155,6 @@ function renderRoute(route) {
     else b.removeAttribute('aria-current')
   })
   if (!state.status) {
-    if (phaseOf('status') === 'loading') { renderLoading(); return }
     if (phaseOf('status') === 'error') { renderFatal(state.lastError || new Error('读取状态失败')); return }
     renderFatal(state.lastError || new Error('尚未加载状态（未知）'))
     return
@@ -180,9 +181,11 @@ function showAuth(message) {
 }
 function hideAuth() { const o = document.getElementById('auth-overlay'); if (o) o.hidden = true }
 
-async function bootstrap(rethrow = false) {
+export async function bootstrap(rethrow = false) {
   initTheme()
   updateChrome()
+  // 首屏在任何一个 API 返回前就显示 loading 骨架（不显示 0/旧缓存）。
+  renderLoading()
   try {
     const auth = await loadAuth()
     if (auth.needAuth && !hasToken()) { renderLocked(); showAuth(); return }
@@ -203,12 +206,16 @@ async function manualRefresh() {
   const btn = document.getElementById('refresh')
   if (btn) btn.disabled = true
   try {
-    await loadAll()
+    // 刷新期间必须显示 loading 骨架：先启动加载（同步置 loading phase），再渲染骨架。
+    const running = loadAll()
+    renderLoading()
+    await running
     hideAuth()
     renderRoute(currentRoute)
     toast('已读取网关最新状态', 'success')
   } catch (e) {
     if (e && e.status === 401) { renderLocked(); showAuth('令牌已失效或未通过验证'); return }
+    renderRoute(currentRoute)
     toast('刷新失败：' + e.message, 'error')
   } finally {
     refreshing = false
@@ -250,7 +257,6 @@ function wire() {
   window.addEventListener('online', () => toast('网络已恢复', 'success'))
   window.addEventListener('offline', () => toast('网络已断开；控制台不会显示模拟数据', 'error'))
   startRouter((route) => {
-    if (!state.status) return
     renderRoute(route)
     document.getElementById('view-root').focus({ preventScroll: true })
     window.scrollTo({ top: 0, behavior: 'instant' })
@@ -259,7 +265,8 @@ function wire() {
   setInterval(async () => {
     if (document.visibilityState !== 'visible' || !state.status) return
     try {
-      await loadStatus()
+      // 后台轮询必须静默：不进入 loading phase，避免把正在阅读的视图替换成骨架。
+      await loadStatus({ silent: true })
       updateChrome()
       if (currentRoute === 'overview' && document.getElementById('dialog-root').hidden) renderRoute(currentRoute)
     } catch (e) {

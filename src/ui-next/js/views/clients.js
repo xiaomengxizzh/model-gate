@@ -1,6 +1,7 @@
 // 客户端接入：真实 origin + 真实模型目录；不读取客户端配置，不推测连接状态。
 import { h } from '../dom.js'
-import { state } from '../store.js'
+import { state, phaseOf } from '../store.js'
+import { request } from '../api.js'
 import { pageHead, card, callout, empty, table, tag, codeBlock, copyButton, kvList, tabs, toast } from '../components.js'
 import { fmtTime } from '../format.js'
 import {
@@ -55,6 +56,54 @@ export function buildClientExport(opts = {}) {
 const view = { tab: 'codex-cli', model: '' }
 // Codex 聚合卡片：只存用户粘贴的文本与预览结果，不持久化、不发请求。
 const CODEX = { pasted: '', preview: null, v2: true }
+// 受控写入能力探测：403 是功能级拒绝（例如 managedRoot 未开），只在本页做局部提示，
+// 绝不清 token / 不清其它视图数据 / 不跳登录。
+const POLICY = { fetched: false, loading: false, value: null }
+async function loadWritePolicy (ctx = {}) {
+  if (POLICY.loading) return POLICY.value
+  POLICY.loading = true
+  try {
+    const body = await request('/api/codex/policy')
+    POLICY.value = { available: true, status: 200, code: null, body }
+  } catch (e) {
+    POLICY.value = {
+      available: false,
+      status: (e && Number.isFinite(e.status)) ? e.status : 0,
+      code: (e && e.data && typeof e.data.code === 'string') ? e.data.code : null,
+      message: (e && e.message) || '未知错误',
+    }
+  } finally {
+    POLICY.loading = false
+    POLICY.fetched = true
+    // 401 已由 api/store 统一锁屏，这里不再重绘旧视图。
+    if (typeof ctx.rerender === 'function' && !(POLICY.value && POLICY.value.status === 401) && phaseOf('status') !== 'idle') ctx.rerender()
+  }
+  return POLICY.value
+}
+function writePolicyNotice (ctx) {
+  const value = POLICY.value
+  const retry = h('button', { class: 'btn btn-sm', type: 'button', text: '重试探测', onclick: () => { POLICY.fetched = false; loadWritePolicy(ctx) } })
+  if (!POLICY.fetched) {
+    return callout('info', h('strong', { text: '受控写入能力：' }), ' 正在探测 GET /api/codex/policy…（模板与导出不受影响）')
+  }
+  if (!value || value.available) {
+    const write = value && value.body && value.body.write ? value.body.write : null
+    return callout('good', h('strong', { text: '受控写入已启用。' }), ' ' + (write && write.mode ? '模式 ' + write.mode : '服务端已返回能力清单') + '；写盘仍受所有权与确认令牌约束。')
+  }
+  if (value.status === 403) {
+    return callout('warn',
+      h('strong', { text: '受控写入未启用（403' + (value.code ? ' · ' + value.code : '') + '）。' }),
+      ' 服务端拒绝了写能力探测；本页仍可生成模板与导出，但不会写盘、不影响其它视图，也不会让你退出登录。',
+      h('div', { class: 'toolbar', style: { marginTop: '8px' } }, retry))
+  }
+  if (value.status === 404) {
+    return callout('info', h('strong', { text: '受控写入未挂载（404）。' }), ' 服务端还没有 /api/codex/* 路由；本页只导出、不写盘。', h('div', { class: 'toolbar', style: { marginTop: '8px' } }, retry))
+  }
+  return callout('danger',
+    h('strong', { text: '受控写入能力探测失败（' + (value.status || '网络不可达') + '）。' }),
+    ' ' + value.message + ' 仅本页进入局部错误，其它视图与登录态不受影响。',
+    h('div', { class: 'toolbar', style: { marginTop: '8px' } }, retry))
+}
 
 function config() { return state.config || {} }
 function baseUrl() { return location.origin + '/v1' }
@@ -652,6 +701,9 @@ export function render(root, ctx = {}) {
       h('button', { class: 'btn', type: 'button', text: '监控与诊断', onclick: () => { location.hash = '#/observability' } }),
     ],
   }))
+
+  if (!POLICY.fetched && !POLICY.loading) loadWritePolicy(ctx)
+  root.append(writePolicyNotice(ctx))
 
   root.append(callout('warn',
     h('strong', { text: '边界：' }),
