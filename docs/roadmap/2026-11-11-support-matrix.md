@@ -7,15 +7,17 @@
 
 ## 0. 先说数字口径（避免误读）
 
-- 下表所有套件/断言数字来自本卡验收时的**实测**：分支 `work/d`（代码基线 `cceb949` + `M5-2b` 的 3 项 MCP 回归），
+- 下表各套件/断言数字来自本卡验收时的**实测**：分支 `work/d`（代码基线 `a7b969e`，含 M4-3a 的历史/额度加固），
   隔离 `HOME`/`TMPDIR`、无网络，命令 `node scripts/test/run.mjs`：
   - **49 套件全部通过**（输出 `Isolated suites: 49/49 passed`，退出码 0）
-  - node:test 用例 **399**：398 通过、**1 SKIP**（`MG_CODEX_VERIFY=1` 才执行的真实 CLI 用例）、0 失败
+  - node:test 用例 **408**：407 通过、**1 SKIP**（`MG_CODEX_VERIFY=1` 才执行的真实 CLI 用例）、0 失败
   - 3 个旧式验收脚本：`virtual-models` 18/18、`effort-normalize` 20/20、`upstream-side-4xx` 7/7
   - `npm run check` 退出码 0；`npm run docs:check` → `Documentation paths: PASS`
-- 集成线（lead 合并其它角色交付后）为 **53 套件 / 492 pass**，里程碑 SHA **`<见交付报告>`**。
-  本分支没有 integration ref，**无法在本地复现这组数字**，因此下表不引用未复现的计数；凡依赖集成线交付的行，
-  证据列写 `<见交付报告>` 并同时标 `NOT_RUN(本分支不可复现)`，而不是写成通过。
+- **集成线口径（总数以此为准）**：lead 合并后为 **53 套件**；node:test 用例总数以交付报告实测为准
+  （**`<见交付报告>`**）。本分支没有 integration ref，无法复现集成线总数，所以上面的 49/408
+  **只用于核对"每个套件的断言数是否与下表一致"**，不作为集成线总数写进任何对外结论。
+  按本轮合并的相对增量推算：503 + 9（history 3→9 即 +6、quota 6→9 即 +3）= **512 pass**；仍以交付报告为准。
+- 凡依赖集成线交付的行，证据列写 `<见交付报告>` 并同时标 `NOT_RUN(本分支不可复现)`，而不是写成通过。
 - 证据白名单：`scripts/test/offline/<suite>.test.mjs`、`scripts/test/*.mjs`（旧式或被门控的脚本）、
   `docs/evidence/**`、`docs/contracts/**`、本轮回执日志
   （`/home/xiaomengxizi/ai/tmp/modelgate-runtime-20261111-a1/d/logs/`，机器本地，不入库）。
@@ -44,10 +46,10 @@
 | A8 | Codex 配置读写（TOML 保留、原子写、备份/回滚、权限段不动） | `PASS(mock)` | `offline/codex-config` 31 | 真实 `~/.codex/config.toml` 未读写（隔离副本测试） |
 | A9 | 配置投影与字段校验（管理面） | `PASS(mock)` | `offline/config-projection` 3、`offline/config-schema` 4 | — |
 | A10 | 身份域 / 官方目标分类 / 控制项 | `PASS(mock)` | `offline/codex-identity` 14、`offline/codex-official` 4、`offline/codex-control-items` 1 | 真实官方 host 与凭据隔离未在本轮验证 |
-| A11 | 额度与应急流程（离线合成演练） | `PASS(mock)` | `offline/codex-quota` 6（对应历史演练 `docs/evidence/2026-11-11-e8-quota-drill.txt`，标注为离线合成） | 真实官方额度耗尽未演练 |
+| A11 | 额度与应急流程（三态 **fresh/stale/unknown**、窗口边界相等算 fresh、未知不伪装 0%/100%、应急进入/退出审计） | `PASS(mock)` | `offline/codex-quota` **9**（三态+边界、契约入口、D7 不自动切身份、审计脱敏；对应历史演练 `docs/evidence/2026-11-11-e8-quota-drill.txt`，标注为离线合成） | 真实官方额度 API 未接入（`NOT_RUN`）；演练输入为注入数据 |
 | A12 | Codex API 兼容层（v1 形状 / 错误码映射 / WS 404 回落） | `PASS(mock)` | `offline/codex-api` 26 | 真实 Codex CLI 未跑（B1） |
 | A13 | v2 互操作（namespace 展开、不可表达工具显式标记、加密任务**只给信号**） | `PASS(mock)` | `offline/codex-interop` 15 | 见 C1：密文一律拒绝跨域 |
-| A14 | Codex 会话历史（只读诊断 / 迁移演练 / opencode 会话） | `PASS(mock)` | `offline/codex-history` 3、`offline/codex-opencode-session` 2 | 真实历史库只读诊断的历史证据见 `docs/evidence/2026-11-11-e7-real-history-readonly.txt`（上一轮） |
+| A14 | Codex 会话历史（**根登记制** + **零写入** + **有界截断标注不静默** + 损坏 JSONL 计数 + 迁移只产导出计划） | `PASS(mock)` | `offline/codex-history` **9**（根登记/拒绝码、限额截断 `truncatedReasons`、零写入 hash+mtime+目录清单前后一致、损坏行计数、符号链接跳过、计划导出）、`offline/codex-opencode-session` 2 | 真实历史库只读诊断的历史证据见 `docs/evidence/2026-11-11-e7-real-history-readonly.txt`（上一轮）；本轮改用真实临时目录复现 |
 | A15 | 智能调度决策（错误分类 / 阶段机 / 候选证据 / 排序 / 对账停机 / D7 身份闸门） | `PASS(mock)` | `offline/codex-fallback` 29、`offline/routing-decision` 20 | 见 B7：接线仍未完成 |
 | A16 | 调度接线（`forward.js` 聚合路径 + 阶段推进） | `PASS(mock)` | `offline/codex-fallback-forward` 10（本地 mock 上游 + 动态端口 + 临时配置目录） | 只覆盖聚合 slug 路径；官方真机未跑 |
 | A17 | 预算账本（整数 micro / 显式币种 / 单写者 / 幂等 / 未知保留 / 超支封顶 / 跨日 / 并发 / 重启恢复 / 脱敏） | `PASS(mock)` | `offline/routing-ledger` 14（真实临时目录 + 3 个真实子进程并发） | 见 B7/B8：**未接进 forward.js，运行时费用上限不生效** |
@@ -87,6 +89,8 @@
 | C5 | MCP ↔ UHR 委派入口 | `DISABLED(未接线)` | `src/mcp/` 是隔离目录，`src/index.js` 无注册/HTTP 入口；边界拒绝由 `offline/mcp-uhr-contract` 15 覆盖 | 开启 = 由接线卡（M1-3/M3-3）决定注册；风险：委派会把任务摘要与引用送出进程边界，必须保持只读意图与引用白名单 |
 | C6 | 新控制台（`/ui-next`）作为**默认**入口 | `DISABLED(非默认)` | `offline/ui-next` 2（静态树/CSP/遍历防护）、README 明确"未经所有者批准不做默认入口替换"；旧 `/` 与 `/admin` 保留 | 开启 = 所有者批准后改默认入口。风险：面板状态与新接口契约不匹配时用户误操作（保存会重写 providers/models） |
 | C7 | 管理面**自管 apply/rollback** 入口（普通产品模式） | `DISABLED(不启用)` | 本分支无该入口（M4-1a 在集成线，`<见交付报告>`，见 B9）；现有管理写操作只有配置保存/重载/令牌/Key 元数据，受 `offline/admin-contract` 2、`admin-projection` 4、`admin-origin` 4、`admin-secrets` 1 约束 | 开启 = 集成线的受控自管 fixture 模式（需回滚点 + 人工确认）。风险：apply 会真实改写配置与目录，误触即改路由；没有"撤销"按钮，只能靠回滚点 |
+| C8 | **额度不足时自动切换身份/provider** | `DISABLED(硬约束)` | `offline/codex-quota` **9** 的 D7 断言：`routing.autoSwitch=false` 恒真；未确认应急时 `switchAllowed=false`、`changeSessionProvider=false`、动作列表无自动切换项；只有显式应急态才 `switchAllowed=true`（仍 `autoSwitch=false`） | 开启 = 修改 `routing` 语义（当前禁止）。风险：额度不足时自动离开官方池会违反 D7（擅自切到第三方/账单身份、跨身份发送凭据） |
+| C9 | **历史迁移执行**（写入真实 sessions 目录） | `DISABLED(拒绝)` | `offline/codex-history` **9** 的断言：`applySelectiveMigration()` 与 `planSelectiveMigration({apply:true})` 恒抛 `not_authorized`；计划里 `plan.apply.supported=false`；零写入用例另证前后 hash/mtime/目录清单一致 | 开启 = 需实现"备份 + tmp/rename + 回滚演练"并单独立项（当前无写入口）。风险：误写真实历史不可逆，可能破坏客户端会话可见性 |
 
 ## 5. 汇总
 
@@ -96,7 +100,7 @@
 | `PASS(real)` | **0** | 本轮零真实上游、零真实 CLI、零真实 UHR；不把 mock 写成真实 |
 | `NOT_RUN` | 11 | B1–B5、B7–B12（含 1 条依赖未接线） |
 | `BLOCKED` | 1 | B6（真实 UHR：缺现行授权接口与写集） |
-| `DISABLED` | 7 | C1–C7，均有拒绝路径或默认关闭证据 |
+| `DISABLED` | 9 | C1–C9，均有拒绝路径或默认关闭/硬约束证据 |
 
 ## 6. 残余风险（按重要性）
 
@@ -105,4 +109,7 @@
 3. **v2 密文边界是硬拒绝**（C1）：多代理 v2 任务在第三方 Chat 上游上必然失败（设计内），用户会看到显式错误而不是静默降级。
 4. **调度只在聚合路径启用**（C2）：非聚合模型仍走旧 `forwardChain`；把"智能调度"理解为全局能力会高估覆盖。
 5. **管理面 = 单令牌**（C4）：没有按操作的最小权限；令牌泄露即全量管理权限。
-6. **数字随分支变化**：回滚到较早里程碑后套件数与断言数都会变（本表 49/396 是本分支实测），不要把任何固定数字写进 CI 断言。
+6. **额度读数必须带观测时间**（M4-3a 收紧）：注入快照没有 `observedAt` 时按 `unknown`（`freshness_unproven`）处理，
+   不再当成当下值；接线方必须把"读到的时间"一并传入，并配置合理的 `codexQuota.maxAgeMs`（默认 5 分钟）。
+7. **数字随分支变化**：回滚到较早里程碑后套件数与断言数都会变（本表各套件数来自本分支实测，集成线总数见交付报告），
+   不要把任何固定数字写进 CI 断言。
