@@ -38,7 +38,7 @@
 
 ```text
 npm run check        → 0（UI modules 16/16）
-npm test             → 44/44 隔离套件通过
+npm test             → 45/45 隔离套件通过（含目录×路由同源回归）
 npm run docs:check   → PASS
 node scripts/check-metadata.mjs → PASS (21 checks)
 scripts/test/codex-e2e.mjs  → 9/9（真实 Codex CLI × 双 mock）
