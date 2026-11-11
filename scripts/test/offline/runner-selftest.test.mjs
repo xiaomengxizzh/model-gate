@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -17,6 +17,8 @@ import {
 } from '../run.mjs'
 
 const RUNNER = suiteFilePath('scripts/test/run.mjs')
+const LIVE_RUNNER = join(ROOT, 'scripts/test/live.mjs')
+const SCRIPT_DIR = join(ROOT, 'scripts/test')
 const OFFLINE_DIR = join(ROOT, 'scripts/test/offline')
 // 45 个基线套件的冻结名单（基线 = 采纳点 64a5c96 上 run.mjs 的 45 个套件）。
 // 断言的是「包含关系」而不是总数：新增套件只需登记，但任何基线套件都不允许被静默移除。
@@ -234,3 +236,79 @@ test('白名单构造：危险 NODE_OPTIONS 被剔除，配置入口被清空', 
   assert.equal(sanitizeNodeOptions('--require /x.js --trace-warnings'), '')
   assert.equal(sanitizeNodeOptions(undefined), '')
 })
+
+// ============================================================================
+// M0-1b：旧 runner 的授权边界（fail-closed 静态扫描 + 显式排除 + 前置守卫）
+// ============================================================================
+
+test('旧 runner 安全扫描：未显式排除的危险脚本会让 live.mjs fail-closed 拒绝启动', () => {
+  const name = '__mg-selftest-danger-' + process.pid + '.mjs'
+  const fake = join(SCRIPT_DIR, name)
+  // 故意放入一个“会复制真实凭据 + 访问真实上游”的未排除文件；只需被静态命中，绝不能被真正执行。
+  writeFileSync(fake, [
+    '// selftest fixture：命中危险特征，不得被任何 runner 执行',
+    "import { copyFile } from 'node:fs/promises'",
+    "await copyFile(process.env.HOME + '/.codex/auth.json', '/tmp/mg-e0/fake.json')",
+    "await fetch('https://chatgpt.com/')",
+    '',
+  ].join('\n'))
+  try {
+    const result = spawnSync(process.execPath, [LIVE_RUNNER, '--scan-only'], { cwd: ROOT, encoding: 'utf8', timeout: 30000 })
+    assert.equal(result.status, 1, 'dangerous unexcluded file must fail-closed: ' + result.stdout + result.stderr)
+    const output = result.stdout + result.stderr
+    assert.ok(output.includes('SAFETY_SCAN_FAILED'), 'must report SAFETY_SCAN_FAILED')
+    assert.ok(output.includes(name), 'must name the offending file')
+  } finally {
+    rmSync(fake, { force: true })
+  }
+  assert.equal(existsSync(fake), false, 'danger fixture must be cleaned up')
+})
+
+test('旧 runner 安全扫描：真实仓库通过且计数自洽（47 total / 20 excluded / 27 executable）', () => {
+  const allMjs = readdirSync(SCRIPT_DIR).filter((file) => file.endsWith('.mjs'))
+  const result = spawnSync(process.execPath, [LIVE_RUNNER, '--scan-only'], { cwd: ROOT, encoding: 'utf8', timeout: 30000 })
+  assert.equal(result.status, 0, 'real repo must pass the safety scan: ' + result.stderr)
+  assert.ok(result.stdout.includes('SAFETY_SCAN_OK'), 'must report SAFETY_SCAN_OK: ' + result.stdout)
+  const parsed = result.stdout.match(/total=(\d+) excluded=(\d+) executable=(\d+) violations=(\d+)/)
+  assert.ok(parsed, 'scan output must expose counts: ' + result.stdout)
+  const total = Number(parsed[1])
+  const excluded = Number(parsed[2])
+  const executable = Number(parsed[3])
+  const violations = Number(parsed[4])
+  assert.equal(total, allMjs.length, 'scan must enumerate every top-level .mjs')
+  assert.equal(excluded + executable, total, 'excluded + executable must equal total')
+  assert.equal(violations, 0, 'no dangerous executable files')
+  assert.equal(total, 47)
+  assert.equal(excluded, 20)
+  assert.equal(executable, 27, 'after excluding codex-v1-live.mjs exactly 27 legacy suites execute')
+
+  const liveSrc = readFileSync(LIVE_RUNNER, 'utf8')
+  assert.ok(liveSrc.includes("'codex-v1-live.mjs'"), 'codex-v1-live.mjs must be in EXCLUDED')
+  const originSrc = readFileSync(join(OFFLINE_DIR, 'admin-origin.test.mjs'), 'utf8')
+  assert.equal(originSrc.includes('0.0.0.0'), false, 'admin-origin must not bind 0.0.0.0')
+  assert.equal(originSrc.includes('networkInterfaces'), false, 'admin-origin must not touch LAN interfaces')
+  const v1Src = readFileSync(join(SCRIPT_DIR, 'codex-v1-live.mjs'), 'utf8')
+  assert.ok(v1Src.includes('MG_ALLOW_LIVE_TESTS'), 'codex-v1-live must gate on explicit authorization')
+  assert.ok(v1Src.includes('REFUSED'), 'codex-v1-live must fail closed when preconditions are missing')
+})
+
+test('codex-v1-live fail-closed：缺显式授权/真实凭据时立即非 0 退出，不复制任何凭据', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mg-selftest-v1-'))
+  const v1 = join(SCRIPT_DIR, 'codex-v1-live.mjs')
+  const baseEnv = { PATH: process.env.PATH || '', HOME: dir }
+  try {
+    const noGate = spawnSync(process.execPath, [v1], { cwd: ROOT, encoding: 'utf8', timeout: 20000, env: baseEnv })
+    assert.equal(noGate.status, 2, 'missing MG_ALLOW_LIVE_TESTS must exit 2: ' + noGate.stderr)
+    assert.ok(noGate.stderr.includes('REFUSED'), 'must print REFUSED reason')
+
+    const gateOnly = spawnSync(process.execPath, [v1], {
+      cwd: ROOT, encoding: 'utf8', timeout: 20000, env: { ...baseEnv, MG_ALLOW_LIVE_TESTS: '1' },
+    })
+    assert.equal(gateOnly.status, 2, 'missing real auth.json must exit 2: ' + gateOnly.stderr)
+    assert.ok(gateOnly.stderr.includes('auth.json'), 'must explain the missing auth file')
+    assert.equal(readdirSync(dir).length, 0, 'guard must not copy credentials or create files')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+

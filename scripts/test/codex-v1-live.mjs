@@ -2,12 +2,38 @@
 // M2 只读取证：v2 关闭（multi_agent_v1 协作命名空间）时，官方主代理 spawn 第三方子代理，
 // 观察子代理请求里的任务是否仍加密。只写事件原文，不修改产品行为。
 import { spawn } from 'node:child_process'
+import { accessSync, constants, existsSync } from 'node:fs'
 import { mkdtemp, rm, copyFile, chmod, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startGateway } from './offline/harness.mjs'
 
 const CODEX = process.env.CODEX_BIN || 'codex'
+
+// M0-1b fail-closed 前置守卫：本脚本复制真实 ~/.codex/auth.json、访问真实上游并真跑 codex exec。
+// 缺少显式授权 / 真实凭据 / codex 可执行文件时立即非 0 退出，绝不进入复制、起网关或 spawn 分支
+// （也避免 spawn ENOENT 时只因没有 error 监听而挂住）。
+function refuse(msg) {
+  console.error('[codex-v1-live] REFUSED: ' + msg)
+  process.exit(2)
+}
+function resolveCodexBinary(bin) {
+  if (bin.includes('/')) {
+    try { accessSync(bin, constants.X_OK); return bin } catch { return null }
+  }
+  for (const dir of (process.env.PATH || '').split(':')) {
+    if (!dir) continue
+    const candidate = join(dir, bin)
+    try { accessSync(candidate, constants.X_OK); return candidate } catch { /* next */ }
+  }
+  return null
+}
+if (process.env.MG_ALLOW_LIVE_TESTS !== '1') {
+  refuse('需要显式 MG_ALLOW_LIVE_TESTS=1（真实凭据/真实上游取证，不属于默认套件）')
+}
+const authFile = join(process.env.HOME || '', '.codex', 'auth.json')
+if (!existsSync(authFile)) refuse('缺少真实授权文件 ' + authFile + '（仅做存在性检查，不读取内容）')
+if (!resolveCodexBinary(CODEX)) refuse('找不到 codex 可执行文件（CODEX_BIN=' + CODEX + '；不在 PATH）')
 const OFFICIAL = 'gpt-6-astra'
 const THIRD_SLUG = 'mg-opencodego-deepseek-v4-1-flash'
 const home = await mkdtemp(join(tmpdir(), 'mg-e4-v1-'))
