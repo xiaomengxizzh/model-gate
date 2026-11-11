@@ -13,7 +13,14 @@
 export const QUOTA_STATE_VERSION = 1
 export const QUOTA_DISPLAY_UNKNOWN = 'UNKNOWN'
 
+/** 三态：fresh（可信来源 + 在新鲜窗口内）/ stale（可信来源但过期）/ unknown（无来源/不可信/读数错误）。 */
+export const QUOTA_FRESHNESS = Object.freeze({ FRESH: 'fresh', STALE: 'stale', UNKNOWN: 'unknown' })
+
 export const DEFAULT_CODEX_QUOTA = Object.freeze({ warnPercent: 80, criticalPercent: 95, source: 'none' })
+/** 额度读数的新鲜窗口默认值（5 分钟）；超过即 stale，绝不把旧读数当当下余额。 */
+export const DEFAULT_QUOTA_MAX_AGE_MS = 5 * 60 * 1000
+const MIN_MAX_AGE_MS = 1000
+const MAX_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
 // 应急态的影响声明：进入前必须展示给用户，不允许宣称"无缝"。
 export const EMERGENCY_IMPACTS = Object.freeze([
@@ -30,6 +37,7 @@ export const QUOTA_PROHIBITED = Object.freeze([
 ])
 
 const SAFE_LABEL_RE = /^[A-Za-z0-9_.:-]{1,40}$/
+const SENSITIVE_RE = /(^|[^A-Za-z0-9_-])(sk-[A-Za-z0-9_-]{8,}|bearer\s+[A-Za-z0-9._-]{8,}|api[_-]?key\s*[=:]|password\s*[=:])/i
 const SAFE_PLAN_RE = /^[A-Za-z0-9 _.:-]{1,40}$/
 const SAFE_ERROR_RE = /^[a-z0-9_.:-]{1,60}$/i
 const MAX_TEXT = 200
@@ -42,8 +50,20 @@ function percentOrNull(v) {
   return Math.round(n * 10) / 10
 }
 function safeLabel(v, fallback) { return typeof v === 'string' && SAFE_LABEL_RE.test(v.trim()) ? v.trim() : fallback }
+// 审计字段（reason/backupPoint）允许自由文本，但绝不把密钥/令牌形态写进审计。
+function scrubText(v) { const s = text(v); return s && SENSITIVE_RE.test(s) ? '[redacted]' : s }
+function safeSubject(v) { const s = scrubText(v); return SAFE_LABEL_RE.test(s) ? s : '' }
 function safePlan(v) { return typeof v === 'string' && SAFE_PLAN_RE.test(v.trim()) ? v.trim() : null }
 function safeError(v) { return typeof v === 'string' && SAFE_ERROR_RE.test(v.trim()) ? v.trim() : 'quota_unavailable' }
+function normalizeObservedAt(v) {
+  if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v
+  if (typeof v === 'string' && v.trim()) {
+    const t = Date.parse(v.trim())
+    return Number.isFinite(t) ? t : null
+  }
+  return null
+}
+
 function normalizeResetAt(v) {
   if (typeof v === 'number' && Number.isFinite(v)) {
     const d = new Date(v)
@@ -63,10 +83,16 @@ export function normalizeQuotaConfig(cfg) {
   const critical = percentOrNull(raw.criticalPercent)
   const warnPercent = warn == null ? DEFAULT_CODEX_QUOTA.warnPercent : warn
   const criticalPercent = Math.max(warnPercent, critical == null ? DEFAULT_CODEX_QUOTA.criticalPercent : critical)
+  // 新鲜窗口：只接受有限正数并夹在 [1s, 24h]；非法回退默认（不允许"永不过期"）。
+  const rawAge = Number(raw.maxAgeMs)
+  const maxAgeMs = Number.isFinite(rawAge) && rawAge > 0
+    ? Math.max(MIN_MAX_AGE_MS, Math.min(MAX_MAX_AGE_MS, Math.trunc(rawAge)))
+    : DEFAULT_QUOTA_MAX_AGE_MS
   return {
     warnPercent,
     criticalPercent,
     source: raw.source === 'trusted' ? 'trusted' : 'none',
+    maxAgeMs,
   }
 }
 
@@ -78,6 +104,7 @@ export function normalizeQuotaConfig(cfg) {
 export function normalizeQuotaReading(raw, fallbackSource = 'injected') {
   const q = isPlainObject(raw) ? raw : {}
   const usedPercent = percentOrNull(q.usedPercent)
+  const observedAt = normalizeObservedAt(q.observedAt != null ? q.observedAt : q.observed_at)
   const ok = q.ok !== false && usedPercent != null
   if (!ok) {
     // 错误只保留"像错误码"的短串；任何自由文本/凭据形态统一收敛为 quota_unavailable。
@@ -90,6 +117,7 @@ export function normalizeQuotaReading(raw, fallbackSource = 'injected') {
       usedPercent: null,
       resetsAt: normalizeResetAt(q.resetsAt),
       plan: safePlan(q.plan),
+      observedAt,
       error,
     }
   }
@@ -99,23 +127,113 @@ export function normalizeQuotaReading(raw, fallbackSource = 'injected') {
     usedPercent,
     resetsAt: normalizeResetAt(q.resetsAt),
     plan: safePlan(q.plan),
+    observedAt,
     error: '',
   }
 }
 
-async function readQuotaValue(opts, conf) {
+async function readQuotaValue(opts, conf, now) {
   const hasCfg = !!opts.cfg
   // 配置显式关闭（source:'none'）时，即使调用方传了读数也不采用：避免"配置说没有来源但代码悄悄用"。
   if (hasCfg && conf.source !== 'trusted') {
     return { reading: null, reason: conf.source === 'none' ? 'no_trusted_source' : 'source_disabled' }
   }
   let raw
+  let live = false
   if (isPlainObject(opts.quota)) raw = opts.quota
   else if (typeof opts.readQuota === 'function') {
-    try { raw = await opts.readQuota({ now: opts.now }) } catch { return { reading: null, reason: 'source_error' } }
+    live = true
+    try { raw = await opts.readQuota({ now }) } catch { return { reading: null, reason: 'source_error' } }
   } else if (!hasCfg && isPlainObject(opts.data)) raw = opts.data
   else return { reading: null, reason: 'no_source_configured' }
-  return { reading: normalizeQuotaReading(raw, conf.source === 'trusted' ? 'trusted' : 'injected'), reason: '' }
+  const reading = normalizeQuotaReading(raw, conf.source === 'trusted' ? 'trusted' : 'injected')
+  // 实时读取（函数返回值）就是"此刻观测"：没有时间戳时补 now；注入快照不补（必须自带时间戳才算新鲜）。
+  if (live && reading.ok && reading.observedAt == null) reading.observedAt = now
+  return { reading, reason: '' }
+}
+
+/**
+ * 解析额度快照并判定三态（fresh / stale / unknown）。**唯一**决定新鲜度的地方：
+ *  · 没有读数 / 读数错误 ⇒ unknown（reason 保留可诊断码）；
+ *  · 有读数但没有观测时间 ⇒ unknown（freshness_unproven，不能证明新鲜就不算新鲜）；
+ *  · 观测时间超出 maxAgeMs ⇒ stale；正好等于窗口边界 ⇒ fresh；
+ *  · 其余 ⇒ fresh。
+ * 实时 source（readQuota 函数）的观测时间就是 now，无需调用方补时间戳。
+ */
+export async function resolveQuotaSnapshot(opts = {}, confIn, nowIn) {
+  const now = Number.isFinite(nowIn) ? nowIn : (Number.isFinite(opts.now) ? opts.now : Date.now())
+  const conf = confIn || normalizeQuotaConfig(opts.cfg)
+  const thresholds = { warnPercent: conf.warnPercent, criticalPercent: conf.criticalPercent }
+  const { reading, reason } = await readQuotaValue(opts, conf, now)
+  if (!reading || !reading.ok) {
+    return {
+      reading: reading || null,
+      freshness: QUOTA_FRESHNESS.UNKNOWN,
+      reason: reason || (reading && reading.error) || 'quota_unavailable',
+      observedAt: null,
+      ageMs: null,
+      maxAgeMs: conf.maxAgeMs,
+      thresholds,
+    }
+  }
+  const observedAt = Number.isFinite(reading.observedAt) ? reading.observedAt : null
+  if (observedAt == null) {
+    return {
+      reading,
+      freshness: QUOTA_FRESHNESS.UNKNOWN,
+      reason: 'freshness_unproven',
+      observedAt: null,
+      ageMs: null,
+      maxAgeMs: conf.maxAgeMs,
+      thresholds,
+    }
+  }
+  const ageMs = now - observedAt
+  const stale = ageMs > conf.maxAgeMs
+  return {
+    reading,
+    freshness: stale ? QUOTA_FRESHNESS.STALE : QUOTA_FRESHNESS.FRESH,
+    reason: stale ? 'stale' : '',
+    observedAt,
+    ageMs,
+    maxAgeMs: conf.maxAgeMs,
+    thresholds,
+  }
+}
+
+/**
+ * 契约入口：`quota -> readFreshTrustedSourceOrReturnUNKNOWN()`。
+ * 只有 fresh 才返回 ok:true；stale/unknown 一律 ok:false 并给出稳定原因（调用方不得据此渲染 0%/100%）。
+ */
+export async function readFreshTrustedSourceOrReturnUNKNOWN(opts = {}) {
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now()
+  const conf = normalizeQuotaConfig(opts.cfg)
+  const snap = await resolveQuotaSnapshot(opts, conf, now)
+  if (snap.freshness === QUOTA_FRESHNESS.FRESH) {
+    return {
+      ok: true,
+      freshness: QUOTA_FRESHNESS.FRESH,
+      usedPercent: snap.reading.usedPercent,
+      observedAt: snap.observedAt,
+      ageMs: snap.ageMs,
+      maxAgeMs: snap.maxAgeMs,
+      resetsAt: snap.reading.resetsAt || null,
+      plan: snap.reading.plan || null,
+      source: snap.reading.source || conf.source,
+      thresholds: snap.thresholds,
+    }
+  }
+  return {
+    ok: false,
+    freshness: snap.freshness,
+    reason: snap.reason || 'quota_unavailable',
+    observedAt: snap.observedAt,
+    ageMs: snap.ageMs,
+    maxAgeMs: snap.maxAgeMs,
+    usedPercent: null,
+    display: QUOTA_DISPLAY_UNKNOWN,
+    thresholds: snap.thresholds,
+  }
 }
 
 function quotaStateOf(usedPercent, conf) {
@@ -156,7 +274,7 @@ function actionsFor(state, reading) {
 }
 
 function sanitizeEmergency(state) {
-  if (!isPlainObject(state)) return { active: false, mode: 'normal', since: null, acknowledged: false, reason: '', backupPoint: '', timeline: [] }
+  if (!isPlainObject(state)) return { active: false, mode: 'normal', since: null, acknowledged: false, reason: '', backupPoint: '', subject: '', timeline: [] }
   const mode = state.mode === 'emergency' ? 'emergency' : 'normal'
   const em = isPlainObject(state.emergency) ? state.emergency : {}
   return {
@@ -164,12 +282,16 @@ function sanitizeEmergency(state) {
     mode,
     since: typeof em.since === 'number' ? em.since : null,
     acknowledged: mode === 'emergency' ? em.acknowledged === true : false,
-    reason: mode === 'emergency' ? text(em.reason) : '',
-    backupPoint: mode === 'emergency' ? text(em.backupPoint) : '',
+    reason: mode === 'emergency' ? scrubText(em.reason) : '',
+    backupPoint: mode === 'emergency' ? scrubText(em.backupPoint) : '',
+    subject: mode === 'emergency' ? safeSubject(em.subject) : '',
+    // 时间线是审计证据：保留 action/subject/reason/timestamp，但同样脱敏、字段受控。
     timeline: Array.isArray(state.timeline) ? state.timeline.slice(-20).map((t) => ({
       at: Number.isFinite(t && t.at) ? t.at : null,
       action: t && (t.action === 'recover' ? 'recover' : 'enter_emergency'),
       mode: t && t.mode === 'emergency' ? 'emergency' : 'normal',
+      subject: safeSubject(t && t.subject),
+      reason: scrubText(t && t.reason),
     })) : [],
   }
 }
@@ -182,42 +304,92 @@ function sanitizeEmergency(state) {
 export async function evaluateQuota(opts = {}) {
   const now = Number.isFinite(opts.now) ? opts.now : Date.now()
   const conf = normalizeQuotaConfig(opts.cfg)
-  const { reading, reason } = await readQuotaValue(opts, conf)
+  const snap = await resolveQuotaSnapshot(opts, conf, now)
+  const reading = snap.reading
+  const freshness = snap.freshness
   const usedPercent = reading && reading.ok ? reading.usedPercent : null
-  const state = quotaStateOf(usedPercent, conf)
+  // observedState 是按读数算出的阈值状态；state 只有"新鲜"时才等于它，stale/unknown 一律 unknown，
+  // 避免任何调用方把过期/无法证明的读数当成当下余额。
+  const observedState = quotaStateOf(usedPercent, conf)
+  const trusted = freshness === QUOTA_FRESHNESS.FRESH
+  const state = trusted ? observedState : 'unknown'
   const emergency = sanitizeEmergency(opts.emergencyState)
   const officialModels = Array.isArray(opts.officialModels) ? opts.officialModels : []
+  const rounded = usedPercent == null ? null : Math.round(usedPercent * 10) / 10
 
   const impacts = impactFor(state, usedPercent, officialModels, conf)
+  if (!trusted && usedPercent != null) {
+    if (freshness === QUOTA_FRESHNESS.STALE) {
+      impacts.push({
+        code: 'quota_stale',
+        message: '额度读数已过期（超出新鲜窗口）：不把旧读数当作当下余额，也不据此自动切换。',
+        usedPercent: rounded, observedAt: snap.observedAt, ageMs: snap.ageMs, maxAgeMs: snap.maxAgeMs,
+      })
+    } else {
+      impacts.push({ code: 'quota_freshness_unproven', message: '额度读数没有可信观测时间：无法证明新鲜，按未知处理。' })
+    }
+  }
   if (emergency.active) {
     impacts.push({ code: 'emergency_mode_active', message: '应急态已启用：provider 分组/会话可见性可能变化，且非无缝。' })
     for (const e of EMERGENCY_IMPACTS) impacts.push(e)
   }
-  const actions = actionsFor(state, reading)
+  // stale 时按"读数算出的状态"给建议（仍可用），但动作里必须包含刷新来源；unknown 用未知建议。
+  const actions = actionsFor(freshness === QUOTA_FRESHNESS.STALE ? observedState : state, reading)
+  if (freshness !== QUOTA_FRESHNESS.FRESH) {
+    actions.unshift({
+      code: 'refresh_quota_source',
+      requiresConfirmation: false,
+      message: '重新读取官方额度（或人工核对后台）：过期/无法证明的读数不能用于自动决策。',
+    })
+  }
   if (emergency.active) {
     actions.push({ code: 'recover_emergency_when_ready', requiresConfirmation: true, message: '额度/条件恢复后，显式执行恢复操作退出应急态。' })
   }
+  const quotaInsufficient = observedState === 'critical'
   return {
     version: QUOTA_STATE_VERSION,
     generatedAt: now,
     state,
-    display: state === 'unknown' ? QUOTA_DISPLAY_UNKNOWN : (Math.round((usedPercent || 0) * 10) / 10) + '%',
+    observedState,
+    freshness,
+    trusted,
+    display: usedPercent == null
+      ? QUOTA_DISPLAY_UNKNOWN
+      : (trusted ? rounded + '%' : (freshness === QUOTA_FRESHNESS.STALE ? rounded + '% (stale)' : QUOTA_DISPLAY_UNKNOWN)),
     usedPercent,
+    observedAt: snap.observedAt,
+    ageMs: snap.ageMs,
+    maxAgeMs: snap.maxAgeMs,
     resetsAt: (reading && reading.resetsAt) || null,
     plan: (reading && reading.plan) || null,
     source: (reading && reading.source) || conf.source,
-    reason: reason || (reading && reading.error) || '',
+    reason: snap.reason || (reading && reading.error) || '',
     thresholds: { warnPercent: conf.warnPercent, criticalPercent: conf.criticalPercent },
-    exhausted: state === 'critical' && usedPercent != null && usedPercent >= 100,
+    exhausted: trusted && observedState === 'critical' && usedPercent != null && usedPercent >= 100,
+    observedExhausted: observedState === 'critical' && usedPercent != null && usedPercent >= 100,
     impacts,
     actions,
     prohibited: [...QUOTA_PROHIBITED],
     automation: { autoSwitch: false, autoPurchase: false, logout: false, changeSessionProvider: false },
+    // 硬约束（D7）：额度不足绝不自动切换身份/provider；只有显式应急态才允许人工切换。
+    routing: {
+      autoSwitch: false,
+      switchAllowed: emergency.active === true,
+      requiresExplicitEmergency: true,
+      quotaInsufficient,
+      freshness,
+      status: emergency.active
+        ? 'emergency_manual_switch_only'
+        : (quotaInsufficient ? 'quota_insufficient_requires_explicit_emergency' : 'no_switch'),
+      note: '官方额度不足不会自动切换 provider/身份；切换必须先进应急态并由人工执行。',
+    },
     emergency,
     mode: emergency.mode,
-    note: state === 'unknown'
-      ? '没有可靠的官方额度数据：显示 UNKNOWN，网关不猜测、不自动切换。'
-      : '额度状态仅用于预警；任何 provider 切换都必须人工确认。',
+    note: trusted
+      ? '额度状态仅用于预警；任何 provider 切换都必须人工确认。'
+      : (freshness === QUOTA_FRESHNESS.STALE
+        ? '额度读数已过期：显示为 stale，不做自动切换；请刷新来源。'
+        : '没有可靠且新鲜的官方额度数据：显示 UNKNOWN，网关不猜测、不自动切换。'),
   }
 }
 
@@ -258,16 +430,18 @@ export function enterEmergency(state, intent = {}, opts = {}) {
   if (!isPlainObject(intent) || intent.acknowledged !== true) {
     return { ok: false, code: 'acknowledgement_required', message: '进入应急态必须显式确认（acknowledged:true）。', state: s, required: { acknowledged: true, reason: '', backupPoint: '' } }
   }
-  const reason = text(intent.reason)
+  // reason/backupPoint 允许自由文本但要脱敏；subject 是"对谁/哪个官方主体"的审计标签（可选）。
+  const reason = scrubText(intent.reason)
   if (!reason) return { ok: false, code: 'reason_required', message: '进入应急态必须说明原因（reason，≤200 字符）。', state: s }
-  const backupPoint = text(intent.backupPoint)
+  const backupPoint = scrubText(intent.backupPoint)
   if (!backupPoint) return { ok: false, code: 'backup_point_required', message: '进入应急态必须提供备份点（backupPoint，例如配置备份文件/时间点）。', state: s }
+  const subject = safeSubject(intent.subject != null ? intent.subject : opts.subject)
   const next = {
     ...s,
     mode: 'emergency',
     updatedAt: now,
-    emergency: { since: now, acknowledged: true, reason, backupPoint },
-    timeline: [...s.timeline, { at: now, action: 'enter_emergency', mode: 'emergency', reason, backupPoint }].slice(-50),
+    emergency: { since: now, acknowledged: true, reason, backupPoint, subject },
+    timeline: [...s.timeline, { at: now, action: 'enter_emergency', mode: 'emergency', reason, backupPoint, subject }].slice(-50),
   }
   return {
     ok: true,
@@ -284,7 +458,8 @@ export function exitEmergency(state, opts = {}) {
   const now = Number.isFinite(opts.now) ? opts.now : Date.now()
   const s = coerceState(state)
   if (s.mode !== 'emergency') return { ok: false, code: 'not_in_emergency', message: '当前不在应急态，无需恢复。', state: s }
-  const reason = text(opts.reason)
+  const reason = scrubText(opts.reason)
+  const subject = safeSubject(opts.subject)
   const lastEmergency = Object.assign({}, s.emergency || {}, { recoveredAt: now, recoverReason: reason })
   const next = {
     ...s,
@@ -292,7 +467,7 @@ export function exitEmergency(state, opts = {}) {
     updatedAt: now,
     emergency: null,
     lastEmergency,
-    timeline: [...s.timeline, { at: now, action: 'recover', mode: 'normal', reason }].slice(-50),
+    timeline: [...s.timeline, { at: now, action: 'recover', mode: 'normal', reason, subject }].slice(-50),
   }
   return { ok: true, code: 'emergency_recovered', state: next }
 }
@@ -304,15 +479,21 @@ export function serializeQuotaState(state) {
     version: QUOTA_STATE_VERSION,
     mode: s.mode,
     updatedAt: s.updatedAt,
-    emergency: s.emergency ? { since: s.emergency.since, acknowledged: s.emergency.acknowledged === true, reason: text(s.emergency.reason), backupPoint: text(s.emergency.backupPoint) } : null,
+    emergency: s.emergency ? { since: s.emergency.since, acknowledged: s.emergency.acknowledged === true, reason: scrubText(s.emergency.reason), backupPoint: scrubText(s.emergency.backupPoint), subject: safeSubject(s.emergency.subject) } : null,
     lastEmergency: s.lastEmergency ? {
       since: Number.isFinite(s.lastEmergency.since) ? s.lastEmergency.since : null,
       recoveredAt: Number.isFinite(s.lastEmergency.recoveredAt) ? s.lastEmergency.recoveredAt : null,
-      reason: text(s.lastEmergency.reason),
-      backupPoint: text(s.lastEmergency.backupPoint),
-      recoverReason: text(s.lastEmergency.recoverReason),
+      reason: scrubText(s.lastEmergency.reason),
+      backupPoint: scrubText(s.lastEmergency.backupPoint),
+      subject: safeSubject(s.lastEmergency.subject),
+      recoverReason: scrubText(s.lastEmergency.recoverReason),
     } : null,
-    timeline: s.timeline.map((t) => ({ at: t.at, action: t.action, mode: t.mode, ...(t.reason ? { reason: text(t.reason) } : {}), ...(t.backupPoint ? { backupPoint: text(t.backupPoint) } : {}) })),
+    timeline: s.timeline.map((t) => ({
+      at: t.at, action: t.action, mode: t.mode,
+      ...(t.subject ? { subject: safeSubject(t.subject) } : {}),
+      ...(t.reason ? { reason: scrubText(t.reason) } : {}),
+      ...(t.backupPoint ? { backupPoint: scrubText(t.backupPoint) } : {}),
+    })),
   }
 }
 
