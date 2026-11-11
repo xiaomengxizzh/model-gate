@@ -11,9 +11,9 @@ import { createLogger } from './logger.js'
 import { forward, probe, probeModel, probeChat, warm, probeEmbedding, probeRerank } from './request.js'
 import { adapterFor, cacheHitMiss, mapErrorEnvelope } from './format.js'
 import { isStreamResponse, writeUpstreamHeaders, relayStream, endInterruptedStream } from './sse.js'
-import { forwardChain, routeLimit, virtualQuotaExceeded, acquireProvider } from './forward.js'
+import { forwardChain, routeLimit, virtualQuotaExceeded, acquireProvider, initForwardLedger } from './forward.js'
 import { createBudget, abortedError } from './budget.js'
-import { responsesToChat, chatToResponse } from './responses.js'
+import { responsesToChat, chatToResponse, LEGACY_BRIDGE_COMPAT } from './responses.js'
 import { createResponsesStream } from './responses-stream.js'
 import { validateEmbeddingRequest, buildEmbeddingRequest, embeddingHeaders, normalizeEmbeddingResponse, supportsEmbeddings, MAX_EMBEDDING_INPUTS } from './embeddings.js'
 import { validateRerankRequest, buildRerankRequest, rerankHeaders, normalizeRerankResponse, supportsRerank } from './rerank.js'
@@ -23,6 +23,8 @@ import { todayKey } from './shared.js'
 import { readNativeUsage, nativeUsageConfig } from './native-usage.js'
 import { classifyTarget } from './codex/identity.js'
 import { buildCatalog } from './codex/catalog.js'
+import { generationRecordFromBuilt, toCatalogView } from './codex/catalog-generation.js'
+import { microFromUsd } from './routing/facts.js'
 import { planTargetHeaders, targetDeny, buildOfficialHeaders, officialPassthroughEnabled } from './codex/auth.js'
 import { handleCodexApi, isCodexApiPath } from './codex/api.js'
 import { registerConfigRoot, sha256Hex } from './codex/config.js'
@@ -157,11 +159,21 @@ function codexCatalogView(cfg) {
     const base = JSON.parse(readFileSync(basePath, 'utf8'))
     const built = buildCatalog({ base, config: cfg })
     const bindings = built.meta.bindings || {}
-    view = {
-      key,
-      models: built.catalog.models,
-      bindings,
-      officialSlugs: built.catalog.models.map((m) => m && m.slug).filter((s) => s && !bindings[s]),
+    // M1-3b：目录世代记录（generation/verified/key）供 forwardChain 的 catalogScoped 授权使用；
+    // 世代号由同一 cache key 的稳定哈希派生，reload 后同目录快照保持同一代。
+    const generation = Math.max(1, parseInt(sha256Hex(key).slice(0, 8), 16) || 1)
+    try {
+      const record = generationRecordFromBuilt({ generation, built, text: JSON.stringify(built.catalog), base, config: cfg })
+      view = toCatalogView(record)
+    } catch (e) {
+      // 世代构造失败不阻断原有目录视图，但标记 unscoped-verified，后续 authz 仍会做 URL 一致性校验。
+      view = {
+        key, generation,
+        models: built.catalog.models,
+        bindings,
+        officialSlugs: built.catalog.models.map((m) => m && m.slug).filter((s) => s && !bindings[s]),
+        verified: { official: true, thirdParty: true, by: 'config-declared' },
+      }
     }
   } catch (e) {
     // fail-closed 但必须可诊断：错误码/消息只进日志，不进响应；不含凭据与正文。
@@ -172,6 +184,40 @@ function codexCatalogView(cfg) {
   _codexModelsCache = view
   return view
 }
+// M1-3b：账本/授权注入（进程内单例由 forward.js 缓存；启动与 reload 都 recover）。
+function microCap(v) { const n = Number(v); return Number.isFinite(n) && n > 0 ? microFromUsd(n) : 0 }
+function ledgerOptionsOf(cfg) {
+  const lc = cfg && cfg.routing && cfg.routing.ledger
+  if (!lc || typeof lc !== 'object' || !lc.dir) return null
+  const b = (cfg.routing && cfg.routing.budget) || {}
+  return {
+    dir: String(lc.dir),
+    currency: lc.currency ? String(lc.currency) : 'USD',
+    dayZone: lc.dayZone ? String(lc.dayZone) : 'Asia/Shanghai',
+    caps: {
+      requestMicro: microCap(b.requestUsd),
+      taskMicro: microCap(b.taskUsd),
+      dayMicro: microCap(b.dailyUsd),
+    },
+    quoteMaxAgeMs: Number(lc.quoteMaxAgeMs) > 0 ? Number(lc.quoteMaxAgeMs) : 0,
+  }
+}
+// 只有目录 slug（codexAggregate/codexOfficial）才把 catalogRecord 传给 forwardChain；
+// 普通官方 Chat/第三方仍走 config-declared 授权（不因目录存在而强制世代）。
+function catalogAuthzContext(state, model) {
+  const view = state && state.cfg && state.cfg._codexCatalog
+  if (!view || view.generation == null) return undefined
+  let hit = null
+  try { hit = state.router.resolve(model) } catch { return undefined }
+  const def = hit && hit.def
+  if (!def || (def.codexAggregate !== true && def.codexOfficial !== true)) return undefined
+  return { catalogGeneration: view.generation, catalogRecord: view }
+}
+function injectedNow() {
+  const n = Number(process.env.MG_TEST_NOW)
+  return Number.isFinite(n) && n > 0 ? n : undefined
+}
+
 function codexModelsPayload(state) {
   const view = codexCatalogView(state.cfg)
   return view ? view.models : null
@@ -496,6 +542,9 @@ function reloadConfig(state) {
     state.log.warn('Codex 目录不可用，官方/聚合模型将按未知模型处理', _codexCatalogError || '')
   }
   state.router = createRouter(state.cfg)
+  // M1-3b：热重载同步账本配置（dir/caps 变化时 forward.js 缓存按 spec 区分）。
+  state.ledgerOptions = ledgerOptionsOf(state.cfg)
+  initForwardLedger(state.cfg, { ledgerOptions: state.ledgerOptions }, state.log)
   if (state.log && state.log.setSecrets) state.log.setSecrets(collectSecrets(state.cfg))
   // 管理令牌优先级：环境变量 MG_ADMIN_TOKEN > server.adminToken > 面板设置（keys.__mg_admin）
   state.adminToken = process.env.MG_ADMIN_TOKEN || (state.cfg.server && state.cfg.server.adminToken) || (state.cfg._keys && state.cfg._keys.__mg_admin) || ''
@@ -1806,7 +1855,9 @@ function makeHandler(state) {
           if (nout && nout.streamed) return
           res.writeHead(nout.status, { 'content-type': nout.contentType }); res.end(nout.buf); return
         }
-        const conv = responsesToChat(body)
+        // M1-3b：把隐式默认改为显式选择——这是为旧客户端/Codex CLI 保留的已知有损兼容模式；
+        // 严格默认入口是 bridge()，未来可切换。
+        const conv = responsesToChat(body, LEGACY_BRIDGE_COMPAT)
         if (conv.rejected) {
           sendJson(res, 400, { error: { message: conv.rejected.message, type: conv.rejected.code || 'unsupported_parameter' } })
           return
@@ -1853,7 +1904,12 @@ function makeHandler(state) {
         const r = await relayStream(res, result.stream, relayOptsFor(m, m.reconnect))
         return Object.assign({}, r, { finish: (note) => endInterruptedStream(res, note, r ? r.reconnects : 0) })
       }
-      const out = await forwardChain(FWD_DEPS, state, req, fUrl, fPath, req.method, bodyBuf, body, log, streamRelay, budget)
+      const out = await forwardChain(FWD_DEPS, state, req, fUrl, fPath, req.method, bodyBuf, body, log, streamRelay, budget, {
+        ledgerOptions: state.ledgerOptions,
+        authzContext: catalogAuthzContext(state, body && body.model),
+        now: injectedNow(),
+        adapterFactory: state.adapterFactory,
+      })
       // 请求级日志：记录每次数据面请求的请求模型/实际服务模型/上游与结果，便于定位空响应与连接问题（不含消息正文/密钥）
       const reqModel = (body && body.model) || '-'
       const _chain = (n) => n || ''
@@ -2035,9 +2091,14 @@ export function start(opts = {}) {
   if (!cfg._codexCatalog && cfg.defaults && cfg.defaults.codexCatalogBasePath) {
     log.warn('Codex 目录不可用，官方/聚合模型将按未知模型处理', _codexCatalogError || '')
   }
+  // M1-3b：账本进程单例 + 启动 recover（在途/未知预留计数写入日志与状态）。
+  const ledgerOptions = ledgerOptionsOf(cfg)
+  initForwardLedger(cfg, { ledgerOptions }, log)
   const pids = (() => { const o = {}; for (const id of Object.keys(cfg.providers || {})) o[id] = { requests:0, errors:0, retries:0, latencySum:0, latencyCount:0, tokens:0 }; return o })()
   const state = {
     cfg, log, router: createRouter(cfg),
+    ledgerOptions,
+    adapterFactory: opts.adapterFactory,
     adminToken: process.env.MG_ADMIN_TOKEN || (cfg.server && cfg.server.adminToken) || (cfg._keys && cfg._keys.__mg_admin) || '',
     paths: cfg._paths || configPaths(),
     st: { startedAt: Date.now(), uses: {}, counters: { requests: 0, errors: 0, retries: 0, interrupts: 0 } },

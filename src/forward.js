@@ -517,8 +517,9 @@ function codexStopStatus(code, upstreamStatus) {
 const LEDGER_CACHE = new Map()
 let LEDGER_DIAGNOSTIC = null
 
-function ledgerSpecOf(cfg) {
-  const lc = cfg && cfg.routing && cfg.routing.ledger
+function ledgerSpecOf(cfg, opts) {
+  const injected = opts && opts.ledgerOptions
+  const lc = injected || (cfg && cfg.routing && cfg.routing.ledger)
   if (!lc || typeof lc !== 'object' || !lc.dir) return null
   return {
     dir: String(lc.dir),
@@ -531,7 +532,7 @@ function ledgerSpecOf(cfg) {
 
 function openLedgerFor(cfg, opts, log) {
   if (opts && opts.ledger) return opts.ledger
-  const spec = ledgerSpecOf(cfg)
+  const spec = ledgerSpecOf(cfg, opts)
   if (!spec) return null
   const key = JSON.stringify(spec)
   const hit = LEDGER_CACHE.get(key)
@@ -598,7 +599,7 @@ function authzContextOf(opts) {
 
 // 每次实际发送前的最终目标授权：官方没有目录世代 ⇒ fail-closed；第三方无目录记录时用配置声明的
 // thirdPartyVerified（generation=unscoped，写入日志/审计），不冒充官方目录证据。
-function authorizeSendTarget({ cfg, provider, pid, path, req, opts, log, catalogScoped }) {
+export function authorizeSendTarget({ cfg, provider, pid, path, req, opts, log, catalogScoped }) {
   const identity = classifyTarget(provider, cfg)
   const ac = authzContextOf(opts)
   const official = identity.kind === 'official'
@@ -848,7 +849,8 @@ async function authorizedSendOnce(input) {
     throw e
   }
   let relayResult = null
-  const adapter = makeAdapter(async (attempt) => {
+  const factory = typeof input.adapterFactory === 'function' ? input.adapterFactory : makeAdapter
+  const adapter = factory(async (attempt) => {
     const res = await forwardOnce(provider, path, method, headers, bodyBuf, {
       timeout: (cfg.defaults && cfg.defaults.timeout) || {},
       redirect: REDIRECT_POLICY,
@@ -1261,7 +1263,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         // 候选全被预算/报价门排除时，用 402 MG_FB_BUDGET 表达"超预算停机"，而不是泛化 502。
         const budgetExcluded = Array.isArray(d0.excluded) && d0.excluded.some((x) => Array.isArray(x.reasons) &&
           x.reasons.some((r) => /budget|cost|quote/.test(String(r))))
-        if (d0.code === STOP.NO_CANDIDATE && budgetExcluded) {
+        if (d0.code === STOP.BUDGET || /BUDGET/.test(String(d0.code || '')) || (d0.code === STOP.NO_CANDIDATE && budgetExcluded)) {
           return { kind: 'json', status: 402, contentType: 'application/json; charset=utf-8', body: Buffer.from(JSON.stringify({ error: { message: '候选池因预算/报价不足不可用：禁止降级到更便宜候选', type: 'codex_fallback', code: STOP.BUDGET, action: ACTION.STOP, phase: d0.audit.phase } })), pid: null, modelName, chain: '' }
         }
         return codexStopResult(d0, {})
@@ -1436,6 +1438,7 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         bodyBuf: tbuf, body: routeBody, opts: Object.assign({}, opts, { ledger }),
         log, model: serving, api, budget, signal: budgetSignal, collectBody,
         nonIdempotent: noReplay || !!codex, catalogScoped,
+        adapterFactory: opts && opts.adapterFactory,
         streamRelay,
         streamMeta: {
           pid, modelName, serving: serving || modelName, api, dialogueId,
