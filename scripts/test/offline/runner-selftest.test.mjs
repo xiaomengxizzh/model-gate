@@ -18,7 +18,55 @@ import {
 
 const RUNNER = suiteFilePath('scripts/test/run.mjs')
 const OFFLINE_DIR = join(ROOT, 'scripts/test/offline')
-const BASELINE_SUITE_COUNT = 45
+// 45 个基线套件的冻结名单（基线 = 采纳点 64a5c96 上 run.mjs 的 45 个套件）。
+// 断言的是「包含关系」而不是总数：新增套件只需登记，但任何基线套件都不允许被静默移除。
+const BASELINE_SUITES = Object.freeze([
+  'scripts/test/virtual-models.mjs',
+  'scripts/test/effort-normalize.mjs',
+  'scripts/test/upstream-side-4xx.mjs',
+  'scripts/test/offline/admin-contract.test.mjs',
+  'scripts/test/offline/admin-origin.test.mjs',
+  'scripts/test/offline/admin-projection.test.mjs',
+  'scripts/test/offline/admin-secrets.test.mjs',
+  'scripts/test/offline/boundary.test.mjs',
+  'scripts/test/offline/codex-api.test.mjs',
+  'scripts/test/offline/codex-catalog-coherence.test.mjs',
+  'scripts/test/offline/codex-catalog.test.mjs',
+  'scripts/test/offline/codex-config.test.mjs',
+  'scripts/test/offline/codex-control-items.test.mjs',
+  'scripts/test/offline/codex-fallback-forward.test.mjs',
+  'scripts/test/offline/codex-fallback.test.mjs',
+  'scripts/test/offline/codex-history.test.mjs',
+  'scripts/test/offline/codex-identity.test.mjs',
+  'scripts/test/offline/codex-interop.test.mjs',
+  'scripts/test/offline/codex-official.test.mjs',
+  'scripts/test/offline/codex-opencode-session.test.mjs',
+  'scripts/test/offline/codex-quota.test.mjs',
+  'scripts/test/offline/codex-routing-catalog.test.mjs',
+  'scripts/test/offline/config-projection.test.mjs',
+  'scripts/test/offline/config-schema.test.mjs',
+  'scripts/test/offline/deadline.test.mjs',
+  'scripts/test/offline/embeddings.test.mjs',
+  'scripts/test/offline/hosted-tools.test.mjs',
+  'scripts/test/offline/lifecycle.test.mjs',
+  'scripts/test/offline/logger-secrets.test.mjs',
+  'scripts/test/offline/media.test.mjs',
+  'scripts/test/offline/metrics.test.mjs',
+  'scripts/test/offline/model-resolution.test.mjs',
+  'scripts/test/offline/native-usage.test.mjs',
+  'scripts/test/offline/probe.test.mjs',
+  'scripts/test/offline/request-encoding.test.mjs',
+  'scripts/test/offline/rerank.test.mjs',
+  'scripts/test/offline/responses-endpoint.test.mjs',
+  'scripts/test/offline/responses-mapping.test.mjs',
+  'scripts/test/offline/responses-native.test.mjs',
+  'scripts/test/offline/retry-governance.test.mjs',
+  'scripts/test/offline/ui-contract.test.mjs',
+  'scripts/test/offline/ui-next.test.mjs',
+  'scripts/test/offline/user-env.test.mjs',
+  'scripts/test/offline/video.test.mjs',
+  'scripts/test/offline/wire-format.test.mjs',
+])
 
 function pidGone(pid) {
   try { process.kill(pid, 0); return false } catch (err) { return err.code === 'ESRCH' }
@@ -33,11 +81,12 @@ async function waitGone(pid, ms = 3000) {
   return pidGone(pid)
 }
 
-test('清单：非空、无重复、保留 45 个既有套件，且每个条目文件真实存在', () => {
+test('清单：非空、无重复、保留全部 45 个基线套件，且每个条目文件真实存在', () => {
   assert.ok(SUITES.length > 0, 'manifest must not be empty')
   assert.equal(new Set(SUITES).size, SUITES.length, 'manifest must not contain duplicates')
-  const baseline = SUITES.filter((file) => !file.endsWith('runner-selftest.test.mjs'))
-  assert.equal(baseline.length, BASELINE_SUITE_COUNT, 'the 45 baseline suites must all stay listed')
+  assert.equal(BASELINE_SUITES.length, 45, 'frozen baseline list must stay at 45 entries')
+  for (const file of BASELINE_SUITES) assert.ok(SUITES.includes(file), 'baseline suite removed from manifest: ' + file)
+  assert.ok(SUITES.includes('scripts/test/offline/runner-selftest.test.mjs'), 'runner selftest must stay listed')
   for (const file of SUITES) assert.ok(existsSync(suiteFilePath(file)), 'missing manifest entry: ' + file)
   assert.deepEqual(SUITES.slice(0, 3), [
     'scripts/test/virtual-models.mjs',
