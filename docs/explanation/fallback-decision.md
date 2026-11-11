@@ -305,7 +305,10 @@ evidence 模式现在要求候选自己带 `capabilities` 证据；顶层 `tools
 - `taskUsd` / `dailyUsd` 在 forward.js 侧**仍把 spent 恒填 0**（接线属 M3-3）：`codexBudgetOf` 只累计本请求的
   `requestUsd`，task/daily 没有账本来源。M3-2 已交付 `src/routing/ledger.js` 与 `facts.budgetFromLedger`，
   M3-3 应改为从账本取 `spent` 并置 `spendSource:'ledger'`；在那之前，配置 task/daily 上限不会真正约束消费，
-  文档与交付继续标 NOT_RUN（不得当成已生效）。
+  文档与交付继续标 NOT_RUN（不得当成已生效）。接线由 B 的 M1-3a 卡闭环
+  （`reserve → 发送 → settle/release/markUnknown`，`receipt.status !== 'released' ⇒ possiblyCommitted ⇒ STOP_RECONCILE`）；
+  当前状态与逐格证据见[支持矩阵](../roadmap/2026-11-11-support-matrix.md) 的 B7/B8，
+  关闭/降级步骤见[回滚与禁用](../how-to/rollback-and-disable.md)。
 - 任一维度耗尽 → `stop（MG_FB_BUDGET，HTTP 402）`，不切更便宜候选。
 
 ### 10.6 日志
