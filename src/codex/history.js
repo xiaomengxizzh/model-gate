@@ -11,18 +11,120 @@
 // 证据与 wire 形状：docs/explanation/codex-v2-agents.md。
 
 import { createHash } from 'node:crypto'
-import { createReadStream, existsSync } from 'node:fs'
+import { createReadStream, lstatSync, statSync } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
-import { basename, join, relative, resolve } from 'node:path'
+import { basename, isAbsolute, join, relative, resolve } from 'node:path'
 
 export const HISTORY_DIAGNOSIS_VERSION = 1
 export const HISTORY_WRITE_NOT_AUTHORIZED = 'not_authorized'
 
-const MAX_FILES = 2000
-const MAX_TOTAL_BYTES = 128 * 1024 * 1024
-const MAX_LINE_BYTES = 2 * 1024 * 1024
-const MAX_LINES_PER_FILE = 400000
+/** 稳定拒绝码（M4-3a）：管理路由/日志/测试只认这些码，不解析 message。 */
+export const HISTORY_ERROR = Object.freeze({
+  NO_ROOT: 'history_root_required',
+  ROOT_NOT_REGISTERED: 'history_root_not_registered',
+  ROOT_MISSING: 'history_root_missing',
+  ROOT_NOT_DIR: 'history_root_not_dir',
+  ROOT_SYMLINK: 'history_root_symlink',
+  PATH_ESCAPE: 'history_path_escape',
+  WRITE_NOT_AUTHORIZED: HISTORY_WRITE_NOT_AUTHORIZED,
+})
+
+// 硬上限：调用方只能"调低"，不能调高（防止管理面传入巨大值把进程读死）。
+export const HISTORY_HARD_LIMITS = Object.freeze({
+  maxFiles: 2000,
+  maxTotalBytes: 128 * 1024 * 1024,
+  maxLineBytes: 2 * 1024 * 1024,
+  maxLinesPerFile: 400000,
+  maxNodes: 5000,
+})
+
+const ROOT_ID_RE = /^[A-Za-z0-9_.:-]{1,40}$/
+const LABEL_RE = /^[A-Za-z0-9 _.:-]{1,60}$/
+
+// 已登记的允许根：**唯一**允许被诊断的目录来源（管理面只传 rootId，不传任意路径）。
+// 这是模块级登记表，不读 ~/.codex、不落盘；进程重启后由接线层重新登记。
+const REGISTERED_ROOTS = new Map()
+
+function plain(v) { return !!v && typeof v === 'object' && !Array.isArray(v) }
+function safeLabel(v, max) {
+  return typeof v === 'string' && LABEL_RE.test(v.trim()) ? v.trim().slice(0, max || 60) : ''
+}
+
+/**
+ * 登记一个允许被诊断的历史根。这是"路径根受限"的入口：
+ *  · dir 必须是**绝对路径**、存在、是普通目录、且本身不是符号链接（否则登记失败）；
+ *  · 只用 id 对外，诊断结果不带绝对路径；同一个 id 重复登记会覆盖（同一目录换 id 也允许，便于迁移）。
+ * @returns {{ok:true, root:{id,label,registeredAt}} | {ok:false, code, message}}
+ */
+export function registerHistoryRoot(input = {}, opts = {}) {
+  const id = typeof input.id === 'string' ? input.id.trim() : ''
+  if (!ROOT_ID_RE.test(id)) return { ok: false, code: HISTORY_ERROR.NO_ROOT, message: 'rootId 必须匹配 [A-Za-z0-9_.:-]{1,40}' }
+  const dirIn = typeof input.dir === 'string' ? input.dir.trim() : ''
+  if (!dirIn || !isAbsolute(dirIn)) return { ok: false, code: HISTORY_ERROR.NO_ROOT, message: 'dir 必须是绝对路径' }
+  const dir = resolve(dirIn)
+  let st = null
+  try { st = lstatSync(dir) } catch { return { ok: false, code: HISTORY_ERROR.ROOT_MISSING, message: '目录不存在或不可读' } }
+  if (st.isSymbolicLink()) return { ok: false, code: HISTORY_ERROR.ROOT_SYMLINK, message: '历史根不得是符号链接（避免越根）' }
+  if (!st.isDirectory()) return { ok: false, code: HISTORY_ERROR.ROOT_NOT_DIR, message: '历史根必须是目录' }
+  const registeredAt = Number.isFinite(opts.now) ? opts.now : Date.now()
+  const label = safeLabel(input.label) || basename(dir)
+  REGISTERED_ROOTS.set(id, { id, dir, label, registeredAt })
+  return { ok: true, root: Object.freeze({ id, label, registeredAt }) }
+}
+
+/** 已登记的根（脱敏：只给 id/label/时间，绝不回绝对路径）。 */
+export function listHistoryRoots() {
+  return [...REGISTERED_ROOTS.values()]
+    .map((r) => ({ id: r.id, label: r.label, registeredAt: r.registeredAt }))
+    .sort((a, b) => a.id.localeCompare(b.id))
+}
+
+/** 取消登记；返回是否真的移除了。 */
+export function unregisterHistoryRoot(id) {
+  return REGISTERED_ROOTS.delete(typeof id === 'string' ? id.trim() : '')
+}
+
+/** 清空登记（仅供隔离测试/运维重启时使用；不会触碰任何文件）。 */
+export function clearHistoryRoots() {
+  const n = REGISTERED_ROOTS.size
+  REGISTERED_ROOTS.clear()
+  return n
+}
+
+function resolveRoot(opts) {
+  const rootId = typeof opts.rootId === 'string' ? opts.rootId.trim() : ''
+  if (rootId) {
+    const hit = REGISTERED_ROOTS.get(rootId)
+    if (!hit) return { error: HISTORY_ERROR.ROOT_NOT_REGISTERED, message: 'rootId 未登记：请先 registerHistoryRoot' }
+    return { root: hit }
+  }
+  const rawDir = typeof opts.sessionsDir === 'string' ? opts.sessionsDir.trim() : ''
+  if (!rawDir) return { error: HISTORY_ERROR.NO_ROOT, message: '未提供历史根：必须传已登记的 rootId（本模块绝不默认读取 ~/.codex）' }
+  const dir = resolve(rawDir)
+  for (const r of REGISTERED_ROOTS.values()) if (r.dir === dir) return { root: r }
+  // 未登记目录只允许显式开发/测试逃生门；管理面不得传这个开关。
+  if (opts.allowUnregisteredRoot === true) {
+    return { root: { id: '', dir, label: safeLabel(opts.label) || basename(dir), registeredAt: null, unregistered: true } }
+  }
+  return { error: HISTORY_ERROR.ROOT_NOT_REGISTERED, message: '目录未登记：请用 rootId 引用已登记的根，或显式 allowUnregisteredRoot（仅隔离测试）' }
+}
+
+function normalizeLimits(raw) {
+  const src = plain(raw) ? raw : {}
+  const pick = (key) => {
+    const n = Number(src[key])
+    if (!Number.isFinite(n) || n <= 0) return HISTORY_HARD_LIMITS[key]
+    return Math.max(1, Math.min(HISTORY_HARD_LIMITS[key], Math.trunc(n)))
+  }
+  return {
+    maxFiles: pick('maxFiles'),
+    maxTotalBytes: pick('maxTotalBytes'),
+    maxLineBytes: pick('maxLineBytes'),
+    maxLinesPerFile: pick('maxLinesPerFile'),
+    maxNodes: pick('maxNodes'),
+  }
+}
 
 const TOOL_CALL_TYPES = new Set([
   'function_call', 'custom_tool_call', 'local_shell_call', 'web_search_call',
@@ -71,23 +173,29 @@ export function normalizeCatalog(catalog) {
   return out
 }
 
-async function listSessionFiles(dir) {
+async function listSessionFiles(dir, limits, acc) {
   const out = []
   let visited = 0
+  const stop = (reason) => { acc.truncated = true; acc.truncatedReasons.add(reason) }
   async function walk(d) {
-    if (out.length >= MAX_FILES || visited > 5000) return
+    if (out.length >= limits.maxFiles || visited > limits.maxNodes) return stop('files')
     let entries
-    try { entries = await readdir(d, { withFileTypes: true }) } catch { return }
+    try { entries = await readdir(d, { withFileTypes: true }) } catch { acc.unreadable += 1; return }
+    entries.sort((a, b) => a.name.localeCompare(b.name))
     for (const e of entries) {
-      if (out.length >= MAX_FILES || visited > 5000) return
-      if (e.isSymbolicLink()) continue
+      if (out.length >= limits.maxFiles || visited > limits.maxNodes) return stop('files')
+      // 符号链接一律不跟随（哪怕指向根内文件）：计数但不读，防越根。
+      if (e.isSymbolicLink()) { acc.skippedSymlinks += 1; continue }
       const p = join(d, e.name)
+      const rel = relative(dir, p)
+      // 防御性越根检查：正常 readdir 不会产生 '..'，但目录被替换/挂载时仍要拦住。
+      if (rel.startsWith('..') || isAbsolute(rel)) { acc.escaped += 1; continue }
       if (e.isDirectory()) { visited += 1; await walk(p); continue }
       if (!e.isFile() || !e.name.endsWith('.jsonl')) continue
       try {
         const st = await stat(p)
         out.push({ path: p, size: st.size, mtime: st.mtimeMs })
-      } catch { /* 不可读文件跳过（仍属只读） */ }
+      } catch { acc.unreadable += 1 }
     }
   }
   await walk(dir)
@@ -151,7 +259,7 @@ function sessionRow(s) {
   }
 }
 
-async function scanSessionFile(file, root, acc) {
+async function scanSessionFile(file, root, acc, limits) {
   const s = emptySession(file, root)
   const hash = createHash('sha256')
   const rs = createReadStream(file.path, { encoding: null })
@@ -161,8 +269,8 @@ async function scanSessionFile(file, root, acc) {
   try {
     for await (const line of rl) {
       s.lines += 1
-      if (s.lines > MAX_LINES_PER_FILE) { s.truncated = true; break }
-      if (line.length > MAX_LINE_BYTES) continue
+      if (s.lines > limits.maxLinesPerFile) { s.truncated = true; acc.truncatedReasons.add('lines'); break }
+      if (line.length > limits.maxLineBytes) { acc.skippedLongLines += 1; continue }
       // 只解析可能相关的行；其余行完全不进入内存/输出。
       if (line.indexOf('session_meta') === -1 && line.indexOf('turn_context') === -1 &&
           line.indexOf('_call') === -1 && line.indexOf('tool_call') === -1 &&
@@ -212,6 +320,9 @@ async function scanSessionFile(file, root, acc) {
     }
   } finally {
     rl.close()
+    // 行数上限提前 break 时 readline 会停止消费，底层流可能被暂停而永不 close：
+    // 截断场景主动销毁（非截断场景让流自然结束，保证 sha256 覆盖整文件）。
+    if (s.truncated) { try { rs.destroy() } catch { /* 已关闭 */ } }
   }
   // 必须等流关闭后再 digest：否则尾部 chunk 可能还没进入 hash。
   await closed
@@ -232,9 +343,16 @@ function emptyReport(opts) {
     enabled: false,
     source: 'codex-sessions',
     readOnly: true,
+    rootId: '',
     dirLabel: '',
+    unregistered: false,
+    errorCode: '',
+    limits: Object.assign({}, HISTORY_HARD_LIMITS),
     catalogProvided: false,
-    scanned: { files: 0, sessions: 0, bytes: 0, parseErrors: 0, truncated: false },
+    scanned: {
+      files: 0, sessions: 0, bytes: 0, parseErrors: 0, truncated: false,
+      truncatedReasons: [], skippedSymlinks: 0, skippedLongLines: 0, escapedPaths: 0, unreadable: 0,
+    },
     summary: null,
     sessions: [],
     notes: [],
@@ -250,24 +368,46 @@ function emptyReport(opts) {
  */
 export async function diagnoseHistory(opts = {}) {
   const report = emptyReport(opts)
-  const rawDir = typeof opts.sessionsDir === 'string' ? opts.sessionsDir.trim() : ''
-  if (!rawDir) {
-    report.error = '未提供 sessions 目录：必须显式传入（本模块绝不默认读取 ~/.codex）'
-    report.notes.push('只读诊断需要显式 sessionsDir；未启用时不做任何文件访问。')
+  const resolved = resolveRoot(opts)
+  if (resolved.error) {
+    report.error = resolved.message
+    report.errorCode = resolved.error
+    report.notes.push('只读诊断只接受已登记的历史根（rootId）；未启用时不做任何文件访问。')
     return report
   }
-  const root = resolve(rawDir)
-  report.dirLabel = typeof opts.label === 'string' && opts.label ? opts.label : basename(root)
+  const root = resolved.root
+  report.rootId = root.id || ''
+  report.dirLabel = root.label || basename(root.dir)
+  report.unregistered = root.unregistered === true
   const catalog = normalizeCatalog(opts.catalog)
   report.catalogProvided = catalog.size > 0 || Array.isArray(opts.catalog) || isPlainObject(opts.catalog)
-  if (!existsSync(root)) {
+
+  // 根本身再校验一次（登记后目录可能被替换成符号链接/文件）：宁可拒绝，不越根。
+  let rootStat = null
+  try { rootStat = lstatSync(root.dir) } catch {
     report.error = '目录不存在或不可读'
+    report.errorCode = HISTORY_ERROR.ROOT_MISSING
+    return report
+  }
+  if (rootStat.isSymbolicLink()) {
+    report.error = '历史根不得是符号链接（避免越根）'
+    report.errorCode = HISTORY_ERROR.ROOT_SYMLINK
+    return report
+  }
+  if (!rootStat.isDirectory()) {
+    report.error = '历史根必须是目录'
+    report.errorCode = HISTORY_ERROR.ROOT_NOT_DIR
     return report
   }
   report.enabled = true
 
-  const files = await listSessionFiles(root)
-  const acc = { files: 0, sessions: 0, bytes: 0, parseErrors: 0, truncated: false }
+  const limits = normalizeLimits(opts.limits)
+  report.limits = limits
+  const acc = {
+    files: 0, sessions: 0, bytes: 0, parseErrors: 0, truncated: false,
+    truncatedReasons: new Set(), skippedSymlinks: 0, skippedLongLines: 0, escaped: 0, unreadable: 0,
+  }
+  const files = await listSessionFiles(root.dir, limits, acc)
   const rows = []
   let totalTurns = 0, totalToolCalls = 0, totalEncrypted = 0, totalAgentMessages = 0
   const byProvider = new Map()
@@ -278,9 +418,14 @@ export async function diagnoseHistory(opts = {}) {
   let sessionsWithEncrypted = 0
 
   for (const f of files) {
-    if (acc.bytes >= MAX_TOTAL_BYTES) { acc.truncated = true; break }
+    // 字节上限：达到或"再读一个就超"都截断并标注原因，绝不静默。
+    if (acc.bytes >= limits.maxTotalBytes || acc.bytes + f.size > limits.maxTotalBytes) {
+      acc.truncated = true
+      acc.truncatedReasons.add('bytes')
+      break
+    }
     let s
-    try { s = await scanSessionFile(f, root, acc) } catch { acc.parseErrors += 1; continue }
+    try { s = await scanSessionFile(f, root.dir, acc, limits) } catch { acc.parseErrors += 1; continue }
     rows.push(s)
     totalTurns += s.turns
     totalToolCalls += s.toolCalls
@@ -317,7 +462,18 @@ export async function diagnoseHistory(opts = {}) {
   if (opts.includeSessions === false) report.sessions = []
   else report.sessions = sessionRows
 
-  report.scanned = { files: acc.files, sessions: acc.sessions, bytes: acc.bytes, parseErrors: acc.parseErrors, truncated: acc.truncated }
+  report.scanned = {
+    files: acc.files,
+    sessions: acc.sessions,
+    bytes: acc.bytes,
+    parseErrors: acc.parseErrors,
+    truncated: acc.truncated,
+    truncatedReasons: [...acc.truncatedReasons].sort(),
+    skippedSymlinks: acc.skippedSymlinks,
+    skippedLongLines: acc.skippedLongLines,
+    escapedPaths: acc.escaped,
+    unreadable: acc.unreadable,
+  }
   report.summary = {
     sessions: acc.sessions,
     totals: {
@@ -353,6 +509,11 @@ export async function diagnoseHistory(opts = {}) {
       encryptedUnreadable: { sessions: sessionsWithEncrypted, items: totalEncrypted },
     },
   }
+  if (acc.escaped > 0) {
+    // 防御性：正常 readdir 不会产生越根路径；一旦出现（目录被替换/挂载异常）给出稳定码并披露跳过数量。
+    report.escapedCode = HISTORY_ERROR.PATH_ESCAPE
+    report.notes.push('检测到越根路径 ' + acc.escaped + ' 个：已跳过（history_path_escape），未读取。')
+  }
   report.notes.push('只读诊断：未修改任何历史文件；不含消息正文、工具参数或密文。')
   if (!report.catalogProvided) report.notes.push('未提供 catalog：missingModels 未计算（catalogProvided=false）。')
   if (sessionsWithEncrypted > 0) report.notes.push('检测到 v2 加密历史：按不可读处理，网关不解密、不伪造、不删除。')
@@ -378,10 +539,35 @@ function stamp(now) {
  *  · apply:true 直接抛 not_authorized（写入未实现）。
  * opts: { sessionsDir?, catalog?, diagnosis?, now? }
  */
+function safeTargetValue(v) {
+  const s = typeof v === 'string' ? v.trim() : ''
+  if (!s || s.length > 80) return ''
+  // 目标 provider/model 是标签：不允许路径、URL、密钥形态。
+  if (/^[A-Za-z]:/.test(s) || s.startsWith('/') || s.startsWith('~')) return ''
+  if (/(sk-|bearer|api[_-]?key|secret|password)/i.test(s)) return ''
+  if (/(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{8,}/i.test(s)) return ''
+  return s
+}
+
+function safeSelectionValue(v) {
+  const s = typeof v === 'string' ? v.trim() : ''
+  if (!s || s.length > 200) return 'redacted'
+  if (s.startsWith('/') || /^[A-Za-z]:/.test(s) || s.startsWith('~') || s.includes('\\')) return 'redacted'
+  if (/(sk-|bearer|api[_-]?key|secret|password)/i.test(s)) return 'redacted'
+  return s
+}
+
 export async function planSelectiveMigration(selection = {}, opts = {}) {
   if (isPlainObject(selection) && selection.apply === true) throw notAuthorized('迁移写入未授权：planSelectiveMigration 只做只读预演')
   const sel = Array.isArray(selection) ? { sessions: selection } : (isPlainObject(selection) ? selection : {})
-  const diag = opts.diagnosis || await diagnoseHistory({ sessionsDir: opts.sessionsDir, catalog: opts.catalog, now: opts.now })
+  const diag = opts.diagnosis || await diagnoseHistory({
+    rootId: opts.rootId,
+    sessionsDir: opts.sessionsDir,
+    allowUnregisteredRoot: opts.allowUnregisteredRoot,
+    catalog: opts.catalog,
+    limits: opts.limits,
+    now: opts.now,
+  })
   const now = Number.isFinite(opts.now) ? opts.now : Date.now()
   const plan = {
     version: HISTORY_DIAGNOSIS_VERSION,
@@ -394,21 +580,26 @@ export async function planSelectiveMigration(selection = {}, opts = {}) {
     changes: [],
     backup: { suggested: true, strategy: '复制原文件为 <file>.bak-<stamp> 并记录 sha256；写入用临时文件+rename；失败用备份恢复', files: [] },
     totals: { files: 0, bytes: 0 },
+    // 迁移只能是"导出计划"：列出文件与字段改动，供人工/工具在别处执行；本模块不写、不备份、不 rename。
+    export: { format: 'codex-sessions-export-plan-v1', files: [], note: '导出计划只含相对路径与目标字段，不含消息正文/密文/绝对路径。' },
+    apply: { supported: false, code: HISTORY_WRITE_NOT_AUTHORIZED, requiresApproval: true, note: '写入未实现：applySelectiveMigration 一律抛 not_authorized。' },
     warnings: [],
     note: '只读预演：不写入任何历史文件。真正迁移需逐条授权、备份与回滚演练（当前写入接口抛 not_authorized）。',
   }
   if (!diag || diag.enabled !== true) {
-    plan.error = (diag && diag.error) || '无可用诊断结果：请显式提供 sessionsDir'
+    plan.error = (diag && diag.error) || '无可用诊断结果：请显式提供已登记的历史根（rootId）'
+    plan.errorCode = (diag && diag.errorCode) || HISTORY_ERROR.NO_ROOT
     return plan
   }
+  plan.rootId = diag.rootId || ''
   const target = isPlainObject(sel.target) ? sel.target : {}
   plan.target = {
-    provider: typeof sel.targetProvider === 'string' ? sel.targetProvider : (typeof target.provider === 'string' ? target.provider : ''),
-    model: typeof sel.targetModel === 'string' ? sel.targetModel : (typeof target.model === 'string' ? target.model : ''),
+    provider: safeTargetValue(typeof sel.targetProvider === 'string' ? sel.targetProvider : target.provider),
+    model: safeTargetValue(typeof sel.targetModel === 'string' ? sel.targetModel : target.model),
   }
   const requested = []
-  if (Array.isArray(sel.sessions)) requested.push(...sel.sessions.map(String))
-  if (Array.isArray(sel.relPaths)) requested.push(...sel.relPaths.map(String))
+  if (Array.isArray(sel.sessions)) requested.push(...sel.sessions.map((v) => safeSelectionValue(v)))
+  if (Array.isArray(sel.relPaths)) requested.push(...sel.relPaths.map((v) => safeSelectionValue(v)))
   plan.selection.requested = requested
   const all = sel.all === true
   const wanted = new Set(requested)
@@ -438,6 +629,7 @@ export async function planSelectiveMigration(selection = {}, opts = {}) {
       requiresApproval: true,
     })
     plan.backup.files.push({ relPath: row.relPath, backupPath, sha256: row.sha256 || '' })
+    plan.export.files.push({ relPath: row.relPath, sha256: row.sha256 || '', size: row.size || 0, target: { provider: plan.target.provider, model: plan.target.model }, fields: fields.map((x) => x.field) })
     plan.totals.files += 1
     plan.totals.bytes += row.size || 0
   }
