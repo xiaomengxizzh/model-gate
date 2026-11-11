@@ -64,6 +64,8 @@ export const SUITES = [
   'scripts/test/offline/user-env.test.mjs',
   'scripts/test/offline/video.test.mjs',
   'scripts/test/offline/wire-format.test.mjs',
+  // M0-1 自检：验证本运行器自身的清单/超时/环境隔离行为。
+  'scripts/test/offline/runner-selftest.test.mjs',
 ]
 
 const NODE_OPTIONS_ALLOWLIST = [
