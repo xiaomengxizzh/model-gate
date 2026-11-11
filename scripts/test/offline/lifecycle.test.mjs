@@ -333,31 +333,28 @@ test('T-LIFE-05 并发/限流令牌在异常路径归还（finally 语义）', {
   assert.equal(pool.active(), 0)
 })
 
-test('T-LIFE-06 取消独立于失败：退避等待中取消 → 一次 CANCELLED 终态，不再发送', { timeout: 20000 }, async () => {
+test('T-LIFE-06 取消独立于失败：Retry-After 等待中取消 → 一次 CANCELLED 终态，不再发送', { timeout: 20000 }, async () => {
   let hits = 0
   const controller = new AbortController()
   const adapter = {
-    async forwardOnce() {
+    async forwardOnce(attempt) {
       hits += 1
-      throw Object.assign(new Error('dns failure before send'), { code: 'ENOTFOUND' })
+      // 429 是供应商可证明的前置拒绝（未执行），允许按 Retry-After 进入等待；等待必须可被取消唤醒。
+      attempt.onResponseHeaders({ status: 429, headers: { 'retry-after': '1' } })
+      return { ok: false, status: 429, headers: { 'retry-after': '1' }, retryAfter: 1000, bodyText: 'Rate limit exceeded' }
     },
   }
   const running = execute(
-    {
-      overallMs: 5000,
-      signal: controller.signal,
-      target: 'p1',
-      maxAttempts: 3,
-      retry: { initialDelayMs: 300, maxDelayMs: 300, jitter: 0 },
-    },
+    { overallMs: 5000, signal: controller.signal, target: 'p1', maxAttempts: 3 },
     adapter,
-    createAttemptPolicy({ maxAttempts: 3, initialDelayMs: 300, maxDelayMs: 300, jitter: 0 }),
+    createAttemptPolicy({ maxAttempts: 3, jitter: 0 }),
   )
   setTimeout(() => controller.abort(), 40)
   const result = await running
-  assert.equal(result.outcome, 'CANCELLED', '退避等待中取消返回取消终态')
+  assert.equal(result.outcome, 'CANCELLED', 'Retry-After 等待中取消返回取消终态')
   assert.equal(result.attemptsMade, 1, '取消不得触发下一次尝试')
   assert.equal(hits, 1, '取消后上游/适配器只被调用一次')
+  assert.equal(result.waitedMs, 0, '取消立即唤醒，不得等满 Retry-After')
   assert.equal(result.deadline.cancelled, true)
   assert.equal(result.error.type, 'client_closed')
   assert.equal(result.countsAsProviderFailure, false, '取消不触发熔断归因')
