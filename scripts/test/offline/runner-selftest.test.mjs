@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -15,6 +15,7 @@ import {
   sanitizeNodeOptions,
   suiteFilePath,
 } from '../run.mjs'
+import { EXECUTABLE_ALLOWLIST } from '../live.mjs'
 
 const RUNNER = suiteFilePath('scripts/test/run.mjs')
 const LIVE_RUNNER = join(ROOT, 'scripts/test/live.mjs')
@@ -257,55 +258,140 @@ test('汇总语义：套件级 skipped 派生、未运行套件单列 notRun、�
 // M0-1b：旧 runner 的授权边界（fail-closed 静态扫描 + 显式排除 + 前置守卫）
 // ============================================================================
 
-test('旧 runner 安全扫描：未显式排除的危险脚本会让 live.mjs fail-closed 拒绝启动', () => {
-  const name = '__mg-selftest-danger-' + process.pid + '.mjs'
-  const fake = join(SCRIPT_DIR, name)
-  // 故意放入一个“会复制真实凭据 + 访问真实上游”的未排除文件；只需被静态命中，绝不能被真正执行。
-  writeFileSync(fake, [
-    '// selftest fixture：命中危险特征，不得被任何 runner 执行',
-    "import { copyFile } from 'node:fs/promises'",
-    "await copyFile(process.env.HOME + '/.codex/auth.json', '/tmp/mg-e0/fake.json')",
-    "await fetch('https://chatgpt.com/')",
-    '',
-  ].join('\n'))
-  try {
-    const result = spawnSync(process.execPath, [LIVE_RUNNER, '--scan-only'], { cwd: ROOT, encoding: 'utf8', timeout: 30000 })
-    assert.equal(result.status, 1, 'dangerous unexcluded file must fail-closed: ' + result.stdout + result.stderr)
-    const output = result.stdout + result.stderr
-    assert.ok(output.includes('SAFETY_SCAN_FAILED'), 'must report SAFETY_SCAN_FAILED')
-    assert.ok(output.includes(name), 'must name the offending file')
-  } finally {
-    rmSync(fake, { force: true })
-  }
-  assert.equal(existsSync(fake), false, 'danger fixture must be cleaned up')
-})
-
-test('旧 runner 安全扫描：真实仓库通过且计数自洽（47 total / 20 excluded / 27 executable）', () => {
+test('live runner 正向白名单：真实仓库 47 顶层 / 27 允许 / 20 未允许 / 0 缺失', () => {
   const allMjs = readdirSync(SCRIPT_DIR).filter((file) => file.endsWith('.mjs'))
-  const result = spawnSync(process.execPath, [LIVE_RUNNER, '--scan-only'], { cwd: ROOT, encoding: 'utf8', timeout: 30000 })
-  assert.equal(result.status, 0, 'real repo must pass the safety scan: ' + result.stderr)
-  assert.ok(result.stdout.includes('SAFETY_SCAN_OK'), 'must report SAFETY_SCAN_OK: ' + result.stdout)
-  const parsed = result.stdout.match(/total=(\d+) excluded=(\d+) executable=(\d+) violations=(\d+)/)
-  assert.ok(parsed, 'scan output must expose counts: ' + result.stdout)
-  const total = Number(parsed[1])
-  const excluded = Number(parsed[2])
-  const executable = Number(parsed[3])
-  const violations = Number(parsed[4])
-  assert.equal(total, allMjs.length, 'scan must enumerate every top-level .mjs')
-  assert.equal(excluded + executable, total, 'excluded + executable must equal total')
-  assert.equal(violations, 0, 'no dangerous executable files')
-  assert.equal(total, 47)
-  assert.equal(excluded, 20)
-  assert.equal(executable, 27, 'after excluding codex-v1-live.mjs exactly 27 legacy suites execute')
+  assert.equal(EXECUTABLE_ALLOWLIST.length, 27, '白名单必须逐项列出 27 个自包含旧套件')
+  assert.equal(allMjs.length, 47)
+  for (const file of EXECUTABLE_ALLOWLIST) assert.ok(existsSync(join(SCRIPT_DIR, file)), 'missing allowlist entry: ' + file)
+  assert.equal(EXECUTABLE_ALLOWLIST.includes('codex-v1-live.mjs'), false, '真实凭据脚本绝不进入白名单')
 
-  const liveSrc = readFileSync(LIVE_RUNNER, 'utf8')
-  assert.ok(liveSrc.includes("'codex-v1-live.mjs'"), 'codex-v1-live.mjs must be in EXCLUDED')
+  const listed = spawnSync(process.execPath, [LIVE_RUNNER, '--list'], { cwd: ROOT, encoding: 'utf8', timeout: 30000 })
+  assert.equal(listed.status, 0, listed.stderr)
+  assert.match(listed.stdout, /== allowlisted \(27\) ==/)
+  assert.match(listed.stdout, /== present-but-not-allowed \(20\) ==/)
+  assert.match(listed.stdout, /== missing-from-disk \(0\) ==/)
+  assert.ok(listed.stdout.includes('codex-v1-live.mjs\tnot_allowlisted'), '未允许文件必须给出 not_allowlisted 原因')
+
+  const scan = spawnSync(process.execPath, [LIVE_RUNNER, '--scan-only'], { cwd: ROOT, encoding: 'utf8', timeout: 30000 })
+  assert.equal(scan.status, 0, scan.stdout + scan.stderr)
+  assert.match(scan.stdout, /SAFETY_SCAN_OK allowlisted=27 present_not_allowed=20 missing=0 allowlisted_danger=0/)
+
+  // 单 opt-in 不足以执行清单外真实文件：位置筛选直接无匹配 exit 2，且零套件启动
+  const blocked = spawnSync(process.execPath, [LIVE_RUNNER, 'codex-v1-live.mjs'], {
+    cwd: ROOT, encoding: 'utf8', timeout: 30000, env: { ...process.env, MG_ALLOW_LIVE_TESTS: '1' },
+  })
+  assert.equal(blocked.status, 2, '清单外文件即使被点名也不得执行')
+  assert.ok(blocked.stderr.includes('无匹配'), '必须说明清单外文件不会执行')
+
   const originSrc = readFileSync(join(OFFLINE_DIR, 'admin-origin.test.mjs'), 'utf8')
   assert.equal(originSrc.includes('0.0.0.0'), false, 'admin-origin must not bind 0.0.0.0')
   assert.equal(originSrc.includes('networkInterfaces'), false, 'admin-origin must not touch LAN interfaces')
   const v1Src = readFileSync(join(SCRIPT_DIR, 'codex-v1-live.mjs'), 'utf8')
   assert.ok(v1Src.includes('MG_ALLOW_LIVE_TESTS'), 'codex-v1-live must gate on explicit authorization')
   assert.ok(v1Src.includes('REFUSED'), 'codex-v1-live must fail closed when preconditions are missing')
+})
+
+const LIVE_COPY_FAKES = {
+  'bypass-concat.mjs': [
+    '// 反例 1：字符串拼接（denylist 无法命中字面量）',
+    "import { writeFileSync } from 'node:fs'",
+    "const home = '.cod' + 'ex'",
+    "const auth = ['auth', 'json'].join('.')",
+    "const upstream = 'chat' + 'gpt' + '.' + 'com'",
+    "writeFileSync(process.env.FAKE_MARKER, 'ran:' + home + ':' + auth + ':' + upstream)",
+    'process.exit(7)',
+  ].join('\n'),
+  'bypass-case.mjs': [
+    '// 反例 2：大小写变体（正则大小写敏感时会漏）',
+    "const upstream = 'https://ChatGPT.com/v1'",
+    'if (!upstream) process.exit(0)',
+  ].join('\n'),
+  'bypass-b64.mjs': [
+    '// 反例 3：base64 解码后才出现危险串',
+    "const decoded = Buffer.from('YXV0aC5qc29u', 'base64').toString('utf8')",
+    'if (!decoded) process.exit(0)',
+  ].join('\n'),
+}
+
+function makeLiveCopy () {
+  const base = mkdtempSync(join(tmpdir(), 'mg-live-copy-'))
+  const testDir = join(base, 'scripts', 'test')
+  mkdirSync(testDir, { recursive: true })
+  copyFileSync(LIVE_RUNNER, join(testDir, 'live.mjs'))
+  for (const file of EXECUTABLE_ALLOWLIST) writeFileSync(join(testDir, file), '// allowlisted placeholder\n')
+  return { base, testDir, runner: join(testDir, 'live.mjs') }
+}
+
+test('live runner 正向白名单：拼接/大小写/base64 反例都不在清单，命名也不执行', () => {
+  const copy = makeLiveCopy()
+  const marker = join(copy.base, 'fake-ran')
+  try {
+    for (const [name, source] of Object.entries(LIVE_COPY_FAKES)) writeFileSync(join(copy.testDir, name), source)
+    const scan = spawnSync(process.execPath, [copy.runner, '--scan-only'], { cwd: copy.base, encoding: 'utf8', timeout: 30000 })
+    assert.equal(scan.status, 0, scan.stdout + scan.stderr)
+    for (const name of Object.keys(LIVE_COPY_FAKES)) {
+      const line = scan.stdout.split('\n').find((entry) => entry.startsWith('NOT_ALLOWED ' + name + ' '))
+      assert.ok(line, 'scan 必须列出清单外文件 ' + name)
+      assert.ok(line.includes('reason=not_allowlisted'), '清单外文件原因必须是 not_allowlisted: ' + line)
+      // 位置筛选点名清单外文件：exit 2，零套件启动，标记文件不得出现
+      const direct = spawnSync(process.execPath, [copy.runner, name], {
+        cwd: copy.base, encoding: 'utf8', timeout: 30000,
+        env: { ...process.env, MG_ALLOW_LIVE_TESTS: '1', FAKE_MARKER: marker },
+      })
+      assert.equal(direct.status, 2, '清单外文件不得执行: ' + name + ' ' + direct.stdout + direct.stderr)
+    }
+    assert.equal(existsSync(marker), false, '清单外文件绝不能被执行')
+
+    // 只有 MG_ALLOW_LIVE_TESTS=1：不足以 --only 清单外文件
+    const oneGate = spawnSync(process.execPath, [copy.runner, '--only', 'bypass-concat.mjs'], {
+      cwd: copy.base, encoding: 'utf8', timeout: 30000,
+      env: { ...process.env, MG_ALLOW_LIVE_TESTS: '1', FAKE_MARKER: marker },
+    })
+    assert.equal(oneGate.status, 2, oneGate.stdout + oneGate.stderr)
+    assert.ok(oneGate.stderr.includes('MG_LIVE_ALLOW_UNLISTED'), '必须说明缺少第二个 opt-in')
+    assert.equal(existsSync(marker), false)
+
+    // 只有 MG_LIVE_ALLOW_UNLISTED=1：同样不够
+    const otherGate = spawnSync(process.execPath, [copy.runner, '--only', 'bypass-concat.mjs'], {
+      cwd: copy.base, encoding: 'utf8', timeout: 30000,
+      env: { ...process.env, MG_LIVE_ALLOW_UNLISTED: '1', FAKE_MARKER: marker },
+    })
+    assert.equal(otherGate.status, 2)
+    assert.equal(existsSync(marker), false)
+
+    // 两个 opt-in 同时存在：允许执行，但必须醒目警告 + 摘要标注（fake 自身 exit 7 → runner 1）
+    const override = spawnSync(process.execPath, [copy.runner, '--only', 'bypass-concat.mjs'], {
+      cwd: copy.base, encoding: 'utf8', timeout: 30000,
+      env: { ...process.env, MG_ALLOW_LIVE_TESTS: '1', MG_LIVE_ALLOW_UNLISTED: '1', FAKE_MARKER: marker },
+    })
+    assert.equal(override.status, 1, 'fake exit 7 必须体现为 runner 失败: ' + override.stdout)
+    assert.ok(existsSync(marker), '双 opt-in 时 --only 才允许执行')
+    assert.match(override.stderr, /UNLISTED_OVERRIDE/)
+    assert.match(override.stdout, /UNLISTED_OVERRIDE/)
+  } finally {
+    rmSync(copy.base, { recursive: true, force: true })
+  }
+})
+
+test('live runner 白名单不变量：缺文件/清单内危险特征 → --scan-only fail-closed', () => {
+  const copy = makeLiveCopy()
+  try {
+    rmSync(join(copy.testDir, 'acl.mjs'))
+    const listed = spawnSync(process.execPath, [copy.runner, '--list'], { cwd: copy.base, encoding: 'utf8', timeout: 30000 })
+    assert.equal(listed.status, 0)
+    assert.match(listed.stdout, /== missing-from-disk \(1\) ==/)
+    assert.ok(listed.stdout.includes('acl.mjs\tmissing_from_disk'))
+    const missingScan = spawnSync(process.execPath, [copy.runner, '--scan-only'], { cwd: copy.base, encoding: 'utf8', timeout: 30000 })
+    assert.equal(missingScan.status, 1)
+    assert.ok((missingScan.stdout + missingScan.stderr).includes('MISSING acl.mjs'))
+
+    writeFileSync(join(copy.testDir, 'acl.mjs'), "const leak = process.env.HOME + '/.codex/auth.json'")
+    const dangerScan = spawnSync(process.execPath, [copy.runner, '--scan-only'], { cwd: copy.base, encoding: 'utf8', timeout: 30000 })
+    assert.equal(dangerScan.status, 1)
+    assert.ok((dangerScan.stdout + dangerScan.stderr).includes('DANGER acl.mjs'), '清单内文件命中 denylist 必须拒绝启动')
+  } finally {
+    rmSync(copy.base, { recursive: true, force: true })
+  }
 })
 
 test('codex-v1-live fail-closed：缺显式授权/真实凭据时立即非 0 退出，不复制任何凭据', () => {
@@ -327,4 +413,3 @@ test('codex-v1-live fail-closed：缺显式授权/真实凭据时立即非 0 退
     rmSync(dir, { recursive: true, force: true })
   }
 })
-

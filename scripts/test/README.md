@@ -5,7 +5,7 @@
 | 入口 | 覆盖 | 是否需要外部网关 | 门禁 |
 | --- | --- | --- | --- |
 | `npm test`（scripts/test/run.mjs） | 白名单自包含套件：virtual-models、effort-normalize、upstream-side-4xx，以及 `offline/*.test.mjs` | 否 | 无（默认套件） |
-| `npm run test:live -- 关键词`（scripts/test/live.mjs） | 其余旧集成套件（47 个顶层 `.mjs`：19 个夹具/工具 + 1 个真实凭据脚本 `codex-v1-live.mjs` 显式排除，默认执行 27 个） | 否（自建隔离实例） | `MG_ALLOW_LIVE_TESTS=1` |
+| `npm run test:live -- 关键词`（scripts/test/live.mjs） | **正向白名单**：27 个自包含旧套件；47 个顶层 `.mjs` 中其余 20 个一律不执行 | 否（自建隔离实例） | `MG_ALLOW_LIVE_TESTS=1` + 在白名单内 |
 
 所有用例只使用本地 mock 上游与虚构 Key，不访问厂商服务、不读写用户主配置。
 
@@ -18,7 +18,7 @@
 - **失败清理**：`fx.stop()` 先杀子进程并等其真正退出（`killAndWait`）再删临时目录——网关退出前仍会写日志/统计，先删会被重建；同时注册 `process.once('exit')` 兜底同步清理。
 - **默认确定性**：夹具默认 `defaults.directory=[]`、`failbackProbe.enabled=false`、只允许 1 次重试与 5s 超时，避免未配置的兜底链或后台探活污染断言。
 - **通过判定**：每个文件收尾调用 `finish()`，有任何 FAIL 即置非零退出码；live.mjs 按文件独立子进程运行，退出码非 0 即判该文件失败。
-- **fail-closed 安全扫描（M0-1b）**：live.mjs 启动前枚举全部顶层 `.mjs` 并静态读取源码，命中危险特征（`auth.json`、`HOME/.codex`、`chatgpt.com`、`opencode.ai`、`codex exec`、写 `/tmp/mg-e0`）却未显式排除的文件 → **直接拒绝启动并列出文件名**，不静默跳过。新增同类脚本无法再被默认选中；`node scripts/test/live.mjs --scan-only` 只做扫描并打印总数。
+- **正向白名单（M0-1c）**：live.mjs 的 `EXECUTABLE_ALLOWLIST` 是唯一可执行来源；不在清单里的文件永远不会被默认选中（与 `MG_ALLOW_LIVE_TESTS=1` 是 AND）。危险特征 denylist（`auth.json`、`HOME/.codex`、`chatgpt.com`、`opencode.ai`、`codex exec`、写 `/tmp/mg-e0`）降级为**第二道闸**：清单内文件命中即拒绝启动；它拦不住拼接/大小写/编码绕过，**不是安全边界**。`--only <file>` 临时运行清单外文件必须同时设置 `MG_ALLOW_LIVE_TESTS=1` 与 `MG_LIVE_ALLOW_UNLISTED=1`，并打印醒目警告/摘要 `UNLISTED_OVERRIDE`。`--list` 输出 allowlisted / present-but-not-allowed / missing-from-disk；`--scan-only` 只静态检查。
 
 直接单跑任一旧套件（推荐排查单个主题）：
 
@@ -38,7 +38,7 @@ MG_ALLOW_LIVE_TESTS=1 node scripts/test/live.mjs     # → 27/27 文件通过（
 npm test                                             # → Isolated suites: 12/12 passed，exit 0
 ```
 
-当前计数（以 `node scripts/test/live.mjs --scan-only` 为准）：47 个顶层 `.mjs`，20 个显式排除（含真实凭据脚本 `codex-v1-live.mjs`），27 个可执行。
+当前计数（以 `node scripts/test/live.mjs --list` 为准）：47 个顶层 `.mjs`，27 个 allowlisted，20 个 present-but-not-allowed（含真实凭据脚本 `codex-v1-live.mjs`），0 个 missing-from-disk。不在白名单 ⇒ 永不执行。
 
 | 文件 | 改造前问题 | 改造后（本文件实测） |
 | --- | --- | --- |
