@@ -1,7 +1,7 @@
 // ModelGate Next bootstrap: auth, routing, data refresh, theme.
 import { clear, h } from './js/dom.js'
-import { setToken, hasToken, clearToken, getToken, setUnauthorizedHandler } from './js/api.js'
-import { state, loadAuth, loadAll, loadStatus, resetData } from './js/store.js'
+import { setToken, hasToken, clearToken, getToken } from './js/api.js'
+import { state, loadAuth, loadAll, loadStatus, resetData, on, phaseOf, handleUnauthorized } from './js/store.js'
 import { ROUTES, routeFromHash, startRouter } from './js/router.js'
 import { toast, callout } from './js/components.js'
 import { dirtyDraft } from './js/config-draft.js'
@@ -64,6 +64,46 @@ function updateChrome() {
   if (footTime) footTime.textContent = state.loadedAt ? '最近刷新 ' + new Date(state.loadedAt).toLocaleTimeString('zh-CN', { hour12: false }) : ''
 }
 
+// 数据阶段展示：loading 用骨架提示，error 用可重试错误页；不允许把未知状态渲染成 0/正常。
+export function renderLoading() {
+  const root = document.getElementById('view-root')
+  if (!root) return
+  clear(root)
+  root.append(h('header', { class: 'page-head' }, h('div', null,
+    h('p', { class: 'eyebrow', text: 'CONTROL PLANE / LOADING' }),
+    h('h1', { text: '正在读取控制面…' }),
+    h('p', { text: '只读取真实管理 API；在响应返回前不会显示任何缓存或模拟数据。' }))),
+    callout('info', h('strong', { text: 'loading：' }), ' 状态、配置与目录尚未返回，页面不展示 0 或“正常”占位。'))
+  updateChrome()
+}
+
+// 401/403：清掉所有已渲染的敏感投影（配置、目录、额度、历史），再跳登录。绝不保留 stale 数据。
+export function clearControlPlaneDom() {
+  const root = document.getElementById('view-root')
+  if (root) clear(root)
+  const dialogRoot = document.getElementById('dialog-root')
+  if (dialogRoot) { clear(dialogRoot); dialogRoot.hidden = true }
+  const chip = document.getElementById('dirty-top')
+  if (chip && chip.remove) chip.remove()
+  const err = document.getElementById('auth-error')
+  if (err) err.textContent = ''
+}
+
+export function onUnauthorized(info) {
+  const status = info && info.status
+  const message = status === 403 ? '管理请求被拒绝（403）：来源/令牌校验未通过，请重新输入管理令牌。' : '管理令牌已失效，请重新输入。'
+  clearControlPlaneDom()
+  renderLocked(message)
+  showAuth(message)
+  updateChrome()
+}
+
+// 供 api/store 之外的显式入口（例如测试或窗口锁定事件）一次性完成：清状态 + 清 DOM + 跳登录。
+export function handleUnauthorizedUi(info) {
+  handleUnauthorized(info)
+  onUnauthorized(info)
+}
+
 function renderLocked(message) {
   const root = document.getElementById('view-root')
   clear(root)
@@ -112,7 +152,12 @@ function renderRoute(route) {
     if (on) b.setAttribute('aria-current', 'page')
     else b.removeAttribute('aria-current')
   })
-  if (!state.status) { renderFatal(state.lastError || new Error('尚未加载状态')); return }
+  if (!state.status) {
+    if (phaseOf('status') === 'loading') { renderLoading(); return }
+    if (phaseOf('status') === 'error') { renderFatal(state.lastError || new Error('读取状态失败')); return }
+    renderFatal(state.lastError || new Error('尚未加载状态（未知）'))
+    return
+  }
   try {
     view.render(root, { rerender: () => renderRoute(currentRoute) })
   } catch (e) {
@@ -199,12 +244,7 @@ function wire() {
     applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark')
   })
   document.getElementById('auth-form').addEventListener('submit', unlock)
-  setUnauthorizedHandler(() => {
-    clearToken(); resetData()
-    renderLocked()
-    showAuth('管理令牌已失效，请重新输入。')
-    updateChrome()
-  })
+  on('unauthorized', onUnauthorized)
   window.addEventListener('mg:lock', () => { clearToken(); resetData(); renderFatal(new Error('控制台已锁定')); showAuth('控制台已锁定，请输入管理员令牌。') })
   window.addEventListener('beforeunload', (e) => { if (dirtyDraft()) { e.preventDefault(); e.returnValue = '' } })
   window.addEventListener('online', () => toast('网络已恢复', 'success'))
@@ -228,5 +268,8 @@ function wire() {
   }, 15000)
 }
 
-wire()
-bootstrap()
+// 测试可设置 globalThis.__MG_UI_TEST__ = true 后 import 本模块，只验证导出的纯/DOM 函数，不启动引导。
+if (!globalThis.__MG_UI_TEST__) {
+  wire()
+  bootstrap()
+}

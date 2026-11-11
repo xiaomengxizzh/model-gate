@@ -4,6 +4,15 @@ import { state, deriveWarnings } from '../store.js'
 import { fmtInt, fmtCompact, fmtMs, fmtPct, fmtAgo, fmtDuration, fmtTime, safeOrigin } from '../format.js'
 import { pageHead, card, metric, tag, statusTag, callout, empty, table, lineChart, barChart, kvList } from '../components.js'
 
+// 未知计数绝不渲染为 0/null%：缺字段时给出显式“未知”。
+export function errorRateText(g) {
+  const requests = g ? Number(g.requests) : NaN
+  if (!Number.isFinite(requests) || requests <= 0) return '未知（无请求计数）'
+  const errors = Number(g.errors)
+  if (!Number.isFinite(errors) || errors < 0) return '未知（错误计数缺失）'
+  return '错误率 ' + (errors / requests * 100).toFixed(1) + '%'
+}
+
 function healthSummary(s) {
   const providers = Array.isArray(s.providers) ? s.providers : []
   const open = providers.filter((p) => p.st && p.st.state === 'open').length
@@ -25,6 +34,10 @@ export function render(root) {
   const health = healthSummary(s)
   const warnings = deriveWarnings()
 
+  if (!state.config) {
+    root.append(callout('warn', h('strong', { text: '配置投影未知：' }), '尚未读取 /api/config；本页不会把缺失的额度、路由或目录显示为 0/正常。'))
+  }
+
   root.append(pageHead('一切模型，尽在掌控。', '本地优先的模型网关控制面：查看真实请求指标、上游健康、路由结果与需要关注的配置问题。', {
     eyebrow: 'GATEWAY / OVERVIEW',
     actions: [
@@ -44,7 +57,7 @@ export function render(root) {
 
   root.append(h('div', { class: 'grid grid-4' },
     metric('累计请求', fmtInt(g.requests), '数据来自进程内真实计数', 'probe'),
-    metric('错误请求', fmtInt(g.errors), providers.length ? '错误率 ' + fmtPct((Number(g.requests) ? Number(g.errors) / Number(g.requests) * 100 : 0)) : '暂无请求', 'warn'),
+    metric('错误请求', fmtInt(g.errors), errorRateText(g), 'warn'),
     metric('累计 Token', fmtCompact(g.tokenCount), '来自上游 usage 的真实累计', 'plus'),
     metric('P95 延迟', fmtMs(g.p95), '按已确认完成的请求样本', 'refresh')))
 

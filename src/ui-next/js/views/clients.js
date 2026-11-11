@@ -26,6 +26,32 @@ const TABS = [
   { id: 'custom', label: '自定义客户端' },
 ]
 const CAPS = ['chat', 'embedding', 'rerank', 'audio', 'image', 'video']
+
+// 客户端导出（M4-2）：只输出客户端所拥有的字段；不含服务端私有/凭据/额度/代理配置。
+export const CLIENT_EXPORT_FIELDS = Object.freeze(['schema', 'baseUrl', 'clientKey', 'models', 'virtualModels', 'notes'])
+export function buildClientExport(opts = {}) {
+  const config = opts.config || state.config || {}
+  const status = opts.status || state.status || {}
+  const origin = opts.origin || (typeof location !== 'undefined' && location.origin ? location.origin : '')
+  const models = Object.entries(config.models || {}).map(([name, m]) => ({
+    name,
+    capability: (m && m.capability) || 'chat',
+    api: (m && m.api) || '',
+  }))
+  const virtualModels = (Array.isArray(config.virtualModels) ? config.virtualModels : [])
+    .filter((v) => v && v.name)
+    .map((v) => ({ name: v.name, capability: 'chat' }))
+  const keySet = (config.defaults && config.defaults.clientKey === '********') ||
+    (status.defaults && status.defaults.clientKey === '********')
+  return {
+    schema: 'modelgate-client-export/1',
+    baseUrl: origin + '/v1',
+    clientKey: keySet ? '已设置' : '未设置',
+    models,
+    virtualModels,
+    notes: ['只包含客户端接入所需字段；不含上游凭据、服务端私有字段、额度或代理配置。'],
+  }
+}
 const view = { tab: 'codex-cli', model: '' }
 // Codex 聚合卡片：只存用户粘贴的文本与预览结果，不持久化、不发请求。
 const CODEX = { pasted: '', preview: null, v2: true }
@@ -58,6 +84,9 @@ function virtualEntries(c = config()) {
   return list.filter((v) => v && v.name).map((v) => ({
     name: v.name,
     directory: Array.isArray(v.directory) ? v.directory : [],
+    expiresAt: v.expiresAt || '',
+    expiresAtState: v.expiresAtState || 'unknown',
+    note: v.note || '',
   }))
 }
 
@@ -556,16 +585,22 @@ function capabilityCard(models) {
 }
 
 function virtualCard(virtuals) {
-  const rows = virtuals.map((v) => ({
-    name: v.name,
-    count: v.directory.length,
-    models: v.directory.slice(0, 4).map((e) => e && e.model ? e.model : '?').join('、') + (v.directory.length > 4 ? ' …' : ''),
-  }))
-  return card('虚拟模型入口', '虚拟入口可用于 chat/Responses，但 /v1/responses 固定走 Chat 桥；媒体与向量入口要求真实模型。', table([
+  const stateLabel = { none: ['不限制', 'muted'], valid: ['限期', 'info'], expired: ['已过期', 'bad'], invalid: ['有效期无效（拒绝放行）', 'bad'], unknown: ['未知', 'muted'] }
+  const rows = virtuals.map((v) => {
+    const [label, kind] = stateLabel[v.expiresAtState] || stateLabel.unknown
+    return {
+      name: v.name,
+      count: v.directory.length,
+      models: v.directory.slice(0, 4).map((e) => e && e.model ? e.model : '?').join('、') + (v.directory.length > 4 ? ' …' : ''),
+      expiry: tag(label, kind),
+    }
+  })
+  return card('虚拟模型入口', '虚拟入口可用于 chat/Responses，但 /v1/responses 固定走 Chat 桥；媒体与向量入口要求真实模型。有效期状态由后端 expiresAtState 判定，不从 0 或本地时钟推断。', table([
     { label: '入口', render: (r) => h('span', { class: 'mono', text: r.name }) },
     { label: '目录模型数', render: (r) => String(r.count) },
     { label: '目录（前 4 个）', render: (r) => h('span', { class: 'mono-break', text: r.models || '—' }) },
-  ], rows), { foot: '来源 /api/config · virtualModels' })
+    { label: '有效期（后端判定）', render: (r) => r.expiry },
+  ], rows), { foot: '来源 /api/config · virtualModels（expiresAtState/expiresAtMs 为后端投影）' })
 }
 
 function securityCard(keyOn) {
@@ -613,6 +648,7 @@ export function render(root, ctx = {}) {
     actions: [
       copyButton(url, '复制 Base URL'),
       h('button', { class: 'btn', type: 'button', text: '模型与路由', onclick: () => { location.hash = '#/models' } }),
+      h('button', { class: 'btn', type: 'button', text: '导出客户端接入 JSON', onclick: () => { downloadJson('modelgate-client-export.json', buildClientExport()); toast('已导出客户端接入清单（仅客户端字段，无凭据）', 'success') } }),
       h('button', { class: 'btn', type: 'button', text: '监控与诊断', onclick: () => { location.hash = '#/observability' } }),
     ],
   }))
@@ -620,6 +656,10 @@ export function render(root, ctx = {}) {
   root.append(callout('warn',
     h('strong', { text: '边界：' }),
     '控制台读不到 ~/.codex/config.toml、~/.codex/auth.json、~/.dsh/* 或你的环境变量，也不会自动探测客户端连接。本页只根据 /api/config 与 /api/status 推导「应如何配置」，不显示「已连接」；未验证的能力会明确标出。'))
+  // 旧入口保留：/admin 不删除，退役条件（核心操作等价 + 双跑通过 + E2E 证据）满足前必须可用。
+  root.append(callout('info',
+    h('strong', { text: '旧面板仍可用：' }),
+    ' /admin（旧 UI）保留为回退入口。退役条件：本页覆盖的核心操作与旧面板等价、两套入口双跑通过、真实浏览器 E2E 有证据；在此之前不得删除旧面板。'))
 
   root.append(h('div', { class: 'grid grid-main' },
     accessCard(url, keyOn, s),

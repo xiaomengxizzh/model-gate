@@ -40,6 +40,8 @@ test('UI contract: /api/config is editable, lossless and versioned', { timeout: 
   assert.equal(cfg.defaults.affinityTtlMs, 4321, 'unknown defaults preserved')
   assert.equal(cfg.virtualModels[0].expiresAt, '', 'virtual expiresAt projected')
   assert.equal(cfg.virtualModels[0].note, '', 'virtual note projected')
+  assert.equal(cfg.virtualModels[0].expiresAtState, 'none', 'virtual expiresAtState projected by backend')
+  assert.equal(cfg.virtualModels[0].expiresAtMs, null, 'virtual expiresAtMs projected by backend')
   assert.equal(Object.hasOwn(cfg.providers.mock, 'hasKey'), false)
   assert.equal(Object.hasOwn(cfg.providers.mock, 'st'), false)
   assert.equal(Object.hasOwn(cfg, '_keys'), false)

@@ -4,7 +4,7 @@ import { state, loadAuth, loadAll } from '../store.js'
 import { api } from '../api.js'
 import { setToken, clearToken, getToken } from '../api.js'
 import { ensureDraft, setDraft, peekDraft } from '../config-draft.js'
-import { reviewAndSave, dirtyChip } from '../save-flow.js'
+import { reviewAndSave, dirtyChip, sanitizeDiff, sourceSummary, expiryStates } from '../save-flow.js'
 import { pageHead, card, callout, field, codeBlock, copyButton, kvList, tag, dialog, toast, confirmDialog } from '../components.js'
 import { fmtTime, fmtDuration, fmtInt, pretty, maskHeaderValue, maskValue, clone } from '../format.js'
 
@@ -30,7 +30,8 @@ function draftChanged(draft) {
   if (btn) btn.disabled = !draft.isDirty()
 }
 
-function sanitizeForExport(config) {
+// 管理面导出：脱敏后的可编辑配置投影；不包含服务端私有/凭据字段（投影本身就不含 _keys）。
+export function sanitizeForExport(config) {
   const out = clone(config)
   out.defaults = out.defaults || {}
   if (out.defaults.clientKey) out.defaults.clientKey = '********'
@@ -58,6 +59,11 @@ function downloadJson(filename, obj) {
 export function render(root, ctx = {}) {
   const s = state.status || {}
   const c = state.config || {}
+  if (!state.config) {
+    root.append(pageHead('安全与设置', '配置投影尚未读取；本页不显示伪造的默认值。', { eyebrow: 'GOVERNANCE / SETTINGS' }))
+    root.append(callout('warn', h('strong', { text: '未知：' }), 'GET /api/config 尚未返回；无法展示可编辑配置、草稿差异或导出。'))
+    return
+  }
   const d = ensureDraft(c)
   const rerender = ctx.rerender || (() => { location.hash = '#/settings' })
 
@@ -77,6 +83,7 @@ export function render(root, ctx = {}) {
     ['配置版本', String(c.configVersion ?? s.configVersion ?? '—')],
     ['管理令牌', state.auth.needAuth ? '已启用' : '未启用'],
     ['密钥文件加密', s.server?.keyEncrypted ? '已启用' : '未确认'],
+    ['目录来源', s.codex && s.codex.catalog ? ((s.codex.catalog.path || '路径未知') + (s.codex.catalog.generatedAt ? ' · ' + s.codex.catalog.generatedAt : '')) : '目录来源未知'],
   ]))
 
   const tokenInput = h('input', { type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: '输入新令牌（留空则清除面板令牌）' })
@@ -158,16 +165,37 @@ export function render(root, ctx = {}) {
     { foot: h('span', { text: '该目录由网关进程用户读取；不要指向包含凭据的目录。' }) })
   root.append(h('div', { class: 'mt-4' }, nativeCard))
 
+  // 生效配置 vs 草稿：只展示脱敏差异（secret 只显示已设置/已修改），并附后端有效期状态。
+  const draftDiff = d.isDirty() ? sanitizeDiff(d.diff()) : []
+  const expiries = expiryStates(c)
+  const diffCard = card('生效配置 vs 草稿', '保存前核对；来源与版本见下，敏感值只显示状态不显示值。',
+    h('div', null,
+      callout('info', h('strong', { text: '来源：' }), ' ' + sourceSummary(d)),
+      draftDiff.length
+        ? h('div', { class: 'table-wrap' }, h('table', { class: 'diff-table' },
+          h('thead', null, h('tr', null, h('th', { text: '字段' }), h('th', { text: '生效值' }), h('th', { text: '草稿值' }))),
+          h('tbody', null, draftDiff.slice(0, 200).map((row) => h('tr', null,
+            h('td', { class: 'path', text: row.path }),
+            h('td', { class: 'old', text: row.before }),
+            h('td', { class: 'new', text: row.after }))))))
+        : callout('good', '草稿与生效配置一致，没有待保存差异。'),
+      expiries.length
+        ? h('p', { class: 'hint', text: '虚拟模型有效期（后端 expiresAtState）：' + expiries.map((e) => e.name + '=' + e.state).join(' · ') })
+        : null),
+    { foot: '差异只在本标签页计算，不发送到服务端；保存请求只包含被动过的字段（未编辑字段不出现）。' })
+  root.append(h('div', { class: 'mt-4' }, diffCard))
+
   const tx = card('配置事务与导出', '当前可编辑配置投影，不含明文 Key',
     h('div', null,
       callout('info', 'GET /api/config 只返回可编辑字段与 configVersion；运行时统计与凭据不在其中。保存时必须携带读取时的版本号。'),
       h('div', { class: 'flex flex-wrap' },
         copyButton(JSON.stringify({ configVersion: c.configVersion, providers: Object.keys(c.providers || {}).length, models: Object.keys(c.models || {}).length }), '复制版本摘要'),
-        h('button', { class: 'btn', type: 'button', text: '导出脱敏配置 JSON', onclick: () => downloadJson('modelgate-config-' + (c.configVersion ?? 0) + '.json', sanitizeForExport(c)) }),
+        h('button', { class: 'btn', type: 'button', text: '导出管理配置投影（脱敏）', onclick: () => downloadJson('modelgate-config-' + (c.configVersion ?? 0) + '.json', sanitizeForExport(c)) }),
         h('button', { class: 'btn', type: 'button', text: '查看原始配置', onclick: () => dialog({ title: '只读配置投影', desc: '敏感 header 与代理凭据在前端显示时仍按原值；请勿截图分享。', wide: true, content: codeBlock(pretty(c)) }) }))))
 
   const backup = card('备份与恢复', '当前后端没有备份/恢复管理 API',
     h('div', null,
+      callout('info', h('strong', { text: '旧面板仍可用：' }), ' /admin（旧 UI）作为回退入口保留。退役条件：核心操作与本页等价、双跑通过、真实浏览器 E2E 有证据；在此之前不得删除旧面板。'),
       callout('warn', h('strong', { text: '恢复功能未实现，页面不会伪装成功。' }), ' 网关配置以原子写落盘；需要回滚时请使用文件系统备份（git 不跟踪 gateway.local.json 与 keys.local.json）。'),
       h('p', { class: 'hint', text: '可安全导出的只有脱敏编辑配置；密钥文件加密后不应随普通备份外传。恢复操作应在停机窗口内由运维手动完成，并保留旧文件。' })))
 
