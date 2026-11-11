@@ -27,6 +27,9 @@ mg-tray.new.exe
 
 # Process-local test leftovers and machine key material
 .tmp-test-*/
+# runner-selftest 的临时哨兵/危险夹具（正常路径自删；SIGKILL 残留时忽略，且显式清单不会执行未登记文件）
+scripts/test/offline/__mg-selftest-sentinel-*.test.mjs
+scripts/test/__mg-selftest-danger-*.mjs
 master.key
 *.pyc
 __pycache__/

@@ -38,6 +38,8 @@ test('MG-003 形状与保留键：非法输入返回 400 且不写盘、不改�
     ['providerModels 含保留键', '{"models":{"m1":{"provider":"p1","providerModels":{"__proto__":"x"}}}}'],
     ['虚拟模型名重复', JSON.stringify({ virtualModels: [{ name: 'v', directory: [{ model: 'm1' }] }, { name: 'v', directory: [{ model: 'm1' }] }] })],
     ['虚拟模型目录为空', JSON.stringify({ virtualModels: [{ name: 'v2', directory: [] }] })],
+    ['虚拟模型 expiresAt 非法（日历越界）', JSON.stringify({ virtualModels: [{ name: 'v3', directory: [{ model: 'm1' }], expiresAt: '2099-02-30T10:00' }] })],
+    ['虚拟模型 expiresAt 歧义（无时区秒级 ISO）', JSON.stringify({ virtualModels: [{ name: 'v4', directory: [{ model: 'm1' }], expiresAt: '2099-01-01T10:00:00' }] })],
   ]
   for (const [label, rawOrBody] of bad) {
     const r = await gw.post('/api/config/save', rawOrBody, json())

@@ -53,6 +53,13 @@ test('管理 API：状态、日志与磁盘均不泄露明文凭据', { timeout:
   const afterMask = await (await gw.get('/api/status')).json()
   assert.equal(afterMask.defaults.clientKey, '********')
 
+  // P0-1：省略 clientKey 的补丁（只改其它 defaults）不得撤销数据面全局 Key。
+  assert.equal((await gw.post('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
+  const afterOmit = await (await gw.get('/api/status')).json()
+  assert.equal(afterOmit.defaults.clientKey, '********', '省略字段保存后仍应回显掩码')
+  const unauth = await gw.post('/v1/chat/completions', { model: 'demo', messages: [{ role: 'user', content: 'hi' }] })
+  assert.equal(unauth.status, 401, '省略字段保存后匿名调用必须仍是 401')
+
   // ④ 虚拟模型只暴露 keySet，不暴露 Key 本身
   const vm = afterMask.virtualModels.find((v) => v.name === 'private')
   assert.equal(vm.keySet, true)
