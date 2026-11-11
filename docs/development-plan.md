@@ -2,6 +2,20 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
+## 2026-11-11 Codex 多供应商聚合（D1–D7 / E0–E9，独立分支）
+
+分支 `dev/codex-aggregation-20261111`（基线 `ec66b24` = Draft PR #5 head）。**未合并、未推送**；实现提交 `d373a06`，文档/证据 `031f477`/`cfdf2e2`，补丁 `2f607d2`/`58c470a`。
+
+已完成 E1–E8：身份域与头防火墙（`src/codex/identity.js`/`auth.js`）、动态目录（`catalog.js` + CLI）、官方透传与同线程切换（`index.js` + zstd/WS 回落）、v2 互操作（`interop.js`）、安全 Fallback（`routing/decision.js` 接入 `forward.js`）、受控配置与 `/api/codex/*`（`config.js`/`api.js` + ui-next）、历史只读（`history.js`）、额度应急（`quota.js`）。
+
+真实验收：真实 Codex CLI + 真实 `chatgpt.com` + 真实 OpenCode Go，同线程 GPT→第三方→GPT **7/7**；M2 官方主代理 spawn 第三方子代理时被 v2 加密任务**显式阻断**（D3 设计内）。证据见 [E9 矩阵](roadmap/2026-11-11-codex-aggregation-e9-acceptance.md)、[E3 证据](evidence/2026-11-11-e3-live-switching.md)、[M2 取证](evidence/2026-11-11-e4-v2-live-blocked.md)。
+
+决策记录见 [ADR-0002](explanation/adr-0002-codex-aggregation-identity.md)；配置字段见 [配置参考](reference/configuration.md)，管理接口见 [Codex 管理面 API](reference/codex-api.md)。
+
+验证：`npm test` 44/44 隔离套件；`npm run check` 0；`npm run docs:check` PASS；`check-metadata` 21/21；配置写入 HTTP e2e 14/14。
+
+未验证/待授权：推送与 Draft PR；真实 `~/.codex/config.toml` 写入与客户端重载；Desktop 端到端；真实 v2 子代理闭环；历史迁移与额度应急演练。
+
 ## 2026-11-10 Codex 多 provider 边界与原生用量采集
 
 - 新增 `/api/native-usage` + `src/native-usage.js` + 观测页卡片/设置项：只读汇总 Codex sessions 的 token 计数，不读取消息正文，默认关闭。
