@@ -8,14 +8,17 @@
 
 ## 1. 回滚点
 
-仓库**没有发布 tag**（`git tag` 为空），一律按提交 sha 回滚。字符串 `<见交付报告>` 由本轮交付报告填写最终里程碑列表。
+仓库**没有发布 tag**（`git tag` 为空），一律按提交 sha 回滚。本轮完整里程碑列表见
+[支持矩阵](../roadmap/2026-11-11-support-matrix.md) §0；本页只挑 4 个常用回滚点并写明各自门禁。
 
 | 回滚点 | SHA | 含义 | 回滚到这里的后果 |
 | --- | --- | --- | --- |
 | 远端 main | `6bc6441` | 本轮开始前的远端 main | 丢掉本轮全部加固交付（调度证据化、账本、UHR 契约/回执、MCP mock、支持矩阵） |
-| 基线采纳 | `64a5c96` | 加固轮起点（`dev/modelgate-hardening-a1` 基线） | 回到本轮之前，仅保留历史聚合/网关能力 |
-| 里程碑（各 merge） | `<见交付报告>` | lead 合并各角色交付后的里程碑 SHA 列表 | 按里程碑粒度的取舍回滚，具体能力见支持矩阵 |
-| 本分支自测锚点 | `cceb949` | 本卡所在分支 `work/d` 的最后一次提交（M5 最终交付） | **不是发布里程碑**，只用于核对"本卡验收时的树" |
+| 基线采纳 | `64a5c96` | 加固轮起点（ff #5+#6，真实祖先链） | 回到本轮之前，仅保留历史聚合/网关能力 |
+| Key 三态 | `dacc564` | M0-2/P0-1 数据面 Key 三态 | 回到"Key 未分态"的入口行为，需重验数据面 Key 判定 |
+| 入口收口 | `9ebb2d5` | M4-1b（P0-2 入口收口） | 回到自管 apply/rollback 入口开放前的状态 |
+| 最终交付 | `<最终集成 SHA，见交付报告 R01>` | R01 交付点 | 回到本轮最终状态；本页所有门禁预期值按此点书写 |
+| 本分支自测锚点 | `a7b969e`（M4-3a）→ `cdb13e3`（矩阵同步） | 本卡所在分支 `work/d` 的提交 | **不是发布里程碑**，只用于核对"本卡验收时的树" |
 
 回滚前先记录现场：
 
@@ -25,6 +28,18 @@ git -C "$DEPLOY" rev-parse HEAD       # 当前提交 = 你的回滚起点
 git -C "$DEPLOY" status --short       # 有未提交改动先停下确认来源
 git -C "$DEPLOY" log --oneline -10    # 找到要回滚到的里程碑
 ```
+
+### 1.1 关键里程碑：回滚到此处后跑什么
+
+四个最常用回滚点各自的门禁（"五条"指 §3 的 `node --version` / `npm run check` / `node scripts/test/run.mjs` /
+`npm run docs:check` / `node scripts/check-metadata.mjs`）：
+
+| 回滚到 | 必跑门禁 | 额外核对 |
+| --- | --- | --- |
+| `64a5c96`（基线采纳） | 五条（该点套件很少，摘要行以当次输出为准，**不要拿 57 套件去比**） | 确认 runner 是旧格式（`Isolated suites: n/n passed`）时不要误判为失败；`/healthz` 与 `/v1/models` |
+| `dacc564`（Key 三态） | 五条 + `offline/admin-origin`、`offline/admin-secrets` | 数据面 Key 三态（缺失/错误/有效）行为、`MG_CLIENT_KEY` 设置后的 401/200 判定 |
+| `9ebb2d5`（入口收口） | 五条 + `offline/admin-entry`、`offline/codex-api` | 确认自管 apply/rollback 在**普通产品模式仍是 DISABLED**（C7），fixture 模式才可用 |
+| `<最终集成 SHA，见交付报告 R01>`（交付点） | 五条（期望 57 套件 / 545 pass / 0 fail / 1 skip、docs 60 files/210 links、metadata 32 checks） | 与[支持矩阵](../roadmap/2026-11-11-support-matrix.md) §0 的数字逐项对齐 |
 
 ## 2. 回滚命令
 
@@ -57,15 +72,18 @@ git -C "$DEPLOY" status --short       # 必须为空
 ```bash
 node --version                       # 必须 >= 18
 npm run check                        # 语法自检，不起服务
-node scripts/test/run.mjs            # 期望末尾 "Isolated suites: <n>/<n> passed"，退出码 0
-npm run docs:check                   # 期望 "Documentation paths: PASS"
-node scripts/check-metadata.mjs      # 期望 "Metadata: PASS (21 checks)"
+node scripts/test/run.mjs            # 期望摘要行 "suites: <N> passed, 0 failed, ..."（本交付点 57 passed / 545 pass / 0 failed / 1 skip），退出码 0
+npm run docs:check                   # 期望 "Documentation paths: PASS"（交付报告记录 60 files / 210 links；脚本只打印 PASS）
+node scripts/check-metadata.mjs      # 期望 "Metadata: PASS (32 checks)"（本交付点；分支/旧里程碑的文档更少，数字会更小，PASS 才是判据）
 ```
 
 判读规则：
 
-- `<n>` **随分支/里程碑变化**（本卡分支实测 49；集成线为 53）。不要在任何脚本或文档里把 `n` 写死，
-  回滚后必须重新读输出；`n` 变小且不是因为回滚目标本身就少套件，说明有交付被意外丢弃。
+- 摘要行格式为 `suites: <N> passed, 0 failed, ...`（本交付点：**57 passed / 545 pass / 0 failed / 1 skip**，
+  其中 1 skip 是 `MG_CODEX_VERIFY=1` 门控的真实 CLI 用例）。若看到旧的 `Isolated suites: n/n passed`，
+  说明跑的是 M0-1 之前的旧 runner，以实际输出为准。
+- `<N>` **随分支/里程碑变化**：57 是**本交付点**的数字，不是永久常量。不要在任何脚本或文档里把 `N` 写死，
+  回滚后必须重新读输出；`N` 变小且不是因为回滚目标本身就少套件，说明有交付被意外丢弃。
 - 回滚后如涉及配置目录，先按 deploy 文档做一次隔离实例启动体检：`/healthz` → `ok`、
   `/v1/models` 模型清单符合预期、`/api/status` 的 `configVersion` 与备份一致（`configVersion` 是并发冲突检测，
   **回滚不会回退它**）。
