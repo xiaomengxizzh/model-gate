@@ -32,6 +32,18 @@
 4.1 `include` 例外：真实客户端（Codex CLI、DSH headless）固定发 `include:["reasoning.encrypted_content"]`。网关本就不产生加密推理，该项在语义上等于"没有可返回的东西"，整条拒绝会让 Responses 入口对真实客户端完全不可用（2026-11-09 实测 DSH 0.2.2-rc.1 因此 400）。因此**只接受丢弃后不影响正确性的项**（`reasoning.encrypted_content`、`output_text.logprobs`）并记 `lossy: include_dropped:<项>`；图片/托管产物/未知项仍旧显式拒绝，避免静默丢掉客户端要求的产物。
 4.2 托管工具与 `namespace` 分组：Chat 协议只能表达 function/custom tool。命名空间分组（Codex 的 `type:"namespace"`，如 `multi_agent_v1` / `collaboration`）在桥方向**展开为可逆 function 名**（`mg_ns__<namespace>__<tool>`），回程 JSON/SSE 再还原为 `{name, namespace}`；无法展开的形状记 `unsupported_tool`。托管工具（`web_search` / `file_search` / `code_interpreter` / `mcp` / `computer_*` / `image_generation` / `local_shell`）仍**丢弃并记 `tool_dropped:<type>`**，同时提供 `onUnsupportedTool:"reject"` 让调用方改为整条 400（零上游调用）；`v2` 的加密任务（`agent_message` 含 `encrypted_content`、`encrypted_task_id`、`encrypted_*` 参数/输出）一律 `400 code=v2_encrypted_task_unsupported`，不解析/不删除/不伪造/不降级 v1；原生 `api:"responses"` 透传路径（`mode:'native'`）原样交给上游。`tool_choice` 点名被丢弃的工具时降级为 `auto` 并记 `tool_choice_dropped:<name>`（否则上游会因"无名工具"400）。理由：Codex 0.167 已取消 `wire_api="chat"`（openai/codex discussions#7782 要求统一 `responses`），而它每轮固定发送 `namespace` 与 `web_search`；按 4. 整条拒绝等于"不支持 Codex"，与 MG-015 目标冲突。原生 `api:"responses"` 透传不经过桥映射，工具原样交给上游。
 
+### 3.5 桥接严格默认与旧客户端兼容预设（M1-2）
+
+plan §3.2 的规则是「不能表达 ⇒ typedUnsupported，**除非调用方显式选择了有文档的有损模式**」。因此 `src/responses.js` 提供两个入口：
+
+- `bridge(input, opts)`：**纯原语，默认严格**。托管工具、`configuration_update`/`additional_tools` 控制项、未知顶层字段、无法精确表达的 `tool_choice.allowed_tools` 子集、不透明 agent 任务/continuation、以及配对不自洽的 `tool_output`（孤儿 / 缺 call_id / 重复 call_id）都会在发送前返回 typedUnsupported（`unsupported_tool` / `unsupported_control_item` / `unsupported_field` / `unsupported_allowed_tools` / `opaque_continuation_unsupported` / `tool_pairing_invalid`）。只有调用方显式传 `{ onUnsupportedTool:'drop' }` 或 `{ allowLossy:true }` 才允许丢弃并记录 `lossy[]`。
+- `responsesToChat(input, opts)`：**产品便捷入口**（`src/index.js` 当前直接调用）。默认携带导出的 `LEGACY_BRIDGE_COMPAT`（`onUnsupportedTool:'drop'`、`allowLossy:true`），保持旧客户端与 Codex CLI 连续性；该预设**已知有损**，M1-3 接线时改为显式选择。传 `{ onUnsupportedTool:'reject' }` 仍可强制严格。
+- 原生 `mode:'native'`：不受 Chat 桥限制（不检查 v2/托管工具）。`store`/`previous_response_id`/`background`/`truncation` 由 `opts.nativeContract` 显式驱动：未提供 ⇒ `unsupported_native_parameter`；提供 `{store:true,...}` / `{supported:[...]}` / `{unsupported:[...]}` 时严格按契约放行或拒绝。
+
+### 3.6 SSE 帧解码（M1-2）
+
+`src/sse.js` 用流式 `TextDecoder` 解码（UTF-8 多字节字符跨 chunk 不丢），帧边界按 SSE 规范识别 `\r\n`/`\n`/`\r` 及其混用，并对单帧（默认 1 MiB）与待解析缓冲（默认 2 MiB）设上限；超限抛 `SSE_FRAME_TOO_LARGE`，中继以一次中断终态收尾且**不续传**（重放整个请求可能重复副作用）。Chat SSE → Responses 事件桥的 item id 在 add/delta/done/completed 间保持稳定，工具增量按 call_id 隔离。
+
 ## 4. 请求映射（Chat 桥）
 
 | Responses 字段 | Chat Completions | 说明 |
