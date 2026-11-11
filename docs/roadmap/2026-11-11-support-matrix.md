@@ -7,9 +7,10 @@
 
 ## 0. 先说数字口径（避免误读）
 
-- 下表所有套件/断言数字来自本卡验收时的**实测**：分支 `work/d`（代码基线 `cceb949`，本卡只加文档，不改变套件数），隔离 `HOME`/`TMPDIR`、无网络，命令 `node scripts/test/run.mjs`：
+- 下表所有套件/断言数字来自本卡验收时的**实测**：分支 `work/d`（代码基线 `cceb949` + `M5-2b` 的 3 项 MCP 回归），
+  隔离 `HOME`/`TMPDIR`、无网络，命令 `node scripts/test/run.mjs`：
   - **49 套件全部通过**（输出 `Isolated suites: 49/49 passed`，退出码 0）
-  - node:test 用例 **396**：395 通过、**1 SKIP**（`MG_CODEX_VERIFY=1` 才执行的真实 CLI 用例）、0 失败
+  - node:test 用例 **399**：398 通过、**1 SKIP**（`MG_CODEX_VERIFY=1` 才执行的真实 CLI 用例）、0 失败
   - 3 个旧式验收脚本：`virtual-models` 18/18、`effort-normalize` 20/20、`upstream-side-4xx` 7/7
   - `npm run check` 退出码 0；`npm run docs:check` → `Documentation paths: PASS`
 - 集成线（lead 合并其它角色交付后）为 **53 套件 / 492 pass**，里程碑 SHA **`<见交付报告>`**。
@@ -51,7 +52,7 @@
 | A16 | 调度接线（`forward.js` 聚合路径 + 阶段推进） | `PASS(mock)` | `offline/codex-fallback-forward` 10（本地 mock 上游 + 动态端口 + 临时配置目录） | 只覆盖聚合 slug 路径；官方真机未跑 |
 | A17 | 预算账本（整数 micro / 显式币种 / 单写者 / 幂等 / 未知保留 / 超支封顶 / 跨日 / 并发 / 重启恢复 / 脱敏） | `PASS(mock)` | `offline/routing-ledger` 14（真实临时目录 + 3 个真实子进程并发） | 见 B7/B8：**未接进 forward.js，运行时费用上限不生效** |
 | A18 | UHR 推理回执契约（授权/候选/预算/终态/未知用量/路由一致性/不可变/幂等） | `PASS(mock)` | `offline/inference-receipt` 12 | 真实 UHR 未接（B6） |
-| A19 | MCP ↔ mock UHR 委派契约（作用域/只读意图/引用白名单/预算/幂等/取消/归属/callId 回填/脱敏） | `PASS(mock)` | `offline/mcp-uhr-contract` 15（真实临时目录落盘 + 重启重建） | mock UHR，不是真实 UHR（B6） |
+| A19 | MCP ↔ mock UHR 委派契约（作用域/只读意图/引用白名单/预算/幂等/取消/归属/callId 回填/摘要硬上限/空 callId 拒绝/脱敏） | `PASS(mock)` | `offline/mcp-uhr-contract` 18（真实临时目录落盘 + 重启重建；含 M5-2b 的摘要硬上限与空 toolCallId 回归） | mock UHR，不是真实 UHR（B6） |
 | A20 | 管理面契约（保存/鉴权矩阵/版本冲突/投影/来源策略/密钥不回显） | `PASS(mock)` | `offline/admin-contract` 2、`offline/admin-projection` 4、`offline/admin-origin` 4、`offline/admin-secrets` 1 | 见 C4：匿名远程默认拒绝 |
 | A21 | 控制台 UI（静态树/CSP/遍历防护/接口契约） | `PASS(mock)` | `offline/ui-contract` 2、`offline/ui-next` 2 | 真实浏览器见 B10 |
 | A22 | 可观测（指标/日志脱敏/原生用量） | `PASS(mock)` | `offline/metrics` 2、`offline/logger-secrets` 2、`offline/native-usage` 2 | — |
