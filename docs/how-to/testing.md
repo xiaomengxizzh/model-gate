@@ -18,6 +18,8 @@ npm run docs:check
 
 旧套件已全部隔离（MG-004）：配置读写经加密 Key 与临时目录，上游为本地 mock，默认 `npm test` 与旧套件互不影响。`user-env-fallback` 的 Windows 分支在 Linux 上打印 `N/A`（不计通过）。仍不要为了让测试通过而关闭日常网关鉴权。
 
+配置事务与恢复的回归在 `scripts/test/offline/config-transaction.test.mjs`：覆盖 journal/commit marker 的 9 个故障注入点（子进程 `process.exit`/SIGKILL）、重启恢复一致代际、外部修改 fail-closed、跨进程锁竞争、0600 权限、日志脱敏与网关级「失败不发布内存/不降低鉴权」。故障注入只通过 `MG_TXN_FAULT` 传给显式子进程（默认 runner 白名单不会透传该变量）。
+
 `scripts/test/offline/runner-selftest.test.mjs` 会在 `scripts/test/offline/` 与 `scripts/test/` 短暂写入哨兵/危险夹具文件（正常路径自删；进程被 SIGKILL 时可能残留，已加入 `.gitignore`）。残留不会被自动执行：默认运行器是显式清单 `SUITES`，清单外文件不参与。
 
 若测试失败，保留命令、错误、Node 版本和相关 diff，先排除端口占用，再判断行为回归。退出、SKIP 和超时均不得写成成功。

@@ -6,6 +6,7 @@ import { basename } from 'node:path'
 import { gunzipSync, inflateSync, brotliDecompressSync, zstdDecompressSync } from 'node:zlib'
 import { isIP } from 'node:net'
 import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh, modelTarget } from './router.js'
+import { beginWrite, recoverStore, TARGET_CONFIG, TARGET_KEYS } from './config-transaction.js'
 import { createLogger } from './logger.js'
 import { forward, probe, probeModel, probeChat, warm, probeEmbedding, probeRerank } from './request.js'
 import { adapterFor, cacheHitMiss, mapErrorEnvelope } from './format.js'
@@ -501,10 +502,50 @@ function versionConflict(state, body) {
   return null
 }
 function saveConfig(state, body) { return withConfigWriteLock(() => doSaveConfig(state, body)) }
+// M0-2b：虚拟模型元数据三态。整个 virtualModels 省略、或数组里的 vm 对象省略 expiresAt/note，都必须 KEEP；
+// 只有字段显式出现在补丁里且值为空才是 EXPLICIT_CLEAR。删除虚拟模型（不在数组里）仍由调用方清理 key+meta。
+export function planVirtualMetaUpdate(rawVm, presence, currentMeta) {
+  const current = currentMeta && typeof currentMeta === 'object' ? currentMeta : null
+  if (presence === 'omitted') return { action: 'KEEP_CURRENT_META', meta: current }
+  const vm = rawVm && typeof rawVm === 'object' ? rawVm : {}
+  const hasExpires = Object.prototype.hasOwnProperty.call(vm, 'expiresAt')
+  const hasNote = Object.prototype.hasOwnProperty.call(vm, 'note')
+  if (!hasExpires && !hasNote) return { action: 'KEEP_CURRENT_META', meta: current }
+  let expiresAt = current && typeof current.expiresAt === 'string' ? current.expiresAt : ''
+  let note = current && typeof current.note === 'string' ? current.note : ''
+  if (hasExpires) {
+    const parsed = parseVirtualExpiry(vm.expiresAt)
+    if (parsed.kind === 'invalid') return { action: 'INVALID_400', code: parsed.code }
+    expiresAt = parsed.kind === 'valid'
+      ? (parsed.source === 'legacy_local_date' ? String(vm.expiresAt).trim() : parsed.normalized)
+      : ''
+  }
+  if (hasNote) note = typeof vm.note === 'string' ? vm.note.trim() : ''
+  const meta = (expiresAt || note) ? { expiresAt, note } : null
+  return { action: meta ? 'UPDATE' : 'EXPLICIT_CLEAR', meta }
+}
+
+// M0-3：把事务错误映射为管理 API 的结构化错误（不含 Key/配置正文）。
+function transactionFailure(error) {
+  const code = (error && error.code) || 'transaction_failed'
+  if (code === 'store_locked') return { error: '配置写入被拒绝：另一个写者持有配置锁（不排队）', status: 409, code }
+  if (code === 'store_conflict') return { error: '配置已被外部修改（磁盘指纹不一致）：已停止写入并保留现场；请人工核对或先 /api/config/reload', status: 409, code }
+  if (code === 'injected_fault') return { error: '配置事务被中断（故障注入）', status: 500, code }
+  return { error: '配置事务失败：' + ((error && error.message) || 'unknown'), status: 500, code }
+}
+
+function beginStoreWrite(state) {
+  return beginWrite(state.paths, { expected: state.cfg && state.cfg._disk, log: state.log })
+}
+
 async function doSaveConfig(state, body) {
   const cur = state.cfg
   const _shape = validateConfigShape(body); if (_shape) return _shape
   const _c = versionConflict(state, body); if (_c) return _c
+  // M0-3：目录级单写者锁 + 中断恢复 + 磁盘指纹校验。拿不到锁或磁盘被外部修改都立即拒绝（不排队）。
+  let tx
+  try { tx = beginStoreWrite(state) } catch (error) { return transactionFailure(error) }
+  try {
   const providers = body.providers !== undefined ? body.providers : (cur.providers || {})
   const models = body.models !== undefined ? body.models : (cur.models || {})
   // defaults 合并而非整体替换：面板等客户端只回传它认识的白名单字段，
@@ -574,9 +615,10 @@ async function doSaveConfig(state, body) {
   const cleanModels = {}
   for (const [name, m] of Object.entries(models || {})) cleanModels[name] = stripRuntimeFields(m, MODEL_RUNTIME_FIELDS)
   // —— virtualModels 强校验（面板保存路径；loadConfig 另有容错规范化，手改坏配置不宕机）——
-  const vmsIn = body.virtualModels !== undefined ? body.virtualModels : (cur.virtualModels || [])
+  // M0-2b：区分「整个 virtualModels 省略」与「数组内某字段省略」——前者不得触碰任何 meta。
+  const vmPresence = body.virtualModels === undefined ? 'omitted' : 'present'
+  const vmsIn = vmPresence === 'present' ? body.virtualModels : (cur.virtualModels || [])
   const vmNames = new Set()
-  const vmExpiryStored = new Map()
   for (const vm of vmsIn) {
     if (!vm || typeof vm.name !== 'string' || !vm.name.trim()) return { error: '虚拟模型缺少名称' }
     const name = vm.name.trim()
@@ -593,15 +635,13 @@ async function doSaveConfig(state, body) {
       for (const pr of (e.providers || [])) if (pr && !providers[pr]) return { error: '虚拟模型「' + name + '」目录引用了不存在的上游 ' + pr }
     }
     for (const f of ['dailyQuota', 'quota', 'maxContext', 'maxConcurrent', 'qps']) if (vm[f] != null && (!Number.isFinite(Number(vm[f])) || Number(vm[f]) < 0)) return { error: '虚拟模型「' + name + '」的 ' + f + ' 必须为非负数字' }
-    // T-KEY-02：过期时间在写盘前解析校验；非法/歧义值 400 且不落盘。
-    const parsedExpiry = parseVirtualExpiry(vm.expiresAt)
-    if (parsedExpiry.kind === 'invalid') {
-      return { error: '虚拟模型「' + name + '」的 Key 过期时间无效（code: ' + parsedExpiry.code + '；支持毫秒值、带时区 ISO8601、旧 datetime-local YYYY-MM-DDTHH:mm）' }
+    // T-KEY-02：只有补丁显式自带 expiresAt 时才校验；省略=保留（见下方 planVirtualMetaUpdate）。
+    if (vmPresence === 'present' && Object.prototype.hasOwnProperty.call(vm, 'expiresAt')) {
+      const parsedExpiry = parseVirtualExpiry(vm.expiresAt)
+      if (parsedExpiry.kind === 'invalid') {
+        return { error: '虚拟模型「' + name + '」的 Key 过期时间无效（code: ' + parsedExpiry.code + '；支持毫秒值、带时区 ISO8601、旧 datetime-local YYYY-MM-DDTHH:mm）' }
+      }
     }
-    // 旧日期格式保留原值以兼容历史读回；其余已解析值统一落显式时区 ISO。
-    vmExpiryStored.set(name, parsedExpiry.kind === 'valid'
-      ? (parsedExpiry.source === 'legacy_local_date' ? String(vm.expiresAt).trim() : parsedExpiry.normalized)
-      : '')
   }
   const cleanVms = vmsIn.map(vm => ({ name: vm.name.trim(), directory: vm.directory.map(e => ({ model: e.model, mode: e.mode === 'onFail' ? 'onFail' : 'afterAll', providers: (e.providers || []).filter(Boolean) })), quota: Number(vm.quota) || 0, dailyQuota: Number(vm.dailyQuota) || 0, maxContext: Number(vm.maxContext) || 0, maxConcurrent: Number(vm.maxConcurrent) || 0, qps: Number(vm.qps) || 0 }))
   // 删除虚拟模型时同步清理其独立 Key 与元数据，防孤儿 key 被同名新建继承
@@ -613,23 +653,30 @@ async function doSaveConfig(state, body) {
   for (const vmRaw of vmsIn) {
     const vmName = vmRaw.name.trim()
     const mid = '__mg_vm_meta_' + vmName
-    const exp = vmExpiryStored.get(vmName) || ''
-    const note = typeof vmRaw.note === 'string' ? vmRaw.note.trim() : ''
-    const want = (exp || note) ? { expiresAt: exp, note } : null
+    const plan = planVirtualMetaUpdate(vmPresence === 'present' ? vmRaw : null, vmPresence, keys[mid])
+    if (plan.action === 'INVALID_400') {
+      return { error: '虚拟模型「' + vmName + '」的 Key 过期时间无效（code: ' + plan.code + '）' }
+    }
+    if (plan.action === 'KEEP_CURRENT_META') continue
+    if (plan.action === 'EXPLICIT_CLEAR') {
+      if (mid in keys) { delete keys[mid]; keysChanged = true }
+      continue
+    }
     const curMeta = keys[mid]
-    if (want && (!curMeta || curMeta.expiresAt !== want.expiresAt || curMeta.note !== want.note)) { keys[mid] = want; keysChanged = true }
-    else if (!want && curMeta) { delete keys[mid]; keysChanged = true }
+    if (!curMeta || curMeta.expiresAt !== plan.meta.expiresAt || curMeta.note !== plan.meta.note) {
+      keys[mid] = plan.meta
+      keysChanged = true
+    }
   }
   for (const v of removedVms) {
     const kid = '__mg_vm_' + v.name, mid = '__mg_vm_meta_' + v.name
     if (kid in keys) { delete keys[kid]; keysChanged = true }
     if (mid in keys) { delete keys[mid]; keysChanged = true }
   }
+  let keysContent = null
   if (keysChanged) {
-    const enc = keysEncrypt(keys)
-    if (!enc) return { error: '无法加密 keys.local.json：缺少主密钥，已拒绝保存' }
-    writeFileSync(state.paths.keys, enc)
-    hardenKeyFile(state.paths.keys)
+    keysContent = keysEncrypt(keys)
+    if (!keysContent) return { error: '无法加密 keys.local.json：缺少主密钥，已拒绝保存' }
   }
   const newVersion = (cur.configVersion || 0) + 1
   // 删除墓碑（MG-003）：local 是"合并补丁"，缺键无法表达删除；累计记录被删的上游/模型名，
@@ -644,15 +691,27 @@ async function doSaveConfig(state, body) {
   for (const n of Object.keys(models || {})) removedModels.delete(n)
   const localOut = { configVersion: newVersion, providers: clean, models: cleanModels, defaults, virtualModels: cleanVms }
   if (removedProviders.size || removedModels.size) localOut._removed = { providers: [...removedProviders], models: [...removedModels] }
-  writeJsonAtomic(state.paths.local, localOut)
-  reloadConfig(state)
+  // M0-3：两个目标作为同一代际提交（每个目标都 rename + fsync 目录；journal/commit marker 保证中断后可恢复）。
+  const files = { [TARGET_CONFIG]: JSON.stringify(localOut, null, 2) }
+  if (keysContent != null) files[TARGET_KEYS] = keysContent
+  tx.commit({ files, operation: 'config.save', publish: () => reloadConfig(state) })
+  if (keysContent != null) hardenKeyFile(state.paths.keys)
   // 管理员审计：只记录动作 + 配置代际，绝不记录 Key 值。
   if (state.log) state.log.info('审计：配置保存', 'version=' + newVersion, 'clientKeyAction=' + clientKeyPlan.action)
   return { version: newVersion }
+  } catch (error) {
+    return transactionFailure(error)
+  } finally {
+    tx.release()
+  }
 }
 function saveKeys(state, body) { return withConfigWriteLock(() => doSaveKeys(state, body)) }
 async function doSaveKeys(state, body) {
   const _c = versionConflict(state, body); if (_c) return _c
+  // M0-3：keys 与 configVersion 属于同一代际，必须一起提交或一起回滚。
+  let tx
+  try { tx = beginStoreWrite(state) } catch (error) { return transactionFailure(error) }
+  try {
   // 盘上最新 keys 合并（而非内存副本）
   const keyId = typeof body.id === 'string' ? body.id.trim() : ''
   if (!keyId) return { error: '缺少 provider id' }
@@ -673,13 +732,17 @@ async function doSaveKeys(state, body) {
   else delete keys[keyId]
   const enc = keysEncrypt(keys)
   if (!enc) return { error: '无法加密 keys.local.json：缺少主密钥（MG_KEYS_MASTER 未设置且自动主密钥不可用），已拒绝明文写入' }
-  writeFileSync(state.paths.keys, enc)
-  hardenKeyFile(state.paths.keys)
   // key 变更同样推进 configVersion（读盘合并 local 顶层，避免覆盖其他字段）
   const newVersion = (state.cfg.configVersion || 0) + 1
-  writeJsonAtomic(state.paths.local, Object.assign({}, readJson(state.paths.local, {}), { configVersion: newVersion }))
-  reloadConfig(state)
+  const localOut = Object.assign({}, readJson(state.paths.local, {}), { configVersion: newVersion })
+  tx.commit({ files: { [TARGET_KEYS]: enc, [TARGET_CONFIG]: JSON.stringify(localOut, null, 2) }, operation: 'keys.save', publish: () => reloadConfig(state) })
+  hardenKeyFile(state.paths.keys)
   return { version: newVersion }
+  } catch (error) {
+    return transactionFailure(error)
+  } finally {
+    tx.release()
+  }
 }
 
 async function doProbe(state, id) {
@@ -1279,15 +1342,23 @@ function makeHandler(state) {
         if (!state.adminToken && !isLoopbackPeer(req)) { sendJson(res, 403, { error: '拒绝远程初始化：未启用管理令牌时只允许本机设置令牌（MG_ADMIN_TOKEN）' }); return }
         const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)) || {}
         const token = typeof body.token === 'string' ? body.token.trim() : ''
-        const keys = Object.assign({}, state.cfg._keys)
-        if (token) keys.__mg_admin = token
-        else delete keys.__mg_admin
-        const enc = keysEncrypt(keys)
-        if (!enc) { sendJson(res, 400, { error: '无法加密 keys.local.json：缺少主密钥，已拒绝写入' }); return }
-        writeFileSync(state.paths.keys, enc)
-        hardenKeyFile(state.paths.keys)
-        reloadConfig(state)
-        sendJson(res, 200, { ok: true, needAuth: !!state.adminToken })
+        let tx
+        try { tx = beginStoreWrite(state) } catch (error) { const f = transactionFailure(error); sendJson(res, f.status, { error: f.error, code: f.code }); return }
+        try {
+          const keys = Object.assign({}, readKeysFresh(state.paths.keys))
+          if (token) keys.__mg_admin = token
+          else delete keys.__mg_admin
+          const enc = keysEncrypt(keys)
+          if (!enc) { sendJson(res, 400, { error: '无法加密 keys.local.json：缺少主密钥，已拒绝写入' }); return }
+          tx.commit({ files: { [TARGET_KEYS]: enc }, operation: 'admin.token', publish: () => reloadConfig(state) })
+          hardenKeyFile(state.paths.keys)
+          sendJson(res, 200, { ok: true, needAuth: !!state.adminToken })
+        } catch (error) {
+          const f = transactionFailure(error)
+          sendJson(res, f.status, { error: f.error, code: f.code })
+        } finally {
+          tx.release()
+        }
         return
       }
 
@@ -1320,13 +1391,19 @@ function makeHandler(state) {
       }
       if (path === '/api/logs' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const lines = parseInt(new URL(url, 'http://x').searchParams.get('lines') || '200', 10) || 200; sendJson(res, 200, { lines: readLogTail((log && log.file) ? log.file() : logFile(), lines) }); return }
       if (path === '/api/config' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; sendJson(res, 200, configProjection(state)); return }
-      if (path === '/api/config/reload' && req.method === 'POST') { if (!await requireAdmin(req, res)) return; reloadConfig(state); sendJson(res, 200, { ok: true }); return }
+      if (path === '/api/config/reload' && req.method === 'POST') {
+        if (!await requireAdmin(req, res)) return
+        try { recoverStore(state.paths) } catch (error) { const f = transactionFailure(error); sendJson(res, f.status, { error: f.error, code: f.code }); return }
+        reloadConfig(state)
+        sendJson(res, 200, { ok: true })
+        return
+      }
       if (path === '/api/config/save' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
         const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
         if (!isPlainObject(body)) { sendJson(res, 400, { error: '请求体必须为 JSON 对象' }); return }
         const r = await saveConfig(state, body)
-        if (r.error) { sendJson(res, 400, { error: r.error }); return }
+        if (r.error) { sendJson(res, r.status || 400, { error: r.error, ...(r.code ? { code: r.code } : {}) }); return }
         if (r.conflict) { sendJson(res, 409, { error: '配置版本已过期（他处已保存过新版本），请刷新后重试', currentVersion: r.currentVersion }); return }
         sendJson(res, 200, { ok: true, status: buildStatus(state) }); return
       }
@@ -1335,7 +1412,7 @@ function makeHandler(state) {
         const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
         if (!body || !body.id) { sendJson(res, 400, { error: '缺少 provider id' }); return }
         const kr = await saveKeys(state, body)
-        if (kr.error) { sendJson(res, 400, { error: kr.error }); return }
+        if (kr.error) { sendJson(res, kr.status || 400, { error: kr.error, ...(kr.code ? { code: kr.code } : {}) }); return }
         if (kr.conflict) { sendJson(res, 409, { error: '配置版本已过期（他处已保存过新版本），请刷新后重试', currentVersion: kr.currentVersion }); return }
         sendJson(res, 200, { ok: true, status: buildStatus(state) }); return
       }
@@ -1871,11 +1948,22 @@ function writeStats(state) {
 }
 
 export function start(opts = {}) {
+  // M0-3：先恢复中断事务再读配置；无法判定（外部修改/元数据损坏）时保留现场并 fail-closed。
+  const bootPaths = configPaths()
+  let recovery = { status: 'clean' }
+  try {
+    recovery = recoverStore(bootPaths)
+  } catch (error) {
+    const payload = JSON.stringify({ code: (error && error.code) || 'recovery_failed', message: (error && error.message) || 'unknown', details: (error && error.details) || null })
+    process.stderr.write('[config-transaction] RECOVERY_FAILED ' + payload + '\n')
+    throw new Error('配置事务恢复失败（fail-closed）：' + ((error && error.code) || 'recovery_failed'))
+  }
   const cfg = opts.config ? loadConfig({ configFile: opts.config }) : loadConfig()
   const mb = process.env.MG_MAX_BODY ? parseInt(process.env.MG_MAX_BODY, 10) : 0
   if (mb > 0) cfg.server = Object.assign({}, cfg.server || {}, { maxBodyBytes: mb })
   // 收集所有密钥值供日志脱敏：环境变量 Key + 面板 Key + extraHeaders 值 + 客户端/管理令牌 + 代理内嵌凭据
   const log = createLogger({ logFile: cfg.server && cfg.server.logFile, silent: opts.silent, secrets: collectSecrets(cfg) })
+  if (recovery.status !== 'clean') log.warn('配置事务恢复', 'status=' + recovery.status, recovery.opId ? 'opId=' + recovery.opId : '')
   // 启动与热重载必须同源注入 Codex 目录视图：否则官方 slug 会按「未知非保留前缀」回落 defaults.provider（跨身份串线）。
   cfg._codexCatalog = codexCatalogView(cfg)
   if (!cfg._codexCatalog && cfg.defaults && cfg.defaults.codexCatalogBasePath) {

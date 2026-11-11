@@ -51,20 +51,22 @@
 
 ### `GET /api/config`
 
-只读配置投影（MG-009 D-6）：返回 `{ configVersion, providers, models, defaults, virtualModels }`，形状与 `POST /api/config/save` 的请求体一致，可直接“读 → 改 → 保存”。不含运行时统计/探针字段（providers 的 hasKey/keySource/keyOk/st/probe、models 的 probe/requests/errors/tokens/today/hitRate/affinity/avgMs 等），不返回 `_keys`/`_paths`；`defaults.clientKey` 在 `keys.__mg_client` 或旧明文存在时固定回显 `********`（只检查 defaults 会导致永远为空、前端误判未设置）；`virtualModels[*]` 回显 `expiresAt`/`note`（存于 `keys.__mg_vm_meta_<name>`，不回显则一次保存会误清空）；未知扩展字段按原样返回。鉴权与错误信封同其它管理 GET（401/403）。回归见 `scripts/test/offline/config-projection.test.mjs`、`scripts/test/offline/ui-contract.test.mjs`。
+只读配置投影（MG-009 D-6）：返回 `{ configVersion, providers, models, defaults, virtualModels }`，形状与 `POST /api/config/save` 的请求体一致，可直接“读 → 改 → 保存”。不含运行时统计/探针字段（providers 的 hasKey/keySource/keyOk/st/probe、models 的 probe/requests/errors/tokens/today/hitRate/affinity/avgMs 等），不返回 `_keys`/`_paths`；`defaults.clientKey` 在 `keys.__mg_client` 或旧明文存在时固定回显 `********`（只检查 defaults 会导致永远为空、前端误判未设置）；`virtualModels[*]` 回显 `expiresAt`/`note`（存于 `keys.__mg_vm_meta_<name>`，不回显则一次保存会误清空），并额外返回后端判定的 `expiresAtState`（`none`/`valid`/`expired`/`invalid`）与 `expiresAtMs`（无效时另带 `expiresAtDiagnostic` 码）；前端只展示状态，不自行比较时间；未知扩展字段按原样返回。鉴权与错误信封同其它管理 GET（401/403）。回归见 `scripts/test/offline/config-projection.test.mjs`、`scripts/test/offline/ui-contract.test.mjs`。
 
 ### `POST /api/config/save`
 请求（均可选）：`{version?: number, providers?: object, models?: object, defaults?: object, virtualModels?: array}`。
-成功 `200 {ok:true, status}`（`status` 为保存后的新快照）。失败：校验不通过 `400 {error}`；版本过期 `409 {error, currentVersion}`；body 非 JSON 对象 `400 {error:'请求体必须为 JSON 对象'}`。
+成功 `200 {ok:true, status}`（`status` 为保存后的新快照）。失败：校验不通过 `400 {error}`；版本过期 `409 {error, currentVersion}`；body 非 JSON 对象 `400 {error:'请求体必须为 JSON 对象'}`；磁盘被外部修改 `409 {error, code:'store_conflict'}`（保留现场、不覆盖）；另一个写者持锁 `409 {error, code:'store_locked'}`（不排队）；事务中途失败 `500 {error, code:'transaction_failed'|'injected_fault'}`。
+
+保存是「同一代际」事务（M0-3，见 `src/config-transaction.js`）：`keys.local.json` 与 `gateway.local.json` 先写暂存件并 fsync，写 journal 后逐目标「校验旧指纹 → rename → fsync 目录」，全部完成后写 commit marker、发布内存代际并清理自有工件。任何一步失败/进程被杀，重启时 `start()` 或下一次写入会先恢复：有 commit marker 且两文件均为新 → 前滚；无 marker 且每个文件只可能是旧或新 → 回滚到旧；出现第三种内容（外部编辑）→ 保留磁盘、fail-closed 并记录结构化冲突。失败期间不发布内存 cfg、不改鉴权。
 形状校验（MG-003，单一入口 `validateConfigShape`）：请求体必须是 JSON 对象；`providers/models/defaults` 必须是对象，`virtualModels` 必须是数组，`version` 必须是数字；任一层级出现保留键 `__proto__`/`constructor`/`prototype`（含 `providerModels` 内层与虚拟模型名）一律 400。校验失败不写盘、不改内存、不推进 `configVersion`。
 
-语义：`providers`/`models`/`virtualModels` 整体替换（缺省=保持不变）；`defaults` 顶层合并（未回传字段保留，无法经此接口删除字段）；`providers[*].keyOk/keySource` 等展示字段被剥离后再落盘；被删除的虚拟模型同步清理其 `__mg_vm_<name>` Key 与 `__mg_vm_meta_<name>` 元数据；被删除的上游/模型名记入 local 的 `_removed` 墓碑，重启后不复活（重新加回即撤销）。
+语义：`providers`/`models`/`virtualModels` 整体替换（缺省=保持不变）；`defaults` 顶层合并（未回传字段保留，无法经此接口删除字段）；`defaults.clientKey` 三态：省略/掩码=保留、`""`=显式清空、非空=替换，非法值 `400` 且不落盘；`virtualModels[*].expiresAt/note` 同为三态：整个数组省略或数组内对象省略该字段=保留现有 meta，显式 `""`=清空该字段，字段全空才删除 meta 条目；`providers[*].keyOk/keySource` 等展示字段被剥离后再落盘；被删除的虚拟模型同步清理其 `__mg_vm_<name>` Key 与 `__mg_vm_meta_<name>` 元数据；被删除的上游/模型名记入 local 的 `_removed` 墓碑，重启后不复活（重新加回即撤销）。
 
 ### `POST /api/config/reload`
-无请求字段。`200 {ok:true}`，重新读盘并重建路由，不重启 HTTP 监听。
+无请求字段。`200 {ok:true}`：先恢复未完成的事务，再重新读盘并重建路由，不重启 HTTP 监听；恢复遇到外部修改/不可判定 → `409 {error, code:'store_conflict'}` 且保留现场。
 
 ### `POST /api/keys`
-请求 `{id: string, key?: string, version?: number}`。缺 `id` → `400 {error:'缺少 provider id'}`；`key` 为空/falsy → 删除该 id；加密失败 `400`；版本过期 `409 {error,currentVersion}`；成功 `200 {ok:true,status}` 且 `configVersion` +1。
+请求 `{id: string, key?: string, version?: number}`。缺 `id` → `400 {error:'缺少 provider id'}`；`key` 为空/falsy → 删除该 id；加密失败 `400`；版本过期 `409 {error,currentVersion}`；磁盘外部修改/锁竞争 `409 {code:'store_conflict'|'store_locked'}`；成功 `200 {ok:true,status}` 且 `configVersion` +1（keys 与 local 同代际原子提交）。
 `id` 目前不设白名单（任意字符串都会成为 keys 条目）：MG-003 收敛为"真实上游 id / `__mg_vm_*` / `__mg_client` / `__mg_admin`"。
 
 ### `POST /api/route-preview`
@@ -105,7 +107,7 @@
 | `dialogues` | array | 最近 30 个有请求的对话（`id,named,requests,tokens,hit,miss,hitRate,startAt,lastAt`） |
 | `providers` | array | 每项 `{id,baseUrl,hasKey,keySource,apiKeyEnv,pathPrefix,api,extraHeaders,proxy,circuit,st}`；**不含 apiKey** |
 | `models` | array | 每项含 `name,provider,alias,fallbacks,maxConcurrent,qps,reasoning,effortOptions,effortFormat,dailyQuota,quota,maxContext,maxTokensMax,api,providerModels,forceNoStream,requests,errors,tokens,today,hitRate,affinity,avgMs,probe` |
-| `virtualModels` | array | `{name,directory,quota,dailyQuota,maxContext,maxConcurrent,qps,keySet,expiresAt,note,requests,errors,tokens,today,hitRate}`；**不含 Key** |
+| `virtualModels` | array | `{name,directory,quota,dailyQuota,maxContext,maxConcurrent,qps,keySet,expiresAt,expiresAtState,expiresAtMs,note,requests,errors,tokens,today,hitRate}`（无效过期值另带 `expiresAtDiagnostic`）；`expiresAtState` ∈ `none/valid/expired/invalid`；**不含 Key** |
 | `defaults` | object | 配置默认值原样回显，`clientKey` 有值时固定为 `********` |
 | `server` | object | `{maxBodyBytes,keyEncrypted,host,port}` |
 | `nativeUsage` | object | `{enabled,dirLabel}`；只暴露是否启用与目录标签，不返回日志内容 |
