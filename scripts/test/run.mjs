@@ -59,6 +59,7 @@ export const SUITES = [
   'scripts/test/offline/responses-mapping.test.mjs',
   'scripts/test/offline/responses-native.test.mjs',
   'scripts/test/offline/retry-governance.test.mjs',
+  'scripts/test/offline/routing-decision.test.mjs',
   'scripts/test/offline/ui-contract.test.mjs',
   'scripts/test/offline/ui-next.test.mjs',
   'scripts/test/offline/user-env.test.mjs',
