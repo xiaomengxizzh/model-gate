@@ -1,3 +1,5 @@
+// 注：自动/默认登记请用 scripts/test/offline/affinity.test.mjs（node:test，无需 MG_ALLOW_LIVE_TESTS）。
+// 本文件保留给 scripts/test/live.mjs 的 legacy 允许清单与手动运行；5 个步骤/断言与离线套件保持一致。
 // 缓存亲和（affinity）有效期回归：provider=A(主) + B(备)。
 //
 // 为什么重写（旧夹具已过期）：
