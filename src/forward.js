@@ -22,6 +22,7 @@ import {
   TARGET_DOMAINS, REDIRECT_POLICY,
 } from './codex/target-authz.js'
 import { generationAuthzBinding } from './codex/catalog-generation.js'
+import { newHeaders as opencodeGoHeaders, isGoBinding } from './providers/opencode-go.js'
 
 const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-length','upgrade','keep-alive','te','trailer'])
 const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection','x-mg-admin','x-goog-api-key','host'])
@@ -113,15 +114,17 @@ export function buildHeaders(req, provider, bodyBuf, cfg, api, body, ctx) {
     if (extraPlan.blocked.length) ctx.log.warn('extraHeaders 鉴权头/帧层头已拦截（仅记头名）', 'provider=' + provider.id, extraPlan.blocked.join(','))
     if (plan.dropped.length) ctx.log.info('upstream 头策略丢弃', 'provider=' + provider.id, 'identity=' + identity.kind, plan.dropped.join(','))
   }
-  if (provider.id === 'opencodego') {
-    const first = (v) => Array.isArray(v) ? v[0] : v
-    // OpenCode Go 强制要求 x-opencode-session（缺失直接 400 MissingSessionID）。Codex 0.167 发的是
-    // session-id / thread-id（官方头，转发前已被剥掉），因此这里只**派生**一个会话标识：
-    // 优先客户端显式头，其次 Codex 的 session-id/thread-id 值，最后给一次性随机 id（不再发裸请求）。
-    const session = first(req.headers['x-opencode-session']) || first(req.headers['x-session-id']) || first(req.headers['x-conversation-id']) ||
-      first(req.headers['session-id']) || first(req.headers['thread-id']) ||
-      (body && (body.session_id || body.conversation_id)) || headers['x-opencode-session'] || headers['x-session-id']
-    headers['x-opencode-session'] = (session != null && String(session).trim()) ? String(session) : ('mg-' + randomUUID())
+  if (isGoBinding(provider)) {
+    // P03：Go 会话标识由 provider 适配器按「主体 + provider + root/child 域 + 目标入口 + 线程」
+    // HMAC 派生，绝不转发原始 Codex session-id/thread-id；UA 统一为本服务 UA。
+    // Go 强制要求 x-opencode-session（缺失直接 400 MissingSessionID），因此总会给出一个值。
+    const goHeaders = opencodeGoHeaders({
+      req, body, provider, cfg,
+      principalRef: ctx && ctx.principalRef,
+      scope: ctx && ctx.sessionScope,
+    })
+    for (const [name, value] of Object.entries(goHeaders.headers)) headers[name] = value
+    if (ctx && ctx.log && goHeaders.session.mode === 'request') ctx.log.info('opencode-go 无会话引用：使用请求内独立会话标识（不转发客户端 id）', 'provider=' + provider.id)
   }
   // 协议专属头（per-model protocol 改革的下游：协议换掉后鉴权头也得跟着换）。
   // Anthropic Messages API 认 x-api-key 且强制 anthropic-version（多数 OpenAI 兼容中转也接受 Bearer，

@@ -9,6 +9,7 @@ import { abortedError, sleepWith } from './budget.js'
 import { classify429, parseRetryAfterMs, retryWaitCap, retryAfterHeader, isToolBearingBody, MAX_ERR_BODY_BYTES, createAttemptPolicy, recordAttemptOutcome, planAttemptRetry } from './retry-policy.js'
 import { createDeadline, deadlineError, abortPromise, DEADLINE_TIMEOUT, DEADLINE_CANCELLED } from './deadline.js'
 import { STAGES, OUTCOMES, createAttempt, createExecutionContext, latestAttempt, retrySafetyOf, summarizeAttempt } from './attempt-state.js'
+import { newHeaders as opencodeGoHeaders, isGoBinding } from './providers/opencode-go.js'
 
 // 上游连接复用（keep-alive）：减少每次 TLS/TCP 握手，改善连接体验与延迟
 const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 64 })
@@ -18,10 +19,12 @@ function applyProviderHeaders(headers, provider) {
   for (const [name, value] of Object.entries((provider && provider.extraHeaders) || {})) {
     if (value != null && value !== '') headers[String(name).toLowerCase()] = String(value)
   }
-  // OpenCode Go requires the OpenCode-specific session header. Older gateway
-  // configs used x-session-id; keep accepting it as the configured fallback.
-  if (provider && provider.id === 'opencodego' && !headers['x-opencode-session']) {
-    headers['x-opencode-session'] = headers['x-session-id'] || 'mg-opencodego-bridge'
+  // P03：OpenCode Go 会话标识由适配器派生（探测/预热/测试路径无客户端线程引用 → 请求内独立 id）；
+  // 绝不使用固定常量，也不读客户端/官方凭据。旧 x-session-id 只作为「显式配置」输入，不当作身份。
+  if (provider && isGoBinding(provider) && !headers['x-opencode-session']) {
+    const go = opencodeGoHeaders({ provider })
+    headers['x-opencode-session'] = go.session.value
+    headers['user-agent'] = go.headers['user-agent']
   }
   return headers
 }
