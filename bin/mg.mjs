@@ -49,7 +49,7 @@ class CliError extends Error {
 }
 
 // —— 参数解析（只做确定性形状解析，不做隐式默认值猜测）——
-const BOOL_FLAGS = new Set(['json', 'yes', 'help', 'allow-create', 'no-network'])
+const BOOL_FLAGS = new Set(['json', 'yes', 'help', 'version', 'allow-create', 'no-network'])
 export function parseArgv(argv) {
   const flags = {}
   const positional = []
@@ -151,9 +151,10 @@ function runDoctor(flags) {
   const major = Number(String(process.versions.node || '0').split('.')[0])
   checks.push({
     id: 'node.version',
-    status: major >= 22 ? 'ok' : (major >= 18 ? 'warn' : 'fail'),
+    // N00 已把 engines/CI 收敛到 Linux + Node 24（>=24）；更高版本未列入首发验证范围。
+    status: major >= 24 ? 'ok' : (major >= 18 ? 'warn' : 'fail'),
     detail: process.versions.node,
-    note: '首发支持矩阵为 Linux + Node 22；18/20 未列入首发',
+    note: '首发支持矩阵为 Linux + Node 24（>=24）；Node 18/20 已退役、22 不在首发验证范围',
   })
   checks.push({ id: 'management.api', status: 'ok', detail: CODEX_API_VERSION, supported: CODEX_API_VERSIONS.slice() })
   const src = configSource(flags)
@@ -502,6 +503,7 @@ function fail(err, flags) {
 
 const USAGE = [
   'ModelGate 管理 CLI（modelgate.cli/1）',
+  '  node bin/mg.mjs --version   # 打印 CLI 契约/包版本/管理 API 版本（不读配置、不联网）',
   '',
   '只读（不联网）：',
   '  node bin/mg.mjs doctor --json [--config <gateway.json>] [--config-dir <dir>]',
@@ -521,6 +523,11 @@ const USAGE = [
 
 export async function main(argv = process.argv.slice(2)) {
   const { flags, positional } = parseArgv(argv)
+  if (flags.version === true) {
+    // 版本自证：CLI 契约 + 包版本 + 管理 API 契约，无需配置/网络。
+    process.stdout.write('modelgate.cli/1 version ' + pkgVersion() + ' api ' + DEFAULT_API_VERSION + '\n')
+    return EXIT.OK
+  }
   if (flags.help === true || positional.length === 0) {
     process.stdout.write(USAGE + '\n')
     return positional.length === 0 && flags.help !== true ? EXIT.ERROR : EXIT.OK

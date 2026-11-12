@@ -45,6 +45,13 @@ async function tempConfig(t) {
   return { dir, path }
 }
 
+test('N03 CLI --version：自证契约/版本/API，不读配置不联网', () => {
+  const out = cli(['--version'])
+  assert.equal(out.status, 0, out.stderr)
+  assert.match(out.stdout, /^modelgate\.cli\/1 version \d+\.\d+\.\d+ api mg-management\/1\n$/)
+  assert.equal(out.stdout.includes('MG_ADMIN_TOKEN'), false)
+})
+
 test('N03 CLI doctor：纯检出可跑、纯 JSON、声明不联网、不读全局配置', () => {
   const out = cli(['doctor', '--json'])
   assert.equal(out.status, 0, out.stderr)
@@ -56,6 +63,9 @@ test('N03 CLI doctor：纯检出可跑、纯 JSON、声明不联网、不读全�
   assert.equal(configCheck.status, 'unknown')
   assert.equal(configCheck.nextAction, 'pass-explicit-config')
   assert.equal(out.json.checks.find((c) => c.id === 'live.upstream').status, 'unknown')
+  const nodeCheck = out.json.checks.find((c) => c.id === 'node.version')
+  assert.match(nodeCheck.note, /Node 24/)
+  assert.equal(nodeCheck.note.includes('Node 22；'), false, '不得残留已退役的 Node 22 首发文案')
 })
 
 test('N03 只读命令：provider/model/route 用显式配置，不打印凭据', async (t) => {
