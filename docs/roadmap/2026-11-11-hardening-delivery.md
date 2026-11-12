@@ -5,7 +5,9 @@
 - **时间**: 2026-11-11 21:58 → 2026-11-12 01:2x（Asia/Shanghai，+0800），跨午夜。
 - **集成分支**: `dev/modelgate-hardening-a1`
 - **R00 受审交付点（代码）**: `2d82ea2e663db5726c866fa261be36fc09f8d8b3`（E 的最终确认绑定于其 docs-only 子提交 `c20f485`）
-- **最终 HEAD**: `efbec41f6acae4bd0920659d66ff06da3e2ccfd7`（= 受审交付点 + docs 计数修正 + M2-3 脚本重写/一行死导入清理）。受审点之后的增量：1 行未使用 import 删除 + 1 个默认拒跑的 opt-in 脚本 + 3 处文档计数，**无路由/鉴权/发送逻辑变化**。
+- **交付代码 HEAD**: `efbec41f6acae4bd0920659d66ff06da3e2ccfd7`（= 受审交付点 + docs 计数修正 + M2-3 脚本重写/一行死导入清理）。
+- **最终 HEAD**: `3862cb47651f23ca73bc01b52e6cc4ef90baa95c`（本报告定稿所在提交，为 `efbec41` 的 **docs-only 子提交**）。
+- **受审点之后的增量**（`2d82ea2..3862cb4`，已逐文件核对）：3 处文档计数/表述、1 行未使用 import 删除、1 个默认 exit 2 拒跑的 opt-in 验收脚本。**零路由/鉴权/发送逻辑变化**。
 - **基线**: 远端 main `6bc6441`（实时 `ls-remote` 核对一致）→ 基线采纳 `64a5c96`
 - **开发模型**: 全队（队长 + A/B/C/D/E）均为 `opencode-go/deepseek-v4.1-flash`，请求 `reasoningEffort: high`。实际生效取舍由 harness 记录；本轮无独立遥测，**实际生效力度/上下文记为 UNKNOWN**。
 
