@@ -1,6 +1,6 @@
 import http from 'node:http'
 import { pipeline } from 'node:stream'
-import { readFileSync, chmodSync, existsSync, writeFileSync, copyFileSync, statSync } from 'node:fs'
+import { readFileSync, chmodSync, existsSync, copyFileSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
 import { gunzipSync, inflateSync, brotliDecompressSync, zstdDecompressSync } from 'node:zlib'

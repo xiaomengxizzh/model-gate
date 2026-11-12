@@ -83,7 +83,7 @@
 
 | # | 能力 | 等级 | 证据 | 原因 / 缺口 |
 | --- | --- | --- | --- | --- |
-| B1 | 真实 Codex CLI 三轮回环（`MG_CODEX_VERIFY=1` 门控） | `NOT_RUN(本轮未执行)` | `offline/codex-catalog` 的 `CLI：真实 codex 可解析生成物（离线，需 MG_CODEX_VERIFY=1）` 在默认全量里是 **SKIP**（本机日志 1 skipped）；`scripts/test/codex-e2e.mjs`、`codex-live*.mjs` 需 `MG_ALLOW_LIVE_TESTS=1` 且被 `live.mjs` 显式排除 | 未在本轮执行真实 CLI 三轮；需要真实 CLI 与本机回环，且不得复用日常 `CODEX_HOME` |
+| B1 | 真实 Codex CLI 三轮回环（`MG_CODEX_VERIFY=1` 门控） | `NOT_RUN(回环隔离前置不成立)` | `scripts/test/codex-e2e.mjs`（重写为安全双 mock 版，opt-in，默认拒跑；需 `MGR_E2E_NETWORK_ISOLATED=1`）：本机 `codex-cli 0.167.0` + `env -i` + 临时 HOME/CODEX_HOME + 合成 `sk-synthetic-not-real` + 官方/第三方双 `127.0.0.1` mock 的可启动脚本已交付；本地曾跑到三轮/27 checks，但复核发现**空 CODEX_HOME 首次启动会触发 curated plugin sync（`git fetch https://github.com/openai/plugins.git`）**，本机 `unshare -Urn` 不可用（uid_map 拒绝），即使 `--disable plugins/remote_plugin` + 代理指向 `127.0.0.1:9` 也不能证明零外连，故该结果作废；合并 B/M1-3 后在本地复跑还出现第 2 轮 502 candidate pool（需接线后复验） | **重开条件**：在具备网络命名空间/主机级 egress 阻断的主机上运行，或 Codex 提供官方关闭 curated plugin sync 的开关；不需要真实凭据/真实上游（双 mock）。默认 `offline/codex-catalog` 的真实 codex 用例仍 SKIP |
 | B2 | 真实官方上游（官方目录 / 身份 / 透传） | `NOT_RUN(本轮零真实上游)` | 历史证据：`docs/evidence/2026-11-11-e3-live-switching.md`（第 1/3 轮为**真实 chatgpt.com 官方后端**，用户已授权）、`docs/evidence/2026-11-11-e4-v2-live-blocked.md`（真实官方主代理）。注：`2026-11-11-e3-official-transport.txt` 是**本地 mock 上游**，不能当真实上游证据 | 需独立授权 + 真实账号；本轮禁止访问真实上游 |
 | B3 | 真实第三方上游（付费/订阅账号） | `NOT_RUN(本轮零真实上游)` | 历史证据：`docs/evidence/2026-11-11-e4-v2-live-blocked.md`（子代理为**真实 OpenCode Go**）。注：`e3-live-switching.md` 第 2 轮是本地 mock 第三方（零真实费用），不算真实第三方证据 | 同上；不得用真实 Key 做本轮验收 |
 | B4 | 真实流式/SSE 上游链路与断流续传 | `NOT_RUN(本轮零真实上游)` | mock 侧 `offline/lifecycle` 2、`offline/retry-governance` 11；历史 `docs/evidence/2026-11-09-integration/` | 真实网络中断/背压未复现 |
