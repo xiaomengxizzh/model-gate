@@ -3,7 +3,7 @@
 import http from 'node:http'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,13 +11,82 @@ import { fileURLToPath } from 'node:url'
 import { buildCatalog, serializeCatalog } from '../../src/codex/catalog.js'
 import { startGateway } from './offline/harness.mjs'
 
-// 状态（2026-11-12）：NOT_RUN —— 本机无网络命名空间隔离（unshare -Urn 不可用），而 codex-cli
-// 0.167.0 在空 CODEX_HOME 首次启动会尝试 curated plugin sync（github.com/openai/plugins.git）。
-// 为避免误触外连，默认拒绝运行；只有在**外部已强制阻断 egress**的主机上显式设置
-// MGR_E2E_NETWORK_ISOLATED=1 才继续（脚本本身另加 --disable plugins 与 127.0.0.1 死代理）。
-if (process.env.MGR_E2E_NETWORK_ISOLATED !== '1') {
-  console.error('NOT_RUN: real codex-cli may perform curated plugin sync over the network. Run only on a host with enforced egress isolation and set MGR_E2E_NETWORK_ISOLATED=1.')
-  process.exit(2)
+// 版本锁定：真实 CLI 只接受 0.167.0；版本不符时生命周期断言不可信，必须失败。
+const LOCKED_CODEX_VERSION = '0.167.0'
+const MANIFEST_PATH = new URL('./fixtures/codex/v2-lifecycle-manifest.json', import.meta.url)
+const ROLE_FIXTURE_PATH = new URL('./fixtures/codex/roles/0.167.0-negative.toml', import.meta.url)
+
+// 显式清单：P05 把 V2 工具/等待/跟进/取消/权限/恢复纳入 runner 的声明面。
+// 这里只声明与纯 mock 校验，不执行 Codex；真实执行归 Q02（要求 OS 级出网隔离）。
+const V2_CASES = Object.freeze([
+  { id: 'tool_nonce', status: 'FIXTURE_PREPARED', requires: 'Q02 + OS isolation', assert: 'child runs a read-only tool and the nonce reaches the parent wait notification' },
+  { id: 'wait_agent', status: 'FIXTURE_PREPARED', requires: 'Q02 + OS isolation', assert: 'wait_agent receives the native completion notification; no timeout before child final' },
+  { id: 'followup_task', status: 'FIXTURE_PREPARED', requires: 'Q02 + OS isolation', assert: 'followup_task starts a new child turn and the new nonce returns to the parent' },
+  { id: 'send_message', status: 'FIXTURE_PREPARED', requires: 'Q02 + OS isolation', assert: 'send_message is routed as a namespace collaboration tool with plaintext projection' },
+  { id: 'cancel', status: 'FIXTURE_PREPARED', requires: 'Q02 + OS isolation', assert: 'cancel prevents further followup and yields a canceled terminal, not a fake success' },
+  { id: 'permission_deny', status: 'FIXTURE_PREPARED', requires: 'Q02 + OS isolation', assert: 'denied tool permission is reported and no tool executes' },
+  { id: 'permission_allow', status: 'FIXTURE_PREPARED', requires: 'Q02 + OS isolation', assert: 'allowed tool permission executes once with the expected nonce' },
+  { id: 'resume_cold', status: 'FIXTURE_PREPARED', requires: 'Q02 + OS isolation', assert: 'resume returns the same root SID and reuses the existing child id/history' },
+  { id: 'fork_turns_none', status: 'FIXTURE_PREPARED', requires: 'Q02 + OS isolation', assert: 'fork_turns=none child starts without parent history' },
+  { id: 'fork_turns_all', status: 'FIXTURE_PREPARED', requires: 'Q02 + OS isolation', assert: 'fork_turns=all child receives the parent history in order' },
+  { id: 'concurrency_limit', status: 'FIXTURE_PREPARED', requires: 'Q02 + OS isolation', assert: 'native concurrency limit rejects the over-limit spawn with a typed error' },
+  { id: 'parent_child_ids', status: 'FIXTURE_PREPARED', requires: 'Q02 + OS isolation', assert: 'root/child ids are distinct and linked; no gateway-invented child' },
+  { id: 'zero_egress', status: 'FIXTURE_PREPARED', requires: 'Q02 + OS isolation', assert: 'requests hit only loopback mocks; no external connect' },
+])
+
+// 历史回归：M2-3 接线后本地跑到 22/27，第 2 轮 502 candidate pool empty；不得当作 PASS。
+const REGRESSIONS = Object.freeze([
+  {
+    id: 'm2-3-round2-502-candidate-pool',
+    status: 'REGRESSION_DECLARED',
+    historical: 'After wiring, the local run reached 22/27 checks and round 2 returned 502 candidate pool empty; not accepted as PASS.',
+    assert: 'round 2 must not return 502; an empty candidate pool must produce a typed/readable diagnosis',
+    reopen: 'Q02 on a host with enforced egress isolation',
+  },
+])
+
+function manifestPayload() {
+  return {
+    schema: 'mg.codex.v2-lifecycle-manifest/v1',
+    codexVersion: LOCKED_CODEX_VERSION,
+    lockedAt: '2026-11-12',
+    roleFixture: 'scripts/test/fixtures/codex/roles/0.167.0-negative.toml',
+    roleExpectation: 'same-provider model override only; role model_provider must not change the provider (ADR-0003)',
+    isolation: {
+      required: 'OS-level egress isolation (network namespace or host-level block)',
+      current: 'BLOCKED_ENV: bwrap/unshare unavailable; curated plugin sync risk cannot be excluded',
+      executionOwner: 'Q02',
+      optInEnv: 'MGR_E2E_NETWORK_ISOLATED=1',
+      v2OptInEnv: 'MG_CODEX_V2=1',
+    },
+    cases: V2_CASES.map((c) => Object.assign({}, c)),
+    regressions: REGRESSIONS.map((r) => Object.assign({}, r)),
+    notes: [
+      'This manifest is declarative. It does not run Codex and does not claim PASS.',
+      'Real lifecycle execution belongs to Q02 and requires OS-level egress isolation; bwrap/unshare is unavailable here.',
+      'The role fixture is the P01 negative fixture: model_provider in a role is ignored, provider is inherited.',
+    ],
+  }
+}
+
+function checkManifest() {
+  const issues = []
+  const add = (name, ok, detail) => {
+    console.log((ok ? 'PASS' : 'FAIL') + '  ' + name + (detail ? ' :: ' + detail : ''))
+    if (!ok) issues.push(name)
+  }
+  let manifest = null
+  try { manifest = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8')) } catch (err) { add('manifest 可读', false, err && err.message) }
+  add('manifest schema/version 锁定', !!manifest && manifest.schema === 'mg.codex.v2-lifecycle-manifest/v1' && manifest.codexVersion === LOCKED_CODEX_VERSION, manifest && manifest.codexVersion)
+  const ids = new Set((manifest && Array.isArray(manifest.cases) ? manifest.cases : []).map((c) => c && c.id))
+  const missing = V2_CASES.map((c) => c.id).filter((id) => !ids.has(id))
+  add('V2 case 清单完整', missing.length === 0, missing.join(','))
+  add('role fixture 存在', existsSync(ROLE_FIXTURE_PATH), fileURLToPath(ROLE_FIXTURE_PATH))
+  const regressions = Array.isArray(manifest && manifest.regressions) ? manifest.regressions : []
+  add('22/27 502 回归已声明', regressions.some((r) => r && r.id === 'm2-3-round2-502-candidate-pool'))
+  const claims = (manifest && Array.isArray(manifest.cases) ? manifest.cases : []).filter((c) => c && /^(PASS|VERIFIED|LIVE)$/i.test(String(c.status || '')))
+  add('清单不声称真实通过', claims.length === 0, claims.map((c) => c.id).join(','))
+  return issues.length === 0
 }
 
 const CODEX = process.env.CODEX_BIN || '/home/xiaomengxizi/.local/bin/codex'
@@ -39,6 +108,24 @@ const checks = []
 function check (name, ok, detail) {
   checks.push({ name, ok: !!ok })
   console.log((ok ? 'PASS' : 'FAIL') + '  ' + name + (detail ? ' :: ' + detail : ''))
+}
+
+// 纯声明模式不启动 CLI/网关、不触网，也不受 egress 门控影响。
+if (process.argv.includes('--list')) {
+  console.log(JSON.stringify(manifestPayload(), null, 2))
+  process.exit(0)
+}
+if (process.argv.includes('--check-manifest')) {
+  process.exit(checkManifest() ? 0 : 1)
+}
+
+// 状态（2026-11-12）：NOT_RUN —— 本机无网络命名空间隔离（unshare -Urn 不可用），而 codex-cli
+// 0.167.0 在空 CODEX_HOME 首次启动会尝试 curated plugin sync（github.com/openai/plugins.git）。
+// 为避免误触外连，默认拒绝运行；只有在**外部已强制阻断 egress**的主机上显式设置
+// MGR_E2E_NETWORK_ISOLATED=1 才继续（脚本本身另加 --disable plugins 与 127.0.0.1 死代理）。
+if (process.env.MGR_E2E_NETWORK_ISOLATED !== '1') {
+  console.error('NOT_RUN: real codex-cli may perform curated plugin sync over the network. Run only on a host with enforced egress isolation and set MGR_E2E_NETWORK_ISOLATED=1.')
+  process.exit(2)
 }
 
 function sse (res, emit) {
@@ -278,6 +365,12 @@ const env = {
   NO_PROXY: '',
 }
 
+async function assertLockedVersion(env, cwd) {
+  const probe = await runCodex(['--version'], env, cwd, null, 30000)
+  check('版本锁定：codex --version 为 ' + LOCKED_CODEX_VERSION, new RegExp(LOCKED_CODEX_VERSION.replace(/\./g, '\\.')).test(probe.out + probe.err), (probe.out + probe.err).trim().slice(0, 200))
+  check('角色 fixture：存在且按 P01 反向边界（同 provider model override）', existsSync(ROLE_FIXTURE_PATH), fileURLToPath(ROLE_FIXTURE_PATH))
+}
+
 function baseArgs (model, prompt, thread) {
   const pluginOff = ['--disable', 'plugins', '--disable', 'remote_plugin', '--disable', 'plugin_discovery_prefetch']
   const common = ['--json', '--skip-git-repo-check', '-c', 'sandbox_mode="read-only"', '-c', 'model_provider="openai"', '-c', 'openai_base_url="' + gw.base + '"', '-c', 'model_catalog_json="' + catalogPath + '"', '-c', 'model="' + model + '"']
@@ -293,6 +386,9 @@ const debugStrace = join(work, 'debug.strace')
 
 
 try {
+  await assertLockedVersion(env, cwd)
+  console.log('v2LifecycleManifest=' + JSON.stringify({ version: LOCKED_CODEX_VERSION, cases: V2_CASES.length, status: 'FIXTURE_PREPARED', execution: 'Q02' }))
+
   // 0) 目录可验证：真实 CLI debug models 加载生成目录
   const dbg = await runCodex(['--disable', 'plugins', '--disable', 'remote_plugin', '--disable', 'plugin_discovery_prefetch', 'debug', 'models', '-c', 'model_catalog_json="' + catalogPath + '"'], env, cwd, debugStrace, 120000)
   let dbgModels = []
@@ -321,6 +417,7 @@ try {
   check('第2轮：第三方 mock 命中且未再打官方', third.hits.length >= 1 && official.hits.length === officialBefore2, 'official=' + official.hits.length + ' third=' + third.hits.length)
   if (!third.state.contextSeen) console.log('DEBUG third messages=' + JSON.stringify(third.state.lastMessages))
   check('第2轮：上下文连续（第三方收到第1轮内容）', third.state.contextSeen === true, 'round2=' + String(third.state.round2Text))
+  check('第2轮：无历史 502 candidate-pool 回归（M2-3 22/27）', r2.code === 0 && !/502|candidate pool|候选池无可用项/i.test(r2.out + r2.err), (r2.err || r2.out).slice(-300))
   check('第2轮：上游收到原模型名而不是聚合 slug', third.hits.every((h) => (h.body.model || '') === THIRD_MODEL), JSON.stringify(third.hits.map((h) => h.body.model)))
 
   // 第 3 轮：同线程切回官方
