@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { startGateway, startScriptedUpstream } from './harness.mjs'
+import { startGateway, startMockUpstream, startScriptedUpstream } from './harness.mjs'
 import { authorizeSendTarget } from '../../../src/forward.js'
 import { assertSendTarget } from '../../../src/codex/target-authz.js'
 
@@ -372,4 +372,66 @@ test('F03 错误状态表与下游头白名单（单元）：码→状态唯一�
   assert.deepEqual(clean, { 'retry-after': '3' }, '只允许白名单头，其余（含帧层/安全头）一律丢弃')
   assert.deepEqual(sanitizeDownstreamHeaders({ 'retry-after': '1\r\nX-Injected: 1' }), {}, '控制字符值必须丢弃')
   assert.deepEqual(sanitizeDownstreamHeaders(undefined), {})
+})
+
+
+// ============================================================================
+// N06：有限历史 / 重启对账 / 短期 SSE 快照
+// ============================================================================
+
+test('N06 有限历史与重启：ring 有界并计数 dropped；重启后事件从头开始且契约稳定', { timeout: 60000 }, async (t) => {
+  const upstream = await startMockUpstream()
+  const dir = mkdtempSync(join(tmpdir(), 'mg-n06-ring-'))
+  const config = {
+    defaults: { observability: { capacity: 2 } },
+    providers: { mock: { baseUrl: upstream.base } },
+    models: { demo: { provider: 'mock', api: 'openai', forceNoStream: true } },
+  }
+  const gw1 = await startGateway({ name: 'n06-ring', dir, config })
+  t.after(async () => { await upstream.stop(); rmSync(dir, { recursive: true, force: true }) })
+  for (let i = 0; i < 3; i++) {
+    await gw1.post('/v1/chat/completions', { model: 'demo', messages: [{ role: 'user', content: 'ring-' + i }] }, json())
+  }
+  const page = await (await gw1.get('/api/observability/events?limit=10')).json()
+  assert.equal(page.version, 1)
+  assert.equal(page.retained.capacity, 2, '容量来自配置')
+  assert.equal(page.retained.count, 2, '只保留最近 capacity 条')
+  assert.ok(page.retained.dropped >= 1, '被淘汰条数必须如实计数')
+  const text = JSON.stringify(page)
+  assert.equal(text.includes('ring-0'), false, '事件不保留正文（历史也一样）')
+  await gw1.stop()
+
+  const gw2 = await startGateway({ name: 'n06-ring', dir, config })
+  t.after(() => gw2.stop())
+  const fresh = await (await gw2.get('/api/observability/events')).json()
+  assert.equal(fresh.version, 1)
+  assert.equal(fresh.contract, 'mg-observability-v1')
+  assert.equal(fresh.items.length, 0, '事件是短期内存缓冲：重启后不伪造历史')
+  assert.equal(fresh.retained.dropped, 0)
+})
+
+test('N06 短期 SSE：连接即收到有界快照，且事件体不含正文', { timeout: 45000 }, async (t) => {
+  const upstream = await startMockUpstream()
+  const gw = await startGateway({
+    name: 'n06-sse',
+    config: { providers: { mock: { baseUrl: upstream.base } }, models: { demo: { provider: 'mock', api: 'openai', forceNoStream: true } } },
+  })
+  t.after(async () => { await gw.stop(); await upstream.stop() })
+  await gw.post('/v1/chat/completions', { model: 'demo', messages: [{ role: 'user', content: 'SSE-CANARY-N06' }] }, json())
+
+  const ctl = new AbortController()
+  const res = await fetch(gw.base + '/api/observability/stream', { headers: { accept: 'text/event-stream' }, signal: ctl.signal })
+  assert.equal(res.status, 200)
+  assert.match(String(res.headers.get('content-type')), /text\/event-stream/)
+  const reader = res.body.getReader()
+  let buf = ''
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline && !/event: request/.test(buf)) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buf += Buffer.from(value).toString('utf8')
+  }
+  try { ctl.abort() } catch {}
+  assert.match(buf, /event: request/, 'SSE 应重放有界快照里的 request 事件')
+  assert.equal(buf.includes('SSE-CANARY-N06'), false, 'SSE 事件体不得包含正文')
 })

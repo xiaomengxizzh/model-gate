@@ -24,6 +24,7 @@ import { readNativeUsage, nativeUsageConfig } from './native-usage.js'
 import { classifyTarget } from './codex/identity.js'
 import { isTargetAuthzError } from './codex/target-authz.js'
 import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
+import { createObservability, hashId } from './observability/events.js'
 import { buildCatalog } from './codex/catalog.js'
 import { generationRecordFromBuilt, toCatalogView } from './codex/catalog-generation.js'
 import { microFromUsd } from './routing/facts.js'
@@ -1555,6 +1556,12 @@ function makeHandler(state) {
     const path = (req.url || '/').split('?')[0]
     const url = req.url || '/'
     const isApi = path === '/api' || path.startsWith('/api/')
+    // N06：每个数据面请求一条 request 收据（引用一律 sha256 派生；终态按 (requestId,terminal) 去重）。
+    let obsRequestId = null
+    let obsRecorded = false
+    if (state.observability && (path.startsWith('/v1/') || path === '/v1')) {
+      try { obsRequestId = hashId(req.headers['x-request-id'] || (process.pid + ':' + Date.now() + ':' + Math.random())) } catch { obsRequestId = null }
+    }
     let budget = null
     let responsesMode = false
     let responsesMeta = null
@@ -1668,6 +1675,32 @@ function makeHandler(state) {
         }
         if (hit.def.virtual) { sendJson(res, 200, { ok: true, hit: { type: 'defaults', name: hit.canonicalName, directory: state.cfg.defaults.directory || [] } }); return }
         sendJson(res, 200, { ok: true, hit: { type: hit.known ? 'model' : 'unknown', name: hit.canonicalName, provider: hit.def.provider || null, note: hit.known ? null : (vms.length ? '将返回 404（已配置虚拟模型）' : '将走默认上游兜底') } }); return
+      }
+      if (path === '/api/observability/events' && req.method === 'GET') {
+        if (!await requireAdmin(req, res)) return
+        const q = new URL(url, 'http://x').searchParams
+        try {
+          sendJson(res, 200, state.observability.page({ cursor: q.get('cursor'), limit: q.get('limit') }))
+        } catch (error) {
+          sendJson(res, 400, { error: '分页参数无效：' + ((error && error.message) || 'cursor/limit'), code: (error && error.code) || 'observability_page_invalid' })
+        }
+        return
+      }
+      if (path === '/api/observability/stream' && req.method === 'GET') {
+        if (!await requireAdmin(req, res)) return
+        // 短期 SSE：先重放有界历史快照，再转发新事件；不持久化、不回放正文。
+        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
+        const write = (event) => {
+          if (res.writableEnded || res.destroyed) return
+          try { res.write('event: ' + event.kind + '\ndata: ' + JSON.stringify(event) + '\n\n') } catch {}
+        }
+        for (const ev of state.observability.page({ limit: 100 }).items) write(ev)
+        const unsubscribe = state.observability.subscribe(write)
+        const timer = setInterval(() => { if (!res.writableEnded && !res.destroyed) { try { res.write(': keepalive\n\n') } catch {} } }, 15000)
+        if (typeof timer.unref === 'function') timer.unref()
+        const close = () => { try { clearInterval(timer) } catch {} ; try { unsubscribe() } catch {} }
+        try { res.once('close', close); res.once('finish', close) } catch {}
+        return
       }
       if (path === '/api/logs' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const lines = parseInt(new URL(url, 'http://x').searchParams.get('lines') || '200', 10) || 200; sendJson(res, 200, { lines: readLogTail((log && log.file) ? log.file() : logFile(), lines) }); return }
       if (path === '/api/config' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; sendJson(res, 200, configProjection(state)); return }
@@ -2246,6 +2279,16 @@ function makeHandler(state) {
       else if (!res.destroyed) { try { res.end() } catch {} }
     } finally {
       if (budget) { try { budget.dispose() } catch {} }
+      // N06：终态只记一次（status>=500 → FAILED；499 → CANCELLED_UNSENT；4xx → FAILED；2xx → SUCCEEDED）。
+      // 用量在这一层无法确证 → usage 'unknown'（绝不填 0）。
+      if (state.observability && obsRequestId && !obsRecorded) {
+        obsRecorded = true
+        try {
+          const code = res.statusCode || 0
+          const terminal = code === 499 ? 'CANCELLED_UNSENT' : (code >= 400 ? 'FAILED' : 'SUCCEEDED')
+          state.observability.recordTerminal({ requestId: obsRequestId, terminal, status: code })
+        } catch { /* 观测不得影响请求结果 */ }
+      }
     }
   }
 }
@@ -2316,6 +2359,8 @@ export function start(opts = {}) {
     adapterFactory: opts.adapterFactory,
     adminToken: process.env.MG_ADMIN_TOKEN || (cfg.server && cfg.server.adminToken) || (cfg._keys && cfg._keys.__mg_admin) || '',
     paths: cfg._paths || configPaths(),
+    // N06：运行时可观测收据（有界内存 ring；request/attempt/usage 三类事件，终态去重）。
+    observability: createObservability({ capacity: (cfg.defaults && cfg.defaults.observability && cfg.defaults.observability.capacity) || undefined }),
     st: { startedAt: Date.now(), uses: {}, counters: { requests: 0, errors: 0, retries: 0, interrupts: 0 } },
     health: {},
     throttle: {},

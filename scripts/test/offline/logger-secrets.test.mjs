@@ -55,3 +55,37 @@ test('MG-005 端到端：通过 API 热更新的凭据在日志里即刻脱敏',
   assert.ok(!joined.includes(HOT), '热更新的凭据不得以明文出现在日志里')
   assert.match(joined, /\*\*\*\*/, '错误摘要中的凭据被抹成 ****')
 })
+
+
+// ============================================================================
+// N06 全链路 canary：正文 / 密钥 / 密文 / 原始 parent id 既不进日志也不进可观测事件
+// ============================================================================
+
+test('N06 canary：请求正文、Bearer、encrypted_content 与原始 parent id 均不出现在日志/事件中', { timeout: 45000 }, async (t) => {
+  const BODY_CANARY = 'CANARY-N06-BODY-TEXT'
+  const KEY_CANARY = 'sk-canary-n06-key-abcdef'
+  const CIPHER_CANARY = 'CANARY-N06-CIPHERTEXT'
+  const PARENT_CANARY = 'CANARY-N06-RAW-PARENT-ID'
+  const upstream = await startMockUpstream()
+  const gw = await startGateway({
+    name: 'n06-canary',
+    config: { providers: { mock: { baseUrl: upstream.base } }, models: { demo: { provider: 'mock', api: 'openai', forceNoStream: true } } },
+  })
+  t.after(async () => { await gw.stop(); await upstream.stop() })
+
+  await gw.post('/v1/chat/completions', {
+    model: 'demo',
+    messages: [{ role: 'user', content: BODY_CANARY }],
+    encrypted_content: CIPHER_CANARY,
+  }, { 'content-type': 'application/json', 'x-request-id': PARENT_CANARY, authorization: 'Bearer ' + KEY_CANARY })
+
+  const logs = (await (await gw.get('/api/logs?lines=500')).json()).lines.join('\n')
+  const events = JSON.stringify(await (await gw.get('/api/observability/events?limit=50')).json())
+  const status = JSON.stringify(await (await gw.get('/api/status')).json())
+  for (const [label, text] of [['日志', logs], ['可观测事件', events], ['/api/status', status]]) {
+    for (const canary of [BODY_CANARY, KEY_CANARY, CIPHER_CANARY, PARENT_CANARY]) {
+      assert.equal(text.includes(canary), false, label + ' 不得包含 ' + canary)
+    }
+  }
+  assert.ok(events.includes('mg-observability-v1'), '事件仍必须可用（只是不含敏感值）')
+})
