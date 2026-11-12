@@ -253,3 +253,9 @@ CLI 约定：
 - 退出码：0 ok / 1 形状或服务端 4xx / 2 令牌缺失或 401 / 3 403 / 4 409 / 5 404。
 - JSON 输出稳定且不含凭据/正文；不写全局文件、不读 `~/.codex`、不碰 auth.json。
 
+
+### 可观测性端点（N06，2026-11-12）
+
+- `GET /api/observability/events?cursor=&limit=` 返回 `{contract: mg-observability-v1, version: 1, items, nextCursor, hasMore, retained: {count, capacity, dropped}, stats}`；非法 cursor 返回 400 稳定 code。
+- `GET /api/observability/stream`：短期 SSE，重放不超过 100 条的有界快照 + 增量 + 15s keepalive，断开即退订。
+- 事件中的 id 只能由 hashId() 派生；正文、凭据、密文与原始 parent id 在 emit 阶段显式拒绝（全链路 canary 断言）。

@@ -285,3 +285,14 @@ model-gateway/
 ## HTTP 边界
 
 Chat 请求必须为 JSON 对象，否则 400。管理和数据面请求均受 server.maxBodyBytes（默认 32 MiB）限制，超限返回 413。跨源请求与非 IP 字面量 Host 在到达路由前即被 403（见上文「管理面来源策略」）。客户端 Host、Cookie、鉴权头、x-mg-admin、x-goog-api-key 以及 Connection 列出的逐跳头不会转发；上游鉴权来自 provider。/healthz 和 /api/auth 是公开的状态入口。
+
+## 收工闭环新增配置项（2026-11-12 补记）
+
+| 键 | 语义 | 缺省行为 |
+|---|---|---|
+| `defaults.codexBudget.billingPolicy` | 付费候选在「没有预算上限且未接账本」时的放行策略。缺省 fail-closed：发送前拒绝并记 `billing_unmetered`（零上游）；显式 `allow_unmetered` 才放行，且审计面可见。 | 未设置 = 拒绝 |
+| `defaults.opencodeGoHosts` | OpenCode Go 允许的 host 白名单（`src/codex/identity.js`）。 | 内置清单 |
+| `providers.<名>.sessionHmacSecret` | Go 会话头的 HMAC 密钥来源。会话值按「主体 + provider + root/child 域 + 目标域 + 线程」派生，绝不转发客户端原始 `session-id`/`thread-id`。 | 未设置 = 请求内独立 id |
+| `defaults.observability.capacity` | 观测事件环形缓冲容量；超出部分以 `dropped` 如实计数，不伪造历史。 | 见 `src/observability/events.js` |
+
+相关接口：`GET /api/observability/events`（cursor 分页，`mg-observability-v1`）与 `GET /api/observability/stream`（有界快照 + 增量 + 15s keepalive）。

@@ -19,7 +19,7 @@ npm test
 
 | 平台 | Node | 状态 | 证据 |
 | --- | --- | --- | --- |
-| Linux x64（Ubuntu 26.04，kernel 7.0.0-43-generic） | Node 24（实测 v24.22.2，npm 11.19.1） | **当前支持（已实测）** | 本机四条门禁全绿：`npm run check` / `npm test`（59 套件、565 用例）/ `npm run docs:check` / `node scripts/check-metadata.mjs`；CI 矩阵同为 Node 24 |
+| Linux x64（Ubuntu 26.04，kernel 7.0.0-43-generic） | Node 24（实测 v24.22.2，npm 11.19.1） | **当前支持（已实测）** | 本机四条门禁全绿：`npm run check` / `npm test`（76 套件、769 用例）/ `npm run docs:check` / `node scripts/check-metadata.mjs`；CI 矩阵同为 Node 24 |
 | macOS / Windows | 任意大版本 | **未验收（NOT_RUN）** | 无实测环境；Windows `.bat/.cmd` 只做静态检查，未在真实 Windows 上运行 |
 | Linux / macOS / Windows | Node 18 / 20 / 22 | **已退役（仅历史记录）** | 旧 CI 矩阵与旧版验证记录；本机没有 Node 18/20/22 runner，也不下载工具链（见 RESOURCE_APPROVAL.md），因此不再声明为受支持版本 |
 
@@ -50,7 +50,7 @@ npm test
 
 本轮交付的验证状态按 `PASS(mock)` / `PASS(real)` / `NOT_RUN(原因)` / `BLOCKED(原因)` / `DISABLED(默认关闭)` 分开记录，**不把 mock 通过写成真实接入通过**；逐格证据（套件名 + 断言数或历史证据）见[支持矩阵](docs/roadmap/2026-11-11-support-matrix.md)。
 
-- 离线可复现（`PASS(mock)`）：Chat/Responses/SSE 协议与映射、Codex 目录与配置、身份域与额度、智能调度决策、预算账本、UHR 推理回执、MCP 契约、管理面与旧/新控制台静态资源等。本分支实测 59 套件 / 565 用例全绿（1 个用例级 skip，非套件跳过；`node scripts/test/run.mjs`）；集成线 53 套件，数字见交付报告。
+- 离线可复现（`PASS(mock)`）：Chat/Responses/SSE 协议与映射、Codex 目录与配置、身份域与额度、智能调度决策、预算账本、UHR 推理回执、MCP 契约、管理面与旧/新控制台静态资源等。本分支实测 76 套件 / 769 用例全绿（1 个用例级 skip，非套件跳过；`node scripts/test/run.mjs`）；集成线 `integration/modelgate-release` 的数字与证据见 `docs/evidence/2026-11-12-closure/delivery-report.md`。
 - 未验证（`NOT_RUN`）：真实官方/第三方上游、真实流式链路、真实 Codex CLI 三轮回环（`MG_CODEX_VERIFY=1`）、Desktop GUI、真实浏览器验收、真实计费。
 - 阻塞（`BLOCKED`）：真实 UHR 委派（需现行授权接口与明确写集）；本轮只交付 mock UHR + 契约。
 - 默认关闭/拒绝（`DISABLED`）：原生 v2 密文跨域（硬拒绝、无开关）、受控官方聚合实验、匿名远程管理面、MCP 委派（未接线）、新控制台默认入口。
