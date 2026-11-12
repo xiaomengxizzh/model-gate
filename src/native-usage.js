@@ -174,3 +174,18 @@ export async function readNativeUsage(cfg, days = 7, now = Date.now()) {
 }
 
 export function __clearNativeUsageCache() { cache = { key: '', at: 0, value: null } }
+
+// N05：原生/直连用量只做本地计数，绝不代表账户额度、也不用于释放/恢复额度。
+export const NATIVE_USAGE_KIND = 'local_stats'
+
+export function usageEvidence(usage) {
+  const u = usage && typeof usage === 'object' ? usage : {}
+  const n = Number(u.totalTokens)
+  return Object.freeze({
+    kind: NATIVE_USAGE_KIND,
+    affectsQuota: false,
+    totalTokens: Number.isFinite(n) && n >= 0 ? Math.trunc(n) : null,
+    source: 'native_session_logs',
+    note: '原生/直连用量仅本地计数：不代表账户余额，不得当作额度证据',
+  })
+}

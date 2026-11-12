@@ -10,7 +10,7 @@
 //  * 错误统一为 {ok:false, code, error, apiVersion, nextAction?}，退出码映射稳定（见 EXIT）。
 //
 // 用法：node bin/mg.mjs <doctor|provider|model|route|config|client> ... [--json]
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
@@ -21,6 +21,10 @@ import { exportClientTemplate } from '../src/codex/config.js'
 import { classifyTarget } from '../src/codex/identity.js'
 import { CODEX_API_VERSION, CODEX_API_VERSIONS } from '../src/codex/api.js'
 import { PROVIDER_ID as GO_PROVIDER_ID, validate as validateGo, entryOf as goEntryOf } from '../src/providers/opencode-go.js'
+import {
+  activateEmergency, classifyUsageFact, emergencyPlan, parseQuotaState,
+  restoreEmergency, serializeQuotaState, USAGE_KINDS,
+} from '../src/codex/quota.js'
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url))
 const CLI_CONTRACT = 'modelgate.cli/1'
@@ -476,6 +480,115 @@ function clientExport(flags) {
   })
 }
 
+
+// —— N05：额度三态 + 显式应急（本地隔离 state-file 模式；HTTP 模式走管理面）——
+function assertEmergencyStatePath(raw) {
+  const p = String(raw || '').trim()
+  if (!p) throw new CliError('state_file_required', '应急命令必须显式给 --state-file <path.json>（隔离状态文件）')
+  const lower = p.toLowerCase()
+  if (lower.includes('auth.json') || lower.includes('/.codex/') || lower.includes('sessions/') || lower.endsWith('.jsonl')) {
+    throw new CliError('forbidden_state_path', '拒绝把应急状态写入官方身份/历史路径（auth.json/.codex/sessions）；应急只配置新 profile，不改身份与历史')
+  }
+  if (!lower.endsWith('.json')) throw new CliError('invalid_state_path', '应急状态文件必须是 .json 显式路径')
+  return p
+}
+function readEmergencyState(path) {
+  try { return parseQuotaState(readFileSync(path, 'utf8')) } catch { return parseQuotaState(null) }
+}
+function writeEmergencyState(path, state) {
+  const tmp = path + '.' + process.pid + '.tmp'
+  writeFileSync(tmp, JSON.stringify(serializeQuotaState(state), null, 2) + '\n', 'utf8')
+  renameSync(tmp, path)
+}
+function splitList(raw) {
+  return typeof raw === 'string' && raw.trim()
+    ? raw.split(',').map((x) => x.trim()).filter(Boolean)
+    : []
+}
+function localUsageView(cfg) {
+  // 本地统计只做计数展示；拿不到就 null，不用 0 冒充。
+  try {
+    const stats = cfg && cfg._paths && cfg._paths.stats ? JSON.parse(readFileSync(cfg._paths.stats, 'utf8')) : null
+    if (!stats) return null
+    return classifyUsageFact({ kind: USAGE_KINDS.LOCAL_STATS, source: 'gateway_stats', totalTokens: stats.tokens || stats.totalTokens || 0 })
+  } catch { return null }
+}
+async function quotaStatus(flags) {
+  const baseUrl = flagString(flags, 'base-url')
+  if (baseUrl) {
+    const { token } = adminToken(flags)
+    return callApi({ baseUrl, token, apiVersion: flagString(flags, 'api-version') || DEFAULT_API_VERSION, method: 'GET', path: '/api/codex/quota' })
+  }
+  const { cfg } = loadGatewayConfig(flags, { required: false })
+  return {
+    ok: true,
+    available: false,
+    state: 'unknown',
+    display: 'UNKNOWN',
+    freshness: 'unknown',
+    usedPercent: null,
+    reason: 'quota_source_not_wired',
+    localUsage: cfg ? localUsageView(cfg) : null,
+    accountQuota: null,
+    note: '未接可信账户额度来源：显示 UNKNOWN，不猜测余额、不自动切换；本地统计仅计数',
+  }
+}
+async function emergencyPlanCommand(flags) {
+  const baseUrl = flagString(flags, 'base-url')
+  const profile = flagString(flags, 'profile') || ''
+  const thirdPartyProfiles = splitList(flags['third-party'])
+  const officialModels = splitList(flags['official-models'])
+  if (baseUrl) {
+    const { token } = adminToken(flags)
+    const query = new URLSearchParams({ profile, thirdPartyProfiles: thirdPartyProfiles.join(','), officialModels: officialModels.join(',') })
+    return callApi({ baseUrl, token, apiVersion: DEFAULT_API_VERSION, method: 'GET', path: '/api/codex/emergency?' + query.toString() })
+  }
+  const statePath = flagString(flags, 'state-file')
+  const state = statePath ? readEmergencyState(assertEmergencyStatePath(statePath)) : parseQuotaState(null)
+  const plan = emergencyPlan({ state, profile, thirdPartyProfiles, officialModels })
+  if (!plan.ok) throw new CliError(plan.code, plan.message)
+  return { ok: true, plan: plan.plan, readOnly: true, writesNothing: true, stateFile: statePath ? 'explicit' : null }
+}
+async function emergencyApplyCommand(flags, action) {
+  const baseUrl = flagString(flags, 'base-url')
+  const body = {
+    action,
+    planId: flagString(flags, 'plan') || '',
+    profile: flagString(flags, 'profile') || '',
+    thirdPartyProfiles: splitList(flags['third-party']),
+    officialModels: splitList(flags['official-models']),
+    acknowledged: flags.acknowledge === true,
+    reason: flagString(flags, 'reason') || '',
+    backupPoint: flagString(flags, 'backup-point') || '',
+  }
+  if (action === 'activate' && !flags.acknowledge) throw new CliError('acknowledgement_required', '应急激活必须显式 --acknowledge（不自动切换）')
+  await confirmOrThrow(flags, 'emergency ' + action)
+  if (baseUrl) {
+    const { token } = adminToken(flags)
+    return callApi({ baseUrl, token, apiVersion: DEFAULT_API_VERSION, method: 'POST', path: '/api/codex/emergency', body })
+  }
+  const statePath = assertEmergencyStatePath(flagString(flags, 'state-file'))
+  const state = readEmergencyState(statePath)
+  const result = action === 'activate'
+    ? activateEmergency(state, body, { profile: body.profile, thirdPartyProfiles: body.thirdPartyProfiles, officialModels: body.officialModels })
+    : restoreEmergency(state, { reason: body.reason })
+  if (!result.ok) throw new CliError(result.code, result.message, { exitCode: result.code === 'plan_id_mismatch' ? EXIT.CONFLICT : EXIT.ERROR })
+  writeEmergencyState(statePath, result.state)
+  return {
+    ok: true,
+    action,
+    mode: serializeQuotaState(result.state).mode,
+    profile: serializeQuotaState(result.state).emergency ? serializeQuotaState(result.state).emergency.profile : '',
+    planId: action === 'activate' ? body.planId : null,
+    wrote: true,
+    stateFileMode: true,
+    identityMutation: false,
+    historyMutation: false,
+    officialLogout: false,
+    impacts: action === 'activate' ? result.impacts : [],
+  }
+}
+
 // —— 输出 ——
 function emit(payload, flags, textLines) {
   if (flags.json === true) {
@@ -511,6 +624,10 @@ const USAGE = [
   '  node bin/mg.mjs model list|show <name> [--json] [--config ...]',
   '  node bin/mg.mjs route explain --model <name> [--json] [--config ...]',
   '  node bin/mg.mjs client codex export [--base-url <url>] [--model <id>] [--json]',
+  '  node bin/mg.mjs quota status [--base-url <url>] [--json]   # 无来源 → UNKNOWN，不猜余额',
+  '  node bin/mg.mjs emergency plan --profile <label> --third-party <a,b> [--state-file <p.json>] [--json]',
+  '  node bin/mg.mjs emergency activate --state-file <p.json> --plan <ep_id> --profile <label> --third-party <a,b> --acknowledge --reason <r> --backup-point <b> --yes',
+  '  node bin/mg.mjs emergency restore --state-file <p.json> --reason <r> --yes',
   '',
   '管理写路径（loopback + 管理令牌环境变量 + planId 绑定）：',
   '  node bin/mg.mjs config plan --base-url <url> --root <id> --desired @patch.json [--expected @snap.json] [--json]',
@@ -590,6 +707,25 @@ export async function main(argv = process.argv.slice(2)) {
       const tpl = clientExport(flags)
       emit(tpl, flags, (p) => [p.text.trimEnd()])
       return EXIT.OK
+    }
+    if (command === 'quota') {
+      if (sub !== 'status') throw new CliError('usage', 'quota 只支持 status')
+      const out = await quotaStatus(flags)
+      emit(out, flags, (p) => ['quota: ' + (p.quota ? p.quota.state : p.state) + '  display=' + (p.quota ? p.quota.display : p.display), 'account: ' + (p.quota && p.quota.freshness === 'fresh' ? 'fresh' : 'unknown/not-wired'), 'local: ' + (p.localUsage ? p.localUsage.tokens + ' tokens (仅计数)' : 'not-collected')])
+      return EXIT.OK
+    }
+    if (command === 'emergency') {
+      if (sub === 'plan') {
+        const out = await emergencyPlanCommand(flags)
+        emit(out, flags, (p) => ['emergency plan: ' + (p.plan ? p.plan.planId : '-'), 'profile: ' + (p.plan ? p.plan.profile : '-'), 'writes: ' + (p.plan ? p.plan.writes.join(',') : '-'), 'identityMutation: false  historyMutation: false'])
+        return EXIT.OK
+      }
+      if (sub === 'activate' || sub === 'restore') {
+        const out = await emergencyApplyCommand(flags, sub === 'restore' ? 'restore' : 'activate')
+        emit(out, flags, (p) => ['emergency ' + p.action + ': mode=' + p.mode + (p.profile ? ' profile=' + p.profile : ''), 'wrote: ' + p.wrote + '  identityMutation: false  historyMutation: false'])
+        return EXIT.OK
+      }
+      throw new CliError('usage', 'emergency 只支持 plan|activate|restore')
     }
     if (command === 'config') {
       if (sub === 'plan') {

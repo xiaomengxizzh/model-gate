@@ -10,6 +10,8 @@
 //
 // 纯函数 + 显式注入：本模块不读进程状态、不发请求、不写文件。
 
+import { createHash } from 'node:crypto'
+
 export const QUOTA_STATE_VERSION = 1
 export const QUOTA_DISPLAY_UNKNOWN = 'UNKNOWN'
 
@@ -285,6 +287,7 @@ function sanitizeEmergency(state) {
     reason: mode === 'emergency' ? scrubText(em.reason) : '',
     backupPoint: mode === 'emergency' ? scrubText(em.backupPoint) : '',
     subject: mode === 'emergency' ? safeSubject(em.subject) : '',
+    profile: mode === 'emergency' ? safeLabel(em.profile, '') : '',
     // 时间线是审计证据：保留 action/subject/reason/timestamp，但同样脱敏、字段受控。
     timeline: Array.isArray(state.timeline) ? state.timeline.slice(-20).map((t) => ({
       at: Number.isFinite(t && t.at) ? t.at : null,
@@ -436,12 +439,14 @@ export function enterEmergency(state, intent = {}, opts = {}) {
   const backupPoint = scrubText(intent.backupPoint)
   if (!backupPoint) return { ok: false, code: 'backup_point_required', message: '进入应急态必须提供备份点（backupPoint，例如配置备份文件/时间点）。', state: s }
   const subject = safeSubject(intent.subject != null ? intent.subject : opts.subject)
+  // N05：应急只「配置新 profile」；profile 是安全标签，绝不携带凭据。
+  const profile = safeLabel(intent.profile != null ? intent.profile : opts.profile, '')
   const next = {
     ...s,
     mode: 'emergency',
     updatedAt: now,
-    emergency: { since: now, acknowledged: true, reason, backupPoint, subject },
-    timeline: [...s.timeline, { at: now, action: 'enter_emergency', mode: 'emergency', reason, backupPoint, subject }].slice(-50),
+    emergency: { since: now, acknowledged: true, reason, backupPoint, subject, profile },
+    timeline: [...s.timeline, { at: now, action: 'enter_emergency', mode: 'emergency', reason, backupPoint, subject, profile }].slice(-50),
   }
   return {
     ok: true,
@@ -479,13 +484,14 @@ export function serializeQuotaState(state) {
     version: QUOTA_STATE_VERSION,
     mode: s.mode,
     updatedAt: s.updatedAt,
-    emergency: s.emergency ? { since: s.emergency.since, acknowledged: s.emergency.acknowledged === true, reason: scrubText(s.emergency.reason), backupPoint: scrubText(s.emergency.backupPoint), subject: safeSubject(s.emergency.subject) } : null,
+    emergency: s.emergency ? { since: s.emergency.since, acknowledged: s.emergency.acknowledged === true, reason: scrubText(s.emergency.reason), backupPoint: scrubText(s.emergency.backupPoint), subject: safeSubject(s.emergency.subject), profile: safeLabel(s.emergency.profile, '') } : null,
     lastEmergency: s.lastEmergency ? {
       since: Number.isFinite(s.lastEmergency.since) ? s.lastEmergency.since : null,
       recoveredAt: Number.isFinite(s.lastEmergency.recoveredAt) ? s.lastEmergency.recoveredAt : null,
       reason: scrubText(s.lastEmergency.reason),
       backupPoint: scrubText(s.lastEmergency.backupPoint),
       subject: safeSubject(s.lastEmergency.subject),
+      profile: safeLabel(s.lastEmergency.profile, ''),
       recoverReason: scrubText(s.lastEmergency.recoverReason),
     } : null,
     timeline: s.timeline.map((t) => ({
@@ -493,6 +499,7 @@ export function serializeQuotaState(state) {
       ...(t.subject ? { subject: safeSubject(t.subject) } : {}),
       ...(t.reason ? { reason: scrubText(t.reason) } : {}),
       ...(t.backupPoint ? { backupPoint: scrubText(t.backupPoint) } : {}),
+      ...(t.profile ? { profile: safeLabel(t.profile, '') } : {}),
     })),
   }
 }
@@ -504,6 +511,119 @@ export function parseQuotaState(raw) {
     try { value = JSON.parse(raw) } catch { return freshState(Date.now()) }
   }
   return coerceState(value)
+}
+
+// —— N05：本地统计 / 导入计数 / 账户额度三者不可混 ——
+// 只有 account_quota 参与额度判断；local_stats 与 imported_counts 一律「仅计数」，
+// 绝不能被当成余额、也不能据此释放/恢复额度。
+export const USAGE_KINDS = Object.freeze({
+  LOCAL_STATS: 'local_stats',
+  IMPORTED_COUNTS: 'imported_counts',
+  ACCOUNT_QUOTA: 'account_quota',
+})
+
+export function classifyUsageFact(raw) {
+  const q = isPlainObject(raw) ? raw : {}
+  const kind = q.kind === USAGE_KINDS.ACCOUNT_QUOTA
+    ? USAGE_KINDS.ACCOUNT_QUOTA
+    : (q.kind === USAGE_KINDS.IMPORTED_COUNTS ? USAGE_KINDS.IMPORTED_COUNTS : USAGE_KINDS.LOCAL_STATS)
+  const tokenRaw = Number(q.totalTokens)
+  const tokens = Number.isFinite(tokenRaw) && tokenRaw >= 0 ? Math.trunc(tokenRaw) : null
+  return Object.freeze({
+    kind,
+    affectsQuota: kind === USAGE_KINDS.ACCOUNT_QUOTA,
+    tokens,
+    source: safeLabel(q.source, 'local'),
+    observedAt: normalizeObservedAt(q.observedAt),
+    note: kind === USAGE_KINDS.ACCOUNT_QUOTA
+      ? '账户额度：必须来自可信来源且在新鲜窗口内；无来源即 UNKNOWN'
+      : '本地统计/导入计数：只做计数展示，绝不当作账户余额、也不用于释放或恢复额度',
+  })
+}
+
+/** 导入历史/本地统计的显式入口：强制按「仅计数」处理（affectsQuota 恒 false）。 */
+export function importCounts(raw) {
+  return classifyUsageFact(Object.assign({}, isPlainObject(raw) ? raw : {}, { kind: USAGE_KINDS.IMPORTED_COUNTS }))
+}
+
+// —— N05：应急试算（plan）→ 确认（planId 绑定）→ 仅配置新 profile → 对称恢复 ——
+// plan 是纯函数：只描述「会影响什么」，不写任何文件、不改身份/历史、不退出官方登录。
+export const EMERGENCY_PLAN_VERSION = 1
+
+function stableStringify(value) {
+  if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']'
+  if (isPlainObject(value)) return '{' + Object.keys(value).sort().map((k) => JSON.stringify(k) + ':' + stableStringify(value[k])).join(',') + '}'
+  return JSON.stringify(value)
+}
+
+export function emergencyPlanId(plan) {
+  const p = plan || {}
+  return 'ep_' + createHash('sha256').update(stableStringify({
+    profile: p.profile || '',
+    thirdPartyProfiles: Array.isArray(p.thirdPartyProfiles) ? p.thirdPartyProfiles : [],
+    officialModels: Array.isArray(p.officialModels) ? p.officialModels : [],
+  })).digest('hex').slice(0, 24)
+}
+
+/**
+ * 应急试算：列出范围与影响，绑定一个**新的** profile（绝不改官方身份/历史/auth.json）。
+ * opts: { state?, profile?, thirdPartyProfiles?, officialModels?, now? }
+ */
+export function emergencyPlan(opts = {}) {
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now()
+  const state = coerceState(opts.state)
+  const profile = safeLabel(opts.profile, '')
+  if (!profile) {
+    return { ok: false, code: 'profile_required', message: '应急必须显式选择一个新 profile 标签（不改动官方身份/历史）', state: sanitizeEmergency(state) }
+  }
+  const officialModels = (Array.isArray(opts.officialModels) ? opts.officialModels : [])
+    .filter((m) => typeof m === 'string' && m && m.length <= 80).slice(0, 50)
+  const thirdPartyProfiles = (Array.isArray(opts.thirdPartyProfiles) ? opts.thirdPartyProfiles : [])
+    .map((p) => safeLabel(p, '')).filter(Boolean).slice(0, 20)
+  if (!thirdPartyProfiles.length) {
+    return { ok: false, code: 'profile_scope_required', message: '应急试算必须列出可用的第三方 profile（第三方的自有凭据），不能空切换', state: sanitizeEmergency(state) }
+  }
+  if (state.mode === 'emergency') {
+    return { ok: false, code: 'already_emergency', message: '已经在应急态；先恢复再重新试算', state: sanitizeEmergency(state) }
+  }
+  const plan = {
+    version: EMERGENCY_PLAN_VERSION,
+    generatedAt: now,
+    profile,
+    thirdPartyProfiles,
+    officialModels,
+    scope: { providerGroup: 'third_party_profile', models: officialModels.length ? officialModels : ['official_provider_models'] },
+    // 明确「会写什么/不会写什么」：只新增 profile 选择，身份与历史零变更。
+    writes: ['emergency-profile:' + profile],
+    identityMutation: false,
+    historyMutation: false,
+    officialLogout: false,
+    credentialReuse: false,
+    requiresConfirmation: true,
+    requires: { acknowledged: true, reason: '', backupPoint: '' },
+    impacts: EMERGENCY_IMPACTS.map((e) => Object.assign({}, e)),
+    prohibited: [...QUOTA_PROHIBITED],
+    currentState: sanitizeEmergency(state),
+  }
+  plan.planId = emergencyPlanId(plan)
+  return { ok: true, plan }
+}
+
+/** 由 plan 进入应急态：planId 必须与当前试算一致；缺三元组/错 planId 绝不改状态。 */
+export function activateEmergency(state, intent = {}, opts = {}) {
+  const computed = emergencyPlan(Object.assign({}, opts, { state }))
+  if (!computed.ok) return computed
+  const planId = typeof intent.planId === 'string' ? intent.planId.trim() : ''
+  if (!planId) return { ok: false, code: 'plan_id_required', message: '应对必须回传 emergencyPlan 的 planId', state: coerceState(state) }
+  if (planId !== computed.plan.planId) {
+    return { ok: false, code: 'plan_id_mismatch', message: 'planId 与当前应急试算不一致（profile/范围可能已变），拒绝激活', state: coerceState(state) }
+  }
+  return enterEmergency(coerceState(state), Object.assign({}, intent, { profile: computed.plan.profile }), opts)
+}
+
+/** 对称恢复：退出应急态；reason 可选但会进审计时间线。 */
+export function restoreEmergency(state, opts = {}) {
+  return exitEmergency(state, opts)
 }
 
 /** 应急态影响声明（供 UI/文档直接展示）。 */
