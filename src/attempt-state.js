@@ -60,6 +60,41 @@ export const OUTCOMES = Object.freeze({
 
 // 可以证明「供应商在真正执行前就拒绝」的证据种类（仅这些允许把 SENT_UNKNOWN 降级为
 // REJECTED_BEFORE_EXECUTION；其他错误一律按执行状态未知处理）。
+// F03：发送授权/目标的统一错误状态表（单一真源）。
+// 之前各处自造数字（403/502/409/504），本表把「拒绝码 → HTTP 状态」固定下来，
+// 供 index.js / target-authz 的拒绝信封与回归断言共用；新增码必须在这里登记。
+export const ERROR_STATUS_TABLE = Object.freeze({
+  // 目标授权（一律 403，零发送）
+  target_denied: 403,
+  target_identity_unknown: 403,
+  domain_identity_mismatch: 403,
+  send_target_drift: 403,
+  catalog_generation_missing: 403,
+  target_not_verified: 403,
+  credential_missing: 403,
+  credential_mode_retired: 403,
+  official_passthrough_retired: 403,
+  official_no_gateway_key: 403,
+  official_path_not_allowlisted: 403,
+  official_host_not_allowlisted: 403,
+  official_target_insecure_scheme: 403,
+  official_credential_missing: 403,
+  // 路由/模型
+  unknown_model: 404,
+  catalog_binding_invalid: 404,
+  // 上游与传输
+  upstream_redirect_rejected: 502,
+  all_providers_failed: 502,
+  request_timeout: 504,
+  // 本地配置写锁（与非发送路径共用的冲突语义）
+  store_locked: 409,
+  store_conflict: 409,
+})
+
+export function statusForErrorCode (code) {
+  return Object.prototype.hasOwnProperty.call(ERROR_STATUS_TABLE, code) ? ERROR_STATUS_TABLE[code] : 502
+}
+
 export const PRE_EXECUTION_EVIDENCE = Object.freeze([
   'connect_refused',
   'dns_failure',

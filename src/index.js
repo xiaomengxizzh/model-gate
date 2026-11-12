@@ -8,10 +8,10 @@ import { isIP } from 'node:net'
 import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readKeysFresh, readLocalConfigStrict, isConfigUnreadable, modelTarget } from './router.js'
 import { beginWrite, recoverStore, TARGET_CONFIG, TARGET_KEYS } from './config-transaction.js'
 import { createLogger } from './logger.js'
-import { forward, probe, probeModel, probeChat, warm, probeEmbedding, probeRerank } from './request.js'
+import { forward, upstreamUrl, probe, probeModel, probeChat, warm, probeEmbedding, probeRerank } from './request.js'
 import { adapterFor, cacheHitMiss, mapErrorEnvelope } from './format.js'
 import { isStreamResponse, writeUpstreamHeaders, relayStream, endInterruptedStream } from './sse.js'
-import { forwardChain, routeLimit, virtualQuotaExceeded, acquireProvider, initForwardLedger } from './forward.js'
+import { forwardChain, routeLimit, virtualQuotaExceeded, acquireProvider, initForwardLedger, authorizeSendTarget } from './forward.js'
 import { createBudget, abortedError } from './budget.js'
 import { responsesToChat, chatToResponse, LEGACY_BRIDGE_COMPAT } from './responses.js'
 import { createResponsesStream } from './responses-stream.js'
@@ -22,6 +22,7 @@ import { defaultVideoPaths, newVideoTask, upstreamTaskId, applyUpstreamStatus, c
 import { todayKey } from './shared.js'
 import { readNativeUsage, nativeUsageConfig } from './native-usage.js'
 import { classifyTarget } from './codex/identity.js'
+import { isTargetAuthzError } from './codex/target-authz.js'
 import { buildCatalog } from './codex/catalog.js'
 import { generationRecordFromBuilt, toCatalogView } from './codex/catalog-generation.js'
 import { microFromUsd } from './routing/facts.js'
@@ -1220,6 +1221,71 @@ async function cancelVideoTask(state, task, log) {
   return task
 }
 
+// —— F03：下游响应头白名单（R1 2c4f2a9 的移植） ——
+// 「上游能影响哪些客户端响应头」必须由网关决定，不能把上游头集合直接并进 writeHead。
+// 当前只放行 retry-after（429 治理需要）；其余（set-cookie / location / transfer-encoding /
+// content-length / x-* / 安全策略头）一律丢弃，且拒绝含控制字符的值。
+const DOWNSTREAM_HEADER_ALLOWLIST = Object.freeze(['retry-after'])
+export function sanitizeDownstreamHeaders (headers) {
+  const out = {}
+  for (const [k, v] of Object.entries(headers || {})) {
+    const name = String(k || '').trim().toLowerCase()
+    if (!DOWNSTREAM_HEADER_ALLOWLIST.includes(name)) continue
+    if (v === undefined || v === null || (typeof v !== 'string' && typeof v !== 'number')) continue
+    const value = String(v)
+    if (!value || /[\r\n\0]/.test(value)) continue
+    out[name] = value
+  }
+  return out
+}
+
+// —— F03：核心发送的「冻结目标」授权（Responses 旁路封口） ——
+// proxyOfficialResponses / proxyNativeResponses 曾直接 request.forward()，绕过 target-authz：
+// 无冻结目标、无二次 assert、无 catalog 绑定。现在两处都在发送前走同一入口：
+//   authorizeSendTarget(...) → 冻结目标（含 codified deny）
+//   assertSendTarget(authz, upstreamUrl(provider, path)) → 授权对象 == 实际发送对象
+// 授权失败零发送，返回统一错误信封（不含头值/Key）。
+function authorizeProxySend (state, prov, pid, path, req, log) {
+  try {
+    const authz = authorizeSendTarget({ cfg: state.cfg, provider: prov, pid, path, req, log, catalogScoped: false })
+    assertProxySendTarget(authz, prov, path)
+    return { authz }
+  } catch (error) {
+    const typed = isTargetAuthzError(error)
+    return {
+      denied: {
+        status: (error && error.status) || 403,
+        code: (error && error.code) || 'target_denied',
+        message: '上游目标未通过发送授权：' + String((error && error.message) || error).slice(0, 300),
+        typed,
+      },
+    }
+  }
+}
+function assertProxySendTarget (authz, prov, path) {
+  // authorizeSendTarget 内部已 assert 一次；这里再按「本次实际拼装的 URL」复核，
+  // 防止未来有人在两者之间改写 provider/path。
+  const actual = upstreamUrl(prov, path).href
+  const expected = authz && authz.target ? authz.target.key : null
+  const parsed = new URL(actual)
+  const key = parsed.origin + parsed.pathname + parsed.search
+  if (!expected || key !== expected) {
+    const error = new Error('实际发送目标与授权目标不一致（' + (expected || 'missing') + ' != ' + key + '）')
+    error.code = 'send_target_drift'
+    error.status = 403
+    error.deny = true
+    throw error
+  }
+  return authz
+}
+function proxyDeniedResult (denied) {
+  return {
+    status: denied.status,
+    contentType: 'application/json; charset=utf-8',
+    buf: Buffer.from(JSON.stringify({ error: { message: denied.message, code: denied.code, type: 'target_denied' } })),
+  }
+}
+
 // —— E3 / D1-A：官方身份直连代理（F01 后只剩「网关自有 key」一条路） ——
 // 只在 classifyTarget()==='official' 时使用。客户端官方凭据（OAuth / chatgpt-account-id）不再透传，
 // /backend-api/codex 也不再是允许路径：无网关自有 key 时 targetDeny 直接 fail-closed。
@@ -1260,6 +1326,12 @@ async function proxyOfficialResponses(state, budget, log, opts) {
       authorization: 'Bearer ' + prov.apiKey,
     })
     if (dropped.length) log && log.info('官方目标丢弃头（仅名称）', dropped.slice(0, 20).join(','))
+    // F03：冻结目标 + 发送前二次校验（此前本代理直接 forward，绕过 target-authz）。
+    const gate = authorizeProxySend(state, prov, pid, upstreamPath, req, log)
+    if (gate.denied) {
+      log && log.warn('官方目标发送授权被拒绝', gate.denied.code, pid)
+      return proxyDeniedResult(gate.denied)
+    }
     let release = null
     try {
       release = await acquireProvider(state, pid, state.cfg, budget.signal)
@@ -1321,10 +1393,27 @@ async function proxyNativeResponses(state, budget, log, opts) {
     const target = modelTarget(state.cfg, modelName, pid)
     const payload = Buffer.from(JSON.stringify(Object.assign({}, body, { model: target.servingName })))
     const headers = videoJsonHeaders(state, prov, payload.length)
+    // F03：原生 Responses 也曾绕过 target-authz。现在发送前必须拿到冻结目标授权，
+    // 且一次终态（noRetry）——Responses 请求可能带工具/托管副作用，绝不能自动重放。
+    const gate = authorizeProxySend(state, prov, pid, upstreamPath, opts.req, log)
+    if (gate.denied) {
+      log && log.warn('responses 目标发送授权被拒绝', gate.denied.code, pid)
+      return proxyDeniedResult(gate.denied)
+    }
     let release = null
     try {
       release = await acquireProvider(state, pid, state.cfg, budget.signal)
-      const up = await forward(prov, upstreamPath, 'POST', headers, payload, state.cfg.defaults || {}, log, { budget, signal: budget.signal })
+      const up = await forward(prov, upstreamPath, 'POST', headers, payload, state.cfg.defaults || {}, log, { budget, signal: budget.signal, noRetry: true })
+      if (up.status >= 300 && up.status < 400) {
+        try { await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true }) } catch {}
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        log && log.warn('responses 目标返回重定向，已拒绝跟随', 'provider=' + pid, 'status=' + up.status)
+        return {
+          status: 502,
+          contentType: 'application/json; charset=utf-8',
+          buf: Buffer.from(JSON.stringify({ error: { message: '上游返回重定向（' + up.status + '），网关拒绝跟随', code: 'upstream_redirect_rejected', type: 'upstream_error' } })),
+        }
+      }
       if (up.ok) {
         state.st.counters.requests += 1
         agg(state, pid, 'requests', 1)
@@ -1876,7 +1965,7 @@ function makeHandler(state) {
           const nconv = responsesToChat(body, { mode: 'native' })   // 仅复用顶层拒绝矩阵；input/tools 原样透传（含 v2 密文）
           if (nconv.rejected) { sendJson(res, 400, { error: { message: nconv.rejected.message, type: nconv.rejected.code || 'unsupported_parameter' } }); return }
           if ((nDef.capability || 'chat') !== 'chat') { sendJson(res, 400, { error: { message: '模型 ' + nHit.canonicalName + ' 的能力不是 chat，不能用于 /v1/responses', type: 'unsupported_model' } }); return }
-          const nout = await proxyNativeResponses(state, budget, log, { body, modelName: nHit.canonicalName, def: nDef, wantStream: !!body.stream, res })
+          const nout = await proxyNativeResponses(state, budget, log, { req, body, modelName: nHit.canonicalName, def: nDef, wantStream: !!body.stream, res })
           if (nout && nout.streamed) return
           res.writeHead(nout.status, { 'content-type': nout.contentType }); res.end(nout.buf); return
         }
@@ -1977,7 +2066,7 @@ function makeHandler(state) {
             const resp = chatToResponse(chat, { model: responsesMeta.model, customToolNames: responsesMeta.customToolNames })
             res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(resp)); return
           }
-          res.writeHead(out.status || 502, Object.assign({ 'content-type': out.contentType || 'application/json; charset=utf-8' }, out.headers || {})); res.end(out.body); return
+          res.writeHead(out.status || 502, Object.assign({ 'content-type': out.contentType || 'application/json; charset=utf-8' }, sanitizeDownstreamHeaders(out.headers))); res.end(out.body); return
         }
         return
       }
@@ -2050,7 +2139,7 @@ function makeHandler(state) {
         if (!res.writableEnded && !res.destroyed) endInterruptedStream(res, '上游响应中断（流已开始后无法回写状态码 ' + out.status + '）', 0)
         return
       }
-      res.writeHead(out.status, Object.assign({ 'content-type': out.contentType }, out.headers || {})); res.end(out.body)
+      res.writeHead(out.status, Object.assign({ 'content-type': out.contentType }, sanitizeDownstreamHeaders(out.headers))); res.end(out.body)
     } catch (err) {
       if (err && err.aborted) {
         // 预算耗尽/客户端断开：不算网关路由失败，按契约 §4 收尾
