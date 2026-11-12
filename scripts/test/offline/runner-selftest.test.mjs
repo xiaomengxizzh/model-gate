@@ -166,6 +166,32 @@ test('超时：假套件超时后返回非 0，且 leader 与孙进程都被回�
   }
 })
 
+test('正常退出：假套件 exit 0 但留下孙进程 → runSuite ok=true 且 treeReaped=true、孙 pid 已不可达', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mg-selftest-exit0-'))
+  const pidsFile = join(dir, 'pids.json')
+  const fake = join(dir, 'exit0-with-grandchild.test.mjs')
+  writeFileSync(fake, [
+    "import { spawn } from 'node:child_process'",
+    "import { writeFileSync } from 'node:fs'",
+    "const grand = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 600000)'], { stdio: 'ignore' })",
+    'writeFileSync(' + JSON.stringify(pidsFile) + ', JSON.stringify({ grand: grand.pid }))',
+    'process.exit(0)',
+    '',
+  ].join('\n'))
+  try {
+    const result = await runSuite(fake, { timeoutMs: 10000, quiet: true })
+    assert.equal(result.ok, true, 'normal exit + reaped tree must be ok: exit=' + result.exitCode + ' treeReaped=' + result.treeReaped)
+    assert.equal(result.timedOut, false)
+    assert.equal(result.exitCode, 0, 'fake suite must exit 0')
+    assert.equal(result.treeReaped, true, 'runner must reap the whole process group even on normal exit')
+    assert.equal(await waitGone(result.pid), true, 'suite leader pid must be gone')
+    const recorded = JSON.parse(readFileSync(pidsFile, 'utf8'))
+    assert.equal(await waitGone(recorded.grand), true, 'grandchild pid must not survive a normal-exit suite')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('环境白名单：宿主哨兵变量与真实凭据不会透传进子进程', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mg-selftest-env-'))
   const outFile = join(dir, 'env.json')
