@@ -251,3 +251,125 @@ test('M1-3b 未配置 ledger + 配置费用上限 → typed 拒绝，零上游',
   assert.equal(body.error.code, 'ledger_required_for_cost_limits')
   assert.equal(upstream.hits.length, 0)
 })
+
+
+// ============================================================================
+// F03：统一发送授权与取消（下游头白名单 / Responses 旁路封口 / 一次终态）
+// ============================================================================
+
+test('F03 下游响应头白名单（R1 2c4f2a9 反向断言）：上游 429 夹带 set-cookie/x-*/location 一律不到客户端', { timeout: 45000 }, async (t) => {
+  const SENTINEL = 'SENTINEL-UPSTREAM-HEADER-F03'
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    for await (const _ of req) { /* drain */ }
+    res.writeHead(429, {
+      'content-type': 'application/json',
+      'retry-after': '3',
+      'set-cookie': 'sid=leak; HttpOnly',
+      'x-upstream-secret': SENTINEL,
+      location: 'http://evil.test/steal',
+    })
+    res.end(JSON.stringify({ error: { message: 'rate limited', type: 'rate_limit' } }))
+  })
+  t.after(() => upstream.stop())
+  const gw = await startGateway({
+    name: 'f03-downstream-headers',
+    config: {
+      // loopMs 只留 300ms：429 的 Retry-After(3s) 等不下即有界收口，避免默认 120s 循环兜底把测试拖超时。
+      defaults: { retry: { maxAttempts: 1 }, timeout: { firstByteMs: 2000, idleMs: 2000, loopMs: 300 } },
+      providers: { third: { baseUrl: upstream.base + '/v1' } },
+      models: { demo: { provider: 'third', api: 'openai' } },
+    },
+  })
+  t.after(() => gw.stop())
+
+  const res = await gw.post('/v1/chat/completions', { model: 'demo', messages: [{ role: 'user', content: 'hi' }] }, json())
+  assert.equal(res.status, 429, '429 语义必须保留')
+  assert.equal(res.headers.get('retry-after'), '3', '白名单内的 retry-after 必须下发')
+  for (const name of ['set-cookie', 'x-upstream-secret', 'location']) {
+    assert.equal(res.headers.get(name), null, '上游头不得透传到客户端：' + name)
+  }
+  const text = await res.text()
+  assert.equal(text.includes(SENTINEL), false, '响应体也不得夹带上游头值')
+})
+
+test('F03 Responses 旁路封口：官方 responses 目标含 userinfo → 403 typed、零上游命中', { timeout: 45000 }, async (t) => {
+  const hits = []
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    for await (const _ of req) { /* drain */ }
+    hits.push({ url: req.url, headers: req.headers })
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ id: 'r1', object: 'response', status: 'completed', model: 'gpt-official-test', output: [] }))
+  })
+  t.after(() => upstream.stop())
+  const gw = await startGateway({
+    name: 'f03-responses-drift',
+    env: { MG_TEST_OFFICIAL_KEY: 'gw-official-f03-key' },
+    config: {
+      defaults: { codexOfficialHosts: ['localhost'] },
+      // userinfo 注入：授权对象与实际发送对象必须逐字段一致，这里必须先被拒绝
+      providers: { official: { baseUrl: 'http://user:pass@localhost:' + upstream.port, codexIdentity: 'official', apiKeyEnv: 'MG_TEST_OFFICIAL_KEY' } },
+      models: { 'gpt-official-test': { provider: 'official', api: 'responses' } },
+    },
+  })
+  t.after(() => gw.stop())
+
+  const res = await gw.post('/v1/responses', { model: 'gpt-official-test', input: 'hi' }, json())
+  assert.equal(res.status, 403, '未通过发送授权必须 403')
+  const body = await res.json()
+  assert.equal(body.error.code, 'target_userinfo_forbidden')
+  assert.equal(hits.length, 0, '授权失败零上游命中')
+})
+
+test('F03 原生 Responses 一次终态：上游 3xx → 502 upstream_redirect_rejected，Location 零命中、只发一次', { timeout: 45000 }, async (t) => {
+  const sinkHits = []
+  const sink = await startScriptedUpstream(async (req, res) => {
+    for await (const _ of req) { /* drain */ }
+    sinkHits.push({ url: req.url })
+    res.writeHead(200, { 'content-type': 'application/json', 'x-sink': 'hit' })
+    res.end('{"ok":true}')
+  })
+  t.after(() => sink.stop())
+  const hits = []
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    for await (const _ of req) { /* drain */ }
+    hits.push({ url: req.url })
+    res.writeHead(302, { location: sink.base + '/v1/responses' })
+    res.end()
+  })
+  t.after(() => upstream.stop())
+  const gw = await startGateway({
+    name: 'f03-native-redirect',
+    config: {
+      providers: { third: { baseUrl: upstream.base + '/v1' } },
+      models: { native: { provider: 'third', api: 'responses' } },
+    },
+  })
+  t.after(() => gw.stop())
+
+  const res = await gw.post('/v1/responses', { model: 'native', input: 'hi' }, json())
+  assert.equal(res.status, 502)
+  assert.equal((await res.json()).error.code, 'upstream_redirect_rejected')
+  assert.equal(hits.length, 1, '只命中原始上游一次（noRetry，不重放）')
+  assert.equal(sinkHits.length, 0, '拒绝跟随 Location')
+})
+
+test('F03 错误状态表与下游头白名单（单元）：码→状态唯一真源，白名单只放行 retry-after', async () => {
+  const { sanitizeDownstreamHeaders } = await import('../../../src/index.js')
+  const { ERROR_STATUS_TABLE, statusForErrorCode } = await import('../../../src/attempt-state.js')
+  assert.equal(ERROR_STATUS_TABLE.send_target_drift, 403)
+  assert.equal(ERROR_STATUS_TABLE.official_no_gateway_key, 403)
+  assert.equal(ERROR_STATUS_TABLE.upstream_redirect_rejected, 502)
+  assert.equal(ERROR_STATUS_TABLE.request_timeout, 504)
+  assert.equal(statusForErrorCode('not_registered_code'), 502, '未登记码按上游失败收口')
+  const clean = sanitizeDownstreamHeaders({
+    'retry-after': '3',
+    'set-cookie': 'a=b',
+    location: 'http://evil.test/',
+    'x-upstream-secret': 's',
+    'transfer-encoding': 'chunked',
+    'content-length': '9',
+  })
+  assert.deepEqual(clean, { 'retry-after': '3' }, '只允许白名单头，其余（含帧层/安全头）一律丢弃')
+  assert.deepEqual(sanitizeDownstreamHeaders({ 'retry-after': '1\r\nX-Injected: 1' }), {}, '控制字符值必须丢弃')
+  assert.deepEqual(sanitizeDownstreamHeaders(undefined), {})
+})
