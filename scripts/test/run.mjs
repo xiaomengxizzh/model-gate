@@ -41,6 +41,7 @@ export const SUITES = [
   'scripts/test/offline/codex-official.test.mjs',
   'scripts/test/offline/codex-opencode-session.test.mjs',
   'scripts/test/offline/codex-quota.test.mjs',
+  'scripts/test/offline/codex-role-provider.test.mjs',
   'scripts/test/offline/codex-routing-catalog.test.mjs',
   'scripts/test/offline/codex-target-authz.test.mjs',
   'scripts/test/offline/config-projection.test.mjs',
