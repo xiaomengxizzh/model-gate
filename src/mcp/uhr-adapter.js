@@ -430,6 +430,9 @@ export function createUhrAdapter(options = {}) {
       return rejection(UHR_REJECT.BAD_REQUEST, 'mock UHR 调用失败')
     }
 
+    // P06：UHR 委派**永远是外部路径**，不是原生 child thread。结果里显式标注降级，
+    // 任何下游（面板/CLI/回执）都不得把它算作原生同会话能力。
+    const delegation = { kind: 'external_delegation', native: false, degraded: true, proof: UHR_MCP_CONTRACT }
     const minimalReceipt = {
       contract: UHR_MCP_CONTRACT,
       version: UHR_MCP_VERSION,
@@ -450,8 +453,9 @@ export function createUhrAdapter(options = {}) {
       summaryTruncated: summary.truncated,
       summaryOriginalBytes: summary.originalBytes,
       summaryBytes: summary.bytes,
+      delegation,
     }
-    return deepFreeze({ ok: true, toolCallId: toStr(toolCallId), taskRef: submitted.taskRef, state: submitted.state, minimalReceipt })
+    return deepFreeze({ ok: true, toolCallId: toStr(toolCallId), taskRef: submitted.taskRef, state: submitted.state, delegation, minimalReceipt })
   }
 
   function loadTask(identity, taskRef) {
@@ -492,6 +496,7 @@ export function createUhrAdapter(options = {}) {
       expired: task.expired === true,
       executions: task.executions,
       result: result ? { text: result.text, truncated: result.truncated, redacted: result.redacted } : null,
+      delegation: { kind: 'external_delegation', native: false, degraded: true, proof: UHR_MCP_CONTRACT },
       receipts: { refsCount: task.refsCount, refKinds: task.refKinds, budgetMicro: task.budgetMicro, currency: task.currency },
     })
   }
@@ -519,6 +524,7 @@ export function createUhrAdapter(options = {}) {
       taskRef: cancelled.taskRef,
       state: cancelled.state,
       duplicate: cancelled.duplicate === true,
+      delegation: { kind: 'external_delegation', native: false, degraded: true, proof: UHR_MCP_CONTRACT },
     })
   }
 
