@@ -3,7 +3,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startGateway, startMockUpstream } from './harness.mjs'
 import {
@@ -393,3 +395,48 @@ test('T-KEY-03 省略 virtualModels 不得清空 meta：已过期 Key 保存后�
   assert.equal(readded.virtualModels[0].keySet, false, '删除虚拟模型必须清理其独立 Key（同名重建不得继承旧 Key）')
 })
 
+
+
+// ============================================================================
+// F02：旧明文 keys → 加密写失败必须整体拒绝（不得退回明文，也不得丢旧 Key）
+// ============================================================================
+
+test('F02 旧明文 keys + 主密钥不可用：加密写失败 → 500 key_encryption_unavailable，明文与旧鉴权都不变', { timeout: 60000 }, async (t) => {
+  const upstream = await startMockUpstream()
+  const dir = mkdtempSync(join(tmpdir(), 'mg-f02-nokey-'))
+  const roHome = mkdtempSync(join(tmpdir(), 'mg-f02-rohome-'))
+  // 让自动主密钥也无法生成：HOME 不可写（机器级 master.key 写不进去）
+  chmodSync(roHome, 0o500)
+  const oldKey = 'sk-plain-keep-01'
+  writeFileSync(join(dir, 'keys.local.json'), JSON.stringify({ __mg_client: oldKey }), { mode: 0o600 })
+  const config = {
+    providers: { mock: { baseUrl: upstream.base, apiKeyEnv: '' } },
+    models: { demo: { provider: 'mock', api: 'openai' } },
+  }
+  const gw = await startGateway({ name: 'f02-nokey', dir, config, env: { HOME: roHome, MG_KEYS_MASTER: '' } })
+  t.after(async () => {
+    await gw.stop(); await upstream.stop()
+    chmodSync(roHome, 0o700)
+    rmSync(dir, { recursive: true, force: true }); rmSync(roHome, { recursive: true, force: true })
+  })
+
+  const chat = (key) => gw.post('/v1/chat/completions', { model: 'demo', messages: [{ role: 'user', content: 'hi' }] }, { authorization: 'Bearer ' + key })
+  assert.equal((await chat(oldKey)).status, 200, '旧明文 Key 仍可用（读路径不需要加密）')
+  const before = readFileSync(join(dir, 'keys.local.json'), 'utf8')
+
+  const rotated = await gw.post('/api/keys', { id: '__mg_client', key: 'sk-plain-new-02' })
+  assert.equal(rotated.status, 500, '无法加密时必须拒绝保存（服务端凭据材料问题）')
+  assert.equal((await rotated.json()).code, 'key_encryption_unavailable')
+  assert.equal(readFileSync(join(dir, 'keys.local.json'), 'utf8'), before, '不得退回明文重写，也不得写一半')
+
+  const saved = await gw.post('/api/config/save', { defaults: { clientKey: 'sk-plain-new-03' } })
+  assert.equal(saved.status, 500)
+  assert.equal((await saved.json()).code, 'key_encryption_unavailable')
+  assert.equal(readFileSync(join(dir, 'keys.local.json'), 'utf8'), before, '配置保存路径同样不得改写 keys')
+  assert.equal(existsSync(join(dir, 'gateway.local.json')), false, '加密失败时不得单独提交 local（同代际要求）')
+
+  assert.equal((await chat(oldKey)).status, 200, '旧 Key 未丢、鉴权未降级')
+  assert.equal((await chat('sk-plain-new-02')).status, 401)
+  const logs = (await (await gw.get('/api/logs?lines=200')).json()).lines.join('\n')
+  for (const value of [oldKey, 'sk-plain-new-02', 'sk-plain-new-03']) assert.equal(logs.includes(value), false, '日志不得出现 Key 值')
+})

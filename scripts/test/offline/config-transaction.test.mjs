@@ -14,6 +14,7 @@ import {
   TARGET_CONFIG,
   TARGET_KEYS,
 } from '../../../src/config-transaction.js'
+import { keysDecrypt, keysEncrypt, loadConfig, readKeysFresh, readLocalConfigStrict } from '../../../src/router.js'
 import { startGateway, startMockUpstream } from './harness.mjs'
 
 const MODULE_URL = new URL('../../../src/config-transaction.js', import.meta.url).href
@@ -335,4 +336,119 @@ test('网关：外部修改后保存 fail-closed，reload 后才继续', { timeo
   assert.equal((await gw.post('/api/config/save', { defaults: { clientKey: next } })).status, 200)
   assert.equal((await chat(gw, next)).status, 200)
   assert.equal((await chat(gw, old)).status, 401)
+})
+
+
+// ============================================================================
+// F02：坏状态拒降级（损坏的配置目标不得被当成空对象，也不得被下一次保存写没）
+// ============================================================================
+
+function withEnv (patch, fn) {
+  const saved = {}
+  for (const key of Object.keys(patch)) { saved[key] = process.env[key]; if (patch[key] === undefined) delete process.env[key]; else process.env[key] = patch[key] }
+  try { return fn() } finally {
+    for (const key of Object.keys(saved)) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key] }
+  }
+}
+
+function seededStore (opts = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'mg-f02-store-'))
+  writeFileSync(join(dir, 'gateway.json'), JSON.stringify({ providers: { third: { baseUrl: 'http://127.0.0.1:9', apiKeyEnv: '' } }, models: { demo: { provider: 'third' } } }))
+  writeFileSync(join(dir, TARGET_KEYS), opts.keys === undefined ? JSON.stringify({ third: 'sk-KEEP-ME' }) : opts.keys, { mode: 0o600 })
+  writeFileSync(join(dir, TARGET_CONFIG), opts.local === undefined ? JSON.stringify({ configVersion: 3, providers: { third: { baseUrl: 'http://127.0.0.1:9' } } }) : opts.local)
+  return dir
+}
+
+test('F02 损坏的 keys.local.json：拒绝加载（不回落空 Key），文件原样保留', () => {
+  const dir = seededStore({ keys: '{"third":"sk-KEEP-ME"' })   // 截断 JSON
+  try {
+    withEnv({ MG_CONFIG_DIR: dir }, () => {
+      assert.throws(() => loadConfig(), (error) => error.code === 'keys_unreadable', '损坏的 keys 必须 fail-closed')
+      assert.throws(() => readKeysFresh(join(dir, TARGET_KEYS)), (error) => error.code === 'keys_unreadable', '写路径的读盘合并同样必须拒绝')
+    })
+    assert.equal(readFileSync(join(dir, TARGET_KEYS), 'utf8'), '{"third":"sk-KEEP-ME"', '损坏文件必须原样保留供人工修复')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('F02 损坏的 gateway.local.json：拒绝加载（不回落 base 配置），文件原样保留', () => {
+  const corrupt = '{"configVersion":3,"providers":{"third":{"baseUrl":"http://127.0.0.1:9"}'   // 截断
+  const dir = seededStore({ local: corrupt })
+  try {
+    withEnv({ MG_CONFIG_DIR: dir }, () => {
+      assert.throws(() => loadConfig(), (error) => error.code === 'local_config_unreadable')
+      assert.throws(() => readLocalConfigStrict(join(dir, TARGET_CONFIG)), (error) => error.code === 'local_config_unreadable')
+    })
+    assert.equal(readFileSync(join(dir, TARGET_CONFIG), 'utf8'), corrupt, '损坏文件必须原样保留')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('F02 损坏 keys 的网关拒绝启动（fail-closed，不降级为无 Key），坏文件不被改写', { timeout: 30000 }, async (t) => {
+  const dir = seededStore({ keys: '{oops' })
+  const corrupt = readFileSync(join(dir, TARGET_KEYS), 'utf8')
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  await assert.rejects(
+    startGateway({ name: 'f02-boot-bad-keys', dir, config: { providers: {}, models: {} } }),
+    (error) => /keys_unreadable/.test(String(error && error.message)),
+    '启动必须拒绝并给出稳定 code',
+  )
+  assert.equal(readFileSync(join(dir, TARGET_KEYS), 'utf8'), corrupt, '启动失败不得改写坏文件')
+})
+
+test('F02 锁文件：空文件（旧实现崩溃残留）可回收；不可解析 → lock_unreadable 且不擅自删除；死 pid 可回收', () => {
+  const store = makeStore()
+  try {
+    // 1) 空锁文件：没有所有者信息，属陈旧残留 → 回收后正常写入
+    writeFileSync(join(store.dir, 'config-txn.lock'), '')
+    const tx1 = beginWrite(pathsOf(store), { expected: fingerprint(pathsOf(store)) })
+    tx1.release()
+    assert.deepEqual(artifacts(pathsOf(store)), [], '回收空锁后不得残留锁/工件')
+
+    // 2) 非空但不可解析：可能是外部损坏或并发写者，fail-closed 且保留现场
+    writeFileSync(join(store.dir, 'config-txn.lock'), '{not-json')
+    assert.throws(() => beginWrite(pathsOf(store), { expected: fingerprint(pathsOf(store)) }), (error) => error.code === 'lock_unreadable')
+    assert.equal(readFileSync(join(store.dir, 'config-txn.lock'), 'utf8'), '{not-json', '不可解析的锁文件必须保留供人工核对')
+
+    // 3) 持有者进程已死 → 回收
+    writeFileSync(join(store.dir, 'config-txn.lock'), JSON.stringify({ pid: 999999, opId: 'dead-writer', at: Date.now() }))
+    const tx3 = beginWrite(pathsOf(store), { expected: fingerprint(pathsOf(store)) })
+    tx3.release()
+    assert.equal(existsSync(join(store.dir, 'config-txn.lock')), false, '死 pid 的陈旧锁必须被回收')
+  } finally { cleanupStore(store) }
+})
+
+test('F02 旧 staging 共存：遗留 <目标>.<pid>.tmp 与无 journal 的 .mg-txn 被安全清理，目标文件不变', () => {
+  const store = makeStore()
+  try {
+    writeFileSync(join(store.dir, TARGET_KEYS + '.999.tmp'), 'legacy-partial-key-write')
+    writeFileSync(join(store.dir, TARGET_CONFIG + '.999.tmp'), '{"legacy":true}')
+    mkdirSync(join(store.dir, '.mg-txn', 'old-op'), { recursive: true })
+    writeFileSync(join(store.dir, '.mg-txn', 'old-op', TARGET_KEYS + '.new'), 'never-published')
+    const recovery = recoverStore(pathsOf(store))
+    assert.equal(recovery.status, 'clean', '无 journal ⇒ 没有任何目标被替换，恢复应为 clean')
+    assert.deepEqual(readPair(store), { keys: OLD_KEYS, local: OLD_LOCAL }, '目标文件必须原样保留')
+    assert.equal(existsSync(join(store.dir, TARGET_KEYS + '.999.tmp')), false, '旧格式临时文件应被清理')
+    assert.equal(existsSync(join(store.dir, TARGET_CONFIG + '.999.tmp')), false)
+    assert.deepEqual(artifacts(pathsOf(store)), [], '旧 staging 不得残留')
+  } finally { cleanupStore(store) }
+})
+
+test('F02 真实加密 Key 回滚：SIGKILL 于 rename 后，恢复旧代际且旧 Key 可解密、未丢', () => {
+  const master = 'f02-master-key'
+  const oldKeys = withEnv({ MG_KEYS_MASTER: master }, () => keysEncrypt({ alpha: 'sk-alpha-old', beta: 'sk-beta-keep' }))
+  const newKeys = withEnv({ MG_KEYS_MASTER: master }, () => keysEncrypt({ alpha: 'sk-alpha-new' }))
+  assert.ok(oldKeys && oldKeys.startsWith('MG1:'), '夹具必须是加密形态')
+  const store = makeStore()
+  try {
+    writeFileSync(store.keys, oldKeys, { mode: 0o600 })
+    const child = spawnSync(process.execPath, [COMMIT_CHILD, store.dir], {
+      encoding: 'utf8', timeout: 30000, env: { ...process.env, MG_TXN_FAULT: 'after_rename_keys:kill' },
+    })
+    assert.equal(child.signal, 'SIGKILL')
+    const recovery = recoverStore(pathsOf(store))
+    assert.equal(recovery.status, 'recovered-old')
+    const recovered = withEnv({ MG_KEYS_MASTER: master }, () => keysDecrypt(readFileSync(store.keys, 'utf8')))
+    assert.deepEqual(recovered, { alpha: 'sk-alpha-old', beta: 'sk-beta-keep' }, '回滚后旧 Key 必须全部还在（未丢）')
+    assert.equal(readFileSync(store.local, 'utf8'), OLD_LOCAL, '配置回到旧代际：与 Key 同代')
+    assert.equal(modeOf(store.keys), 0o600)
+  } finally { cleanupStore(store) }
 })

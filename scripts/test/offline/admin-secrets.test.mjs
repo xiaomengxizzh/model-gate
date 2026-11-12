@@ -2,7 +2,9 @@
 // 契约正文见 docs/contracts/management-api-v1.md「敏感字段」一节。
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startGateway, startMockUpstream } from './harness.mjs'
 
@@ -83,4 +85,21 @@ test('管理 API：状态、日志与磁盘均不泄露明文凭据', { timeout:
   for (const secret of SECRETS) assert.ok(!lockedText.includes(secret), '加锁后的状态快照泄露凭据')
   const authText = await (await gw.get('/api/auth')).text()
   assert.ok(!authText.includes(ADMIN_SECRET), '/api/auth 不得回显令牌')
+})
+
+
+test('F02 坏状态错误路径不泄露文件内容：损坏 keys 的启动失败只报 code，不回显 Key', { timeout: 30000 }, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'mg-f02-secret-'))
+  const sentinel = 'sk-CORRUPT-SENTINEL-F02'
+  // 截断的 keys 文件：解析失败，但文件里含哨兵 Key（错误信息绝不能把它带出来）
+  writeFileSync(join(dir, 'keys.local.json'), '{"mock":"' + sentinel + '"', { mode: 0o600 })
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  let refused = null
+  try {
+    await startGateway({ name: 'f02-secret-corrupt', dir, config: { providers: {}, models: {} } })
+  } catch (error) { refused = error }
+  assert.ok(refused, '损坏的 keys 必须拒绝启动')
+  const text = String((refused && refused.message) || '')
+  assert.match(text, /keys_unreadable/, '必须给出稳定 code')
+  assert.equal(text.includes(sentinel), false, '启动失败信息不得回显文件内容/Key')
 })

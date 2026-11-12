@@ -16,6 +16,41 @@ export function readJson(path, dflt = {}) {
   try { return JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')) } catch { return dflt }
 }
 
+// F02：配置目标（gateway.local.json / keys.local.json）**损坏时必须 fail-closed**。
+// 旧行为是「解析失败 → 返回 {}」：那等于静默降级（鉴权丢失），更糟的是下一次保存会基于 {}
+// 写回，把用户余下的上游/模型/Key 全部写没。这里把「不存在」与「存在但不可解析」分开：
+//   · ENOENT → 缺省值（首次运行）
+//   · 存在但不可解析 → 抛 ConfigUnreadable（带稳定 code），由调用方拒绝启动/拒绝变更
+export class ConfigUnreadable extends Error {
+  constructor (code, message, details) {
+    super(message)
+    this.name = 'ConfigUnreadable'
+    this.code = code
+    if (details) this.details = details
+  }
+}
+
+export function isConfigUnreadable (error) {
+  return !!(error && error.name === 'ConfigUnreadable' && typeof error.code === 'string')
+}
+
+function unreadableJson (code, path, what) {
+  return new ConfigUnreadable(code, what + ' 不可解析（可能被截断/外部改坏）：已拒绝加载/写入以免清空现有配置与 Key；请从备份恢复或人工修复后重试（文件保持原样：' + path + '）', { path })
+}
+
+// 严格读取 gateway.local.json：供 loadConfig 与保存路径的「读盘合并」共用同一语义。
+export function readLocalConfigStrict (path, dflt = {}) {
+  let text
+  try { text = readFileSync(path, 'utf8') } catch (error) {
+    if (error && error.code === 'ENOENT') return dflt
+    throw error
+  }
+  let parsed
+  try { parsed = JSON.parse(text.replace(/^\uFEFF/, '')) } catch { throw unreadableJson('local_config_unreadable', path, 'gateway.local.json') }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw unreadableJson('local_config_unreadable', path, 'gateway.local.json（顶层必须是对象）')
+  return parsed
+}
+
 // 原子写：先写临时再 rename（避免半截文件）
 export function writeJsonAtomic(path, obj) {
   mkdirSync(dirname(path), { recursive: true })
@@ -114,14 +149,21 @@ function readFileIfExists(path) {
 function rawFingerprint(buf) {
   return buf == null ? { exists: false, hash: null, size: 0 } : { exists: true, hash: createHash('sha256').update(buf).digest('hex'), size: buf.length }
 }
-function parseJsonBuffer(buf) {
-  try { return JSON.parse(buf.toString('utf8').replace(/^\uFEFF/, '')) } catch { return null }
-}
-function keysFromRaw(raw) {
+function keysFromRaw(raw, path) {
   if (raw == null) return {}
   const text = raw.toString('utf8')
-  if (text.trimStart().startsWith('MG1:')) return keysDecrypt(text)
-  try { const o = JSON.parse(text); return o && typeof o === 'object' ? o : {} } catch { return {} }
+  if (!text.trim()) return {} // 空文件 = 尚未写入任何 Key（与「损坏」区分）
+  if (text.trimStart().startsWith('MG1:')) {
+    try { return keysDecrypt(text) } catch (error) {
+      throw new ConfigUnreadable('keys_unreadable', 'keys.local.json 无法解密（主密钥不匹配或密文损坏）：已拒绝加载以免清空现有 Key；请恢复对应主密钥或从备份恢复。' + (error && error.message ? '（' + error.message + '）' : ''), { path })
+    }
+  }
+  let parsed
+  try { parsed = JSON.parse(text.replace(/^\uFEFF/, '')) } catch {
+    throw unreadableJson('keys_unreadable', path || 'keys.local.json', 'keys.local.json')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw unreadableJson('keys_unreadable', path || 'keys.local.json', 'keys.local.json（顶层必须是对象）')
+  return parsed
 }
 
 export function loadConfig(opts = {}) {
@@ -132,7 +174,8 @@ export function loadConfig(opts = {}) {
   const base = readJson(mainFile)
   const localRaw = readFileIfExists(p.local)
   if (localRaw != null) {
-    const patch = parseJsonBuffer(localRaw) || {}
+    // F02：存在但不可解析 → 拒绝启动（不降级到 base 配置）。
+    const patch = readLocalConfigStrict(p.local, {})
     base.providers = Object.assign({}, base.providers, patch.providers)
     base.models = Object.assign({}, base.models, patch.models)
     // 删除墓碑：patch 只做合并，缺键无法表达"删除"，因此保存时显式记录被删的上游/模型名（MG-003）
@@ -146,7 +189,7 @@ export function loadConfig(opts = {}) {
   }
   base.virtualModels = normalizeVirtualModels(base.virtualModels, base)
   const keysRaw = readFileIfExists(p.keys)     // 一次读盘：解析与指纹用同一份字节
-  base._keys = keysFromRaw(keysRaw)            // { providerId: key }，gitignored，不入库
+  base._keys = keysFromRaw(keysRaw, p.keys)    // { providerId: key }，gitignored，不入库；损坏时抛 keys_unreadable
   base._disk = { local: rawFingerprint(localRaw), keys: rawFingerprint(keysRaw) }
   base._paths = p
   return base
@@ -411,7 +454,7 @@ export function keysDecrypt(raw) {
   return JSON.parse(pt.toString('utf8'))
 }
 function readKeys(p) {
-  try { return keysFromRaw(readFileSync(p)) } catch (error) { if (error && error.code === 'ENOENT') return {}; throw error }
+  try { return keysFromRaw(readFileSync(p), p) } catch (error) { if (error && error.code === 'ENOENT') return {}; throw error }
 }
 // 从盘上读取最新 keys（解密），供写路径合并使用——消除「基于内存旧副本写回」复活已删 key 的窗口
 export function readKeysFresh(p) { return readKeys(p) }

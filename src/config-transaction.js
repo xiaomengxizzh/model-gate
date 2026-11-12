@@ -11,7 +11,7 @@
 //   - recover()：有 marker 且目标均为新 → 前滚；无 marker 且每个目标只可能是旧或新 → 回滚到旧；
 //     其它（外部修改/无法判定）→ 保留现场、fail-closed、返回结构化冲突
 // 所有写目标文件的路径都经过 rename，禁止 writeFileSync 直写目标（journal/暂存件除外）。
-import { closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, fchmodSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 
@@ -122,24 +122,62 @@ function readJsonFile (path) {
   }
 }
 
+// 锁文件的「所有者」读取：与 journal/marker 不同，锁是**可回收**的短命工件。
+//   missing   → 已被释放（并发窗口），直接重试
+//   empty     → 旧实现「先 openSync('wx') 再 writeSync」在两步之间崩溃留下的空文件；没有所有者，可按陈旧锁回收
+//   invalid   → 非空但不可解析（外部损坏/截断）：fail-closed 并给出可操作错误，不静默删除
+//   owner     → 有 pid：存活则拒绝（不排队），已死则回收
+function readLockOwner (path) {
+  let text
+  try { text = readFileSync(path, 'utf8') } catch (error) {
+    if (error && error.code === 'ENOENT') return { state: 'missing' }
+    throw error
+  }
+  if (!text.trim()) return { state: 'empty' }
+  let parsed
+  try { parsed = JSON.parse(text) } catch { return { state: 'invalid' } }
+  if (!parsed || typeof parsed !== 'object') return { state: 'invalid' }
+  return { state: 'owner', owner: parsed }
+}
+
 function acquireLock (paths, opId) {
   mkdirSync(paths.dir, { recursive: true })
   const lockPath = join(paths.dir, LOCK_FILE)
   const payload = JSON.stringify({ pid: process.pid, opId, at: Date.now() })
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fd = openSync(lockPath, 'wx', 0o600)
-      try { writeSync(fd, payload); fsyncSync(fd) } finally { closeSync(fd) }
-      return { path: lockPath, opId }
-    } catch (error) {
-      if (!error || error.code !== 'EEXIST') throw error
-      const owner = readJsonFile(lockPath)
-      if (owner && pidAlive(Number(owner.pid))) {
-        fail('store_locked', '配置正被另一个写者持有锁（pid ' + owner.pid + '）', { ownerPid: Number(owner.pid) })
+  // F02：锁内容先写私有临时文件并 fsync，再用 linkSync 原子「发布」为锁文件。
+  // 旧的 openSync('wx') + writeSync 存在「空锁文件」窗口：在两步之间崩溃会留下 0 字节锁，
+  // 旧代码把它当 journal 解析失败 → 永久锁死（每次保存都失败）。linkSync 保证锁文件一旦可见就内容完整。
+  const tmpPath = lockPath + '.' + process.pid + '.' + randomBytes(4).toString('hex') + '.tmp'
+  const fd = openSync(tmpPath, 'wx', 0o600)
+  try {
+    fchmodSync(fd, 0o600)
+    writeSync(fd, payload)
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        linkSync(tmpPath, lockPath)
+        return { path: lockPath, opId }
+      } catch (error) {
+        if (!error || error.code !== 'EEXIST') throw error
+        const observed = readLockOwner(lockPath)
+        if (observed.state === 'missing') continue
+        if (observed.state === 'invalid') {
+          fail('lock_unreadable', '配置写锁文件不可解析（可能被外部损坏）：已停止写入以免并发覆盖；请人工检查并删除配置目录下的 ' + LOCK_FILE + ' 后重试', { lockFile: LOCK_FILE })
+        }
+        const owner = observed.owner || null
+        if (owner && pidAlive(Number(owner.pid))) {
+          fail('store_locked', '配置正被另一个写者持有锁（pid ' + owner.pid + '）', { ownerPid: Number(owner.pid) })
+        }
+        // empty（旧实现崩溃残留）或持有者已不存在：清理陈旧锁后重试一次（仍然失败则拒绝，不排队等待）
+        try { unlinkSync(lockPath) } catch {}
       }
-      // 持有者已不存在：清理陈旧锁后重试一次（仍然失败则拒绝，不排队等待）
-      try { unlinkSync(lockPath) } catch {}
     }
+  } finally {
+    removeIfExists(tmpPath)
   }
   fail('store_locked', '配置写锁无法获取（存在未清理的锁文件）')
 }
@@ -147,15 +185,20 @@ function acquireLock (paths, opId) {
 function releaseLock (lock) {
   if (!lock) return
   try {
-    const owner = readJsonFile(lock.path)
-    if (!owner || owner.opId === lock.opId) unlinkSync(lock.path)
+    const observed = readLockOwner(lock.path)
+    // 只删「自己的锁」：missing 无需处理；空/损坏文件不是本事务写的，保留给人工判断。
+    if (observed.state === 'missing') return
+    if (observed.state === 'owner' && observed.owner.opId === lock.opId) unlinkSync(lock.path)
   } catch {}
 }
 
 function removeIfExists (path) { try { unlinkSync(path) } catch {} }
 
-// 只清理本事务自有的临时写文件（writeFileDurable 的命名模式），不碰用户其它文件。
-const OWN_TMP_RE = /^(?:keys\.local\.json|gateway\.local\.json|config-txn(?:\.commit)?\.json)\.[0-9]+\.[a-f0-9]+\.tmp$/
+// 只清理本事务自有的临时写文件，不碰用户其它文件。三种命名都要认：
+//   1. writeFileDurable 当前格式：<目标>.<pid>.<hex>.tmp
+//   2. 旧 writeJsonAtomic 遗留格式：<目标>.<pid>.tmp（升级/崩溃残留，「与旧 staging 共存」）
+//   3. 锁发布用的私有临时文件：config-txn.lock.<pid>.<hex>.tmp
+const OWN_TMP_RE = /^(?:(?:keys\.local\.json|gateway\.local\.json|config-txn\.json|config-txn\.commit\.json)(?:\.[0-9]+\.[a-f0-9]+\.tmp|\.[0-9]+\.tmp)|config-txn\.lock\.[0-9]+\.[a-f0-9]+\.tmp)$/
 function cleanupOwnedTmp (paths) {
   let names = []
   try { names = readdirSync(paths.dir) } catch { return }
