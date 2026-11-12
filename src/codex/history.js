@@ -11,10 +11,10 @@
 // 证据与 wire 形状：docs/explanation/codex-v2-agents.md。
 
 import { createHash } from 'node:crypto'
-import { createReadStream, lstatSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, lstatSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
-import { basename, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 export const HISTORY_DIAGNOSIS_VERSION = 1
 export const HISTORY_WRITE_NOT_AUTHORIZED = 'not_authorized'
@@ -647,3 +647,237 @@ export async function planSelectiveMigration(selection = {}, opts = {}) {
 export async function applySelectiveMigration() {
   throw notAuthorized()
 }
+
+// —— N04：经确认的最小明文摘要导出（供新会话；原件逐字节不变） ——
+// 只读取显式选中会话里的 user/assistant **明文文本**；工具调用/工具输出/密文/system 指令一律不导出。
+// 导出目标是调用方显式给出的独立文件（不得落在历史根内），原子写；成功后复核原件 sha/mtime 未变。
+export const SUMMARY_EXPORT_FORMAT = 'modelgate.codex-summary-export/1'
+export const SUMMARY_HARD_LIMITS = Object.freeze({
+  maxFiles: 200,
+  maxBytes: 16 * 1024 * 1024,
+  maxChars: 60000,
+  maxItems: 400,
+  maxItemChars: 4000,
+})
+const SUMMARY_TEXT_TYPES = new Set(['text', 'input_text', 'output_text'])
+const SUMMARY_ROLES = new Set(['user', 'assistant'])
+
+function summaryLimits(raw) {
+  const src = plain(raw) ? raw : {}
+  const pick = (key) => {
+    const n = Number(src[key])
+    if (!Number.isFinite(n) || n <= 0) return SUMMARY_HARD_LIMITS[key]
+    return Math.max(1, Math.min(SUMMARY_HARD_LIMITS[key], Math.trunc(n)))
+  }
+  return {
+    maxFiles: pick('maxFiles'),
+    maxBytes: pick('maxBytes'),
+    maxChars: pick('maxChars'),
+    maxItems: pick('maxItems'),
+    maxItemChars: pick('maxItemChars'),
+  }
+}
+
+function selectedSessionRows(diag, selection) {
+  const sel = Array.isArray(selection) ? { sessions: selection } : (plain(selection) ? selection : {})
+  const wanted = new Set()
+  for (const v of Array.isArray(sel.sessions) ? sel.sessions : []) wanted.add(String(v))
+  for (const v of Array.isArray(sel.relPaths) ? sel.relPaths : []) wanted.add(String(v))
+  const all = sel.all === true
+  const rows = (diag && Array.isArray(diag.sessions)) ? diag.sessions : []
+  return rows.filter((r) => all || wanted.has(r.sessionId) || wanted.has(r.relPath))
+}
+
+export function summaryPlanId(diag, selection) {
+  const rows = selectedSessionRows(diag, selection)
+  const material = { rootId: (diag && diag.rootId) || '', files: rows.map((r) => (r.relPath || '') + '#' + (r.sha256 || '')) }
+  return 'hs_' + createHash('sha256').update(JSON.stringify(material)).digest('hex').slice(0, 24)
+}
+
+/** 只读试算：给 planId、选中文件与边界；不写任何文件。 */
+export function planSummaryExport(diag, opts = {}) {
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now()
+  const limits = summaryLimits(opts.limits)
+  const rows = selectedSessionRows(diag, opts.selection)
+  const plan = {
+    version: HISTORY_DIAGNOSIS_VERSION,
+    format: SUMMARY_EXPORT_FORMAT,
+    generatedAt: now,
+    rootId: (diag && diag.rootId) || '',
+    rootLabel: (diag && diag.dirLabel) || '',
+    planId: summaryPlanId(diag, opts.selection),
+    selection: { files: rows.map((r) => ({ relPath: r.relPath, sessionId: r.sessionId || '', sha256: r.sha256 || '', size: r.size || 0 })), count: rows.length },
+    bounds: limits,
+    include: ['user_plaintext', 'assistant_plaintext'],
+    exclude: ['system_instructions', 'tool_calls', 'tool_outputs', 'encrypted_content', 'reasoning', 'images'],
+    requires: { acknowledged: true, purpose: '说明导出用途（≤200 字符）', outFile: '独立 .json 文件（不得在历史根内）', planId: true },
+    writes: ['summary-export-file'],
+    originalsMutated: false,
+    historyWriteSupported: false,
+    note: '只读试算：选中文件的明文摘要将在用户确认后导出到独立文件；原件不改写、不迁移、不删除。',
+  }
+  if (!diag || diag.enabled !== true) {
+    plan.error = (diag && diag.error) || '无可用诊断：请先用已登记的历史根做只读诊断'
+    plan.errorCode = (diag && diag.errorCode) || HISTORY_ERROR.NO_ROOT
+  }
+  if (!rows.length) plan.warnings = ['没有选中任何会话']
+  return plan
+}
+
+function extractSummaryTexts(payload) {
+  const out = []
+  if (!plain(payload)) return out
+  if (payload.type === 'message' && SUMMARY_ROLES.has(payload.role) && Array.isArray(payload.content)) {
+    for (const item of payload.content) {
+      if (!plain(item)) continue
+      if (!SUMMARY_TEXT_TYPES.has(String(item.type || ''))) continue
+      if (typeof item.text !== 'string' || !item.text.trim()) continue
+      out.push({ role: payload.role, text: item.text })
+    }
+  }
+  return out
+}
+
+async function scanSummaryFile(absPath, relPath, limits, acc) {
+  const items = []
+  let bytes = 0
+  let skippedEncrypted = 0
+  let lines = 0
+  const rs = createReadStream(absPath, { encoding: 'utf8' })
+  const rl = createInterface({ input: rs, crlfDelay: Infinity })
+  try {
+    for await (const line of rl) {
+      lines += 1
+      bytes += Buffer.byteLength(line, 'utf8') + 1
+      if (bytes > limits.maxBytes) { acc.truncated = true; acc.reasons.add('bytes'); break }
+      if (line.length > HISTORY_HARD_LIMITS.maxLineBytes) continue
+      if (line.indexOf('encrypted_content') !== -1 || line.indexOf('encrypted_task_id') !== -1) { skippedEncrypted += 1; continue }
+      const rec = parseJsonMaybe(line)
+      if (!plain(rec)) continue
+      const payload = plain(rec.payload) ? rec.payload : rec
+      for (const it of extractSummaryTexts(payload)) {
+        let text = it.text.trim()
+        if (!text) continue
+        if (text.length > limits.maxItemChars) {
+          text = text.slice(0, limits.maxItemChars)
+          acc.truncated = true
+          acc.reasons.add('item_chars')
+        }
+        if (acc.chars + text.length > limits.maxChars) { acc.truncated = true; acc.reasons.add('chars'); return { items, bytes, skippedEncrypted } }
+        if (items.length >= limits.maxItems) { acc.truncated = true; acc.reasons.add('items'); return { items, bytes, skippedEncrypted } }
+        items.push({ relPath, role: it.role, text })
+        acc.chars += text.length
+      }
+    }
+  } finally {
+    try { rl.close() } catch {}
+    try { rs.destroy() } catch {}
+  }
+  return { items, bytes, skippedEncrypted }
+}
+
+function assertSummaryOutputPath(rootDir, rawPath) {
+  const out = typeof rawPath === 'string' ? rawPath.trim() : ''
+  if (!out) return { error: 'out_file_required', message: '必须显式提供导出目标文件（绝对路径 .json）' }
+  if (!isAbsolute(out)) return { error: 'invalid_out_file', message: '导出目标必须是绝对路径' }
+  if (!out.toLowerCase().endsWith('.json')) return { error: 'invalid_out_file', message: '导出目标必须是 .json 文件' }
+  if (basename(out).toLowerCase() === 'auth.json') return { error: 'forbidden_out_file', message: '拒绝写入 auth.json' }
+  const norm = resolve(out)
+  if (norm === resolve(rootDir) || norm.startsWith(resolve(rootDir) + sep)) {
+    return { error: 'forbidden_out_file', message: '导出目标不得落在历史根内（原件区域零写）' }
+  }
+  return { ok: true, path: norm }
+}
+
+/** 经确认的导出：planId 绑定 + 显式用途 + 独立目标文件；原件不变，工具/密文不导出。 */
+export async function exportApprovedSummary(opts = {}) {
+  if (opts.acknowledged !== true) return { ok: false, code: 'acknowledgement_required', message: '导出摘要必须显式确认 acknowledged:true' }
+  const purpose = typeof opts.purpose === 'string' ? opts.purpose.trim().slice(0, 200) : ''
+  if (!purpose) return { ok: false, code: 'purpose_required', message: '必须说明用途（purpose，≤200 字符）' }
+  const resolved = resolveRoot({ rootId: opts.rootId, sessionsDir: opts.sessionsDir, allowUnregisteredRoot: opts.allowUnregisteredRoot === true })
+  if (resolved.error) return { ok: false, code: resolved.error, message: resolved.message }
+  const root = resolved.root
+  const diag = opts.diagnosis || await diagnoseHistory({ rootId: opts.rootId, sessionsDir: opts.sessionsDir, limits: opts.limits, now: opts.now })
+  if (!diag || diag.enabled !== true) return { ok: false, code: (diag && diag.errorCode) || 'diagnosis_unavailable', message: (diag && diag.error) || '诊断不可用' }
+  const expected = summaryPlanId(diag, opts.selection)
+  const planId = typeof opts.planId === 'string' ? opts.planId.trim() : ''
+  if (!planId) return { ok: false, code: 'plan_id_required', message: '必须回传摘要导出计划（planId）' }
+  if (planId !== expected) return { ok: false, code: 'plan_id_mismatch', message: 'planId 与当前选择不一致（历史或选择已变），拒绝导出' }
+  const outCheck = assertSummaryOutputPath(root.dir, opts.outFile)
+  if (!outCheck.ok) return { ok: false, code: outCheck.error, message: outCheck.message }
+  if (existsSync(outCheck.path) && opts.allowOverwrite !== true) {
+    return { ok: false, code: 'out_file_exists', message: '导出目标已存在；拒绝覆盖（显式 allowOverwrite 才允许）' }
+  }
+  const limits = summaryLimits(opts.limits)
+  const rows = selectedSessionRows(diag, opts.selection)
+  if (rows.length > limits.maxFiles) return { ok: false, code: 'too_many_files', message: '选中文件数超过上限：' + limits.maxFiles }
+  const selectedReal = []
+  for (const row of rows) {
+    const abs = resolve(root.dir, row.relPath)
+    if (!abs.startsWith(resolve(root.dir) + sep)) return { ok: false, code: 'escaped_path', message: '选中文件越出历史根，已拒绝' }
+    let st
+    try { st = lstatSync(abs) } catch { return { ok: false, code: 'file_missing', message: '选中文件不存在或不可读：' + row.relPath } }
+    if (st.isSymbolicLink()) return { ok: false, code: 'symlink_refused', message: '选中文件是符号链接，已拒绝：' + row.relPath }
+    if (!st.isFile()) return { ok: false, code: 'not_a_file', message: '选中路径不是普通文件：' + row.relPath }
+    selectedReal.push({ row, abs, stat: st })
+  }
+  const acc = { chars: 0, truncated: false, reasons: new Set() }
+  const files = []
+  const items = []
+  let skippedEncrypted = 0
+  for (const { row, abs, stat: st } of selectedReal) {
+    const scanned = await scanSummaryFile(abs, row.relPath, limits, acc)
+    skippedEncrypted += scanned.skippedEncrypted
+    for (const it of scanned.items) items.push(it)
+    files.push({ relPath: row.relPath, sha256: row.sha256 || '', size: st.size, items: scanned.items.length, bytes: scanned.bytes })
+  }
+  const note = '最小明文摘要：只含 user/assistant 明文文本（不含工具/密文/系统指令）；供新会话人工粘贴或导入；原件未改动。'
+  const payload = {
+    format: SUMMARY_EXPORT_FORMAT,
+    generatedAt: Number.isFinite(opts.now) ? opts.now : Date.now(),
+    root: { id: root.id || '', label: root.label || basename(root.dir) },
+    purpose,
+    selection: { files: files.map((f) => ({ relPath: f.relPath, sha256: f.sha256, size: f.size, items: f.items })), count: files.length },
+    bounds: limits,
+    totals: { files: files.length, items: items.length, chars: acc.chars, skippedEncrypted, truncated: acc.truncated, truncatedReasons: [...acc.reasons].sort() },
+    items,
+    note,
+  }
+  const text = JSON.stringify(payload, null, 2)
+  const tmp = outCheck.path + '.' + process.pid + '.tmp'
+  try {
+    writeFileSync(tmp, text + '\n', 'utf8')
+    renameSync(tmp, outCheck.path)
+  } catch (e) {
+    try { if (existsSync(tmp)) unlinkSync(tmp) } catch {}
+    return { ok: false, code: 'export_write_failed', message: '导出写入失败（未触碰原件）：' + ((e && e.code) || 'io_error') }
+  }
+  // 复核原件：sha256 与 mtime 未变（导出绝不修改历史）。
+  let originalsUnchanged = true
+  for (const { row, abs, stat: before } of selectedReal) {
+    try {
+      const after = lstatSync(abs)
+      const hash = await hashFile(abs)
+      if (after.size !== before.size || after.mtimeMs !== before.mtimeMs || (row.sha256 && hash !== row.sha256)) { originalsUnchanged = false; break }
+    } catch { originalsUnchanged = false; break }
+  }
+  return {
+    ok: true,
+    wrote: true,
+    format: SUMMARY_EXPORT_FORMAT,
+    outFile: basename(outCheck.path),
+    sha256: createHash('sha256').update(text + '\n').digest('hex'),
+    totals: payload.totals,
+    notes: [note],
+    originalsUnchanged,
+    historyWriteSupported: false,
+  }
+}
+
+async function hashFile(path) {
+  const h = createHash('sha256')
+  const rs = createReadStream(path)
+  for await (const chunk of rs) h.update(chunk)
+  return h.digest('hex')
+}
+
