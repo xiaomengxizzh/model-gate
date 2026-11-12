@@ -195,3 +195,61 @@ POST /api/probe {"id":"mock"} → 200 {"ok":true,"results":[{"id":"mock","ok":tr
 | 备份 | 写后返回不透明 backupId（bk_ 32hex）；rollback 只接受 backupId，未知/跨根/路径形态一律 400/403/404，不接受文件路径。 |
 | export | GET /api/codex/config/export?root=<id> 只回所拥有字段的归一化投影；不含保留行、外部段值、凭据或整文件。 |
 | 审计 | 只记 action / root / 受控字段名 / 结果码；不记内容、路径、令牌或 hash。 |
+
+## 11. 版本化管理面与 CLI v1（N03）
+
+> 2026-11-12。`mg-management/1` 是 CLI/控制台可依赖的版本化契约；旧调用方不声明版本时保留
+> 既有 confirmToken-only 语义（deprecated，**不是** v1 的一部分）。
+
+### 11.1 版本协商
+
+| 项 | 契约 |
+| --- | --- |
+| 版本 | 支持 `mg-management/1`（`src/codex/api.js` 的 `CODEX_API_VERSION`），列表对外只读暴露在 `/api/codex/policy.apiVersions`。 |
+| 请求头 | `x-mg-api-version: mg-management/1`；缺省按当前版本处理（旧客户端兼容）。 |
+| 不支持版本 | 读 body 前返回 400 `{ok:false, code:"unsupported_api_version", apiVersion, nextAction:"upgrade-client-or-pin-supported-api-version"}`，绝不按旧形状猜。 |
+
+### 11.2 统一错误信封与状态
+
+所有 codex 管理面错误统一为：
+
+```json
+{ "ok": false, "code": "<stable>", "error": "<redacted message>", "apiVersion": "mg-management/1", "nextAction": "<stable>", "requestId": "<optional>" }
+```
+
+| HTTP | 语义 | 代表 code |
+| --- | --- | --- |
+| 401 | 入口层令牌缺失/错误（index.js 管理入口；CLI 映射为 exit 2） | 无（入口信封） |
+| 403 | 已识别但无权（非显式管理员/非本机/写被关闭/字段所有权） | explicit_admin_required, remote_forbidden, write_disabled, admin_subject_required |
+| 409 | 代际/绑定冲突（不写盘，保留草稿） | concurrent_modification, unmanaged_conflict, plan_id_mismatch, confirmation_binding_mismatch, root_changed |
+| 400 | 形状/确认/版本错误 | unsupported_api_version, plan_id_required, confirmation_required, invalid_body |
+| 404 | 未知端点/root/backup | unknown_endpoint, unknown_config_root, backup_not_found |
+
+### 11.3 写操作绑定 planId（v1 必需）
+
+- `POST /api/codex/config/plan` 返回 `planId`（`pl_` + 24 hex，由 confirmToken 单向派生）与 `confirmToken`；同时返回 `generation`、`redactedDiff`（{field, from, to, redacted, owner}）、`before/after` hash 与 `expiresAt`。
+- 声明了 `x-mg-api-version` 的 `config/apply`、`config/rollback` 必须回传 planId：缺失 400 `plan_id_required`；与 confirmToken 不属于同一 plan → 409 `plan_id_mismatch`，任何写入前拒绝。
+- `apply` 返回 `rollback.planId` / `rollback.confirmToken` / `rollback.backupId` / `rollback.expectedSha256`，回滚同样绑定 planId。
+- 权限/只读/数据面隔离不变：管理面只认显式管理员；`/v1/*` 客户端 Key 永不授权 `/api/codex/*`；普通产品模式 apply/rollback 仍 403 `write_disabled`。
+
+### 11.4 路由分级
+
+`/api/codex/policy.routes` 为每条路由给出 `kind`（`readonly` / `management`）、`write`、`explicitAdmin`、`requiresPlanId`。只读路由（policy/plan/export/catalog status）绝不写盘；写路由必须同时满足 managed root + 显式管理员 + confirmToken + planId。
+
+### 11.5 CLI（`node bin/mg.mjs`，纯检出可运行）
+
+| 命令 | 网络 | 说明 |
+| --- | --- | --- |
+| `doctor --json` | 无 | 版本、Node 支持范围、管理 API 版本、显式配置的 providers/models 计数、目录完整性/证据新鲜度（stale 计数）、keys 文件存在性（**不读值**）、支持矩阵；未显式给配置时 config=unknown，不去读 HOME/全局配置。 |
+| `provider list/show`、`model list/show`、`route explain` | 无 | 只读投影；host 只回主机名，key 只回引用来源（store/env/config/absent），不打印任何值；`route explain` 未命中聚合保留 ID 时 exit 5 且 `zeroUpstream:true`。 |
+| `client codex export` | 无 | 只读 TOML 模板（profile + 别名样例 + 显式角色样例）；角色样例标注 `providerOverride:"unsupported"`，不冒充原生同会话切模型；不写文件。 |
+| `config plan` | HTTP | 前置：loopback 目标 + 管理令牌环境变量。输出 planId/generation/redactedDiff/confirmToken。 |
+| `config apply/rollback` | HTTP | 必须 `--plan`；非 TTY 必须 `--yes`；无隐式重试；只写登记 root 指向的 config.toml。 |
+
+CLI 约定：
+
+- 管理令牌只从环境变量读取（默认 `MG_ADMIN_TOKEN`，`--admin-token-env` 可改），不进 argv/输出/日志。
+- 默认只允许 loopback 目标；非 loopback 需显式 `MG_CLI_ALLOW_REMOTE=1`（输出标注 `remoteTarget:true`）。
+- 退出码：0 ok / 1 形状或服务端 4xx / 2 令牌缺失或 401 / 3 403 / 4 409 / 5 404。
+- JSON 输出稳定且不含凭据/正文；不写全局文件、不读 `~/.codex`、不碰 auth.json。
+

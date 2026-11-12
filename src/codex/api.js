@@ -29,19 +29,77 @@ import {
 } from './config.js'
 
 export const CODEX_API_CONTRACT = 'mg-codex-api/1'
+// N03：管理 API 版本化。请求可用 x-mg-api-version 声明；不支持则 400（绝不按旧形状猜）。
+export const CODEX_API_VERSION = 'mg-management/1'
+export const CODEX_API_VERSIONS = Object.freeze([CODEX_API_VERSION])
+export const CODEX_ROUTE_KIND = Object.freeze({ MANAGEMENT: 'management', READONLY: 'readonly' })
 export const MAX_DIFF_ROWS = 400
+const API_VERSION_HEADER = 'x-mg-api-version'
+
+// 统一错误信封的稳定 nextAction（管理 CLI/控制台据此给操作建议）。
+const NEXT_ACTIONS = Object.freeze({
+  admin_auth_required: 'set-admin-token-and-send-x-mg-admin',
+  explicit_admin_required: 'set-admin-token-and-send-x-mg-admin',
+  remote_forbidden: 'use-loopback-or-explicit-allow-remote',
+  unsupported_api_version: 'upgrade-client-or-pin-supported-api-version',
+  plan_id_required: 'run-config-plan-first',
+  plan_id_mismatch: 'rerun-config-plan',
+  confirmation_required: 'rerun-config-plan',
+  confirmation_expired: 'rerun-config-plan',
+  concurrent_modification: 're-plan-on-latest-generation',
+  unmanaged_conflict: 'manual-review-preserved-lines',
+  write_disabled: 'enable-managed-root-explicitly',
+  root_changed: 're-plan-after-root-change',
+})
+
+// 版本协商：只认已发布版本；未声明按当前版本处理（向后兼容），声明了但未知即拒绝。
+export function negotiateApiVersion (ctx = {}) {
+  const headerValue = (ctx && ctx.apiVersion != null)
+    ? ctx.apiVersion
+    : (ctx && ctx.req && ctx.req.headers ? ctx.req.headers[API_VERSION_HEADER] : undefined)
+  const raw = Array.isArray(headerValue) ? headerValue[0] : headerValue
+  const version = raw == null || String(raw).trim() === '' ? CODEX_API_VERSION : String(raw).trim()
+  if (!CODEX_API_VERSIONS.includes(version)) {
+    return {
+      ok: false,
+      version,
+      response: {
+        status: 400,
+        body: errorBody('unsupported_api_version', '不支持的管理 API 版本：' + version + '（支持：' + CODEX_API_VERSIONS.join(', ') + '）'),
+      },
+    }
+  }
+  return { ok: true, version }
+}
+
+// 调用方是否显式声明了管理 API 版本（mg-management/1 契约）。未声明的旧调用方保留
+// confirmToken-only 兼容语义（deprecated），但一旦声明版本，写操作必须绑定 planId。
+export function apiVersionDeclared (ctx = {}) {
+  const v = ctx && ctx.apiVersion != null
+    ? ctx.apiVersion
+    : (ctx && ctx.req && ctx.req.headers ? ctx.req.headers[API_VERSION_HEADER] : undefined)
+  const raw = Array.isArray(v) ? v[0] : v
+  return raw != null && String(raw).trim() !== ''
+}
+
+// 写操作绑定 planId：由 confirmToken 单向派生（不引入新 secret，不可逆，不能跨 plan 复用）。
+export function planIdFor (confirmToken) {
+  const token = String(confirmToken == null ? '' : confirmToken)
+  if (!token) return null
+  return 'pl_' + sha256Hex('mg-management-plan:' + token).slice(0, 24)
+}
 const MAX_SLUG_LIMIT = 200
 const DEFAULT_SLUG_LIMIT = 50
 
 // 每个路由都要求显式管理员（explicitAdmin）；"未设置 adminToken 即放行" 的旧语义已删除。
 // write=true 的路由还要求 ctx.managedRoot === true 且登记根 mode=managed（普通产品模式 403 disabled）。
 export const CODEX_API_ROUTES = Object.freeze([
-  { method: 'GET', path: '/api/codex/policy', name: 'policy', write: false, explicitAdmin: true, desc: '字段所有权 + 目录摘要 + 路由清单' },
-  { method: 'POST', path: '/api/codex/config/plan', name: 'config_plan', write: false, explicitAdmin: true, desc: '只读预览：白名单字段差异/脱敏值/confirmToken，绝不写盘' },
-  { method: 'POST', path: '/api/codex/config/apply', name: 'config_apply', write: true, explicitAdmin: true, desc: '受控写入：二次快照 + 原子写 + 备份 + 写后校验（仅 managed）' },
-  { method: 'POST', path: '/api/codex/config/rollback', name: 'config_rollback', write: true, explicitAdmin: true, desc: '按不透明 backupId 回滚（仅 managed），回滚前状态另存' },
-  { method: 'GET', path: '/api/codex/config/export', name: 'config_export', write: false, explicitAdmin: true, desc: '只回所拥有字段的归一化投影（无保留行/无凭据）' },
-  { method: 'GET', path: '/api/codex/catalog/status', name: 'catalog_status', write: false, explicitAdmin: true, desc: '目录世代/计数/slugs 摘要（截断，不回全量目录）' },
+  { method: 'GET', path: '/api/codex/policy', name: 'policy', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '字段所有权 + 目录摘要 + 路由清单' },
+  { method: 'POST', path: '/api/codex/config/plan', name: 'config_plan', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '只读预览：白名单字段差异/脱敏值/planId+confirmToken，绝不写盘' },
+  { method: 'POST', path: '/api/codex/config/apply', name: 'config_apply', kind: CODEX_ROUTE_KIND.MANAGEMENT, write: true, explicitAdmin: true, desc: '受控写入：二次快照 + 原子写 + 备份 + 写后校验（仅 managed，必须回传 planId）' },
+  { method: 'POST', path: '/api/codex/config/rollback', name: 'config_rollback', kind: CODEX_ROUTE_KIND.MANAGEMENT, write: true, explicitAdmin: true, desc: '按不透明 backupId 回滚（仅 managed，必须回传 planId），回滚前状态另存' },
+  { method: 'GET', path: '/api/codex/config/export', name: 'config_export', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '只回所拥有字段的归一化投影（无保留行/无凭据）' },
+  { method: 'GET', path: '/api/codex/catalog/status', name: 'catalog_status', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '目录世代/计数/slugs 摘要（截断，不回全量目录）' },
 ])
 
 export const EXPLICIT_ADMIN_OPERATIONS = Object.freeze(CODEX_API_ROUTES.map((r) => r.name))
@@ -106,7 +164,10 @@ function statusFor (code) {
 }
 
 function errorBody (code, message, extra) {
-  return Object.assign({ ok: false, error: message, code }, extra || {})
+  const key = String(code == null ? '' : code)
+  const base = { ok: false, error: message, code: key, apiVersion: CODEX_API_VERSION }
+  if (NEXT_ACTIONS[key]) base.nextAction = NEXT_ACTIONS[key]
+  return Object.assign(base, extra || {})
 }
 
 function isPlainObject (v) {
@@ -377,7 +438,7 @@ function configErrorResponse (e) {
 }
 
 function okBody (obj) {
-  return Object.assign({ ok: true, contract: CODEX_API_CONTRACT, configContract: CONFIG_CONTRACT }, obj)
+  return Object.assign({ ok: true, contract: CODEX_API_CONTRACT, configContract: CONFIG_CONTRACT, apiVersion: CODEX_API_VERSION }, obj)
 }
 
 function requireObject (body, label) {
@@ -420,7 +481,9 @@ function handlePolicy (ctx, query, auth) {
         requiredBasenameAtRegistration: 'config.toml',
         forbidden: ['auth.json', 'sessions/**'],
       },
-      routes: CODEX_API_ROUTES.map((r) => ({ method: r.method, path: r.path, name: r.name, write: r.write, explicitAdmin: r.explicitAdmin === true, desc: r.desc })),
+      apiVersion: CODEX_API_VERSION,
+      apiVersions: CODEX_API_VERSIONS.slice(),
+      routes: CODEX_API_ROUTES.map((r) => ({ method: r.method, path: r.path, name: r.name, kind: r.kind, write: r.write, explicitAdmin: r.explicitAdmin === true, requiresPlanId: r.write === true, desc: r.desc })),
       audit: { fields: ['action', 'root', 'fields', 'result'], storesContent: false, storesTokens: false },
       ui: { probePath: '/api/codex/policy', exportOnlyFallback: true },
     }),
@@ -456,9 +519,12 @@ function handleConfigPlan (ctx, body, auth) {
         after: { size: plan.after.size, sha256: plan.after.sha256 },
         existing: plan.existing,
         changed: sanitizeChanged(plan.changed),
+        redactedDiff: sanitizeChanged(plan.changed),
         warnings: sanitizeWarnings(plan.warnings),
         preserved: preservedSummary(plan.preserved),
         createdSections: plan.createdSections,
+        // N03：写操作绑定 planId（由 confirmToken 单向派生）；confirmToken 仍是唯一确认凭据。
+        planId: planIdFor(plan.confirmToken),
         confirmToken: plan.confirmToken,
         expiresAt: plan.expiresAt,
         requiresConfirmation: true,
@@ -490,6 +556,14 @@ function handleConfigApply (ctx, body, auth) {
   if (typeof shaped.body.confirmToken !== 'string' || !shaped.body.confirmToken.trim()) {
     return { status: 400, body: errorBody('confirmation_required', '必须提供 plan 返回的 confirmToken；缺令牌的写入一律拒绝') }
   }
+  // N03：写操作绑定 planId —— 缺 planId 400；planId 与 confirmToken 不属于同一 plan → 409。
+  const planId = typeof shaped.body.planId === 'string' ? shaped.body.planId.trim() : ''
+  if (apiVersionDeclared(ctx)) {
+    if (!planId) return { status: 400, body: errorBody('plan_id_required', 'mg-management/1 的 apply 必须回传 /config/plan 的 planId；写操作一律绑定 plan') }
+  }
+  if (planId && planId !== planIdFor(shaped.body.confirmToken)) {
+    return { status: 409, body: errorBody('plan_id_mismatch', 'planId 与 confirmToken 不属于同一 plan（可能已重新 plan），拒绝写入') }
+  }
   if (!auth.adminSubject) return { status: 403, body: errorBody('admin_subject_required', 'apply 必须绑定显式管理员身份（adminSubject）') }
   try {
     const result = applyConfigForRoot({
@@ -505,7 +579,7 @@ function handleConfigApply (ctx, body, auth) {
     if (result.backupId) {
       try {
         const rp = planRollbackForRoot({ rootId, adminSubject: auth.adminSubject, backupId: result.backupId, now: ctx.now, ttlMs: ctx.confirmationTtlMs })
-        rollback = { backupId: rp.backupId, confirmToken: rp.confirmToken, expiresAt: rp.expiresAt, expectedSha256: rp.expectedSha256 }
+        rollback = { backupId: rp.backupId, planId: planIdFor(rp.confirmToken), confirmToken: rp.confirmToken, expiresAt: rp.expiresAt, expectedSha256: rp.expectedSha256 }
       } catch { rollback = null }
     }
     audit(ctx, 'config_apply', { root: rootId, fields: (result.changed || []).map((c) => c.path), result: 'ok' })
@@ -552,6 +626,13 @@ function handleConfigRollback (ctx, body, auth) {
   }
   if (typeof shaped.body.confirmToken !== 'string' || !shaped.body.confirmToken.trim()) {
     return { status: 400, body: errorBody('confirmation_required', '必须提供 planRollback 派生出的 confirmToken；缺令牌的回滚一律拒绝') }
+  }
+  const rollbackPlanId = typeof shaped.body.planId === 'string' ? shaped.body.planId.trim() : ''
+  if (apiVersionDeclared(ctx)) {
+    if (!rollbackPlanId) return { status: 400, body: errorBody('plan_id_required', 'mg-management/1 的 rollback 必须回传 apply 返回的 rollback.planId；回滚一律绑定 plan') }
+  }
+  if (rollbackPlanId && rollbackPlanId !== planIdFor(shaped.body.confirmToken)) {
+    return { status: 409, body: errorBody('plan_id_mismatch', 'planId 与 rollback confirmToken 不属于同一 plan，拒绝回滚') }
   }
   if (!auth.adminSubject) return { status: 403, body: errorBody('admin_subject_required', 'rollback 必须绑定显式管理员身份（adminSubject）') }
   try {
@@ -630,8 +711,12 @@ export async function handleCodexApi (ctx = {}) {
   const path = rawPath.split('?')[0]
   const query = readQuery(ctx, rawPath)
 
+  // 1) 授权先于任何 body 读取（readBody 只在鉴权+版本+路由校验通过后调用）。
   const auth = await authorize(ctx)
   if (!auth.ok) return auth.sent ? null : auth.response
+  // 2) 版本协商同样先于 body：不支持的客户端形状直接拒绝，绝不按旧形状猜。
+  const version = negotiateApiVersion(ctx)
+  if (!version.ok) return version.response
 
   const route = CODEX_API_ROUTES.find((r) => r.path === path)
   if (!route) {
