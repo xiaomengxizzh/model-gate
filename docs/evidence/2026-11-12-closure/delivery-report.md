@@ -120,9 +120,9 @@ cd "$WT" && npm run check && npm test && npm run docs:check && node scripts/chec
 
 | 项 | 值 |
 |---|---|
-| HEAD / tree | FINAL_HEAD_PLACEHOLDER |
+| HEAD / tree | `4a19fb13fd9c52e79b5d60624cc99afb05932221` / `fc57b9d297f2c1b56f2f4025b20ef82856cce28a` |
 | `npm run check` | exit 0 |
-| `npm test` | FINAL_TEST_PLACEHOLDER |
+| `npm test` | exit 0；**76 套件全部通过，770 用例通过 / 0 失败 / 1 用例级 skip**（71 套件上报 node:test 计数，其余为 legacy 根脚本由进程 exit 判定） |
 | `npm run docs:check` | exit 0 |
 | `node scripts/check-metadata.mjs` | exit 0（39 checks） |
 | 唯一 skip | `offline/codex-catalog` 的真实 CLI 门控（需 `MG_CODEX_VERIFY=1`），非掩盖失败 |
@@ -156,3 +156,16 @@ cd "$WT" && npm run check && npm test && npm run docs:check && node scripts/chec
 - 未完成：src/index.js 接线（P02/P04/N01）、CLI 原生门 Q03/Q04（BLOCKED_LIVE）、Q02（BLOCKED_ENV）、正式 GUI（Q04 后）。
 - 本 PR 不代表发布就绪；OFFLINE_RC 仅内部交接。
 ```
+
+## 11. 收尾时已关闭的 Q01 缺口（相对 E 的 S2 判定）
+
+| 缺口 | 处置 | 证据 |
+|---|---|---|
+| G1 provider 级熔断只在 legacy | `circuit.mjs` 经 E 隔离审计后登记进默认回归（显式 allowlist） | 提交 `87afcca`；76 套件中含 circuit 2 断言 |
+| G2 affinity 夹具过期 | B 用当前语义下的合法跨请求路径重写（A 503 单次终态+熔断 → 下一请求跳 A → TTL 粘滞 → 过期回流），并新增 canonical 用例 `affinity.test.mjs` 登记进默认回归；旧 `affinity.mjs` 保留给 live 手动清单 | 提交 `626fea1`/`b580452`/`22494f1`/`ec081fb`；canonical 5 断言 ×3 次全绿 |
+| G3 下游 set-cookie 反向断言缺失 | 非流式 200/429/500 硬断言已在 `downstream-headers.test.mjs`；**流式泄漏（x-upstream-secret 等）由 B 修 `src/sse.js` 改为安全白名单**，todo 已改硬断言（文件内 todo 计数 = 0） | 提交 `edd4ae7`/`0a41c53`/`fb53af4`/`4a19fb1` |
+| G4 runner 正常退出不回收孙进程 | runner-selftest 增加「exit 0 但留孙进程」用例 | 提交 `c5cb59f`；12 用例全绿 |
+| G5 性能三次采样 / 300s RSS 斜率 / 故障矩阵 | **未关闭**，留作 Q01 重开项（见 §6） | `p2-perf-baseline-E.md` 明确标注方向性基线 |
+
+注：G3 的流式路径修复是**产品代码变更**（`src/sse.js` 由黑名单改白名单），由 Lead 明确授权后由 B 执行，属本轮唯一的跨卡 src 修改。
+
