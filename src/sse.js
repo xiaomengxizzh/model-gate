@@ -4,11 +4,12 @@ export function isStreamResponse(res) {
   return STREAM_CT.test(ct)
 }
 
-// 不透传给客户端的上游响应头（流式路径是逐头透传的，必须显式挡掉两类）：
-//  ① hop-by-hop / 传输层：剥离后由网关自己以 chunked 重发，否则客户端解析错乱；
-//  ② 面向浏览器的状态与安全头：对 API 客户端无意义，且**恶意上游可借此污染调用方**——
-//     set-cookie 给调用方种 cookie、CSP/HSTS 干扰其页面、location 引导跳转（3xx 已被拦，2xx 带 location 属异常）。
-// 用黑名单而非白名单：白名单会把各家有用的 rate-limit / request-id 头一并丢掉。
+// 上游响应头只按**安全白名单**透传（流式路径逐头转发，不能信任任意上游头）：
+//   · 只保留对 SSE/诊断确实有用、且对浏览器/调用方无副作用的标准头；
+//   · 任意 x-*（x-upstream-secret、x-powered-by 等）不再默认透传；需要新增诊断头必须显式入白名单；
+//   · retry-after 只在 429 透传；200/5xx 不继承上游的 retry-after；
+//   · hop-by-hop / 传输层由网关自己以 chunked 重发，绝不透传上游的 transfer-encoding/content-length。
+// 另保留 STRIP_OUT 作为纵深防御：即使未来白名单误加，危险头仍被挡掉。
 const STRIP_OUT = new Set([
   'transfer-encoding', 'content-length', 'connection', 'keep-alive',
   'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'upgrade',
@@ -16,14 +17,25 @@ const STRIP_OUT = new Set([
   'content-security-policy', 'content-security-policy-report-only',
   'x-frame-options', 'strict-transport-security', 'public-key-pins', 'expect-ct',
 ])
+const FORWARD_SAFE_HEADERS = new Set([
+  'content-type', 'content-encoding', 'cache-control', 'expires', 'etag', 'last-modified',
+  'retry-after',
+  'x-request-id', 'request-id', 'openai-request-id', 'openai-processing-ms', 'openai-version',
+  'x-ratelimit-limit-requests', 'x-ratelimit-remaining-requests', 'x-ratelimit-reset-requests',
+  'x-ratelimit-limit-tokens', 'x-ratelimit-remaining-tokens', 'x-ratelimit-reset-tokens',
+])
 export function writeUpstreamHeaders(client, upstream, extra) {
+  const status = Number(upstream.statusCode) || 200
   const h = {}
   for (const [k, v] of Object.entries(upstream.headers)) {
-    if (STRIP_OUT.has(k.toLowerCase())) continue
+    const lower = k.toLowerCase()
+    if (!FORWARD_SAFE_HEADERS.has(lower)) continue
+    if (STRIP_OUT.has(lower)) continue
+    if (lower === 'retry-after' && status !== 429) continue
     h[k] = v
   }
   h['transfer-encoding'] = 'chunked'
-  return client.writeHead(upstream.statusCode || 200, Object.assign(h, extra || {}))
+  return client.writeHead(status, Object.assign(h, extra || {}))
 }
 
 // ── SSE 背压（MG-002）──

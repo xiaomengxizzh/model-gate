@@ -108,7 +108,7 @@ async function startLeakyStreamUpstream() {
   })
 }
 
-test('Q01-GAP1 流式 200：逐头透传路径也必须剥离 set-cookie/x-upstream-secret/CSP/上游 retry-after', { timeout: 30000, todo: 'Q01-GAP1-FOLLOWUP: src/sse.js 逐头透传黑名单未覆盖任意 x-* 与 200 retry-after（实测泄漏 x-upstream-secret,x-powered-by,retry-after）；修复后去掉 todo' }, async (t) => {
+test('Q01-GAP1 流式 200：逐头透传路径也必须剥离 set-cookie/x-upstream-secret/CSP/上游 retry-after', { timeout: 30000 }, async (t) => {
   const upstream = await startLeakyStreamUpstream()
   const gw = await startGateway({ name: 'q01-downstream-headers-stream', config: config(upstream) })
   t.after(async () => { await gw.stop(); await upstream.stop() })
@@ -122,9 +122,10 @@ test('Q01-GAP1 流式 200：逐头透传路径也必须剥离 set-cookie/x-upstr
   // 已覆盖的部分：set-cookie / CSP / hop-by-hop 不得透传。
   assert.equal(res.headers.get('set-cookie'), null, 'stream-200：set-cookie 不得透传')
   assert.equal(res.headers.get('content-security-policy'), null, 'stream-200：上游 CSP 不得污染客户端')
-  // GAP（todo）：src/sse.js 的 STRIP_OUT 黑名单仍会透传任意 x-* 与 200 的 retry-after。
-  const leaked = ['x-upstream-secret', 'x-powered-by', 'retry-after'].filter((h) => res.headers.get(h) !== null)
-  assert.deepEqual(leaked, [], 'stream-200：流式逐头透传仍泄漏 ' + leaked.join(','))
+  // 安全白名单：任意 x-* 与 200 的 retry-after 不得透传。
+  assert.equal(res.headers.get('x-upstream-secret'), null, 'stream-200：x-upstream-secret 不得透传')
+  assert.equal(res.headers.get('x-powered-by'), null, 'stream-200：x-powered-by 不得透传')
+  assert.equal(res.headers.get('retry-after'), null, 'stream-200：200 不得继承上游 retry-after')
   const text = await res.text()
   assert.match(text, /pong/)
   assert.match(text, /\[DONE\]/)
