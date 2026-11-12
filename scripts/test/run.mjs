@@ -25,6 +25,7 @@ export const SUITES = [
   'scripts/test/circuit.mjs',
   'scripts/test/affinity.mjs',
   'scripts/test/offline/downstream-headers.test.mjs',
+  'scripts/test/offline/affinity.test.mjs',
   'scripts/test/offline/admin-contract.test.mjs',
   'scripts/test/offline/admin-entry.test.mjs',
   'scripts/test/offline/admin-origin.test.mjs',
