@@ -13,6 +13,14 @@
 //
 // 事实来源：能力只来自显式 evidence（source/version/observedAt/expiresAt），缺席即 unknown，
 // 过期即 stale —— 不把「配置里写了」当成「上游已证实」。
+//
+// **位形证据（未独立复核厂商文档）**：本模块登记的现行 Go 位形只有
+//   /inference/go/openai/v1/{chat/completions,responses}（plan §3 记录的最新文档形状）
+//   /inference/go/v1/{chat/completions,responses}（本树 CHANGELOG 2026-09 记录 + 历史 live 脚本
+//     baseUrl=https://opencode.ai/inference/go 再由发送层拼 /v1/…）
+// 两者都登记为现行 binding（名字区分），互相不自动认作对方；/zen/go/v1 继续 legacy+deprecated。
+// 其它形状（例如 /inference/go/v2）一律拒绝。**live 使用前必须以厂商文档或有效凭据下的探针确认位形**，
+// 本仓库没有联网探测，不得把这里的登记当成已证实的生产事实。
 
 import { createHmac, randomUUID } from 'node:crypto'
 import { hostOf, isOpencodeGoHost } from '../codex/identity.js'
@@ -22,10 +30,14 @@ export const SERVICE_UA = 'model-gateway/0.1'
 export const ENTRY_SCHEMA = 'modelgate.opencode-go.entry/1'
 export const CAPABILITY_SCHEMA = 'modelgate.opencode-go.capabilities/1'
 
-// 现行 Go 入口（与 /zen/go/... 遗留入口分属不同绑定）。responses/chat 共享 go-v1 前缀。
+// 现行 Go 入口（与 /zen/go/... 遗留入口分属不同绑定）。两种现行位形各自一个 binding，不互认：
+//   go-openai-v1 → /inference/go/openai/v1/...
+//   go-v1        → /inference/go/v1/...
 export const ENTRIES = Object.freeze({
-  CHAT: Object.freeze({ kind: 'chat', binding: 'go-v1', path: '/inference/go/openai/v1/chat/completions', legacy: false }),
-  RESPONSES: Object.freeze({ kind: 'responses', binding: 'go-v1', path: '/inference/go/openai/v1/responses', legacy: false }),
+  CHAT: Object.freeze({ kind: 'chat', binding: 'go-openai-v1', path: '/inference/go/openai/v1/chat/completions', legacy: false }),
+  RESPONSES: Object.freeze({ kind: 'responses', binding: 'go-openai-v1', path: '/inference/go/openai/v1/responses', legacy: false }),
+  CHAT_V1: Object.freeze({ kind: 'chat', binding: 'go-v1', path: '/inference/go/v1/chat/completions', legacy: false }),
+  RESPONSES_V1: Object.freeze({ kind: 'responses', binding: 'go-v1', path: '/inference/go/v1/responses', legacy: false }),
   LEGACY_ZEN: Object.freeze({ kind: 'chat', binding: 'legacy-zen', path: '/zen/go/v1/chat/completions', legacy: true, deprecated: true }),
 })
 export const GO_ENTRY_VERSIONS = Object.freeze(['go-v1'])
@@ -53,15 +65,18 @@ export function entryOf(def) {
     }
     return { ok: false, code: 'opencodego_entry_invalid', message: 'opencodeGoEntry 只接受 chat/responses：' + String(d.opencodeGoEntry), host, url }
   }
-  for (const entry of [ENTRIES.LEGACY_ZEN, ENTRIES.CHAT, ENTRIES.RESPONSES]) {
+  for (const entry of [ENTRIES.LEGACY_ZEN, ENTRIES.CHAT, ENTRIES.RESPONSES, ENTRIES.CHAT_V1, ENTRIES.RESPONSES_V1]) {
     if (url.endsWith(entry.path) || url === normalizeUrl(base + entry.path)) {
       return { ok: true, entry, host, url, source: 'baseUrl' }
     }
   }
-  // baseUrl 是入口目录（.../inference/go/openai/v1）时，chat/responses 由协议决定，二者都合法。
+  // baseUrl 只到入口目录时，chat/responses 由协议决定，二者都合法；但必须标 ambiguous（诊断可见）。
   if (url.endsWith('/inference/go/openai/v1')) return { ok: true, entry: ENTRIES.CHAT, host, url, source: 'baseUrl', ambiguous: true }
+  if (url.endsWith('/inference/go/v1')) return { ok: true, entry: ENTRIES.CHAT_V1, host, url, source: 'baseUrl', ambiguous: true }
+  // 历史 live 脚本用的是 /inference/go 根，由发送层再拼 /v1/…（本树 CHANGELOG 2026-09 记录）。
+  if (url.endsWith('/inference/go')) return { ok: true, entry: ENTRIES.CHAT_V1, host, url, source: 'baseUrl', ambiguous: true, root: true }
   if (url.includes('/zen/go/')) return { ok: true, entry: ENTRIES.LEGACY_ZEN, host, url, source: 'baseUrl' }
-  return { ok: false, code: 'opencodego_entry_unknown', message: 'baseUrl 不是已识别的 Go 入口（现行 /inference/go/openai/v1 或遗留 /zen/go/v1）', host, url }
+  return { ok: false, code: 'opencodego_entry_unknown', message: 'baseUrl 不是已登记的 Go 入口（现行 /inference/go/openai/v1、/inference/go/v1，或遗留 /zen/go/v1）', host, url }
 }
 
 // 运行时判定「这个 provider 是否属于现行 Go 绑定」：显式 id 或（可识别的现行入口路径）。
@@ -95,6 +110,12 @@ export function validate(def, opts = {}) {
   const api = d.api === undefined || d.api === '' ? 'openai' : String(d.api)
   if (api !== 'openai' && api !== 'responses') {
     return { ok: false, code: 'opencodego_api_unsupported', message: 'Go provider.api 只能是 openai/responses：' + api, entry, warnings }
+  }
+  if (entry.ambiguous) {
+    warnings.push({
+      code: 'entry_shape_ambiguous',
+      message: '入口只到目录（' + entry.url + '）：chat/responses 未显式区分；live 前请用厂商文档/探针确认位形',
+    })
   }
   const version = d.opencodeGoVersion == null || d.opencodeGoVersion === '' ? 'unversioned' : String(d.opencodeGoVersion)
   if (!GO_ENTRY_VERSIONS.includes(version)) {

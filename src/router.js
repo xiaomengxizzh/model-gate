@@ -301,11 +301,44 @@ export function createRouter(cfg) {
   // （加载顺序与热重载都不可依赖），因此按对象引用失效，而不是在构造时快照。
   let catCache = null
   let catSource
-  function catalog() {
+  // N01：catalog() 现在可以吃一个**固定快照**（pin）。传入快照时不再读 cfg._codexCatalog，
+  // 因此同一请求从解析到授权始终使用同一代目录（同代生成/授权，不混代）。
+  function snapshotView(snapshot) {
+    if (snapshot == null) return null
+    const view = snapshot.view || snapshot
+    const generation = snapshot.generation != null ? snapshot.generation : view && view.generation
+    if (view && view.complete === false) {
+      throw catalogError('*', 'catalog_snapshot_incomplete', '目录快照不完整，拒绝路由（零上游）：' + (view.incompleteReasons || []).join(','))
+    }
+    if (!view || !Array.isArray(view.models) || !view.models.length || !Number.isInteger(generation)) {
+      throw catalogError('*', 'catalog_snapshot_invalid', '目录快照缺少模型或代际，拒绝路由（零上游）')
+    }
+    return { view, generation }
+  }
+  function catalog(snapshot) {
+    const pinned = snapshotView(snapshot)
+    if (pinned) {
+      const view = pinned.view
+      return {
+        officials: new Set((view.officialSlugs || []).filter((s) => typeof s === 'string' && s)),
+        bindings: (view.bindings && typeof view.bindings === 'object') ? view.bindings : {},
+        aliases: (view.aliases && typeof view.aliases === 'object') ? view.aliases : {},
+        retired: new Set((view.retiredSlugs || []).filter((s) => typeof s === 'string' && s)),
+        generation: pinned.generation,
+        key: view.key || (snapshot && snapshot.key) || null,
+      }
+    }
     const src = cfg && cfg._codexCatalog
     if (catSource === src && catCache) return catCache
     catSource = src
-    catCache = { officials: codexOfficialSlugSet(cfg), bindings: codexCatalogBindings(cfg) }
+    catCache = {
+      officials: codexOfficialSlugSet(cfg),
+      bindings: codexCatalogBindings(cfg),
+      aliases: (src && src.aliases && typeof src.aliases === 'object') ? src.aliases : {},
+      retired: new Set(((src && src.retiredSlugs) || []).filter((s) => typeof s === 'string' && s)),
+      generation: src && Number.isInteger(src.generation) ? src.generation : null,
+      key: (src && src.key) || null,
+    }
     return catCache
   }
   // 目录 slug 无法安全路由（身份冲突 / 上游缺失 / 绑定损坏）：**fail-closed**。
@@ -320,8 +353,23 @@ export function createRouter(cfg) {
     e.available = [...alias.keys()].filter((name) => isAggregateModelId(name, cfg)).sort().slice(0, 50)
     return e
   }
-  function resolveCatalogSlug(model) {
-    const cat = catalog()
+  function resolveCatalogSlug(model, snapshot) {
+    const cat = catalog(snapshot)
+    // N01：墓碑优先于一切现存条目 —— 下架模型即便仍出现在旧视图/旧缓存里，也零上游拒绝。
+    if (cat.retired.has(model)) throw catalogError(model, 'catalog_slug_retired', '目录模型 ' + model + ' 已下架（墓碑），拒绝路由且零上游请求')
+    // N01：同代别名（来自目录 meta）。别名指向墓碑/不存在目标 => fail-closed，不回落默认上游。
+    if (Object.prototype.hasOwnProperty.call(cat.aliases, model)) {
+      const raw = cat.aliases[model]
+      const target = raw && typeof raw === 'object' ? raw.model : raw
+      if (typeof target !== 'string' || !target) throw catalogError(model, 'alias_target_missing', '目录别名 ' + model + ' 没有有效目标')
+      if (cat.retired.has(target)) throw catalogError(model, 'alias_to_retired_id', '目录别名 ' + model + ' 指向已下架模型 ' + target)
+      const resolved = resolveCatalogSlug(target, snapshot)
+      if (!resolved) throw catalogError(model, 'alias_target_missing', '目录别名 ' + model + ' 指向不存在的目录模型 ' + target)
+      const wrapped = Object.assign({}, resolved, { canonicalName: model, aliasTarget: target })
+      if (snapshot) wrapped.catalogGeneration = snapshot.generation != null ? snapshot.generation : cat.generation
+      else if (cat.generation != null) wrapped.catalogGeneration = cat.generation
+      return wrapped
+    }
     const isOfficial = cat.officials.has(model)
     const rawBinding = cat.bindings[model]
     const hasBinding = !!(rawBinding && typeof rawBinding === 'object')
@@ -334,15 +382,25 @@ export function createRouter(cfg) {
       const pid = codexOfficialProvider(cfg)
       if (!pid) throw catalogError(model, 'official_provider_missing', '官方目录模型 ' + model + ' 需要 defaults.codexOfficialProvider 指定官方上游')
       if (!cfg.providers || !cfg.providers[pid]) throw catalogError(model, 'official_provider_missing', '官方目录模型 ' + model + ' 指向的上游 ' + pid + ' 未配置')
-      return { canonicalName: model, known: true, def: { provider: pid, api: 'responses', codexOfficial: true } }
+      return { canonicalName: model, known: true, catalogGeneration: genOf(cat), def: { provider: pid, api: 'responses', codexOfficial: true } }
     }
-    // 3) 聚合 slug：绑定到 provider + 原模型名；providerModels 让转发/探活/预热共用同一映射。
-    const binding = codexBindingFor(cfg, model)
-    if (!binding) throw catalogError(model, 'catalog_binding_invalid', '聚合目录模型 ' + model + ' 的绑定损坏（缺少 provider）')
+    // 3) 聚合 slug：绑定来自**本次解析的那一代目录**（不重读 cfg._codexCatalog），
+    //    否则固定快照解析会被新代目录的 bindings 污染（混代）。providerModels 让转发/探活/预热共用同一映射。
+    if (!rawBinding || typeof rawBinding.provider !== 'string' || !rawBinding.provider) {
+      throw catalogError(model, 'catalog_binding_invalid', '聚合目录模型 ' + model + ' 的绑定损坏（缺少 provider）')
+    }
+    const binding = {
+      slug: typeof rawBinding.slug === 'string' && rawBinding.slug ? rawBinding.slug : model,
+      provider: rawBinding.provider,
+      model: typeof rawBinding.model === 'string' && rawBinding.model ? rawBinding.model : model,
+      capability: typeof rawBinding.capability === 'string' && rawBinding.capability ? rawBinding.capability : 'chat',
+    }
     if (!cfg.providers || !cfg.providers[binding.provider]) throw catalogError(model, 'catalog_binding_invalid', '聚合目录模型 ' + model + ' 绑定的上游 ' + binding.provider + ' 未配置')
     return {
       canonicalName: model,
       known: true,
+      catalogGeneration: genOf(cat),
+      catalogKey: cat.key || null,
       def: {
         provider: binding.provider,
         api: 'openai',
@@ -353,7 +411,12 @@ export function createRouter(cfg) {
       },
     }
   }
-  function resolve(model) {
+  function genOf(cat) {
+    return cat && Number.isInteger(cat.generation) ? cat.generation : null
+  }
+  // opts.snapshot：调用方固定的目录快照（N01 同代解析）。缺省时沿用旧的「读 cfg._codexCatalog」行为。
+  function resolve(model, opts = {}) {
+    const snapshot = opts && opts.snapshot ? opts.snapshot : null
     // 优先级：虚拟模型 → 旧 defaults.model → 目录 slug（官方/聚合）→ 真实模型/别名
     //          → 聚合保留 ID 严格闸门 → 默认上游兜底（旧接口兼容）
     if (model && vms.has(model)) {
@@ -365,7 +428,7 @@ export function createRouter(cfg) {
       return { canonicalName: virtualModel, known: true, def: { virtual: true } }
     }
     // 目录 slug 必须先于 alias：否则「官方 slug 被 config.models 同名声明」会被静默解析成第三方模型。
-    if (model) { const catHit = resolveCatalogSlug(model); if (catHit) return catHit }
+    if (model) { const catHit = resolveCatalogSlug(model, snapshot); if (catHit) return catHit }
     if (model) { const hit = alias.get(model); if (hit) return { canonicalName: hit.name, known: true, def: hit.def } }
     // 聚合保留前缀（默认 mg-/mg/，可用 defaults.aggregatePrefixes 覆盖）：未命中即硬失败。
     // 已配置的聚合 ID 在上一步就已返回，因此这条只影响「下架/拼错/同名不同源」的 ID。
@@ -373,7 +436,13 @@ export function createRouter(cfg) {
     if (defaultProvider) return { canonicalName: model || '(默认)', known: !!model && alias.has(model), def: { provider: defaultProvider } }
     throw new Error('model 未在 config/models 中配置，且未设置 defaults.provider: ' + model)
   }
-  return { resolve, hasVirtualModels: () => vms.size > 0 }
+  // 固定快照解析：先自证快照完整/同代，再走同一套目录解析；不可用即 fail-closed（零上游）。
+  function resolvePinned(model, snapshot) {
+    const cat = catalog(snapshot)
+    const hit = resolve(model, { snapshot })
+    return Object.assign({}, hit, { catalogGeneration: genOf(cat), catalogKey: cat.key || null })
+  }
+  return { resolve, resolvePinned, hasVirtualModels: () => vms.size > 0 }
 }
 // 机器级主密钥：优先取 MG_KEYS_MASTER，否则自动生成并持久化到用户目录，保证 keys.local.json 永远加密落盘
 function machineMaster() {
