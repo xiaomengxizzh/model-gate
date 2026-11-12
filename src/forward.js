@@ -350,15 +350,32 @@ function codexLimitsOf(cfg) {
 
 // 预算：只认用户显式配置的上限；spent.requestUsd 由本请求累计的估算费用提供
 // （task/daily 维度未接费用账本，保持 0；文档标注）。
+// N02 接线（C）：billingPolicy 是配置意图，必须同时覆盖「无账本」与「有账本」两条预算来源，
+// 否则配了 'allow_unmetered' 在接入账本后会静默失效（用户只能改代码才能紧急放行）。
+// 缺省/空值**不写字段** → 由 decision.js 使用自己的 fail-closed 默认
+// （未配费用上限且未接账本 → 发送前拒绝 billing_unmetered、零上游）。
+function billingPolicyOf(cfg) {
+  const raw = (cfg.defaults && cfg.defaults.codexBudget) || {}
+  const v = typeof raw.billingPolicy === 'string' ? raw.billingPolicy.trim() : ''
+  return v || null
+}
+function withBillingPolicy(budget, policy) {
+  if (!budget || !policy) return budget
+  return Object.assign({}, budget, { billingPolicy: policy })
+}
 function codexBudgetOf(cfg, spentUsd) {
   const raw = (cfg.defaults && cfg.defaults.codexBudget) || {}
   const lim = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0)
-  return {
+  return withBillingPolicy({
     limits: { requestUsd: lim(raw.requestUsd), taskUsd: lim(raw.taskUsd), dailyUsd: lim(raw.dailyUsd) },
     spent: { requestUsd: Math.max(0, Number(spentUsd) || 0), taskUsd: 0, dailyUsd: 0 },
     enforceUnknownCost: raw.enforceUnknownCost === true,
-  }
+  }, billingPolicyOf(cfg))
 }
+
+// 测试接缝（N02 接线证据）：预算对象构造是纯函数，导出给回归断言 billingPolicy 透传；
+// 生产路径仍只经 codexBudgetForDecision 调用，不新增行为。
+export function __codexBudgetOfForTest(cfg, spentUsd) { return codexBudgetOf(cfg, spentUsd) }
 
 // 单次费用估算：models.<m>.costEstimateUsd > providers.<p>.costEstimateUsd；都未配置 = 未知。
 function codexEstimateFor(cfg) {
@@ -1176,13 +1193,14 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
   }
   const decisionLimitsMicro = limitsMicroOf(sendLimits)
   const codexBudgetForDecision = () => {
+    const policy = billingPolicyOf(cfg)
     if (ledger) {
       try {
-        return facts.budgetFromLedger(ledger.usage({ requestId: ledgerRequestId, taskRef: ledgerTaskRef }), {
+        return withBillingPolicy(facts.budgetFromLedger(ledger.usage({ requestId: ledgerRequestId, taskRef: ledgerTaskRef }), {
           limitsMicro: decisionLimitsMicro,
           currency: ledger.currency,
           enforceUnknownCost: true,
-        })
+        }), policy)
       } catch { /* 账本视图不可用：退回旧预算（仍受上面的 fail-closed 保护） */ }
     }
     return codexBudgetOf(cfg, codex.spentUsd)
