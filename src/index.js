@@ -25,7 +25,7 @@ import { classifyTarget } from './codex/identity.js'
 import { buildCatalog } from './codex/catalog.js'
 import { generationRecordFromBuilt, toCatalogView } from './codex/catalog-generation.js'
 import { microFromUsd } from './routing/facts.js'
-import { planTargetHeaders, targetDeny, buildOfficialHeaders, officialPassthroughEnabled } from './codex/auth.js'
+import { planTargetHeaders, targetDeny, legacyPassthroughRequested } from './codex/auth.js'
 import { handleCodexApi, isCodexApiPath } from './codex/api.js'
 import { registerConfigRoot, sha256Hex } from './codex/config.js'
 
@@ -1212,9 +1212,10 @@ async function cancelVideoTask(state, task, log) {
   return task
 }
 
-// —— E3 / D1-A：官方身份透传代理 ——
-// 只在 classifyTarget()==='official' 时使用。客户端官方凭据仅在 MG_CODEX_OFFICIAL_PASSTHROUGH=1 时转发，
-// 否则 targetDeny 直接 fail-closed。官方请求不重试（可能有工具/托管副作用），也不跟随重定向。
+// —— E3 / D1-A：官方身份直连代理（F01 后只剩「网关自有 key」一条路） ——
+// 只在 classifyTarget()==='official' 时使用。客户端官方凭据（OAuth / chatgpt-account-id）不再透传，
+// /backend-api/codex 也不再是允许路径：无网关自有 key 时 targetDeny 直接 fail-closed。
+// 官方请求不重试（可能有工具/托管副作用），3xx 一律拒绝（不跟随重定向、不把凭据带到 Location）。
 async function proxyOfficialResponses(state, budget, log, opts) {
   const { req, body, modelName, def, res } = opts
   const candidates = [def.provider, ...(def.fallbacks || [])].filter(Boolean)
@@ -1226,7 +1227,9 @@ async function proxyOfficialResponses(state, budget, log, opts) {
     const identity = classifyTarget(prov, state.cfg)
     // 官方目标只允许官方候选：绝不因故障把官方请求递给第三方（身份串线）。
     if (identity.kind !== 'official') { lastErr = new Error('候选上游不是官方目标：' + pid); continue }
-    const upstreamPath = (typeof def.responsesPath === 'string' && def.responsesPath) || (typeof pdef.responsesPath === 'string' && pdef.responsesPath) || '/backend-api/codex/responses'
+    // F01：官方直连只走 API 路径（/v1/responses）。/backend-api/codex 已从白名单移除，
+    // 旧配置里残留该 responsesPath 会在 targetDeny 处 403 official_path_not_allowlisted（零发送）。
+    const upstreamPath = (typeof def.responsesPath === 'string' && def.responsesPath) || (typeof pdef.responsesPath === 'string' && pdef.responsesPath) || '/v1/responses'
     const deny = targetDeny({ identity, provider: prov, cfg: state.cfg, path: upstreamPath, env: process.env })
     if (deny) {
       log && log.warn('官方目标被拒绝', deny.code, pid)
@@ -1234,31 +1237,37 @@ async function proxyOfficialResponses(state, budget, log, opts) {
     }
     const target = modelTarget(state.cfg, modelName, pid)
     const payload = Buffer.from(JSON.stringify(Object.assign({}, body, { model: target.servingName })))
-    const clientPassthrough = identity.credential === 'client-passthrough'
-    let headers
-    let dropped = []
-    if (clientPassthrough) {
-      // 客户端官方凭据透传（仅开关开启时 targetDeny 才放行）：头集合由 codex/auth 单一真源生成。
-      headers = buildOfficialHeaders(req, payload.length)
-    } else {
-      const plan = planTargetHeaders({ identity, provider: prov, cfg: state.cfg, incoming: req.headers, passthrough: false })
-      dropped = plan.dropped
-      headers = Object.assign({}, plan.headers, {
-        'content-type': 'application/json',
-        'content-length': payload.length,
-        'accept-encoding': 'identity',
-      })
-      if (prov.apiKey) headers.authorization = 'Bearer ' + prov.apiKey
+    // F01：官方目标只有「网关自有 key」一条路（客户端凭据透传已移除）。头集合仍由 codex/auth
+    // 单一真源决定：白名单内非凭据头保留，authorization 只由下面这一行按自有 key 注入。
+    if (!prov.apiKey) {
+      // 双保险：targetDeny 已按无 key fail-closed，这里防止未来调用顺序变化悄悄放行。
+      return { status: 403, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: '官方目标未配置网关自有 key（客户端官方凭据透传已移除）', code: 'official_no_gateway_key', type: 'official_target_rejected' } })) }
     }
-    if (!officialPassthroughEnabled() && clientPassthrough) {
-      // 双保险：targetDeny 已拦，这里防止未来调用顺序变化悄悄放行。
-      return { status: 403, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: '官方凭据透传未开启', code: 'official_passthrough_disabled', type: 'official_target_rejected' } })) }
-    }
+    const plan = planTargetHeaders({ identity, provider: prov, cfg: state.cfg, incoming: req.headers })
+    const dropped = plan.dropped
+    const headers = Object.assign({}, plan.headers, {
+      'content-type': 'application/json',
+      'content-length': payload.length,
+      'accept-encoding': 'identity',
+      authorization: 'Bearer ' + prov.apiKey,
+    })
     if (dropped.length) log && log.info('官方目标丢弃头（仅名称）', dropped.slice(0, 20).join(','))
     let release = null
     try {
       release = await acquireProvider(state, pid, state.cfg, budget.signal)
       const up = await forward(prov, upstreamPath, 'POST', headers, payload, state.cfg.defaults || {}, log, { budget, signal: budget.signal, noRetry: true })
+      // F01 边界：官方目标 3xx 一律不跟随（Node http 本身不跟随，但把 3xx 原样回给客户端会
+      // 让客户端/中间层替我们跟随，把凭据送去 Location）。统一按上游错误 502 收口，零二次命中。
+      if (up.status >= 300 && up.status < 400) {
+        try { await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true }) } catch {}
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        log && log.warn('官方目标返回重定向，已拒绝跟随', 'provider=' + pid, 'status=' + up.status)
+        return {
+          status: 502,
+          contentType: 'application/json; charset=utf-8',
+          buf: Buffer.from(JSON.stringify({ error: { message: '官方上游返回重定向（' + up.status + '），网关拒绝跟随', code: 'upstream_redirect_rejected', type: 'upstream_error' } })),
+        }
+      }
       if (up.ok) {
         state.st.counters.requests += 1
         agg(state, pid, 'requests', 1)
@@ -2086,6 +2095,10 @@ export function start(opts = {}) {
   // 收集所有密钥值供日志脱敏：环境变量 Key + 面板 Key + extraHeaders 值 + 客户端/管理令牌 + 代理内嵌凭据
   const log = createLogger({ logFile: cfg.server && cfg.server.logFile, silent: opts.silent, secrets: collectSecrets(cfg) })
   if (recovery.status !== 'clean') log.warn('配置事务恢复', 'status=' + recovery.status, recovery.opId ? 'opId=' + recovery.opId : '')
+  // F01：旧开关只做迁移提示，不再启用任何能力（官方目标请求会按 official_passthrough_retired 拒绝）。
+  if (legacyPassthroughRequested(process.env)) {
+    log.warn('MG_CODEX_OFFICIAL_PASSTHROUGH 已退役：客户端官方凭据透传与 /backend-api/codex 已移除；请删除该变量并为官方 provider 配置 apiKeyEnv/面板 Key')
+  }
   // 启动与热重载必须同源注入 Codex 目录视图：否则官方 slug 会按「未知非保留前缀」回落 defaults.provider（跨身份串线）。
   cfg._codexCatalog = codexCatalogView(cfg)
   if (!cfg._codexCatalog && cfg.defaults && cfg.defaults.codexCatalogBasePath) {

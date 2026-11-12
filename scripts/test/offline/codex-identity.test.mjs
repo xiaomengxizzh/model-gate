@@ -187,7 +187,7 @@ test('官方目标分类矩阵：名字不参与判定，声明与 host 冲突�
   assert.equal(isOfficialHost('127.0.0.1', { defaults: { codexOfficialHosts: ['127.0.0.1'] } }), true)
 })
 
-test('官方目标（无自有 key、透传关闭）：403 official_passthrough_disabled，零上游请求', { timeout: 30000 }, async (t) => {
+test('官方目标（无自有 key）：403 official_no_gateway_key，零上游请求（F01：透传已移除）', { timeout: 30000 }, async (t) => {
   const upstream = await echoUpstream()
   const gw = await startIsolated({
     name: 'e1-official-off',
@@ -201,16 +201,16 @@ test('官方目标（无自有 key、透传关闭）：403 official_passthrough_
 
   const res = await rawRequest(gw.base, '/v1/chat/completions', CHAT, OFFICIAL_REQUEST_HEADERS)
   assert.equal(res.status, 403)
-  assert.equal(res.json.error.code, 'official_passthrough_disabled')
-  assert.equal(upstream.hits.length, 0, '默认 fail-closed：不得发上游请求')
+  assert.equal(res.json.error.code, 'official_no_gateway_key')
+  assert.equal(upstream.hits.length, 0, '无 key 一律 fail-closed：不得发上游请求')
   const log = readLog(gw)
   assert.equal(log.includes('CLIENT-OFFICIAL-TOKEN'), false)
 })
 
-test('官方目标（无自有 key、透传开启）：官方头原样透传，白名单外头丢弃', { timeout: 30000 }, async (t) => {
+test('官方目标（旧透传开关残留）：403 official_passthrough_retired，客户端官方头零到达、零上游请求', { timeout: 30000 }, async (t) => {
   const upstream = await echoUpstream()
   const gw = await startIsolated({
-    name: 'e1-official-on',
+    name: 'e1-official-retired',
     env: { MG_CODEX_OFFICIAL_PASSTHROUGH: '1' },
     config: {
       defaults: { provider: 'official', codexOfficialHosts: ['127.0.0.1'] },
@@ -221,14 +221,12 @@ test('官方目标（无自有 key、透传开启）：官方头原样透传，�
   t.after(async () => { await gw.stop(); await upstream.stop() })
 
   const res = await rawRequest(gw.base, '/v1/chat/completions', CHAT, OFFICIAL_REQUEST_HEADERS)
-  assert.equal(res.status, 200, '透传开启后应放行')
-  const seen = upstream.hits[0].headers
-  for (const name of ['authorization', 'chatgpt-account-id', 'openai-beta', 'version', 'originator', 'session-id', 'thread-id', 'x-client-request-id', 'x-codex-beta-features', 'x-codex-turn-metadata', 'x-codex-window-id', 'x-codex-routing-hint', 'x-openai-internal-codex-responses-lite']) {
-    assert.notEqual(seen[name], undefined, '官方目标应保留 ' + name)
-  }
-  assert.equal(seen.authorization, 'Bearer CLIENT-OFFICIAL-TOKEN', '透传路径使用客户端官方凭据')
-  assert.equal(seen['x-ordinary-client-header'], undefined, '官方白名单外头必须丢弃')
-  assert.equal(seen['sec-websocket-key'], undefined, 'WS 帧层头永不转发')
+  assert.equal(res.status, 403, '旧开关不得再放行客户端官方凭据')
+  assert.equal(res.json.error.code, 'official_passthrough_retired')
+  assert.match(res.json.error.message, /已移除|MG_CODEX_OFFICIAL_PASSTHROUGH/, '必须给迁移提示')
+  assert.equal(upstream.hits.length, 0, '拒绝时零上游请求')
+  const log = readLog(gw)
+  for (const value of ['CLIENT-OFFICIAL-TOKEN', 'acct-CLIENT-ACCOUNT']) assert.equal(log.includes(value), false, '日志不得含凭据值 ' + value)
 })
 
 test('官方目标（自有 key）：网关注入 key，客户端官方凭据不透传（两条路互斥）', { timeout: 30000 }, async (t) => {
@@ -259,7 +257,8 @@ test('官方目标 host/path/scheme 白名单（fail-closed）与 extraHeaders �
 
   assert.equal(denied(official(), '/v1/chat/completions'), null)
   assert.equal(denied(official(), '/v1/models'), null, 'GET /v1/models?client_version 属合法官方路径')
-  assert.equal(denied(official(), '/backend-api/codex/responses'), null)
+  // F01：/backend-api/codex（ChatGPT 订阅后端）已随凭据透传移除，官方路径只允许 /v1。
+  assert.equal(denied(official(), '/backend-api/codex/responses').code, 'official_path_not_allowlisted')
   assert.equal(denied(official(), '/admin/secret').code, 'official_path_not_allowlisted')
   assert.equal(denied(official({ baseUrl: 'http://api.openai.com' }), '/v1/chat/completions').code, 'official_target_insecure_scheme')
   assert.equal(denied({ id: 'u', baseUrl: 'https://evil.test', codexIdentity: 'official' }, '/v1/x').code, 'target_identity_unknown')
@@ -397,7 +396,7 @@ test('targetDeny 旧入参形状保持兼容：拒绝消息不含头值/密钥�
   const identity = classifyTarget(provider, cfg)
   // 既有调用方（forward.js / index.js）的四件套入参形状
   assert.equal(targetDeny({ identity, provider, cfg, path: '/v1/chat/completions', env: {} }), null)
-  assert.equal(targetDeny({ identity, provider, cfg, path: '/backend-api/codex/responses', env: {} }), null)
+  assert.equal(targetDeny({ identity, provider, cfg, path: '/backend-api/codex/responses', env: {} }).code, 'official_path_not_allowlisted')
 
   const shadow = { id: 'shadow', baseUrl: 'https://evil.test', codexIdentity: 'official', apiKey: 'sk-SENTINEL-OFFICIAL' }
   const denied = targetDeny({ identity: classifyTarget(shadow, cfg), provider: shadow, cfg, path: '/v1/x', env: {} })
@@ -409,8 +408,8 @@ test('targetDeny 旧入参形状保持兼容：拒绝消息不含头值/密钥�
   assert.equal(targetDeny({ identity: minimal, provider: { id: 'o' }, cfg, path: '/v1/models', env: {} }), null)
   assert.equal(targetDeny({ identity: { kind: 'thirdParty' }, provider: { id: 't' }, cfg, path: '/v1/x', env: {} }), null)
 
-  // 身份域与凭据模式是两个维度：官方 host + 无 key = 客户端订阅透传；第三方 + 有 key = 自有 key
-  assert.equal(classifyTarget({ id: 'x', baseUrl: 'https://chatgpt.com' }, cfg).credential, 'client-passthrough')
+  // F01 之后：官方 host + 无 key = 无凭据（fail-closed，不再有 client-passthrough）；第三方 + 有 key = 自有 key
+  assert.equal(classifyTarget({ id: 'x', baseUrl: 'https://chatgpt.com' }, cfg).credential, 'none')
   assert.equal(classifyTarget({ id: 'y', baseUrl: 'https://api.deepseek.com', apiKey: 'k' }, cfg).credential, 'provider-key')
   assert.equal(classifyTarget({ id: 'z', baseUrl: 'https://api.openai.com', apiKey: 'k' }, cfg).credential, 'provider-key')
 })

@@ -20,16 +20,15 @@
 // 本模块不写日志、不抛含头值/密钥的消息；deny 只带 host/路径/拒绝码。
 
 import { createHmac } from 'node:crypto'
-import {
-  classifyTarget, isLoopbackHost, isOfficialHost,
-  IDENTITY_KINDS, OFFICIAL_SUBSCRIPTION_HOSTS,
-} from './identity.js'
+import { classifyTarget, isLoopbackHost, isOfficialHost, IDENTITY_KINDS } from './identity.js'
 import {
   CREDENTIAL_HEADERS, OFFICIAL_ONLY_HEADERS, OFFICIAL_ONLY_PREFIXES,
-  OFFICIAL_PATH_PREFIXES, planTargetHeaders, officialPassthroughEnabled,
+  OFFICIAL_PATH_PREFIXES, planTargetHeaders, legacyPassthroughRequested,
 } from './auth.js'
 
 export const TARGET_DOMAINS = Object.freeze({ OFFICIAL: 'official', THIRD_PARTY: 'thirdParty' })
+// F01：OFFICIAL_SUBSCRIPTION（客户端官方订阅凭据 / /backend-api/codex）已退役。
+// 常量保留只为把旧调用方识别出来并给出 typed deny（credential_mode_retired），绝不回落到可用状态。
 export const CREDENTIAL_MODES = Object.freeze({
   PROVIDER_KEY: 'provider-key',
   OFFICIAL_SUBSCRIPTION: 'official-subscription',
@@ -38,7 +37,6 @@ export const CREDENTIAL_MODES = Object.freeze({
 // 显式不跟随重定向：授权记录里带这个标记，接线卡必须把它映射到请求选项（redirect: 'error'）。
 export const REDIRECT_POLICY = 'error'
 export const DEFAULT_SESSION_SALT = 'mg-codex-session-v1'
-const BILLING_HOSTS = Object.freeze(['api.openai.com'])
 const SESSION_VALUE_LEN = 32
 
 // typed deny：status/code/message 可直接映射成 403 错误体；消息永不含头值或 key。
@@ -157,11 +155,6 @@ function officialPathnameAllowed(pathname) {
   return OFFICIAL_PATH_PREFIXES.some((p) => pathname === p || pathname.startsWith(p.endsWith('/') ? p : p + '/'))
 }
 
-function subscriptionIngressAllowed(target) {
-  const hostOk = OFFICIAL_SUBSCRIPTION_HOSTS.includes(target.hostname) || isLoopbackHost(target.hostname)
-  return hostOk && target.pathname.startsWith('/backend-api/codex')
-}
-
 export function allowedSchemeHostPortPath(target, domain, opts) {
   const o = opts || {}
   if (domain !== TARGET_DOMAINS.OFFICIAL && domain !== TARGET_DOMAINS.THIRD_PARTY) {
@@ -187,41 +180,37 @@ export function allowedSchemeHostPortPath(target, domain, opts) {
 }
 
 // —— 域与凭据分离 ——
-// provider-key   = 网关自持 API Key（计费身份）
-// official-subscription = ChatGPT 订阅身份（客户端官方凭据透传）
+// provider-key   = 网关自持 API Key（唯一可用凭据，官方/第三方同规则）
+// official-subscription = 已退役（F01）：任何声明都返回 credential_mode_retired + 迁移提示
 // none           = 无凭据（第三方宁可 401，官方必须 fail-closed）
+const RETIRED_CREDENTIAL_HINT = '客户端官方订阅凭据透传（official-subscription / MG_CODEX_OFFICIAL_PASSTHROUGH / /backend-api/codex）已移除（F01）：请为官方目标配置网关自有 key（apiKeyEnv 或面板 Key）。'
 export function credentialModeAllowed(domain, target, callerScope) {
   const s = callerScope || {}
   const mode = s.credentialMode
-  if (![CREDENTIAL_MODES.PROVIDER_KEY, CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION, CREDENTIAL_MODES.NONE].includes(mode)) {
+  // 旧字段显式拒绝：即使调用方仍传 officialSubscription/passthroughEnabled，也绝不回落到可用状态。
+  if (s.officialSubscription === true || s.passthroughEnabled === true) {
+    return deny('official_passthrough_retired', RETIRED_CREDENTIAL_HINT)
+  }
+  if (mode === CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION) {
+    return deny('credential_mode_retired', RETIRED_CREDENTIAL_HINT)
+  }
+  if (![CREDENTIAL_MODES.PROVIDER_KEY, CREDENTIAL_MODES.NONE].includes(mode)) {
     return deny('credential_mode_invalid', '凭据模式不合法：' + String(mode))
   }
   const hasKey = s.hasProviderKey === true || (typeof s.providerKey === 'string' && s.providerKey.length > 0)
   if (domain === TARGET_DOMAINS.THIRD_PARTY) {
-    if (mode === CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION) {
-      return deny('credential_mode_forbidden', '官方订阅身份不得用于第三方目标')
-    }
     if (mode === CREDENTIAL_MODES.PROVIDER_KEY && !hasKey) {
       return deny('credential_missing', '第三方目标声明使用自有 key，但未提供 key')
     }
     return null
   }
   if (domain !== TARGET_DOMAINS.OFFICIAL) return deny('intent_domain_invalid', '未知身份域：' + String(domain))
-  if (mode === CREDENTIAL_MODES.NONE) return deny('official_credential_missing', '官方目标必须携带自有 key 或已授权的订阅身份')
-  if (mode === CREDENTIAL_MODES.PROVIDER_KEY) {
-    if (!hasKey) return deny('credential_missing', '官方目标声明使用自有 key，但未提供 key')
-    return null
+  if (mode === CREDENTIAL_MODES.NONE) {
+    // 旧开关仍在环境里 → 给迁移提示，而不是含糊的「缺凭据」。
+    if (s.legacyPassthrough === true) return deny('official_passthrough_retired', RETIRED_CREDENTIAL_HINT)
+    return deny('official_credential_missing', '官方目标必须配置网关自有 key（F01 已移除客户端官方凭据透传）')
   }
-  if (s.officialSubscription !== true) return deny('credential_mode_forbidden', '调用方未持官方订阅身份')
-  if (s.passthroughEnabled !== true) {
-    return deny('official_passthrough_disabled', '官方订阅凭据透传未开启（默认关闭）')
-  }
-  if (BILLING_HOSTS.includes(target.hostname)) {
-    return deny('official_subscription_on_billing_path', '订阅身份不得用于 API Key 计费端点：' + target.hostname)
-  }
-  if (!subscriptionIngressAllowed(target)) {
-    return deny('official_subscription_ingress_not_allowed', '订阅身份只允许用于 /backend-api/codex 入口：' + target.hostname + target.pathname)
-  }
+  if (!hasKey) return deny('credential_missing', '官方目标声明使用自有 key，但未提供 key')
   return null
 }
 
@@ -253,7 +242,9 @@ export function resolveCredentialMode(domain, identity, callerScope) {
     !!(identity && identity.credential === 'provider-key')
   if (domain === TARGET_DOMAINS.OFFICIAL) {
     if (hasKey) return CREDENTIAL_MODES.PROVIDER_KEY
-    if (s.officialSubscription === true || !!(identity && identity.credential === 'client-passthrough')) return CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION
+    // F01：官方无 key 只剩 NONE（fail-closed）；旧订阅声明仍被识别成 OFFICIAL_SUBSCRIPTION，
+    // 以便 credentialModeAllowed 给出「已退役」而不是含糊的「缺凭据」。
+    if (s.officialSubscription === true || s.passthroughEnabled === true || !!(identity && identity.credential === 'client-passthrough')) return CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION
     return CREDENTIAL_MODES.NONE
   }
   return hasKey ? CREDENTIAL_MODES.PROVIDER_KEY : CREDENTIAL_MODES.NONE
@@ -273,8 +264,8 @@ export function officialIngressPolicy(domain, target, opts) {
   if (!officialPathnameAllowed(target.pathname)) {
     return deny('official_path_not_allowlisted', '官方目标路径不在白名单：' + target.pathname)
   }
-  if (o.credentialMode === CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION && !subscriptionIngressAllowed(target)) {
-    return deny('official_subscription_ingress_not_allowed', '订阅身份只允许用于 /backend-api/codex 入口：' + target.hostname + target.pathname)
+  if (o.credentialMode === CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION) {
+    return deny('credential_mode_retired', RETIRED_CREDENTIAL_HINT)
   }
   return null
 }
@@ -331,21 +322,14 @@ export function buildAllowlistedHeaders(domain, caller, targetCredential) {
     return headers
   }
   if (domain !== TARGET_DOMAINS.OFFICIAL) throw deny('intent_domain_invalid', '未知身份域：' + String(domain))
-  const subscription = cred.mode === CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION
-  const plan = planTargetHeaders({
-    identity: { kind: 'official', credential: subscription ? 'client-passthrough' : 'provider-key' },
-    provider: {},
-    incoming: c.incoming || {},
-    passthrough: subscription,
-  })
+  if (cred.mode === CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION) throw deny('credential_mode_retired', RETIRED_CREDENTIAL_HINT)
+  const plan = planTargetHeaders({ identity: { kind: 'official', credential: 'provider-key' }, provider: {}, incoming: c.incoming || {} })
   const headers = plan.headers
   if (cred.mode === CREDENTIAL_MODES.PROVIDER_KEY) {
     if (cred.token == null || String(cred.token) === '') throw deny('official_credential_missing', '官方目标缺少自有 key')
     headers.authorization = 'Bearer ' + String(cred.token)
-  } else if (cred.mode === CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION) {
-    if (!headers.authorization) throw deny('official_subscription_token_missing', '订阅透传缺少客户端官方凭据')
   } else {
-    throw deny('official_credential_missing', '官方目标缺少可用凭据')
+    throw deny('official_credential_missing', '官方目标缺少可用凭据（F01 已移除客户端官方凭据透传）')
   }
   headers['user-agent'] = 'model-gateway/0.1'
   headers['accept-encoding'] = 'identity'
@@ -430,13 +414,13 @@ function callerScopeOf(intent, binding, identity) {
   const prov = binding.provider || {}
   const def = prov._def || {}
   const providerHasKey = !!(prov.apiKey || def.apiKey || (identity && identity.credential === 'provider-key'))
-  let passthrough = c.passthroughEnabled
-  if (passthrough === undefined) passthrough = officialPassthroughEnabled(binding.env || (typeof process !== 'undefined' ? process.env : {}))
   return Object.freeze({
     providerKey: c.providerKey !== undefined ? c.providerKey : binding.providerKey,
     hasProviderKey: c.hasProviderKey === true || providerHasKey,
     officialSubscription: c.officialSubscription === true,
-    passthroughEnabled: passthrough === true,
+    passthroughEnabled: c.passthroughEnabled === true,
+    // 旧环境开关只用于「已退役」提示，不参与任何放行判断。
+    legacyPassthrough: legacyPassthroughRequested(binding.env || (typeof process !== 'undefined' ? process.env : {})),
     credentialMode: c.credentialMode || cred.mode || null,
     incoming: c.incoming || binding.incoming || null,
     threadId: c.threadId,

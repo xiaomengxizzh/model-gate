@@ -3,16 +3,22 @@
 // 三条不可越过的边界（plan §3.1 身份隔离 + E0 实测头集合）：
 //  1. 第三方目标绝不接收官方专用头（authorization / chatgpt-account-id / openai-beta / version /
 //     originator / session-id / thread-id / x-codex-* / x-openai-internal-* / x-client-request-id）。
-//  2. 官方目标只放行白名单头；客户端官方凭据仅在显式开启透传时转发（默认关闭 = fail-closed）。
+//  2. 官方目标只放行白名单头，凭据**只来自网关自持 key**：客户端带来的 authorization /
+//     chatgpt-account-id 一律丢弃（F01 已移除客户端官方凭据透传与 /backend-api/codex 模板）。
 //  3. extraHeaders（配置层）不得覆盖/注入鉴权头——那是 E0 确认的越权面。
 //
 // 本模块只做**决策**（返回要转发的头 / 拒绝原因），不发请求、不记头值；日志只允许头名。
 
 import { hostOf, isOfficialHost, isLoopbackHost } from './identity.js'
 
-export const PASSTHROUGH_ENV = 'MG_CODEX_OFFICIAL_PASSTHROUGH'
-// 官方端点允许的路径前缀：OpenAI API（/v1/...）与 ChatGPT 后端的 Codex 路径。
-export const OFFICIAL_PATH_PREFIXES = Object.freeze(['/v1/', '/v1', '/backend-api/codex'])
+// F01：官方原生凭据透传（客户端 OAuth / chatgpt-account-id → chatgpt.com/backend-api/codex）
+// 已从生产路径移除。旧开关只用于**识别旧配置并显式拒绝/提示迁移**，不再启用任何能力。
+export const LEGACY_PASSTHROUGH_ENV = 'MG_CODEX_OFFICIAL_PASSTHROUGH'
+// 兼容旧 import 名：语义已变为「已退役的旧开关名」。
+export const PASSTHROUGH_ENV = LEGACY_PASSTHROUGH_ENV
+// 官方端点允许的路径前缀：只保留 OpenAI API 直连（/v1/...）。
+// /backend-api/codex（ChatGPT 订阅后端）已随凭据透传一并移除——见 F01。
+export const OFFICIAL_PATH_PREFIXES = Object.freeze(['/v1/', '/v1'])
 
 // 凭据类：任何身份域都不得由 extraHeaders 注入/覆盖，第三方域也必须剥掉客户端带来的。
 export const CREDENTIAL_HEADERS = Object.freeze([
@@ -34,15 +40,17 @@ const FRAME_HEADERS = Object.freeze([
   'keep-alive', 'te', 'trailer', 'proxy-connection',
 ])
 
-// 官方目标放行白名单（名字 + 前缀）。默认值即 E0/Lead 实测头集合的超集。
+// 官方目标放行白名单（名字 + 前缀）。默认值即 E0/Lead 实测头集合去掉凭据类后的超集。
+// F01：authorization / chatgpt-account-id 不在白名单内——官方 Authorization 只能由网关按自有 key
+// 注入（forward.js / target-authz.js），任何客户端凭据都没有入口。
 export const OFFICIAL_HEADER_ALLOWLIST = Object.freeze([
   'accept', 'accept-encoding', 'accept-language', 'content-type', 'user-agent',
   'originator', 'version', 'session-id', 'thread-id', 'x-client-request-id',
-  'openai-beta', 'chatgpt-account-id', 'authorization',
+  'openai-beta',
 ])
 export const OFFICIAL_HEADER_ALLOW_PREFIXES = Object.freeze(['x-codex-', 'x-openai-internal-', 'openai-'])
 
-// E3 集成接口：官方透传代理可消费的头名清单。与 planTargetHeaders 使用**同一组常量**，
+// E3 集成接口：官方直连路径可消费的头名清单。与 planTargetHeaders 使用**同一组常量**，
 // 不另存一份列表（避免清单漂移）。前缀项用于 x-codex-* / x-openai-internal-* / openai-* 家族。
 export const OFFICIAL_REQUEST_HEADER_NAMES = OFFICIAL_HEADER_ALLOWLIST
 export const OFFICIAL_REQUEST_HEADER_PREFIXES = OFFICIAL_HEADER_ALLOW_PREFIXES
@@ -53,28 +61,24 @@ export function isOfficialRequestHeader(name) {
   return OFFICIAL_HEADER_ALLOWLIST.includes(n) || allowlistHas(OFFICIAL_HEADER_ALLOW_PREFIXES, n)
 }
 
-// E3 集成接口：基于客户端请求生成官方上游头（供 index.js 官方透传代理直接使用）。
-// 契约：只做白名单过滤 + 基础头补齐，**不含** provider.apiKey（透传路径的身份来自客户端官方凭据）。
-export function buildOfficialHeaders(req, payloadLen) {
-  const incoming = (req && req.headers) || {}
-  const plan = planTargetHeaders({ identity: { kind: 'official', credential: 'client-passthrough' }, incoming, provider: {}, passthrough: true })
-  const headers = plan.headers
-  headers['user-agent'] = 'model-gateway/0.1'
-  if (!headers['accept']) headers['accept'] = 'application/json'
-  headers['accept-encoding'] = 'identity'
-  const len = Number(payloadLen)
-  if (Number.isFinite(len) && len > 0) headers['content-length'] = len
-  return headers
-}
+// F01：旧模板 buildOfficialHeaders() 已删除。它按「客户端官方凭据透传」生成上游头，
+// 而该链路（含 /backend-api/codex 默认路径）已从生产移除；留一个会返回客户端凭据头的函数
+// 只会让未来的调用方误用旧能力。需要官方头请走 planTargetHeaders + 网关自有 key。
 
 const LOWER = (v) => String(v == null ? '' : v).trim().toLowerCase()
 
 function allowlistHas(list, name) { return list.some((p) => name.startsWith(p)) }
 
-// 客户端官方凭据透传：默认关闭，只有显式 MG_CODEX_OFFICIAL_PASSTHROUGH=1|true|on 才开。
-export function officialPassthroughEnabled(env) {
+// 兼容导出：F01 之后**永远返回 false**。客户端官方凭据透传不再可用，不存在「打开」的状态；
+// 保留函数名只为不给旧 import 抛错（行为与退役前默认值一致 = fail-closed）。
+export function officialPassthroughEnabled() {
+  return false
+}
+
+// 旧开关是否被显式设置（1/true/on）。仅用于**拒绝 + 迁移提示**，绝不启用任何能力。
+export function legacyPassthroughRequested(env) {
   const src = env || (typeof process !== 'undefined' ? process.env : {}) || {}
-  const v = LOWER(src[PASSTHROUGH_ENV])
+  const v = LOWER(src[LEGACY_PASSTHROUGH_ENV])
   return v === '1' || v === 'true' || v === 'on'
 }
 
@@ -84,7 +88,7 @@ function dropByPolicy(name) {
 
 // 计算要发往上游的头集合。
 //   identity: classifyTarget() 结果
-//   passthrough: 本次是否透传客户端官方凭据（仅 official + client-passthrough + 开关开启）
+//   o.passthrough 已退役（F01）：任何值都被忽略，客户端凭据永不进入头集合。
 // 返回 { headers, dropped }；dropped 只含头名，供脱敏审计。
 export function planTargetHeaders(opts) {
   const o = opts || {}
@@ -92,7 +96,6 @@ export function planTargetHeaders(opts) {
   const provider = o.provider || {}
   const def = provider._def || provider
   const incoming = o.incoming || {}
-  const passthrough = !!o.passthrough
   const headers = {}
   const dropped = []
 
@@ -103,10 +106,8 @@ export function planTargetHeaders(opts) {
       if (dropByPolicy(name)) { dropped.push(name); continue }
       const allowed = OFFICIAL_HEADER_ALLOWLIST.includes(name) || allowlistHas(OFFICIAL_HEADER_ALLOW_PREFIXES, name)
       if (!allowed) { dropped.push(name); continue }
-      // 官方域内客户端凭据只在透传开启且本次走客户端身份时才通过。
-      if (name === 'authorization' || name === 'chatgpt-account-id') {
-        if (!passthrough) { dropped.push(name); continue }
-      }
+      // 凭据类即使在白名单误配时也不得从客户端进入（守卫不依赖清单内容）。
+      if (CREDENTIAL_HEADERS.includes(name)) { dropped.push(name); continue }
       headers[name] = v
     }
     return { headers, dropped }
@@ -150,7 +151,7 @@ function safePathname(pathPrefix, path) {
 }
 
 // 目标是否允许被使用。返回 null = 允许；否则返回 { status, code, message }（消息内绝不含头值）。
-//   env 仅用于读取官方透传开关；不得把 env 之外的运行时状态塞进判定。
+//   env 仅用于识别「旧开关仍存在」并给出迁移提示；不得把 env 之外的运行时状态塞进判定。
 export function targetDeny(opts) {
   const o = opts || {}
   const identity = o.identity || { kind: 'unknown' }
@@ -176,8 +177,13 @@ export function targetDeny(opts) {
   if (!OFFICIAL_PATH_PREFIXES.some((p) => pathname === p || pathname.startsWith(p.endsWith('/') ? p : p + '/'))) {
     return deny('official_path_not_allowlisted', '官方目标路径不在白名单：' + pathname + '（允许 ' + OFFICIAL_PATH_PREFIXES.join(', ') + '）。')
   }
-  if (identity.credential === 'client-passthrough' && !officialPassthroughEnabled(o.env)) {
-    return deny('official_passthrough_disabled', '官方目标无网关自有 key，且客户端官方凭据透传未开启（默认关闭，需显式设置 ' + PASSTHROUGH_ENV + '=1）。')
+  // F01：官方目标只认网关自有 key。无 key = 零发送，并给旧配置明确的迁移提示。
+  const hasGatewayKey = !!provider.apiKey || identity.credential === 'provider-key'
+  if (!hasGatewayKey) {
+    if (legacyPassthroughRequested(o.env)) {
+      return deny('official_passthrough_retired', '客户端官方凭据透传（MG_CODEX_OFFICIAL_PASSTHROUGH + /backend-api/codex）已移除（F01）：官方目标必须配置网关自有 key。请删除该环境变量并为 provider 配置 apiKeyEnv 或面板 Key。')
+    }
+    return deny('official_no_gateway_key', '官方目标未配置网关自有 key：F01 起不再透传客户端官方凭据，请配置 apiKeyEnv（环境变量/面板 Key）后重试。')
   }
   return null
 }
