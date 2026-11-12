@@ -74,6 +74,7 @@ export const SUITES = [
   'scripts/test/offline/native-usage.test.mjs',
   'scripts/test/offline/optional-endpoints.test.mjs',
   'scripts/test/offline/p03-opencode-go.test.mjs',
+  'scripts/test/offline/p06-external-delegation.test.mjs',
   'scripts/test/offline/probe.test.mjs',
   'scripts/test/offline/request-encoding.test.mjs',
   'scripts/test/offline/rerank.test.mjs',
