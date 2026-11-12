@@ -38,6 +38,9 @@ import {
   detectOpaqueV2Task,
   flattenAgentMessage,
   analyzeToolPairs,
+  validateCodexResponsesEnvelope,
+  buildToolPlan,
+  projectOrderedHistory,
 } from './codex/interop.js'
 
 const EFFORT_NONE_ALIAS = new Set(['off', 'none', 'disabled', 'false'])
@@ -535,6 +538,50 @@ export function bridge(input, opts = {}) {
  */
 export function responsesToChat(input, opts = {}) {
   return bridge(input, Object.assign({}, LEGACY_BRIDGE_COMPAT, opts))
+}
+
+/**
+ * Codex 原生 V2 请求投影（P02，定向移植 7afb4dc）。
+ *
+ * 调用点（Lead/N01 接线）：只对显式声明 codex 路由的 `api:"responses"` 模型使用；
+ * 返回的 body 是发给**单一上游**的副本，原 body 不被修改。
+ *   · 信封拒绝矩阵（store/background/previous_response_id/truncation/include）；
+ *   · 本轮工具声明投影（collaboration namespace 扁平化、三消息工具去 encrypted 标记）；
+ *   · 有序历史投影（agent_message 仅可证明明文才投影；reasoning/compaction/控制项按 route 策略）；
+ *   · 工具 call_id 配对；非空 encrypted_function_args、未知密文、不可读 agent_message 在发送前拒绝。
+ *
+ * generation 边界：plan 只由**本请求**的 tools 构建，restore 也只接受本请求 plan；
+ * 不缓存跨请求工具身份，不把上一代 namespace 映射用于下一代。
+ *
+ * 返回 { body, plan, lossy, rejected }；rejected 非空时调用方必须 400 且零上游请求。
+ * include / client_metadata 等字段不在本函数中删除（由接线层按目标能力与凭据边界处理）。
+ */
+export function prepareCodexNativeRequest(body, route) {
+  const lossy = []
+  const fail = (rejected) => ({ body: null, plan: null, lossy, rejected })
+  if (!isPlainObject(body)) return fail({ code: 'invalid_envelope', message: '请求体必须是 JSON 对象' })
+  try {
+    const env = validateCodexResponsesEnvelope(body)
+    for (const code of env.lossy || []) lossy.push(code)
+    if (!env.ok) return fail(env.rejected)
+    const planned = buildToolPlan(body.tools, route, body.tool_choice)
+    for (const code of planned.lossy || []) lossy.push(code)
+    if (planned.rejected) return fail(planned.rejected)
+    const history = projectOrderedHistory(body.input, route, planned.plan)
+    for (const code of history.lossy || []) lossy.push(code)
+    if (history.rejected) return fail(history.rejected)
+    const projected = Object.assign({}, body)
+    projected.input = history.input
+    if (planned.plan.declarations !== undefined) projected.tools = planned.plan.declarations
+    else delete projected.tools
+    if (planned.plan.toolChoice !== undefined) projected.tool_choice = planned.plan.toolChoice
+    else delete projected.tool_choice
+    return { body: projected, plan: planned.plan, lossy, rejected: null }
+  } catch (e) {
+    // 投影是纯函数；任何未预期异常都按发送前拒绝处理，绝不带着半投影 body 出网。
+    const message = String((e && e.message) || e).slice(0, 200)
+    return fail({ code: 'projection_failed', message: '原生 V2 请求投影失败: ' + message })
+  }
 }
 
 // Chat usage → Responses usage（契约 §5：无来源写 0，不臆造 reasoning_tokens）
