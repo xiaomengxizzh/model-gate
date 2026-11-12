@@ -2,8 +2,9 @@
 //   node scripts/check-metadata.mjs
 // 核对项：package.json 版本/名称/许可/engines、LICENSE 实际文件与 license 字段、
 //         CHANGELOG 版本标题、README 的版本与 Node 下限/项目名声明、
+//         README「运行时支持矩阵」与 engines/CI 一致（当前支持 = Linux + Node 24）、
 //         manifest.yaml（存在时）的 project/version/engines 声明、
-//         CI workflow 的触发方式、Node 矩阵与 engines 下限、依赖与工具链下载禁令。
+//         CI workflow 的触发方式、Node 矩阵等于已实测支持矩阵、依赖与工具链下载禁令。
 // 输出 PASS/FAIL 行，任一失败时退出码为 1。
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -15,6 +16,13 @@ const readText = rel => { try { return readFileSync(join(root, rel), 'utf8') } c
 const check = (name, okFlag, detail) => results.push({ name, ok: okFlag, detail: detail === undefined ? '' : String(detail) })
 const ok = (name, detail) => check(name, true, detail)
 const fail = (name, detail) => check(name, false, detail)
+
+// N00（2026-11-12）：当前**已实测**的运行时支持矩阵只有一条线：Linux + Node 24。
+// 本机实测 v24.22.2（Ubuntu 26.04 / x86_64），没有 Node 18/20/22 runner，也不允许下载工具链。
+// 因此 engines 下限、CI 矩阵、README 支持矩阵必须同时收敛到 24；18/20（及 22）只作历史记录。
+const SUPPORTED_NODE_MAJORS = Object.freeze([24])
+const RETIRED_NODE_MAJORS = Object.freeze([18, 20, 22])
+const SUPPORTED_FLOOR = String(SUPPORTED_NODE_MAJORS[0])
 
 const semver = v => /^\d+\.\d+\.\d+$/.test(String(v))
 const cmpVersion = (a, b) => {
@@ -52,6 +60,9 @@ if (pkg) {
   const nodeFloor = pkg.engines && typeof pkg.engines.node === 'string' ? pkg.engines.node.trim() : ''
   if (/^>=\s*\d+/.test(nodeFloor)) ok('package.json engines.node 声明下限', nodeFloor)
   else fail('package.json engines.node 声明下限', JSON.stringify(pkg.engines === undefined ? null : pkg.engines.node))
+  // engines 下限必须等于已实测支持矩阵的最小版本：写未验证的更低版本等于暗示支持。
+  if (floorOf(nodeFloor) === SUPPORTED_FLOOR) ok('package.json engines.node 等于已实测支持矩阵下限', '>= ' + SUPPORTED_FLOOR)
+  else fail('package.json engines.node 等于已实测支持矩阵下限', 'engines ' + JSON.stringify(nodeFloor) + ' ≠ >= ' + SUPPORTED_FLOOR + '（当前已实测矩阵 Linux + Node ' + SUPPORTED_NODE_MAJORS.join('/') + '）')
 }
 
 // —— 2. LICENSE 实际文件与 license 字段一致 ——
@@ -134,6 +145,40 @@ else {
   else fail('README Node 下限声明与 engines 一致', 'README >= ' + readmeFloor[1] + ' ≠ engines ' + pkg.engines.node)
 }
 
+// —— 4b. README 运行时支持矩阵：当前支持与退役/未验收必须写实 ——
+{
+  const matrix = readText('README.md') || ''
+  const heading = '运行时支持矩阵'
+  if (!matrix.includes(heading)) fail('README 含「' + heading + '」小节', '未找到该小节标题')
+  else ok('README 含「' + heading + '」小节')
+  const rows = matrix.split('\n').filter(line => /^\|[^|]*\|[^|]*\|/.test(line.trim()))
+  const rowOf = (needle) => rows.find(line => line.includes(needle)) || ''
+  const linuxRow = rowOf('Linux')
+  if (/24/.test(linuxRow) && /(当前支持|已实测|已验收)/.test(linuxRow)) {
+    ok('README 支持矩阵：Linux + Node 24 标为当前支持/已实测')
+  } else {
+    fail('README 支持矩阵：Linux + Node 24 标为当前支持/已实测', linuxRow ? '实际行: ' + linuxRow.trim() : '未找到 Linux 行')
+  }
+  const windowsRow = rowOf('Windows')
+  if (!windowsRow) fail('README 支持矩阵：Windows 标为未验收', '未找到 Windows 行')
+  else if (/(未验收|未验证|NOT_RUN|未实测)/.test(windowsRow)) ok('README 支持矩阵：Windows 标为未验收')
+  else fail('README 支持矩阵：Windows 标为未验收', '实际行: ' + windowsRow.trim())
+  const retiredRow = rows.find(line => RETIRED_NODE_MAJORS.every(m => new RegExp('(^|[^0-9])' + m + '([^0-9]|$)').test(line)))
+  if (!retiredRow) fail('README 支持矩阵：18/20/22 标为历史/退役', '未找到同时列出 ' + RETIRED_NODE_MAJORS.join('/') + ' 的行')
+  else if (!/(已退役|历史|不再支持|未纳入当前支持)/.test(retiredRow)) fail('README 支持矩阵：18/20/22 标为历史/退役', '实际行: ' + retiredRow.trim())
+  else if (/(当前支持|已实测|已验收)/.test(retiredRow)) fail('README 支持矩阵：18/20/22 不得标为当前支持', '实际行: ' + retiredRow.trim())
+  else ok('README 支持矩阵：18/20/22 标为历史/退役', '不再列入当前支持')
+  // 支持矩阵与 engines/CI 必须同代：README 的 Node 下限核对已在上方完成，这里再核对矩阵里出现的
+  // 「当前支持」大版本都必须属于 SUPPORTED_NODE_MAJORS。
+  const activeRows = rows.filter(line => /(当前支持|已实测|已验收)/.test(line) && /Node/.test(line))
+  const activeMajors = new Set()
+  for (const line of activeRows) for (const m of line.matchAll(/Node\s*(\d{2})/g)) activeMajors.add(Number(m[1]))
+  const unexpected = [...activeMajors].filter(m => !SUPPORTED_NODE_MAJORS.includes(m))
+  if (!activeMajors.size) fail('README 当前支持矩阵与 engines/CI 一致', '未解析出当前支持的大版本')
+  else if (unexpected.length) fail('README 当前支持矩阵与 engines/CI 一致', '出现未实测大版本: ' + unexpected.join('/'))
+  else ok('README 当前支持矩阵与 engines/CI 一致', [...activeMajors].map(m => 'Node ' + m).join(', '))
+}
+
 // —— 5. manifest.yaml（存在时）声明与 package.json 一致 ——
 const manifest = readText('manifest.yaml')
 if (manifest === null) ok('manifest.yaml 存在（可选）', '不存在，跳过 manifest 声明核对')
@@ -164,10 +209,12 @@ else {
   if (!majors.length) fail('CI 固定 Node 版本矩阵', '未在 check.yml 找到 node: [ ... ] 矩阵')
   else {
     ok('CI 固定 Node 版本矩阵', majors.join('/'))
-    const floorMatch = pkg && pkg.engines && typeof pkg.engines.node === 'string' ? pkg.engines.node.match(/^>=\s*(\d+)/) : null
-    if (!floorMatch) fail('CI 矩阵覆盖 engines 下限', 'engines.node 无法解析为 >=N')
-    else if (majors.includes(Number(floorMatch[1]))) ok('CI 矩阵覆盖 engines 下限', '包含 ' + floorMatch[1])
-    else fail('CI 矩阵覆盖 engines 下限', '矩阵 ' + majors.join('/') + ' 未包含 engines 下限 ' + floorMatch[1])
+    // 矩阵必须**等于**已实测支持矩阵：多列未验证版本 = 假绿，少列已实测版本 = 静默缩小门禁。
+    const sameSet = majors.length === SUPPORTED_NODE_MAJORS.length && SUPPORTED_NODE_MAJORS.every(m => majors.includes(m))
+    if (sameSet) ok('CI 矩阵等于已实测支持矩阵', majors.join('/'))
+    else fail('CI 矩阵等于已实测支持矩阵', '矩阵 ' + majors.join('/') + ' ≠ 已实测 ' + SUPPORTED_NODE_MAJORS.join('/') + '（未验证版本不得留在矩阵里，也不得静默移除已实测版本）')
+    if (majors.every(m => !RETIRED_NODE_MAJORS.includes(m))) ok('CI 矩阵不含已退役大版本', '不含 ' + RETIRED_NODE_MAJORS.join('/'))
+    else fail('CI 矩阵不含已退役大版本', '矩阵出现了 ' + majors.filter(m => RETIRED_NODE_MAJORS.includes(m)).join('/'))
   }
   for (const trigger of ['push', 'pull_request', 'workflow_dispatch']) {
     if (new RegExp('^\\s{2}' + trigger + ':', 'm').test(workflow)) ok('CI 支持触发: ' + trigger)

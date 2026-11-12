@@ -1,6 +1,6 @@
 # ModelGate（model-gateway）
 
-本地 OpenAI 兼容模型网关，统一 Chat / Responses 转发、失败重试、多上游兜底、429 治理、SSE 续传和用量统计。Node.js >=18，运行时无第三方 npm 依赖；管理面板由同一进程提供。
+本地 OpenAI 兼容模型网关，统一 Chat / Responses 转发、失败重试、多上游兜底、429 治理、SSE 续传和用量统计。Node.js >=24，运行时无第三方 npm 依赖；管理面板由同一进程提供。当前验收线只有 **Linux + Node 24**（见[运行时支持矩阵](#运行时支持矩阵)）。
 
 新一代控制台（候选版）位于 `/ui-next`，源代码在 `src/ui-next/`；旧管理台 `/` 与 `/admin` 保留，未经所有者批准不做默认入口替换。
 
@@ -12,6 +12,18 @@ npm test
 ```
 
 上述测试自行启动本地 mock 和临时网关。首次运行服务见[隔离启动教程](docs/tutorials/local-start.md)；真实接入需要自行配置上游与 Key。
+
+## 运行时支持矩阵
+
+本轮（N00，2026-11-12）只把下列组合当作**当前支持**；没有实测环境的一律标未验收/已退役，不写成支持（"跳过"不等于"通过"）。
+
+| 平台 | Node | 状态 | 证据 |
+| --- | --- | --- | --- |
+| Linux x64（Ubuntu 26.04，kernel 7.0.0-43-generic） | Node 24（实测 v24.22.2，npm 11.19.1） | **当前支持（已实测）** | 本机四条门禁全绿：`npm run check` / `npm test`（59 套件、565 用例）/ `npm run docs:check` / `node scripts/check-metadata.mjs`；CI 矩阵同为 Node 24 |
+| macOS / Windows | 任意大版本 | **未验收（NOT_RUN）** | 无实测环境；Windows `.bat/.cmd` 只做静态检查，未在真实 Windows 上运行 |
+| Linux / macOS / Windows | Node 18 / 20 / 22 | **已退役（仅历史记录）** | 旧 CI 矩阵与旧版验证记录；本机没有 Node 18/20/22 runner，也不下载工具链（见 RESOURCE_APPROVAL.md），因此不再声明为受支持版本 |
+
+`package.json` 的 `engines.node`（`>=24`）、CI 矩阵（`24`）与上表由 `node scripts/check-metadata.mjs` 强制一致；改任一处都要同步其余两处。低于 24 的大版本不会被"兼容模式"放行。
 
 ## 开发与交接
 
@@ -38,7 +50,7 @@ npm test
 
 本轮交付的验证状态按 `PASS(mock)` / `PASS(real)` / `NOT_RUN(原因)` / `BLOCKED(原因)` / `DISABLED(默认关闭)` 分开记录，**不把 mock 通过写成真实接入通过**；逐格证据（套件名 + 断言数或历史证据）见[支持矩阵](docs/roadmap/2026-11-11-support-matrix.md)。
 
-- 离线可复现（`PASS(mock)`）：Chat/Responses/SSE 协议与映射、Codex 目录与配置、身份域与额度、智能调度决策、预算账本、UHR 推理回执、MCP 契约、管理面与旧/新控制台静态资源等。本分支实测 49 套件全绿（`node scripts/test/run.mjs`）；集成线 53 套件，数字见交付报告。
+- 离线可复现（`PASS(mock)`）：Chat/Responses/SSE 协议与映射、Codex 目录与配置、身份域与额度、智能调度决策、预算账本、UHR 推理回执、MCP 契约、管理面与旧/新控制台静态资源等。本分支实测 59 套件 / 565 用例全绿（1 个用例级 skip，非套件跳过；`node scripts/test/run.mjs`）；集成线 53 套件，数字见交付报告。
 - 未验证（`NOT_RUN`）：真实官方/第三方上游、真实流式链路、真实 Codex CLI 三轮回环（`MG_CODEX_VERIFY=1`）、Desktop GUI、真实浏览器验收、真实计费。
 - 阻塞（`BLOCKED`）：真实 UHR 委派（需现行授权接口与明确写集）；本轮只交付 mock UHR + 契约。
 - 默认关闭/拒绝（`DISABLED`）：原生 v2 密文跨域（硬拒绝、无开关）、受控官方聚合实验、匿名远程管理面、MCP 委派（未接线）、新控制台默认入口。
