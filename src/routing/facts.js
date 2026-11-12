@@ -308,6 +308,12 @@ export function budgetFromLedger(usage, options = {}) {
   if (wantCurrency && usageCurrency && wantCurrency !== usageCurrency) {
     throw moneyError(MONEY_ERR.CURRENCY_MISMATCH, '账本币种与调用方声明不一致：拒绝隐式换算')
   }
+  // N02：决策器的费用估算只有一个币种维度（models/providers.costEstimateUsd = USD）。
+  // 非 USD 账本喂进来就是把「欧元数字」当「美元数字」比较（混币），必须 fail-closed：
+  // 要支持多币种，先给报价事实加币种字段与换算来源，再放开这里。
+  if (usageCurrency && usageCurrency !== 'USD') {
+    throw moneyError(MONEY_ERR.CURRENCY_MISMATCH, '账本币种 ' + usageCurrency + ' 超出决策器 USD 报价维度：拒绝混币（不隐式换算）')
+  }
   const limitsMicro = options.limitsMicro && typeof options.limitsMicro === 'object' ? options.limitsMicro : {}
   const limit = (key) => (limitsMicro[key + 'Micro'] == null ? 0 : usdFromMicro(limitsMicro[key + 'Micro']))
   const known = (key) => typeof u[key + 'Micro'] === 'number' && Number.isSafeInteger(u[key + 'Micro'])
@@ -324,6 +330,9 @@ export function budgetFromLedger(usage, options = {}) {
     currency: usageCurrency,
     unit: MONEY_UNIT.USD,
     enforceUnknownCost: options.enforceUnknownCost !== false,
+    // N02：这份 budget 来自真实账本 ⇒ 即使没配 USD 上限，也算「有计费设施」；
+    // 无预算设施闸门只针对「既无上限也无账本」的裸配置。
+    hasLedger: true,
   }
 }
 

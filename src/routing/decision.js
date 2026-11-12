@@ -147,6 +147,8 @@ export const EXCLUDE = Object.freeze({
   BUDGET_EXCEEDED: 'budget_exceeded',
   WORST_CASE_EXCEEDS_BUDGET: 'worst_case_exceeds_budget',
   BUDGET_UNVERIFIED: 'budget_unverified',
+  // N02：付费路径但完全没有预算设施（无上限、无账本），且未显式声明「允许未计量」。
+  BILLING_UNMETERED: 'billing_unmetered',
 })
 
 // 决策码后缀：与错误类别的映射保持稳定，便于日志/UI/文档引用（不用类别名直接大写，避免暴露内部命名）。
@@ -290,6 +292,11 @@ function normalizeBudget(raw) {
     unit,
     currency: str(b.currency) ? upper(b.currency) : null,
     enforceUnknownCost: b.enforceUnknownCost !== false,
+    // N02：预算设施（上限/账本）与「允许未计量」显式策略。默认 fail-closed：
+    // 付费候选在没有任何计费设施时必须被拒，除非调用方显式声明 allowUnmetered。
+    hasLedger: !!ledger || b.hasLedger === true,
+    allowUnmetered: b.allowUnmetered === true || str(b.billingPolicy).toLowerCase() === 'allow_unmetered',
+    billingPolicy: b.allowUnmetered === true || str(b.billingPolicy).toLowerCase() === 'allow_unmetered' ? 'allow_unmetered' : 'fail_closed_if_unmetered',
   }
 }
 
@@ -324,6 +331,14 @@ function unverifiedSpendDimension(budget) {
  */
 function budgetGate(budget, candidate, cost, opts = {}) {
   const evidence = opts.evidence === true
+  // N02：无预算设施（无上限且无账本）时，付费路径必须显式拒发或显式声明适用策略。
+  // 已知报价 > 0，或候选自述 paid 但报价未知，都算「计费路径」；免费（usd=0）不受影响。
+  const metered = limitsConfigured(budget) || budget.hasLedger === true
+  if (!metered && budget.allowUnmetered !== true) {
+    const selfPaid = !!(candidate && (candidate.paid === true || (candidate.pricing && candidate.pricing.paid === true)))
+    const paid = cost.known ? Number(cost.usd) > 0 : selfPaid
+    if (paid) return 'unmetered_cost'
+  }
   if (budget.enforceUnknownCost) {
     const unverified = unverifiedSpendDimension(budget)
     if (unverified) return 'unverified_spend'
@@ -361,6 +376,7 @@ const BUDGET_EXCLUDE_CODES = new Set([
   EXCLUDE.COST_UNKNOWN,
   EXCLUDE.WORST_CASE_EXCEEDS_BUDGET,
   EXCLUDE.BUDGET_UNVERIFIED,
+  EXCLUDE.BILLING_UNMETERED,
 ])
 
 /**
@@ -376,6 +392,7 @@ function exclusionCause(skipped) {
 }
 
 function reasonForGate(token, evidence) {
+  if (token === 'unmetered_cost') return EXCLUDE.BILLING_UNMETERED
   if (token === 'unknown_cost') return evidence ? EXCLUDE.QUOTE_UNKNOWN : EXCLUDE.COST_UNKNOWN
   if (token === 'unverified_spend') return EXCLUDE.BUDGET_UNVERIFIED
   if (token === 'worst_case_exceeds_budget') return EXCLUDE.WORST_CASE_EXCEEDS_BUDGET
@@ -394,6 +411,8 @@ function budgetSnapshot(budget, nextUsd) {
     spendSource: Object.assign({}, budget.spendSource || {}),
     unit: budget.unit || 'usd',
     currency: budget.currency || null,
+    metered: limitsConfigured(budget) || budget.hasLedger === true,
+    billingPolicy: budget.billingPolicy || 'fail_closed_if_unmetered',
     nextUsd: nextUsd == null ? null : nextUsd,
     remaining,
     exceededBy: null,
