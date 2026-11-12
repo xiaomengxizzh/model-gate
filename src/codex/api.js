@@ -14,6 +14,16 @@
 import { statSync } from 'node:fs'
 import { basename, isAbsolute, normalize, sep } from 'node:path'
 import {
+  QUOTA_DISPLAY_UNKNOWN,
+  USAGE_KINDS,
+  activateEmergency,
+  classifyUsageFact,
+  emergencyPlan,
+  parseQuotaState,
+  restoreEmergency,
+  serializeQuotaState,
+} from './quota.js'
+import {
   CONFIG_CONTRACT,
   ConfigError,
   applyConfigForRoot,
@@ -100,6 +110,9 @@ export const CODEX_API_ROUTES = Object.freeze([
   { method: 'POST', path: '/api/codex/config/rollback', name: 'config_rollback', kind: CODEX_ROUTE_KIND.MANAGEMENT, write: true, explicitAdmin: true, desc: '按不透明 backupId 回滚（仅 managed，必须回传 planId），回滚前状态另存' },
   { method: 'GET', path: '/api/codex/config/export', name: 'config_export', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '只回所拥有字段的归一化投影（无保留行/无凭据）' },
   { method: 'GET', path: '/api/codex/catalog/status', name: 'catalog_status', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '目录世代/计数/slugs 摘要（截断，不回全量目录）' },
+  { method: 'GET', path: '/api/codex/quota', name: 'quota_status', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '官方额度三态（fresh/stale/unknown）；本地统计/导入仅计数' },
+  { method: 'GET', path: '/api/codex/emergency', name: 'emergency_plan', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '应急试算：范围/影响/planId；绝不写盘、不改身份' },
+  { method: 'POST', path: '/api/codex/emergency', name: 'emergency_apply', kind: CODEX_ROUTE_KIND.MANAGEMENT, write: true, explicitAdmin: true, desc: '按 planId 进入/退出应急态（只配置新 profile，恢复对称）' },
 ])
 
 export const EXPLICIT_ADMIN_OPERATIONS = Object.freeze(CODEX_API_ROUTES.map((r) => r.name))
@@ -447,6 +460,148 @@ function requireObject (body, label) {
 }
 
 // —— 各端点 ——
+
+// —— N05：额度三态与显式应急（管理面）——
+// 官方余额拿不到就 UNKNOWN；本地统计/导入计数只做计数展示。
+function handleQuotaStatus (ctx) {
+  const evaluator = ctx && typeof ctx.quotaEvaluator === 'function' ? ctx.quotaEvaluator : null
+  const local = ctx && ctx.localUsage && typeof ctx.localUsage === 'object' ? classifyUsageFact(Object.assign({ kind: USAGE_KINDS.LOCAL_STATS }, ctx.localUsage)) : null
+  if (!evaluator) {
+    return {
+      status: 200,
+      body: okBody({
+        available: false,
+        state: 'unknown',
+        display: QUOTA_DISPLAY_UNKNOWN,
+        reason: 'quota_source_not_wired',
+        freshness: 'unknown',
+        usedPercent: null,
+        localUsage: local,
+        accountQuota: null,
+        note: '没有接入可信额度来源：按 UNKNOWN 展示，不猜测余额、不自动切换',
+        readOnly: true,
+      }),
+    }
+  }
+  return Promise.resolve(evaluator(ctx)).then((quota) => ({
+    status: 200,
+    body: okBody({
+      available: true,
+      quota: quota && typeof quota === 'object' ? quota : null,
+      localUsage: local,
+      accountQuota: quota && quota.freshness === 'fresh' ? { usedPercent: quota.usedPercent, observedAt: quota.observedAt, source: quota.source } : null,
+      readOnly: true,
+    }),
+  }))
+}
+
+function emergencyStoreOf (ctx) {
+  const store = ctx && ctx.emergencyStore
+  if (!store || typeof store.read !== 'function' || typeof store.write !== 'function') return null
+  return store
+}
+
+function emergencyStateOf (store) {
+  try { return parseQuotaState(store.read()) } catch { return parseQuotaState(null) }
+}
+
+function emergencyPlanFor (ctx, store, query) {
+  const state = emergencyStateOf(store)
+  const thirdPartyProfiles = String((query && query.thirdPartyProfiles) || '').split(',').map((s) => s.trim()).filter(Boolean)
+  const officialModels = String((query && query.officialModels) || '').split(',').map((s) => s.trim()).filter(Boolean)
+  const plan = emergencyPlan({ state, profile: query && query.profile, thirdPartyProfiles, officialModels, now: ctx && ctx.now })
+  return { state, plan }
+}
+
+function handleEmergencyPlan (ctx, query) {
+  const store = emergencyStoreOf(ctx)
+  if (!store) {
+    return {
+      status: 200,
+      body: okBody({
+        available: false,
+        reason: 'emergency_store_not_wired',
+        readOnly: true,
+        note: '网关未接入应急状态存储：请先用 CLI 的隔离 state-file 模式演练，接线后再启用管理面写路径',
+      }),
+    }
+  }
+  const { state, plan } = emergencyPlanFor(ctx, store, query)
+  return {
+    status: 200,
+    body: okBody({
+      available: true,
+      mode: state.mode,
+      emergency: state.mode === 'emergency' ? serializeQuotaState(state).emergency : null,
+      plan: plan.ok ? plan.plan : null,
+      planError: plan.ok ? null : { code: plan.code, message: plan.message },
+      readOnly: true,
+      writesNothing: true,
+    }),
+  }
+}
+
+function handleEmergencyApply (ctx, body, auth) {
+  const shaped = requireObject(body, '请求体')
+  if (!shaped.ok) return shaped
+  const store = emergencyStoreOf(ctx)
+  if (!store) {
+    return { status: 503, body: errorBody('emergency_store_unavailable', '应急状态存储未接入：写路径关闭（不静默降级为内存态）') }
+  }
+  if (!auth.adminSubject) return { status: 403, body: errorBody('admin_subject_required', '应急操作必须绑定显式管理员身份（adminSubject）') }
+  const state = emergencyStateOf(store)
+  const action = String(shaped.body.action || '').trim()
+  let result
+  if (action === 'activate') {
+    const plan = emergencyPlan({
+      state,
+      profile: shaped.body.profile,
+      thirdPartyProfiles: Array.isArray(shaped.body.thirdPartyProfiles) ? shaped.body.thirdPartyProfiles : [],
+      officialModels: Array.isArray(shaped.body.officialModels) ? shaped.body.officialModels : [],
+      now: ctx.now,
+    })
+    if (!plan.ok) return { status: 400, body: errorBody(plan.code, plan.message) }
+    if (shaped.body.planId !== plan.plan.planId) {
+      return { status: 409, body: errorBody('plan_id_mismatch', 'planId 与当前应急试算不一致（profile/范围已变或被替换），拒绝激活') }
+    }
+    result = activateEmergency(state, {
+      planId: shaped.body.planId,
+      acknowledged: shaped.body.acknowledged === true,
+      reason: shaped.body.reason,
+      backupPoint: shaped.body.backupPoint,
+      subject: auth.adminSubject,
+    }, { profile: shaped.body.profile, thirdPartyProfiles: shaped.body.thirdPartyProfiles, officialModels: shaped.body.officialModels, now: ctx.now })
+  } else if (action === 'restore') {
+    result = restoreEmergency(state, { reason: shaped.body.reason, subject: auth.adminSubject, now: ctx.now })
+  } else {
+    return { status: 400, body: errorBody('invalid_operation', '应急 action 只支持 activate|restore') }
+  }
+  if (!result.ok) {
+    const status = result.code === 'plan_id_mismatch' ? 409 : 400
+    return { status, body: errorBody(result.code, result.message) }
+  }
+  const serialized = serializeQuotaState(result.state)
+  store.write(serialized)
+  audit(ctx, action === 'activate' ? 'emergency_activate' : 'emergency_restore', { fields: ['emergency', 'profile'], result: 'ok' })
+  return {
+    status: 200,
+    body: okBody({
+      action,
+      mode: serialized.mode,
+      emergency: serialized.emergency,
+      planId: action === 'activate' ? shaped.body.planId : null,
+      wrote: true,
+      identityMutation: false,
+      historyMutation: false,
+      officialLogout: false,
+      impacts: action === 'activate' ? result.impacts : [],
+      note: action === 'activate'
+        ? '已进入手动应急态：只新增 profile 配置，官方身份/auth.json/历史均未改动；恢复需再次显式操作'
+        : '已恢复 normal；应急记录保留在 timeline 作为审计证据',
+    }),
+  }
+}
+
 function handlePolicy (ctx, query, auth) {
   const catalog = summarizeCodexCatalog(ctx.cfg, { limit: query.limit })
   const locality = resolveLocality(ctx)
@@ -718,7 +873,9 @@ export async function handleCodexApi (ctx = {}) {
   const version = negotiateApiVersion(ctx)
   if (!version.ok) return version.response
 
-  const route = CODEX_API_ROUTES.find((r) => r.path === path)
+  // 同一路径可有多方法（如 /api/codex/emergency GET/POST）：先按方法精确命中，再回退做 405 判定。
+  const route = CODEX_API_ROUTES.find((r) => r.path === path && r.method === method) ||
+    CODEX_API_ROUTES.find((r) => r.path === path)
   if (!route) {
     audit(ctx, 'unknown', { path, result: 'not_found' })
     return { status: 404, body: errorBody('unknown_endpoint', '未知的 Codex 管理接口：' + path) }
@@ -730,6 +887,13 @@ export async function handleCodexApi (ctx = {}) {
 
   if (route.name === 'policy') return handlePolicy(ctx, query, auth)
   if (route.name === 'catalog_status') return handleCatalogStatus(ctx, query)
+  if (route.name === 'quota_status') return handleQuotaStatus(ctx)
+  if (route.name === 'emergency_plan') return handleEmergencyPlan(ctx, query)
+  if (route.name === 'emergency_apply') {
+    const emergencyBody = readBody(ctx)
+    if (emergencyBody === undefined) return { status: 400, body: errorBody('invalid_body', '请求体必须是合法 JSON 对象') }
+    return handleEmergencyApply(ctx, emergencyBody, auth)
+  }
   // export 走 GET query，无请求体；鉴权先于任何文件读取。
   if (route.name === 'config_export') return handleConfigExport(ctx, query, auth)
 
