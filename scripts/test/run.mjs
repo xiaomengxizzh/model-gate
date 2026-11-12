@@ -43,6 +43,7 @@ export const SUITES = [
   'scripts/test/offline/codex-quota.test.mjs',
   'scripts/test/offline/codex-role-provider.test.mjs',
   'scripts/test/offline/codex-v2-responses.test.mjs',
+  'scripts/test/offline/codex-v2-stream.test.mjs',
   'scripts/test/offline/codex-routing-catalog.test.mjs',
   'scripts/test/offline/codex-target-authz.test.mjs',
   'scripts/test/offline/config-projection.test.mjs',
