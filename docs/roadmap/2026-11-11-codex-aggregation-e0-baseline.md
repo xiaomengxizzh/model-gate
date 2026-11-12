@@ -54,7 +54,7 @@ model-gate-frontend  6bc6441  dev/frontend-console-rebuild-20261107
 
 | 项 | 值 | 说明 |
 | --- | --- | --- |
-| Node | v24.22.2 | 仓库要求 >=18 |
+| Node | v24.22.2 | 仓库要求 >=24（2026-11-12 N00 起；此前 >=18） |
 | npm / pnpm | 11.19.1 / 12.18.0 | pnpm 存在但**本项目不需要** |
 | Codex CLI | 0.167.0（vendor `x86_64-unknown-linux-musl`） | 稳定入口 `harness/codex/cli/bin/codex` |
 | ChatGPT Desktop | 26.1103.32239（deb，内置 Codex 0.167.0） | 本轮未启动 |

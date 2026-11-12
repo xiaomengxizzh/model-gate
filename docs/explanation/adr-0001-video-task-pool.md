@@ -9,7 +9,7 @@
 ## 决策
 
 1. **存储**：`<MG_CONFIG_DIR>/videos.json`，与 stats/keys 同目录，原子写（临时文件 + rename）。单进程独占；不引入 SQLite/外部 DB，避免 Node 版本与二进制依赖。跨进程并发不支持（网关本身单实例）。
-2. **Node 版本**：保持 `>=18`；仅使用 `crypto.randomUUID`、`AbortSignal`、原子写等既有能力。
+2. **Node 版本**（2026-11-12 N00 修订：engines 已收敛到 >=24，以下为实现约束）：保持 `>=18`；仅使用 `crypto.randomUUID`、`AbortSignal`、原子写等既有能力。
 3. **状态机**：`queued → running → succeeded | failed | canceled`。终态不可再变（cancel 对终态幂等）。
 4. **轮询**：客户端 `GET /v1/videos/:id` 惰性触发（每任务 ≥1.5s 最多一次）+ 后台 5s 扫描非终态任务；无 webhook、无外部调度。后台定时器 `unref()`，`close()` 时清理。
 5. **上游协议**：只桥接 OpenAI 兼容上游（`api=openai`）；路径按模型配置：
