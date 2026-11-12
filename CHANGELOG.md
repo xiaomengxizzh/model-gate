@@ -2,6 +2,42 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-12 收工闭环（`integration/modelgate-release`）
+
+> 本段记录从 A1 基线 `2a735fb` 起的新集成线：G0 冻结 + G1 后端/协议/控制面的定向移植与收紧。**CLI 原生门（Q03/Q04）与正式 GUI（U01–U07）未开始**，本段不表示发布就绪。
+
+### Security —— 行为变更（部署前必须确认）
+
+1. **官方原生凭据透传彻底退役（F01）**：`/backend-api/codex` 与 `MG_CODEX_OFFICIAL_PASSTHROUGH` 不再启用任何能力。官方目标无网关自有 Key 时 `403 official_no_gateway_key`；设了旧开关则 `403 official_passthrough_retired`（含迁移提示）。两者均零上游请求，绝不改投第三方；网关不读取 `auth.json`/`CODEX_HOME`。`credentialModeAllowed('official-subscription')` 返回 `credential_mode_retired`。
+2. **配置与 Key 恢复一律 fail-closed（F02）**：截断的 `keys.local.json`/`gateway.local.json` 不再静默变空（此前会静默降级鉴权并清空用户配置），分别报 `keys_unreadable`/`local_config_unreadable`；锁改 `linkSync` 原子发布，0 字节残留锁可回收、不可解析锁保留现场；加密不可用时保存返回 `500 key_encryption_unavailable`（原 400），绝不退回明文；坏状态以 `CONFIG_UNREADABLE` 拒启动。
+3. **发送前授权统一（F03）**：`/v1/responses` 官方分支与原生分支都在发送前经 `authorizeSendTarget` 冻结目标并复核实际 `upstreamUrl`；官方目标带 userinfo 等异常形态返回 typed 403 且零发送；原生 responses 加 `noRetry`，上游 3xx 统一 `502 upstream_redirect_rejected`。
+4. **下游响应头白名单**：JSON 响应仅下发 `retry-after`（拒绝控制字符），上游 `set-cookie`/`x-*` 不再可能到达客户端（移植 R1 `2c4f2a9` 语义并补反向断言）。
+5. **付费候选默认拒绝无计量发送（N02）**：未配预算上限且未接账本时，`costEstimateUsd>0` 或 legacy paid 候选在发送前被拒（`EXCLUDE.billing_unmetered`，零上游）；显式放行需 `defaults.codexBudget.billingPolicy='allow_unmetered'`（审计面可见）。
+6. **Go 会话头改 HMAC 域派生（P03）**：不再转发客户端原始 `session-id`/`thread-id`，移除固定常量；会话值按主体+provider+root/child 域+目标域+线程派生。
+7. **生成授权默认 fail-closed（N01）**：目录墓碑优先于现存条目（下架模型零上游拒绝）；同代别名指向墓碑/不存在目标时 fail-closed，不回落默认上游。
+
+### Added
+
+- **显式清单型离线门禁**：`scripts/test/run.mjs` 扩至 70 套件，新增 `native-boundary`、`codex-role-provider`、`codex-v2-responses`、`codex-v2-stream`、`codex-v2-lifecycle`、`p03-opencode-go`、`n01-catalog-authz`、`n02-routing-budget`、`n03-cli-contract`、`siwc-preview`，并把经隔离审计的 legacy `circuit.mjs` 纳入默认回归（`affinity.mjs` 因夹具过期未纳入，待重写）。
+- **管理 CLI `bin/mg.mjs` 与 `mg-management/1`（N03）**：`doctor`/`provider`/`model`/`config`/`client` 子命令；`doctor --json` 纯检出可跑且 `noNetwork:true`；统一错误信封带 `code`/`requestId`/`nextAction`；写操作绑定 `planId`，缺失/错误返回 `409 plan_id_mismatch`。
+- **V2 协议移植（P01/P02/P04/P05/P07）**：envelope 校验 + 有序历史投影 + 控制项/加密项分类（不可读密文与未支持关键工具发送前拒绝）、工具 namespace/identity 恢复、原生 Responses SSE 适配器（终态归因、usage once、EOF→`STREAM_INTERRUPTED`）、真实 CLI 离线 V2 生命周期清单（13 case，`FIXTURE_PREPARED`，真实运行仍需 egress 隔离）、合成 SIWC/OIDC 预览（默认 off）。
+- **目录世代与同代授权（N01）**：快照 pin、证据来源/过期、同代别名、墓碑、只读客户端模板与 drift。
+- **CLI 原生角色边界（P01）**：ADR-0003 锁定 CLI 0.167.0 的 role 不应用 `model_provider`，附四矩阵 fixture（证据边界 `UNKNOWN_PRIMARY_SOURCE`：本机无该版本源码）。
+- **收工证据包**：`docs/evidence/2026-11-12-closure/`（环境实测与 Q02 隔离判决、Q03/Q04 续跑手册、交付报告）。
+
+### Changed
+
+- **支持矩阵收敛到 Linux + Node 24（N00）**：`engines.node` 改为 `>=24`，CI 矩阵 `['24']`，README/`check-metadata` 同步；Node 18/20/22 与 Windows/macOS 标记未验收/退役。
+- 错误状态表统一（`src/attempt-state.js`）：授权 403、目录 404、上游 502、超时 504、store 类 409，未登记码归 502。
+- `bin/mg.mjs --version` 打印 `modelgate.cli/1 version 0.2.3 api mg-management/1`；`doctor` 的 Node 说明与 N00 一致。
+
+### Not wired（已知缺口，见交付报告 §缺口矩阵）
+
+- P02/P04 的 `src/index.js` 接线（`prepareCodexNativeRequest`/`restoreResponseJson`/`createCodexStreamAdapter`）尚未进入生产请求路径；模块与夹具已交付并通过单测。
+- N01 的请求入口目录 pin 尚未接入 `src/index.js`（router 侧已 fail-closed 兜底）。
+- `src/budget.js` 默认时钟仍为墙钟；`src/sse.js` 流式下游头仍为黑名单语义；探活/媒体/可选端点尚未统一走 `target-authz`。
+- CLI 原生门（Q03/Q04）与 GUI（U01–U07）、Q05/Q06、R01/R02 未开始或阻断。
+
 ## [Unreleased] —— 2026-11-11/12 加固循环（M0–M5，本次交付）
 
 > 本次交付以 `dev/modelgate-hardening-a1` 集成分支为准。标注「未接线」的能力表示模块/契约已交付、生产入口仍走旧路径；部署前请按 [支持矩阵](docs/roadmap/2026-11-11-support-matrix.md) 与 [回滚与禁用](docs/how-to/rollback-and-disable.md) 核对。
