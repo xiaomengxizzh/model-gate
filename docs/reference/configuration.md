@@ -37,8 +37,9 @@
     "claude":           { "baseUrl": "https://api.anthropic.com", "apiKeyEnv": "ANTHROPIC_API_KEY", "api": "anthropic", "circuit": { "maxFailures": 3, "openDurationMs": 10000 } },
     "gemini":           { "baseUrl": "https://generativelanguage.googleapis.com", "apiKeyEnv": "GEMINI_API_KEY", "api": "gemini" },
     "local-ollama":     { "baseUrl": "http://127.0.0.1:11434", "apiKeyEnv": "" },
-    // Codex 聚合：官方目标示例（codexIdentity 可省略——官方 host 自动判定；第三方可显式声明 thirdParty）
-    "codex-official":   { "baseUrl": "https://chatgpt.com/backend-api/codex", "codexIdentity": "official", "apiKeyEnv": "" }
+    // Codex 聚合：官方直连示例（codexIdentity 可省略——官方 host 自动判定；第三方可显式声明 thirdParty）
+    // F01：官方目标只走 API Key 直连；/backend-api/codex（ChatGPT 订阅后端）与客户端凭据透传已移除，必须配 apiKeyEnv/面板 Key。
+    "codex-official":   { "baseUrl": "https://api.openai.com", "codexIdentity": "official", "apiKeyEnv": "OPENAI_API_KEY" }
   },
   "models": {
     "deepseek-chat": { "provider": "deepseek-official", "alias": ["ds"], "maxConcurrent": 0, "qps": 0 },
@@ -134,10 +135,10 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 
 头策略：
 - **第三方目标**：剥除 `authorization`、`chatgpt-account-id`、`openai-beta`、`version`、`originator`、`session-id`、`thread-id`、`x-client-request-id` 以及 `chatgpt-*` / `openai-*` / `x-codex-*` / `x-openai-*` 前缀头；`sec-websocket-*`、`upgrade`、`connection` 等帧层/逐跳头永不转发。无自有 key 时**不发** Authorization（宁可让上游 401，也不继承客户端官方 token）。确需放行个别非凭据头时用 `providers.<名>.forwardClientHeaders: ["thread-id"]` 显式声明（凭据类与帧层头即使列出也不放行）。
-- **官方目标**：只放行白名单（`accept`/`accept-encoding`/`content-type`/`user-agent`/`originator`/`version`/`session-id`/`thread-id`/`x-client-request-id`/`openai-beta` + `x-codex-*`/`x-openai-internal-*`/`openai-*` 前缀），其余丢弃并记头名。另有两条互斥路径：
-  1. **网关自有 key**（keys/apiKeyEnv）→ 注入 `Authorization: Bearer <自有 key>`，客户端官方凭据一律丢弃；
-  2. **客户端官方凭据透传**（无自有 key）→ 默认关闭，需显式 `MG_CODEX_OFFICIAL_PASSTHROUGH=1`；关闭时返回 403 `official_passthrough_disabled`，不产生任何上游请求。
-- 官方目标还受 host/scheme/path 白名单约束：必须是 `https`（回环例外），路径前缀限 `/v1` 与 `/backend-api/codex`；错误码 `official_target_insecure_scheme` / `official_host_not_allowlisted` / `official_path_not_allowlisted`。上游 3xx 一律按上游错误处理，**不跟随重定向**（不把凭据送到 Location）。
+- **官方目标**：只放行白名单（`accept`/`accept-encoding`/`content-type`/`user-agent`/`originator`/`version`/`session-id`/`thread-id`/`x-client-request-id`/`openai-beta` + `x-codex-*`/`x-openai-internal-*`/`openai-*` 前缀），其余丢弃并记头名。**凭据只有一条路**：
+  - **网关自有 key**（keys/apiKeyEnv）→ 注入 `Authorization: Bearer <自有 key>`；客户端带来的 `authorization` / `chatgpt-account-id` 一律丢弃（不在白名单内，且凭据类有独立守卫）。
+  - **客户端官方凭据透传已移除（F01）**：`/backend-api/codex` 订阅后端与 `MG_CODEX_OFFICIAL_PASSTHROUGH` 开关不再启用任何能力。官方目标没有自有 key 时：设置了旧开关 → 403 `official_passthrough_retired`（含迁移提示）；未设置 → 403 `official_no_gateway_key`。两种情况都**零上游请求**，也绝不改投第三方。网关不读取客户端登录态（`auth.json`/`CODEX_HOME` 从不访问）。
+- 官方目标还受 host/scheme/path 白名单约束：必须是 `https`（回环例外），路径前缀只剩 `/v1`（`/backend-api/codex` 已移除）；错误码 `official_target_insecure_scheme` / `official_host_not_allowlisted` / `official_path_not_allowlisted`。上游 3xx 一律按上游错误处理（502 `upstream_redirect_rejected`），**不跟随重定向**（不把凭据送到 Location），Location 目标零命中。
 
 严格路由：`defaults.aggregatePrefixes`（默认 `mg-`、`mg/`）是**聚合保留 ID 前缀**。命中前缀但未在 `models` 显式声明（含别名）时，`/v1/*` 返回 404 `{type:"unknown_model", code:"unknown_model", available:[…]}` 且**零上游请求**，绝不回退 `defaults.provider`；已配置的聚合 ID 与非保留前缀的未知模型维持原行为（后者仍按 `defaults.provider` 兜底，旧接口兼容）。
 
@@ -148,7 +149,7 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 | `defaults.codexCatalogBasePath` | 官方基线目录文件（`codex debug models` 导出）；网关用它 + 已配置第三方模型生成完整 Codex 目录，服务 `GET /v1/models?client_version=…`（`{models:[ModelInfo…]}`）与 `model_catalog_json`。未配置时回落旧的 `{object:"list",data:[…]}` 形状（Codex 会报 `failed to decode models response`）。目录构建失败时 fail-closed：官方/聚合 slug 按 unknown 处理并写日志。 |
 | `defaults.codexOfficialProvider` | 官方模型 slug 的上游 provider id。官方模型**不需要**出现在 `models`（目录生成器禁止复用官方 slug）；缺该字段时官方 slug 判 unknown（404），不会回落 `defaults.provider`。 |
 | 聚合 slug | 由目录生成器产出：`mg-<provider>-<model>`（`providers` id + `models` 键名净化）。请求该 slug 时网关映射到 `models.<原名>` 的上游及 `providerModels`，响应 `model` 回写 slug。 |
-| `MG_CODEX_OFFICIAL_PASSTHROUGH` | 见上文"客户端官方凭据透传"，默认关闭。 |
+| `MG_CODEX_OFFICIAL_PASSTHROUGH` | **已退役（F01）**：客户端官方凭据透传已移除。保留该变量只会被判为旧配置并给出迁移提示，不启用任何能力（见下文环境变量表）。 |
 
 **官方额度（D7）**：`defaults.codexQuota = { warnPercent: 80, criticalPercent: 95, source: "none" | "trusted" }`。`source:"none"` 时即使注入了读数也不采用（严格 UNKNOWN，不虚构余额）；没有可信数据时显示 `UNKNOWN`。应急态必须显式 `{acknowledged:true, reason, backupPoint}` 才能进入，记录时间线并可恢复；进入/恢复都需用户确认，绝不自动切换 provider、购买额度或退出官方登录。
 
@@ -269,7 +270,7 @@ model-gateway/
 | `MG_SILENT` | 置 1 关闭控制台日志（仍写文件） |
 | `MG_CONFIG_DIR` | keys/local/stats 隔离目录；未指定时为 cwd/config |
 | `MG_GW` | 旧测试目标；需显式指定可丢弃的本地实例，禁用生产端口 8787 |
-| `MG_CODEX_OFFICIAL_PASSTHROUGH` | 置 `1`/`true`/`on` 开启**客户端官方凭据透传**（官方目标无网关自有 key 时使用客户端 Bearer/chatgpt-account-id）。**默认关闭**；关闭时官方目标 403 `official_passthrough_disabled` |
+| `MG_CODEX_OFFICIAL_PASSTHROUGH` | **已退役（F01）**：客户端官方凭据透传与 `/backend-api/codex` 已移除，置任何值都不会启用。启动时写一条迁移警告；官方目标若无网关自有 key 则 403 `official_passthrough_retired`。请删除该变量并为官方 provider 配置 `apiKeyEnv`/面板 Key |
 
 **`apiKeyEnv` 的解析顺序**（`resolveKey`，转发/探测/预热/回切与 `/api/status` 同源）：① 面板 Key（加密 `keys.local.json`）→ ② **网关进程**环境变量 → ③ **用户级**环境变量。③ 在 Linux/POSIX 上先查 `systemctl --user show-environment`（其中已含 `~/.config/environment.d/*.conf`），未命中再直接解析 `~/.config/environment.d/*.conf`（按文件名排序，后者覆盖前者，支持双引号转义），因此改完环境变量最多约 60s 生效，无需重启网关或 `daemon-reload`；Windows 对应 `HKCU\Environment`。读取结果按变量名带 **60s TTL 正/负缓存**（避免每请求 `spawnSync` 空查），变量名先过标识符白名单（防注入）。
 

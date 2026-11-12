@@ -1,6 +1,6 @@
 # ADR-0002：Codex 多供应商聚合身份与目录（D1-A / D2）
 
-- 状态：Accepted（2026-11-11，未合并草稿分支）
+- 状态：Accepted（2026-11-11，未合并草稿分支）；**F01 修订（2026-11-12）**：官方原生凭据透传与 `/backend-api/codex` 入口已移除，官方目标只保留 API Key 直连（见下决策 2/4 的删除线说明）
 - 决策来源：[D1–D7 执行计划](../roadmap/2026-11-10-codex-aggregation-d1-d7-execution-plan.md)（所有者锁定）
 - 实现证据：[E9 验收矩阵](../roadmap/2026-11-11-codex-aggregation-e9-acceptance.md)、[E3 同线程切换证据](../evidence/2026-11-11-e3-live-switching.md)
 
@@ -14,9 +14,9 @@ Codex 0.167 的会话绑定 provider：`/model` 只列当前 provider 的目录�
 | # | 决策 | 落地 |
 | --- | --- | --- |
 | 1 | 复用内置 `openai` 身份 | Codex 侧只写 `model_provider="openai"` + 顶层 `openai_base_url`；**禁止**写 `[model_providers.openai]`（0.167 报 reserved built-in provider IDs，启动失败） |
-| 2 | 网关按模型选上游 | `classifyTarget()` 判定 official/thirdParty/unknown；官方 slug → 官方后端（`/backend-api/codex/responses`），`mg-*` 聚合 slug → 第三方 + Chat 桥 |
+| 2 | 网关按模型选上游 | `classifyTarget()` 判定 official/thirdParty/unknown；官方 slug → 官方**直连**（`/v1/responses`，网关自有 key），`mg-*` 聚合 slug → 第三方 + Chat 桥。F01 删除：官方订阅后端路径 `/backend-api/codex/responses` |
 | 3 | 动态本地目录 | `defaults.codexCatalogBasePath`（`codex debug models` 导出）+ 已配置第三方 → `buildCatalog()`；`GET /v1/models?client_version` 返回 `{models:[…]}`，与 `model_catalog_json` 同形 |
-| 4 | 凭据分域 | 官方专有头只在官方目标放行；第三方一律剥离。客户端官方凭据透传默认关闭（`MG_CODEX_OFFICIAL_PASSTHROUGH=1` 才开） |
+| 4 | 凭据分域 | 官方专有头只在官方目标放行；第三方一律剥离。官方目标凭据**只来自网关自有 key**。F01 删除：客户端官方凭据透传（原 `MG_CODEX_OFFICIAL_PASSTHROUGH` 开关）——无 key 时 403 `official_no_gateway_key` / 旧开关残留时 403 `official_passthrough_retired`，均零发送 |
 | 5 | 传输现实 | 请求体可能是 `content-encoding: zstd`；客户端先试 WebSocket，网关回 404 促其回落 HTTPS |
 | 6 | v2 加密任务 | 含 `encrypted_content`/`encrypted_task_id` 的任务在桥方向显式 `v2_encrypted_task_unsupported`；不解析/不删除/不伪造/不降级 |
 

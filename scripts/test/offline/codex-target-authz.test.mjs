@@ -246,60 +246,65 @@ test('fail-closed：unknown / 未验证 / host 冲突 / generation 不匹配零�
   assert.equal(denyOf(() => authorizeFinalTarget({ domain: TARGET_DOMAINS.OFFICIAL, caller: { incoming: OFFICIAL_INCOMING } }, 7, thirdBinding(third, thirdIdentity, cfg, { officialVerified: true }))).code, 'domain_identity_mismatch')
 })
 
-test('域与凭据分离：订阅身份不得用于 API Key 计费端点或第三方目标', () => {
+test('域与凭据分离：官方订阅身份已退役，任何声明都被显式拒绝（F01）', () => {
   const cfg = configWithOfficialHosts()
 
-  // 官方无自有 key = 订阅身份；目标却是 api.openai.com 计费端点
+  // 官方无自有 key = 无凭据（fail-closed）；不再有 client-passthrough 分类
   const sub = subscriptionProvider()
   const subIdentity = classifyTarget(sub, cfg)
   assert.equal(subIdentity.kind, 'official')
-  assert.equal(subIdentity.credential, 'client-passthrough')
+  assert.equal(subIdentity.credential, 'none')
   const billingProvider = { id: 'openai-nokey', baseUrl: 'https://api.openai.com' }
   const billingIdentity = classifyTarget(billingProvider, cfg)
-  assert.equal(billingIdentity.credential, 'client-passthrough')
+  assert.equal(billingIdentity.credential, 'none')
+  // 旧调用方仍传 officialSubscription/passthroughEnabled：显式拒绝 + 迁移提示，绝不静默启用
   const billing = denyOf(() => authorizeFinalTarget(
     { domain: TARGET_DOMAINS.OFFICIAL, caller: { incoming: OFFICIAL_INCOMING, officialSubscription: true, passthroughEnabled: true } },
     3,
     officialBinding(billingProvider, billingIdentity, cfg, { path: '/v1/chat/completions' })
   ))
-  assert.equal(billing.code, 'official_subscription_on_billing_path')
+  assert.equal(billing.code, 'official_passthrough_retired')
+  assert.match(billing.message, /已移除/, '拒绝消息必须说明能力已移除')
+  assertNoSentinels(billing.message, ['CLIENT-OFFICIAL-TOKEN', 'acct-CLIENT-ACCOUNT'])
 
-  // 第三方显式要求订阅身份 = 越权
+  // 第三方显式要求订阅身份：同样是已退役，不是「可用但越权」
   const third = thirdProvider()
   const thirdIdentity = classifyTarget(third, cfg)
-  assert.equal(denyOf(() => authorizeFinalTarget(thirdIntent({ credentialMode: CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION, officialSubscription: true, passthroughEnabled: true }), 7, thirdBinding(third, thirdIdentity, cfg))).code, 'credential_mode_forbidden')
+  assert.equal(denyOf(() => authorizeFinalTarget(thirdIntent({ credentialMode: CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION, officialSubscription: true, passthroughEnabled: true }), 7, thirdBinding(third, thirdIdentity, cfg))).code, 'official_passthrough_retired')
 
-  // 订阅凭据透传未开启：fail-closed（官方无 key 且未显式声明订阅）
+  // 官方无 key 且未声明订阅：缺凭据（fail-closed），零发送
   assert.equal(denyOf(() => authorizeFinalTarget(
     { domain: TARGET_DOMAINS.OFFICIAL, caller: { incoming: OFFICIAL_INCOMING, officialSubscription: false, passthroughEnabled: false } },
     3,
     officialBinding(billingProvider, billingIdentity, cfg, { path: '/v1/chat/completions' })
-  )).code, 'credential_mode_forbidden')
+  )).code, 'official_credential_missing')
 
   // 直接调用凭据模式判定
   const target = canonicalizeUrlOnce('https://api.openai.com', '/v1/chat/completions')
-  assert.equal(credentialModeAllowed(TARGET_DOMAINS.THIRD_PARTY, target, { credentialMode: CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION }).code, 'credential_mode_forbidden')
-  assert.equal(credentialModeAllowed(TARGET_DOMAINS.OFFICIAL, target, { credentialMode: CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION, officialSubscription: true, passthroughEnabled: true }).code, 'official_subscription_on_billing_path')
+  assert.equal(credentialModeAllowed(TARGET_DOMAINS.THIRD_PARTY, target, { credentialMode: CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION }).code, 'credential_mode_retired')
+  assert.equal(credentialModeAllowed(TARGET_DOMAINS.OFFICIAL, target, { credentialMode: CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION, officialSubscription: true, passthroughEnabled: true }).code, 'official_passthrough_retired')
   assert.equal(credentialModeAllowed(TARGET_DOMAINS.THIRD_PARTY, target, { credentialMode: CREDENTIAL_MODES.NONE }), null)
 })
 
-test('官方订阅入口（/backend-api/codex）：放行客户端官方凭据，其余官方头按白名单', () => {
+test('官方订阅入口（/backend-api/codex）已移除：路径先于凭据被拒，客户端官方头零放行', () => {
   const cfg = configWithOfficialHosts()
   const provider = subscriptionProvider()
   const identity = classifyTarget(provider, cfg)
-  const authz = authorizeFinalTarget(
-    { domain: TARGET_DOMAINS.OFFICIAL, caller: { incoming: OFFICIAL_INCOMING, officialSubscription: true, passthroughEnabled: true } },
+  const legacyCaller = { incoming: OFFICIAL_INCOMING, officialSubscription: true, passthroughEnabled: true }
+  // 1) 旧路径直接不在白名单内（与凭据声明无关，路径白名单先判）
+  assert.equal(denyOf(() => authorizeFinalTarget(
+    { domain: TARGET_DOMAINS.OFFICIAL, caller: legacyCaller },
     3,
     officialBinding(provider, identity, cfg, { path: '/backend-api/codex/responses' })
-  )
-  assert.equal(authz.credentialMode, CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION)
-  assert.equal(authz.headers.authorization, 'Bearer CLIENT-OFFICIAL-TOKEN')
-  assert.equal(authz.headers['chatgpt-account-id'], 'acct-CLIENT-ACCOUNT')
-  assert.equal(authz.headers['openai-beta'], 'responses=experimental')
-  assert.equal(authz.headers['x-codex-beta-features'], 'multi_agent')
-  assert.equal(authz.headers['x-ordinary-client-header'], undefined, '白名单外头必须丢弃')
-  assert.equal(authz.redirect, 'error')
-  assert.equal(assertSendTarget(authz, upstreamUrl(provider, '/backend-api/codex/responses')), authz)
+  )).code, 'official_path_not_allowlisted')
+  // 2) 即使退回 /v1，旧订阅声明也是退役拒绝，不会把客户端 OAuth 写进头集合
+  const retired = denyOf(() => authorizeFinalTarget(
+    { domain: TARGET_DOMAINS.OFFICIAL, caller: legacyCaller },
+    3,
+    officialBinding(provider, identity, cfg, { path: '/v1/chat/completions' })
+  ))
+  assert.equal(retired.code, 'official_passthrough_retired')
+  assertNoSentinels(retired.message, ['CLIENT-OFFICIAL-TOKEN', 'acct-CLIENT-ACCOUNT'])
 })
 
 test('官方自有 key：注入网关 key，客户端官方凭据不透传（两条路互斥）', () => {

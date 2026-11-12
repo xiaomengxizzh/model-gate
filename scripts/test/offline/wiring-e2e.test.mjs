@@ -122,12 +122,13 @@ test('M1-3b official Chat（非目录参与）200，不要求 catalogRecord', { 
     res.end(CHAT_OK('official-ok'))
   })
   t.after(() => upstream.stop())
+  // F01：官方目标只认网关自有 key（客户端官方凭据透传已移除）。
   const gw = await startGateway({
     name: 'm13b-official-chat',
-    env: { MG_CODEX_OFFICIAL_PASSTHROUGH: '1' },
+    env: { MG_TEST_OFFICIAL_KEY: 'gw-official-wiring-key' },
     config: {
       defaults: { provider: 'official', codexOfficialHosts: ['127.0.0.1'] },
-      providers: { official: { baseUrl: upstream.base, codexIdentity: 'official' } },
+      providers: { official: { baseUrl: upstream.base, codexIdentity: 'official', apiKeyEnv: 'MG_TEST_OFFICIAL_KEY' } },
       models: { demo: { provider: 'official' } },
     },
   })
@@ -139,6 +140,9 @@ test('M1-3b official Chat（非目录参与）200，不要求 catalogRecord', { 
   })
   assert.equal(res.status, 200, await res.clone().text())
   assert.equal(upstream.hits.length, 1)
+  // 客户端带来的官方凭据不得到达官方上游；只允许网关自有 key。
+  assert.equal(upstream.hits[0].headers.authorization, 'Bearer gw-official-wiring-key')
+  assert.equal(upstream.hits[0].headers['chatgpt-account-id'], undefined)
 })
 
 test('M1-3b catalogScoped 但 record 缺失 → 403 catalog_generation_missing（单元）', () => {

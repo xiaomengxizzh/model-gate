@@ -11,14 +11,13 @@
 //
 // credential 说明「这次请求用谁的身份」：
 //   provider-key       使用网关自持的上游 key（配置 keys/apiKeyEnv）。
-//   client-passthrough 官方目标且网关无自有 key：只能用客户端带来的官方凭据（默认关闭，见 auth.js）。
-//   none               thirdParty 且无 key（宁可让上游 401，绝不继承客户端官方 token）。
+//   none               没有可用凭据：官方域 fail-closed（auth.targetDeny 403），第三方宁可让上游 401，
+//                      两者都绝不继承客户端官方 token。F01 起 client-passthrough 已从分类结果中移除。
 
 export const DEFAULT_OFFICIAL_HOSTS = Object.freeze(['api.openai.com', 'chatgpt.com', 'chat.openai.com'])
 
-// ChatGPT 订阅身份可用的入口 host（/backend-api/codex）。api.openai.com 是 API Key 计费端点，
-// 订阅身份不得用于该域（target-authz 会显式拒绝）。
-export const OFFICIAL_SUBSCRIPTION_HOSTS = Object.freeze(['chatgpt.com', 'chat.openai.com'])
+// F01：OFFICIAL_SUBSCRIPTION_HOSTS 已移除——ChatGPT 订阅入口（/backend-api/codex）随凭据透传一同退役，
+// 官方目标只剩 API Key 计费端点（api.openai.com）这一条直连路径。
 
 // 本机回环：允许 http（自建 mock/本机代理）与自定义端口；其它 host 必须 https + 默认端口。
 export function isLoopbackHost(host) {
@@ -114,7 +113,7 @@ export function classifyTarget(provider, cfg) {
     return Object.assign(base, {
       kind: IDENTITY_KINDS.OFFICIAL,
       reason: declared === 'official' ? 'declared_official' : 'official_host_allowlist',
-      credential: hasKey ? 'provider-key' : 'client-passthrough',
+      credential: hasKey ? 'provider-key' : 'none',
     })
   }
   return Object.assign(base, { kind: IDENTITY_KINDS.THIRD_PARTY, reason: declared === 'thirdParty' ? 'declared_third_party' : 'non_official_host', credential: hasKey ? 'provider-key' : 'none' })
