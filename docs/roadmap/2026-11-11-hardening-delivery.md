@@ -15,7 +15,7 @@
 | --- | --- | --- |
 | 套件 | `node scripts/test/run.mjs` | **59 套件 / 564 pass / 0 fail / 1 skip**，exit 0（49.6s） |
 | 语法/UI | `npm run check` | exit 0，UI modules 16/16 |
-| 文档 | `node scripts/check-docs.mjs` | exit 0，PASS（60 files / 213 links） |
+| 文档 | `node scripts/check-docs.mjs` | exit 0，PASS（最终树 61 files / 216 links；代码受审点 2d82ea2 为 60 files / 213 links） |
 | 元数据 | `node scripts/check-metadata.mjs` | exit 0，PASS（32 checks） |
 | 清单不变量 | 磁盘 `offline/*.test.mjs` vs `SUITES` | 56 = 56，`missing=[] ghost=[] duplicates=0` |
 | 纯检出 | `git archive` → 无 `.git` 目录 | 上述四命令逐项一致（E 独立复跑） |

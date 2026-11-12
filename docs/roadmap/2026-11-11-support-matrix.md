@@ -10,10 +10,10 @@
 - **交付点权威数字（E 在纯检出上实跑，lead 复核一致；总数以此为准）**：
   - **59 套件 / 564 pass / 0 fail / 1 skip**（`node scripts/test/run.mjs`）。
     **1 skip = `MG_CODEX_VERIFY=1` 门控的真实 CLI 用例**（`offline/codex-catalog` 内），默认不执行真实 CLI。
-  - `npm run docs:check` → **`Documentation paths: PASS`**（交付报告记录 **60 files / 213 links**；脚本本身只打印 PASS）
+  - `npm run docs:check` → **`Documentation paths: PASS`**（代码受审点 2d82ea2 实测 **60 files / 213 links**；加上 R01 交付报告与索引后为 **61 files / 216 links**；脚本本身只打印 PASS）
   - `node scripts/check-metadata.mjs` → **Metadata: PASS (32 checks)**
   - `npm run check` → exit 0，UI **16/16** 语法 OK
-  - 清单不变量：磁盘 `scripts/test/offline/*.test.mjs` = **54**，登记 **54**，**missing=[] ghost=[]**
+  - 清单不变量：磁盘 `scripts/test/offline/*.test.mjs` = **56**，登记 **56**，**missing=[] ghost=[]**
 - 这组数字是**本交付点**的实测，随分支/清单增删变化，**不是永久常量**；回滚到较早里程碑后总数会变
   （判读规则见[回滚与禁用](../how-to/rollback-and-disable.md) §3）。下表每行的"套件断言数"是该交付点树上的
   逐套件实测值；换分支跑出的**总数**可能更少，但**每个套件的断言数**应一致，用于核对下面各格。
