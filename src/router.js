@@ -47,6 +47,74 @@ function normalizeVirtualModels(vms, base) {
   return out
 }
 
+// —— MG-017 Codex 试点路由：模型表单一查询入口 ——
+// createRouter().resolve()（虚拟模型/默认兜底优先）与 codexRoute()（只认精确名/别名）必须共用同一张
+// 别名表，避免两份解析规则漂移：一处认别名、另一处只认模型名就会让试点请求落到错误上游。
+function buildModelIndex(cfg) {
+  const models = (cfg && cfg.models) || {}
+  const index = new Map()
+  for (const [name, def] of Object.entries(models)) {
+    index.set(name, { name, def })
+    for (const a of def.alias || []) index.set(a, { name, def })
+  }
+  return index
+}
+// 真实模型名或别名精确命中；未命中返回 null（不做前缀/大小写/模糊匹配）
+export function lookupModel(cfg, name, index) {
+  if (!name) return null
+  return (index || buildModelIndex(cfg)).get(name) || null
+}
+
+// Codex 试点路由的固定 default 值（契约 §3.2/§3.3）：缺省与保存校验共用，避免两处默认值分叉
+const CODEX_HISTORY_DEFAULTS = Object.freeze({ agentMessage: 'preserve', reasoning: 'preserve', compaction: 'reject' })
+const CODEX_NAMESPACE_DEFAULT = 'collaboration'
+
+// 精确名/别名命中且 api:"responses" 且声明了 codex → 冻结 route；否则 null。
+// route 是纯数据快照：provider/upstreamModel 在命中时即固定，运行期不再读 fallbacks，也不做跨上游迁移。
+export function codexRoute(cfg, modelName) {
+  const hit = lookupModel(cfg, modelName)
+  if (!hit || !hit.def || hit.def.isVirtualModel || hit.def.virtual) return null
+  const def = hit.def
+  if (def.api !== 'responses') return null
+  const c = def.codex
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return null
+  if (!def.provider) return null
+  // 运行时与保存校验同一套白名单（契约 §3.2/§3.3）：手改坏配置不静默降级成别的语义，而是判定路由无效。
+  if (c.multiAgentVersion !== 'v2') return null
+  if (typeof c.plaintextTools !== 'boolean') return null
+  if (c.namespace != null && c.namespace !== CODEX_NAMESPACE_DEFAULT) return null
+  const h = (c.history && typeof c.history === 'object' && !Array.isArray(c.history)) ? c.history : {}
+  if (h.agentMessage != null && !['preserve', 'project', 'reject'].includes(h.agentMessage)) return null
+  if (h.reasoning != null && !['preserve', 'drop', 'reject'].includes(h.reasoning)) return null
+  if (h.compaction != null && !['reject', 'drop'].includes(h.compaction)) return null
+  const providerModels = (def.providerModels && typeof def.providerModels === 'object') ? def.providerModels : {}
+  const history = Object.freeze({
+    agentMessage: h.agentMessage || CODEX_HISTORY_DEFAULTS.agentMessage,
+    reasoning: h.reasoning || CODEX_HISTORY_DEFAULTS.reasoning,
+    compaction: h.compaction || CODEX_HISTORY_DEFAULTS.compaction,
+  })
+  return Object.freeze({
+    alias: hit.name,
+    provider: def.provider,
+    upstreamModel: providerModels[def.provider] || hit.name,
+    api: 'responses',
+    codex: Object.freeze({
+      multiAgentVersion: c.multiAgentVersion || 'v2',
+      plaintextTools: c.plaintextTools === true,
+      history,
+      namespace: c.namespace || CODEX_NAMESPACE_DEFAULT,
+    }),
+  })
+}
+
+// 是否存在任一 codex 试点模型（面板/诊断用；运行期路由仍以 codexRoute 逐请求判定）
+export function codexPilotEnabled(cfg) {
+  for (const def of Object.values((cfg && cfg.models) || {})) {
+    if (def && def.codex && typeof def.codex === 'object' && !Array.isArray(def.codex)) return true
+  }
+  return false
+}
+
 // 模型解析单一入口（MG-008 余项）：探测/预热/failback/转发必须得到同一组
 // { servingName(上游模型名), api(协议), effortFormat, maxTokensMax }，否则同一模型在不同路径
 // 会打不同上游名/协议（典型：providerModels 覆盖只在转发生效，预热却发网关模型名 → 404）。
@@ -205,12 +273,7 @@ export function buildProvider(cfg, id) {
 }
 
 export function createRouter(cfg) {
-  const models = cfg.models || {}
-  const alias = new Map()
-  for (const [name, def] of Object.entries(models)) {
-    alias.set(name, { name, def })
-    for (const a of def.alias || []) alias.set(a, { name, def })
-  }
+  const alias = buildModelIndex(cfg)   // 与 lookupModel()/codexRoute() 同一张表，禁止各自复制解析规则
   const defaultProvider = cfg.defaults && cfg.defaults.provider
   const virtualModel = cfg.defaults && cfg.defaults.model
   const vms = new Map((cfg.virtualModels || []).map(v => [v.name, v]))
@@ -224,8 +287,8 @@ export function createRouter(cfg) {
       if (!defaultProvider) throw new Error('defaults.provider 未设置，无法用虚拟共用模型名: ' + model)
       return { canonicalName: virtualModel, known: true, def: { virtual: true } }
     }
-    if (model) { const hit = alias.get(model); if (hit) return { canonicalName: hit.name, known: true, def: hit.def } }
-    if (defaultProvider) return { canonicalName: model || '(默认)', known: !!model && alias.has(model), def: { provider: defaultProvider } }
+    if (model) { const hit = lookupModel(cfg, model, alias); if (hit) return { canonicalName: hit.name, known: true, def: hit.def } }
+    if (defaultProvider) return { canonicalName: model || '(默认)', known: !!model && !!lookupModel(cfg, model, alias), def: { provider: defaultProvider } }
     throw new Error('model 未在 config/models 中配置，且未设置 defaults.provider: ' + model)
   }
   return { resolve, hasVirtualModels: () => vms.size > 0 }

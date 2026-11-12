@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import { isIP } from 'node:net'
-import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh, modelTarget } from './router.js'
+import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh, modelTarget, codexRoute, lookupModel } from './router.js'
 import { createLogger } from './logger.js'
 import { forward, probe, probeModel, probeChat, warm, probeEmbedding, probeRerank } from './request.js'
 import { adapterFor, cacheHitMiss, mapErrorEnvelope } from './format.js'
@@ -14,6 +14,9 @@ import { forwardChain, routeLimit, virtualQuotaExceeded, acquireProvider } from 
 import { createBudget, abortedError } from './budget.js'
 import { responsesToChat, chatToResponse } from './responses.js'
 import { createResponsesStream } from './responses-stream.js'
+// MG-017 Codex V2 试点：纯映射/流式适配由专用模块提供，入口只做接线（缺失时由启动期模块解析失败直接暴露，不在此重复实现）
+import { validateCodexResponsesEnvelope, buildToolPlan, projectOrderedHistory, restoreResponseJson } from './codex-responses.js'
+import { createCodexStreamAdapter } from './codex-responses-stream.js'
 import { validateEmbeddingRequest, buildEmbeddingRequest, embeddingHeaders, normalizeEmbeddingResponse, supportsEmbeddings, MAX_EMBEDDING_INPUTS } from './embeddings.js'
 import { validateRerankRequest, buildRerankRequest, rerankHeaders, normalizeRerankResponse, supportsRerank } from './rerank.js'
 import { supportsMedia, parseMultipartField, replaceMultipartField, isMultipart, validateSpeechRequest, validateImageRequest, mediaResponseLimit } from './media.js'
@@ -412,6 +415,34 @@ async function doSaveConfig(state, body) {
     for (const k of ['videoCreatePath', 'videoStatusPath', 'videoCancelPath']) {
       if (m[k] != null && m[k] !== '' && (typeof m[k] !== 'string' || !m[k].startsWith('/'))) return { error: '模型「' + mn + '」的 ' + k + ' 必须是以 / 开头的路径' }
     }
+    // —— MG-017 Codex V2 试点（契约 §3）：只允许 responses 模型、单上游、版本/历史策略白名单 ——
+    // 未知字段一律 400，不做"保留但运行期忽略"的静默兼容，避免配置与服务端契约悄悄分叉。
+    if (m.codex != null) {
+      if (String(m.api || '') !== 'responses') return { error: '模型「' + mn + '」的 codex 试点仅允许用于 api:"responses" 的非虚拟模型' }
+      if (typeof m.codex !== 'object' || Array.isArray(m.codex)) return { error: '模型「' + mn + '」的 codex 须为对象' }
+      const codexFields = new Set(['multiAgentVersion', 'plaintextTools', 'history', 'namespace'])
+      for (const k of Object.keys(m.codex)) if (!codexFields.has(k)) return { error: '模型「' + mn + '」的 codex 含未知字段：' + k }
+      if (m.codex.multiAgentVersion !== 'v2') return { error: '模型「' + mn + '」的 codex.multiAgentVersion 仅支持 "v2"' }
+      if (typeof m.codex.plaintextTools !== 'boolean') return { error: '模型「' + mn + '」的 codex.plaintextTools 须为布尔值' }
+      if (m.codex.namespace != null && m.codex.namespace !== 'collaboration') return { error: '模型「' + mn + '」的 codex.namespace 仅支持缺省或 "collaboration"' }
+      if (m.codex.history != null) {
+        if (typeof m.codex.history !== 'object' || Array.isArray(m.codex.history)) return { error: '模型「' + mn + '」的 codex.history 须为对象' }
+        const hist = m.codex.history
+        const histFields = new Set(['agentMessage', 'reasoning', 'compaction'])
+        for (const k of Object.keys(hist)) if (!histFields.has(k)) return { error: '模型「' + mn + '」的 codex.history 含未知字段：' + k }
+        if (hist.agentMessage != null && !['preserve', 'project', 'reject'].includes(hist.agentMessage)) return { error: '模型「' + mn + '」的 codex.history.agentMessage 仅支持 preserve/project/reject' }
+        if (hist.reasoning != null && !['preserve', 'drop', 'reject'].includes(hist.reasoning)) return { error: '模型「' + mn + '」的 codex.history.reasoning 仅支持 preserve/drop/reject' }
+        if (hist.compaction != null && !['reject', 'drop'].includes(hist.compaction)) return { error: '模型「' + mn + '」的 codex.history.compaction 仅支持 reject/drop' }
+      }
+      const hasFallbacks = Array.isArray(m.fallbacks) ? m.fallbacks.length > 0 : (m.fallbacks != null && m.fallbacks !== '')
+      if (hasFallbacks) return { error: '模型「' + mn + '」codex 试点模型不允许 fallbacks' }
+    }
+  }
+  // defaults.codex：严格模型路由开关（契约 §3.5）。只允许已知字段，未知字段不静默保留。
+  if (defaults.codex != null) {
+    if (typeof defaults.codex !== 'object' || Array.isArray(defaults.codex)) return { error: 'defaults.codex 须为对象' }
+    for (const k of Object.keys(defaults.codex)) if (k !== 'strictModelRouting') return { error: 'defaults.codex 含未知字段：' + k }
+    if (defaults.codex.strictModelRouting != null && typeof defaults.codex.strictModelRouting !== 'boolean') return { error: 'defaults.codex.strictModelRouting 须为布尔值' }
   }
   // 单上游代理（名单）：留空/undefined=继承全局；direct/false=强制直连；否则须为合法 http(s):// 地址
   for (const [pid, p] of Object.entries(providers || {})) {
@@ -860,6 +891,177 @@ async function proxyNativeResponses(state, budget, log, opts) {
   return { status: 502, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: 'responses 上游失败：' + (lastErr ? lastErr.message : 'all providers failed'), type: 'all_providers_failed' } })) }
 }
 
+// —— MG-017 Codex V2 试点路由（契约 §3/§4.3/§5/§7/§8） ——
+// 与 proxyNativeResponses 并列：非试点模型保持原逐字节透传；试点模型才做工具声明投影/历史投影/完成项恢复。
+// 硬约束：
+//  · 只打 route.provider 一个上游，不读 def.fallbacks、不因 429/5xx 换上游（错误按原状态码归因）；
+//  · 请求头由 codexUpstreamHeaders 重建：只有服务端 Bearer + provider/defaults extraHeaders，
+//    客户端 authorization/cookie/chatgpt-account-id/openai-*/x-api-key 绝不进上游（凭据隔离 §3.6）；
+//  · 转换只调用 codex-responses.js 的纯函数，入口不重复实现任何映射逻辑。
+const CODEX_STRIP_HEADERS = ['host', 'connection', 'transfer-encoding', 'upgrade', 'keep-alive', 'te', 'trailer']
+function codexUpstreamHeaders(state, provider, payloadLen) {
+  const headers = videoJsonHeaders(state, provider, payloadLen)
+  for (const k of CODEX_STRIP_HEADERS) delete headers[k]
+  return headers
+}
+function codexJsonError(status, message, type) {
+  return { status, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message, type: type || 'invalid_request_error' } })) }
+}
+// Responses usage 记账（input/output/total；无 usage 记 0，不臆造）；一个待交付响应只记一次
+function tallyResponsesUsage(state, modelName, pid, usage, sg) {
+  const u = usage || {}
+  const inTk = Number(u.input_tokens) > 0 ? Number(u.input_tokens) : 0
+  const outTk = Number(u.output_tokens) > 0 ? Number(u.output_tokens) : 0
+  const total = Number(u.total_tokens) > 0 ? Number(u.total_tokens) : inTk + outTk
+  if (total > 0) {
+    sg.tokens = (sg.tokens || 0) + total
+    sg.inTokens = (sg.inTokens || 0) + inTk
+    sg.outTokens = (sg.outTokens || 0) + outTk
+    agg(state, pid, 'tokens', total)
+    tallyDaily(state, modelName, total, 0, 0, inTk, outTk)
+  }
+  return total
+}
+
+async function proxyCodexResponses(state, budget, log, opts) {
+  const { body, modelName, def, route, res } = opts
+  // 1) 请求副本（纯函数投影，原 body 不被修改）：客户端元数据剥离 → 工具声明 → 有序历史 → providerModels 覆盖名
+  // 契约 §4.1 的 request-like 重载（同一实现，映射测试已覆盖）：tools + tool_choice 一起投影，
+  // 否则 tool_choice 仍指向上游不认识的 namespace 工具名。
+  const planOut = buildToolPlan({ tools: body.tools, tool_choice: body.tool_choice }, route)
+  if (planOut && planOut.rejected) return codexJsonError(400, planOut.rejected.message, planOut.rejected.code)
+  // declarations/toolChoice/lossy 在 plan 内；planOut 是 { plan, lossy, rejected } 外壳
+  const plan = (planOut && planOut.plan) || null
+  const hist = projectOrderedHistory(body.input, route, plan)
+  if (hist && hist.rejected) return codexJsonError(400, hist.rejected.message, hist.rejected.code)
+  const upstreamBody = Object.assign({}, body, { model: route.upstreamModel })
+  // client_metadata（thread_id/parent_thread_id 等）/prompt_cache_key 是客户端来源元数据，
+  // 只用于网关日志与收据关联；第三方上游不接收（契约 §7 目的端能力边界）。
+  // 仅 codex 试点路由剥离；proxyNativeResponses 的普通原生透传保持既有透传语义。
+  const CLIENT_METADATA_FIELDS = ['client_metadata', 'prompt_cache_key']
+  const strippedMetadata = CLIENT_METADATA_FIELDS.filter((k) => upstreamBody[k] !== undefined)
+  for (const k of CLIENT_METADATA_FIELDS) delete upstreamBody[k]
+  if (hist && hist.input !== undefined) upstreamBody.input = hist.input
+  if (plan) {
+    if (Array.isArray(plan.declarations)) upstreamBody.tools = plan.declarations
+    else delete upstreamBody.tools
+    if (plan.toolChoice !== undefined) upstreamBody.tool_choice = plan.toolChoice
+  }
+  const lossy = [].concat((planOut && planOut.lossy) || [], (plan && plan.lossy) || [], (hist && hist.lossy) || [])
+  if (strippedMetadata.length) lossy.push('codex 剥离客户端元数据:' + strippedMetadata.join(','))
+  if (lossy.length && log) log.info('codex 路由有损投影', lossy.slice(0, 20).join(','))
+
+  // 2) 单上游：只认 route.provider；不做 fallback / 跨上游迁移
+  const pid = route.provider
+  if (!(state.cfg.providers || {})[pid]) return codexJsonError(502, 'codex 试点上游不存在: ' + pid, 'all_providers_failed')
+  const prov = buildProvider(state.cfg, pid)
+  if (!healthy(ensureHst(state, pid), Date.now())) return codexJsonError(502, 'codex 试点上游熔断中: ' + pid, 'all_providers_failed')
+  if (prov._def.apiKeyEnv && !prov.keyOk) return codexJsonError(502, 'codex 试点上游未配置 Key: ' + pid, 'all_providers_failed')
+  const upstreamPath = (typeof def.responsesPath === 'string' && def.responsesPath) ? def.responsesPath : '/v1/responses'
+  const payload = Buffer.from(JSON.stringify(upstreamBody))
+  const headers = codexUpstreamHeaders(state, prov, payload.length)
+  const sg = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
+  const countError = () => { agg(state, pid, 'errors', 1); state.st.counters.errors += 1; markFail(state, pid, prov.circuit) }
+  let release = null
+  try {
+    release = await acquireProvider(state, pid, state.cfg, budget.signal)
+    const up = await forward(prov, upstreamPath, 'POST', headers, payload, state.cfg.defaults || {}, log, { budget, signal: budget.signal })
+    if (!up.ok) {
+      const ebuf = await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
+      const mapped = mapErrorEnvelope(route.api, up.status, ebuf) || ebuf
+      // 与既有归因一致：402/403/404/429/5xx 记上游失败；其余 4xx 是确定性请求错误，不熔断、不重试
+      if (up.status === 402 || up.status === 403 || up.status === 404 || up.status === 429 || up.status >= 500) countError()
+      return { status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: mapped }
+    }
+    state.st.counters.requests += 1
+    agg(state, pid, 'requests', 1)
+    sg.requests = (sg.requests || 0) + 1
+    const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
+    if (/text\/event-stream/i.test(ct)) {
+      return await relayCodexStream(state, budget, log, { up, res, plan, route, body, modelName, pid, prov, sg, countError })
+    }
+    const maxBytes = ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024) * 4
+    const buf = await collectBody(up.stream, maxBytes, { budget, signal: budget.signal, destroyOnAbort: true })
+    const j = tryParse(buf)
+    if (j && typeof j === 'object') {
+      const restored = restoreResponseJson(j, route, plan)
+      if (restored && restored.rejected) {
+        countError()
+        return codexJsonError(502, restored.rejected.message, restored.rejected.code)
+      }
+      const outJson = (restored && restored.json) || j
+      outJson.model = body.model   // model 回写客户端请求名（与原生透传一致，客户端只应看到自己请求的名字）
+      tallyResponsesUsage(state, modelName, pid, outJson.usage, sg)
+      if (restored && restored.lossy && restored.lossy.length && log) log.info('codex 完成项恢复有损', restored.lossy.slice(0, 20).join(','))
+      markOk(state, pid); noteAffinity(state, modelName, pid)
+      return { status: up.status, contentType: ct, buf: Buffer.from(JSON.stringify(outJson)) }
+    }
+    markOk(state, pid); noteAffinity(state, modelName, pid)
+    return { status: up.status, contentType: ct, buf }
+  } catch (err) {
+    if (err && err.aborted) throw err
+    countError()
+    log && log.warn('codex 上游请求失败', pid, err && err.message)
+    // forward() 对 429/5xx 在重试耗尽后以带 status 的错误抛出：保留上游状态码归因，
+    // 但绝不换到另一个 provider（试点路由单上游）。响应体已被 forward 丢弃，这里只回可读归因。
+    const st = Number(err && err.status)
+    if (Number.isInteger(st) && st >= 400 && st <= 599) {
+      return { status: st, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: 'codex 上游返回 HTTP ' + st + '（试点路由不切换上游）', type: 'upstream_error' } })) }
+    }
+    return codexJsonError(502, 'codex 上游请求失败：' + (err && err.message ? err.message : 'unknown'), 'all_providers_failed')
+  } finally { if (release) release() }
+}
+
+// 流式：SSE 交给 createCodexStreamAdapter 规范化（身份/终态/usage/背压都在适配器内），
+// 入口只负责泵字节、取消（预算/客户端断开 → 销毁上游）与按终态归因，不自动重发。
+async function relayCodexStream(state, budget, log, opts) {
+  const { up, res, plan, route, body, modelName, pid, prov, sg, countError } = opts
+  let usageSeen = false
+  const adapter = createCodexStreamAdapter(res, {
+    plan, route, model: body.model, log,
+    onUsage: (u) => {
+      if (usageSeen) return
+      usageSeen = true
+      tallyResponsesUsage(state, modelName, pid, u, sg)
+    },
+  })
+  // 响应头由适配器在首帧写出（SSE_HEADERS）；这里不抢先 writeHead，避免两套 header 分叉
+  const destroyUp = () => { try { up.stream.destroy() } catch {} }
+  const onAbort = () => destroyUp()
+  if (budget && budget.signal) {
+    if (budget.signal.aborted) onAbort()
+    else { try { budget.signal.addEventListener('abort', onAbort, { once: true }) } catch {} }
+  }
+  try { res.once('close', destroyUp) } catch {}
+  let reachedEnd = false
+  try {
+    for await (const chunk of up.stream) await adapter.push(chunk)
+    reachedEnd = true
+    await adapter.end()
+    const terminal = adapter.terminal
+    if (terminal === 'response.failed') { countError() }
+    else { markOk(state, pid); noteAffinity(state, modelName, pid) }
+    return { streamed: true }
+  } catch (err) {
+    const cancelled = (err && err.aborted) || (budget && budget.signal && budget.signal.aborted) || res.destroyed
+    if (cancelled) {
+      // 客户端断开/预算耗尽：销毁上游、不按上游失败记账（契约 §8 取消语义）；
+      // 预算超时（客户端仍在）以 REQUEST_TIMEOUT 收尾，客户端已断则写不出去（适配器内部忽略）。
+      const timedOut = !!(budget && budget.signal && budget.signal.aborted && budget.reason !== 'client_closed')
+      try { await adapter.fail(timedOut ? '请求超出整体预算' : '请求已取消（客户端断开）', timedOut ? { timeout: true } : {}) } catch {}
+      return { streamed: true }
+    }
+    countError()
+    log && log.warn('codex 流式响应中断', pid, err && err.message)
+    try { await adapter.fail(err && err.message ? err.message : '上游流式响应中断') } catch {}
+    return { streamed: true }
+  } finally {
+    try { res.removeListener('close', destroyUp) } catch {}
+    if (budget && budget.signal) { try { budget.signal.removeEventListener('abort', onAbort) } catch {} }
+    if (!reachedEnd) destroyUp()
+  }
+}
+
 // 原生 Responses 流：逐字节管道（pipeline 负责背压），预算中止/客户端断开时销毁上游。
 function streamRawResponses(res, upstreamStream, budget) {
   return new Promise((resolve) => {
@@ -1253,18 +1455,38 @@ function makeHandler(state) {
         sendJson(res, 400, { error: { message: '请求体必须为 JSON 对象', type: 'invalid_request_error' } })
         return
       }
-      // —— MG-015：/v1/responses 入口（Chat 桥）。原生 api:"responses" 透传尚未实现，见契约 §3 ——
+      // —— MG-015/MG-017：/v1/responses 入口（Chat 桥 / 原生透传 / Codex 试点） ——
       if (isResponses) {
+        // 严格模型路由（契约 §3.5）：开启后本入口只接受 models 中精确声明（或别名命中）的名字，
+        // 未声明直接 400 unknown_model 且**零上游请求**，不得回落 defaults.provider。仅收窄 /v1/responses。
+        const codexDefaults = (state.cfg.defaults && state.cfg.defaults.codex) || null
+        if (codexDefaults && codexDefaults.strictModelRouting === true && !lookupModel(state.cfg, body.model)) {
+          sendJson(res, 400, { error: { message: '未知模型名: ' + (typeof body.model === 'string' && body.model ? body.model : '(缺失)') + '（/v1/responses 已启用 defaults.codex.strictModelRouting：未在 models 声明/别名命中的模型不回落 defaults.provider）', type: 'unknown_model' } })
+          return
+        }
         // 原生 Responses 透传（MG-015）：模型显式 api:"responses" 时不做 Chat 桥转换
         // resolve 在缺 model 且无 defaults.provider 时会抛错：此处静默回落到 Chat 桥，由 forwardChain 给出统一错误
         let nHit = null
         try { nHit = state.router.resolve(body.model) } catch { nHit = null }
         const nDef = nHit && nHit.def
         if (nDef && !nDef.isVirtualModel && !nDef.virtual && nDef.api === 'responses') {
-          const nconv = responsesToChat(body)   // 仅复用拒绝矩阵/校验，不采用其 Chat body
-          if (nconv.rejected) { sendJson(res, 400, { error: { message: nconv.rejected.message, type: nconv.rejected.code || 'unsupported_parameter' } }); return }
+          // 原生信封校验与 Chat 桥必须分离：Responses 原生语义（agent_message/reasoning/namespace 工具等）
+          // 由 validateCodexResponsesEnvelope 判定；responsesToChat 只服务 Chat 桥，禁止互相借用。
+          const env = validateCodexResponsesEnvelope(body)
+          if (!env || env.ok !== true) {
+            const rj = (env && env.rejected) || {}
+            sendJson(res, 400, { error: { message: rj.message || 'Responses 请求信封不合法', type: rj.code || 'unsupported_parameter' } }); return
+          }
+          if (env.lossy && env.lossy.length && log) log.info('responses 原生信封可丢弃项', env.lossy.slice(0, 20).join(','))
           if ((nDef.capability || 'chat') !== 'chat') { sendJson(res, 400, { error: { message: '模型 ' + nHit.canonicalName + ' 的能力不是 chat，不能用于 /v1/responses', type: 'unsupported_model' } }); return }
-          const nout = await proxyNativeResponses(state, budget, log, { body, modelName: nHit.canonicalName, def: nDef, wantStream: !!body.stream, res })
+          // Codex V2 试点：声明了 codex 的 responses 模型走单上游投影/恢复路径；其余模型保持原逐字节透传
+          const pilot = codexRoute(state.cfg, nHit.canonicalName)
+          if (nDef.codex != null && !pilot) {
+            sendJson(res, 500, { error: { message: 'codex 试点模型路由无效：需要 api:"responses" 且 provider 存在', type: 'invalid_config' } }); return
+          }
+          const nout = pilot
+            ? await proxyCodexResponses(state, budget, log, { body, modelName: nHit.canonicalName, def: nDef, route: pilot, res })
+            : await proxyNativeResponses(state, budget, log, { body, modelName: nHit.canonicalName, def: nDef, wantStream: !!body.stream, res })
           if (nout && nout.streamed) return
           res.writeHead(nout.status, { 'content-type': nout.contentType }); res.end(nout.buf); return
         }

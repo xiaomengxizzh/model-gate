@@ -1,0 +1,79 @@
+{
+  "_comment": "Codex 0.167.0 model_catalog_json（模型目录）规范样例：已用本机 codex-cli 0.167.0 实测解析通过。slug 与网关 models 别名必须一致；multi_agent_version:\"v2\" 是递归子代理的门槛，子模型自身也要声明。",
+  "models": [
+    {
+      "slug": "codex-gpt",
+      "display_name": "Codex GPT (ModelGate)",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Low"
+        },
+        {
+          "effort": "medium",
+          "description": "Medium"
+        },
+        {
+          "effort": "high",
+          "description": "High"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high"
+        }
+      ],
+      "shell_type": "default",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 10,
+      "support_verbosity": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "experimental_supported_tools": [],
+      "base_instructions": "You are the root agent. Use only the tools declared in this request.",
+      "context_window": 200000,
+      "max_output_tokens": 32000,
+      "supports_parallel_tool_calls": true,
+      "multi_agent_version": "v2",
+      "use_responses_lite": false,
+      "prefer_websockets": false
+    },
+    {
+      "slug": "codex-deepseek",
+      "display_name": "Codex DeepSeek worker (ModelGate)",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Low"
+        },
+        {
+          "effort": "medium",
+          "description": "Medium"
+        },
+        {
+          "effort": "high",
+          "description": "High"
+        }
+      ],
+      "shell_type": "default",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 20,
+      "support_verbosity": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "experimental_supported_tools": [],
+      "base_instructions": "You are a worker agent. Use only the tools declared in this request.",
+      "context_window": 128000,
+      "max_output_tokens": 16000,
+      "supports_parallel_tool_calls": true,
+      "multi_agent_version": "v2",
+      "use_responses_lite": false,
+      "prefer_websockets": false
+    }
+  ]
+}

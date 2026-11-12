@@ -2,6 +2,68 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
+## 2026-11-12 Codex 原生 Multi-Agent V2 跨供应商（MG-017）
+
+路线 **A 主导、B 补充**：Codex 持有线程、工具执行、审批、沙箱、收件箱、等待、取消、调度与持久化；ModelGate 只做模型路由、请求/响应转换、鉴权隔离与推理流治理。契约：[codex-multi-agent-v2.md](contracts/codex-multi-agent-v2.md)。验收矩阵与收据：[2026-11-12-codex-v2-acceptance.md](roadmap/2026-11-12-codex-v2-acceptance.md)、[收据目录索引](roadmap/receipts/README.md)。
+
+**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 全程零新增运行时依赖，复用本机 Codex CLI `0.167.0` 与 Desktop 捆绑 `0.167.0-alpha.3.2`、Node v24.22.2。
+
+### 开工基线（与审计一致）
+
+| 项 | 值 |
+| --- | --- |
+| 分支 / HEAD | `dev/gateway-audit-20261108` @ `3a4ba8956732e2aabdff2cfce8a118107189542a`（= 审计基线，无跟踪文件改动） |
+| 用户未提交内容 | 原工作区仅 4 项未跟踪（`config/videos.json`、`scripts/tray/*`），未触碰 |
+| 任务工作树 | `.agents/worktrees/codex-multiagent-v2`（分支 `codex-multiagent-v2`，从基线提交切出；原工作区只读） |
+| 基线回归 | `npm run check`=0；`npm test`=25/25；三个 Responses 套件 27/27 |
+| 现场缺陷（合成复现） | 原生分支用 `responsesToChat()` 当校验 → 明文 `agent_message` 400；Chat 桥丢 `namespace`；原生透传无目的端投影/无完成项恢复；`resolve()` 未知名回落 `defaults.provider` |
+
+### 本轮交付
+
+| ID | 交付 | 验收证据 |
+| --- | --- | --- |
+| MG-017-T1 | 路由：`codexRoute`/`codexPilotEnabled`/`lookupModel`；原生信封校验与 Chat 桥分离；`strictModelRouting`（未知模型 400 零上游）；单 provider 试点转发与完成项恢复接线；凭据隔离 + 客户端元数据剥离；保存校验 | `offline/codex-routing.test.mjs`（8 用例，双 mock） |
+| MG-017-T2 | 纯映射 `src/codex-responses.js`：三工具明文声明、namespace 扁平/别名、`agent_message` 三态与投影、reasoning/compaction、`call_id` 配对、完成项恢复（6 工具恢复 namespace，三消息工具补 `encrypted_function_args: []`）、显式拒绝码 | `offline/codex-responses.test.mjs`（44 断言） |
+| MG-017-T3 | SSE 适配 `src/codex-responses-stream.js`：UTF-8/CRLF/多行 data 增量解析、身份恢复、终态唯一、usage 一次、断流不重发、背压 30s/8MiB | `offline/codex-responses-stream.test.mjs`（38 用例，含 4 个网关端到端 + incomplete 恢复） |
+| MG-017-T4 | 生命周期套件：原版 CLI + bundled app-server、两个隔离 mock、隔离 CODEX_HOME、门禁 `MG_CODEX_V2=1`；抓线与判据见 fixtures/NOTES.md | `offline/codex-v2-lifecycle.test.mjs`（默认快测；真 CLI 组按门禁） |
+| MG-017-T5 | 验收矩阵（CLI CL-00～CL-14 / Desktop DS-00～DS-10、三档等级、双记分卡）与收据模板、离线收据 | `docs/roadmap/2026-11-12-codex-v2-acceptance.md`、`docs/roadmap/receipts/` |
+
+### 关键实测结论（写入契约 §5.1/§5.3/§6.1）
+
+- 协作工具是 `namespace "collaboration"` 下 6 个：spawn_agent / send_message / followup_task / wait_agent / list_agents / interrupt_agent；只有前三者带 `message` 参数与 `encrypted` 标记。
+- `spawn_agent` 参数为 task_name / message / model / reasoning_effort / fork_turns，**没有 agent_type**；子模型用 `model` 显式覆盖（单 provider 成立）。
+- 明文委派在 wire 上仍是 `agent_message`（author/recipient + input_text），无 `encrypted_content` 字段；回放时 Codex 会清掉 `encrypted_function_args` 但保留 `namespace`。
+- **6 个协作工具的完成项都必须恢复 namespace**（扁平 wait_agent 实测报 `unsupported call: wait_agent`）；普通工具绝不能带 namespace（会拼成 `collaborationexec_command`）。
+- `model_catalog_json` 已实测可用（形状与必填字段见契约 §6，样例 `docs/contracts/fixtures/codex/models.v2.json`）；`multi_agent_version:"v2"` 是递归门槛，子模型自身也要声明。
+- 冷恢复：`codex exec resume <rootSid>` 不接受 -s/-C/--ephemeral，复用同一 root SID；resume 后 followup 落在原 child thread。
+
+### 离线验收（本机，mock 上游，不触真实供应商）
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm run check` | 退出码 0（新增两个模块已纳入 check） |
+| `npm test` | **29/29 隔离套件通过**（新增 4 个 Codex 套件随默认套件运行；lifecycle 真实 CLI 组默认 skip） |
+| `node --test offline/codex-responses.test.mjs` | 44 断言全过 |
+| `node --test offline/codex-responses-stream.test.mjs` | 38 用例全过（含网关端到端：身份恢复/终态/usage 一次/断流/取消/incomplete 恢复） |
+| `node --test offline/codex-routing.test.mjs` | 8 用例全过（分路/鉴权隔离/严格路由/单上游/元数据剥离/保存校验） |
+| `node --test offline/codex-v2-lifecycle.test.mjs` | 默认：pass 6 / skipped 10（约 62ms，零子进程；skip 不算通过） |
+| `MG_CODEX_V2=1 node --test offline/codex-v2-lifecycle.test.mjs` | **Lead 独立复跑 16/16 pass、rc=0**（约 124s）：spawn/真实工具 nonce/完成通知、send 排队、递归、并发上限、审批 read-only vs workspace-write、冷恢复、interrupt_agent 取消、Phase B 生命周期与递归、app-server 组件 |
+| `node --test offline/responses-{mapping,endpoint,native}.test.mjs` | 27/27（既有 Responses 回归） |
+| `npm run docs:check` | PASS（顺带修复既有仓库外坏链） |
+| `node scripts/check-metadata.mjs` | PASS (21) |
+| 离线 Phase B（Lead 手工端到端：原版 CLI → 隔离网关单 provider → 两个 mock） | **PASS（OFFLINE 级）**：4 次上游请求；codex-gpt 39 tokens/3 请求、deepseek-mock 13 tokens/1 请求、global requests=4/errors=0/tokens=52；root 第 3 回合 input 依次含 `function_call wait_agent` → `function_call_output {"message":"Wait completed.","timed_out":false}` → `agent_message FINAL_ANSWER … Payload: CH…`；Codex exit 0、stdout 末行 `ROOT_SAW_NOTIFICATION` |
+| 同一 Phase B 首次尝试（留档） | **PARTIAL**：root 拿到 spawn 输出后立即 final，CLI 退出致子线程流被 `client_closed` 中止（deepseek-mock 0 请求/0 tokens）。归因**客户端竞态**，非网关缺陷；修正 mock 先 `wait_agent` 后复跑得上一行 |
+
+### 未验证 / 待授权（不得当通过）
+
+- **真实 GPT + 真实 DeepSeek 双上游试点、CLI 与 Desktop GUI 真实验收、ChatGPT 登录/工作区归属**：需用户明确批准认证模式、模型、额度、数据范围与隔离 Desktop 环境；矩阵全部 `BLOCKED_PENDING_AUTHORIZATION`。
+- 离线阶段只到「两个 mock 上游 + 原版 Codex 创建线程」；mock、HTTP 200、截图都不构成真实验收。
+- 首版不做：WebSocket 上游、远程 compaction、`previous_response_id` 续轮、托管工具转发、交互式审批 UI（只验证沙箱拒绝/放宽）。
+- 真实 DeepSeek 对未声明顶层字段（如 `reasoning.summary`）的容忍度未经真实上游验证。
+
+### 回退
+
+删除模型的 `codex` 块或把 `api` 改回原值即按 alias 关闭试点；关闭 `defaults.codex.strictModelRouting` 恢复未知名回落。保留原 Codex rollout，不迁移、不改写旧密文；跨路由需用户同意后开新线程重发必要明文。隔离实例失败即停并确认原入口 `/healthz` 可用，不对生产做隐式回滚。
 ## 当前状态（2026-11-09 第三批/真实链路验证收口）
 
 分支 `dev/gateway-audit-20261108`。第一批三个提交：`33853d2`（契约基线 + P1 卡）、`522da4a`（旧套件隔离 + 日志脱敏性能）、`9a41547`（指标口径）。第二批（2026-11-09）：`5498c1a`（MG-002 预算/取消/背压 + 契约 + deadline 测试）、`42f06cd`（MG-009 投影契约/fixture/托盘文档）、`81b37e6`（MG-009 服务端投影清洗、Key 白名单、面板版本）、`027a97f`（MG-015 Responses 契约草案）。
@@ -176,3 +238,5 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 同一时刻一个文件一个作者：MG-008 与 MG-009 都改 src/index.js，必须串行；MG-015 的 format.js/router.js 写集与二者不重叠。全部完成后由 Lead 统一提交并更新本表。
 
 并行分派记录（2026-11-08 第二批）：MG-004、MG-008、MG-010 写集互不重叠。2026-11-09 第二批：MG-002 由 Lead 独写 src/ 四文件；mg002-tests 只写 scripts/test/offline/；mg015-spec 只写 docs/contracts/responses-v1.md；mg009-fixture 只写 docs/contracts/management-ui-projection-v1.md、docs/contracts/fixtures/v1/、docs/how-to/tray-deployment.md。2026-11-09 第三批：MG-008 余项由 Lead 独写 src/（router/request/index/forward/format）；MG-015 纯映射模块由 mg002-tests 只写 src/responses.js 与 scripts/test/offline/responses-mapping.test.mjs，接线待其后串行。
+
+2026-11-12 MG-017（Codex 原生 Multi-Agent V2，独立工作树 `.agents/worktrees/codex-multiagent-v2`，原工作区只读）：累计创建队友 **5** 个（gateway-routing / responses-mapping / responses-streaming / codex-lifecycle / client-acceptance），未超上限、无失败创建。写集互不重叠：gateway-routing=`src/index.js`+`src/router.js`+`docs/reference/configuration.md`+`scripts/test/offline/codex-routing.test.mjs`；responses-mapping=`src/codex-responses.js`+`codex-responses.test.mjs`；responses-streaming=`src/codex-responses-stream.js`+`codex-responses-stream.test.mjs`；codex-lifecycle=`scripts/test/offline/codex-v2-lifecycle.test.mjs`+`codex-v2-fixtures/`；client-acceptance=`docs/roadmap/2026-11-12-codex-v2-acceptance.md`+`docs/roadmap/receipts/`；Lead=契约/开发计划/CHANGELOG/testing 指南/package.json check 列表/run.mjs 无需改（自动发现）+ 集成复核与回归。集成门禁由 Lead 复跑：映射 44、SSE 36、路由 8、既有 Responses 27、默认 29/29、gated lifecycle 16/16、docs:check PASS、check-metadata PASS(21)、`git diff --check`=0。

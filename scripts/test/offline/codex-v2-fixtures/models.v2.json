@@ -1,0 +1,58 @@
+{
+  "models": [
+    {
+      "slug": "gpt-mock",
+      "display_name": "Mock GPT (ModelGate)",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Low"
+        }
+      ],
+      "shell_type": "default",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 10,
+      "support_verbosity": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "experimental_supported_tools": [],
+      "base_instructions": "You are the root agent of an offline Codex V2 lifecycle fixture. Use the collaboration tools when instructed.",
+      "context_window": 200000,
+      "max_output_tokens": 32000,
+      "supports_parallel_tool_calls": true,
+      "multi_agent_version": "v2",
+      "use_responses_lite": false,
+      "prefer_websockets": false
+    },
+    {
+      "slug": "deepseek-mock",
+      "display_name": "Mock DeepSeek (ModelGate)",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Low"
+        }
+      ],
+      "shell_type": "default",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 20,
+      "support_verbosity": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "experimental_supported_tools": [],
+      "base_instructions": "You are a subagent of an offline Codex V2 lifecycle fixture. Use local tools when instructed.",
+      "context_window": 128000,
+      "max_output_tokens": 32000,
+      "supports_parallel_tool_calls": true,
+      "multi_agent_version": "v2",
+      "use_responses_lite": false,
+      "prefer_websockets": false
+    }
+  ]
+}

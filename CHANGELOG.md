@@ -2,6 +2,28 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## 2026-11-12 Codex 原生 Multi-Agent V2 跨供应商支持（MG-017，未发布）
+
+路线 **A 主导、B 补充**：Codex 持有线程/工具/权限/收件箱/并发/调度/取消/通知/恢复；ModelGate 只负责模型路由、请求/响应转换、鉴权隔离与推理流治理。契约见 [docs/contracts/codex-multi-agent-v2.md](docs/contracts/codex-multi-agent-v2.md)。
+
+### Added
+- `src/codex-responses.js`（纯映射，零 import）：三工具明文声明（删除 `message.encrypted`）、namespace 扁平化与确定性别名（`<namespace>__<name>`，仅冲突时）、`agent_message` 明文化（preserve/project/reject）与标准 user message 投影、reasoning/compaction 策略、`call_id` 配对校验、完成项恢复（namespace collaboration 下 6 工具恢复 namespace，仅三消息工具补 `encrypted_function_args: []`），以及显式拒绝码（opaque/tool_call_pairing/tool_identity_conflict/…）。实测校准：Codex 167 回放会清掉 marker 但保留 namespace；普通工具带 namespace 会被 Codex 拼成 `collaboration<name>` 而报 unsupported call。
+- `src/codex-responses-stream.js`（原生 Responses SSE 适配）：StringDecoder 增量解析（UTF-8 跨分片/CRLF/多行 data/注释/半帧）、added 只恢复身份、done 与 completed.output[] 用同一 `restoreToolItem` 恢复、终态唯一（completed/failed/incomplete）、usage 每响应一次且缺失记 0、断流以 `response.failed{code:STREAM_INTERRUPTED}` 收尾不重发、`[DONE]` 丢弃、`write()===false` 等 drain（30s/8MiB）。
+- `src/router.js`：抽出 `buildModelIndex`/`lookupModel` 供 `resolve()` 与 `codexRoute()` 共用；新增 `codexRoute`/`codexPilotEnabled`（冻结 route：provider/upstreamModel/api/history/namespace，运行时白名单校验）。
+- `src/index.js`：原生 `api:"responses"` 信封校验改用 `validateCodexResponsesEnvelope`（与 Chat 桥的 `responsesToChat` 分离）；`defaults.codex.strictModelRouting` 下未声明模型 400 `unknown_model` 且零上游；新增 `proxyCodexResponses`/`relayCodexStream` 单 provider 试点转发（工具/历史投影、完成项恢复、model 回写、usage 记账、取消销毁上游）；凭据隔离（客户端 authorization/cookie/chatgpt-account-id/openai-*/x-api-key 不转发）与客户端来源元数据剥离（`client_metadata`/`prompt_cache_key`，仅试点路由）；保存校验（codex 仅限 responses 非虚拟模型、multiAgentVersion=v2、history 白名单、禁止 fallbacks、未知字段 400）。
+- 回归：`offline/codex-responses.test.mjs`（映射 44 断言）、`offline/codex-responses-stream.test.mjs`（SSE 38 用例，含网关端到端与 incomplete 终态恢复）、`offline/codex-routing.test.mjs`（双 mock 8 用例：分路/鉴权隔离/严格路由/单上游/元数据剥离/保存校验）、`offline/codex-v2-lifecycle.test.mjs`（门禁 `MG_CODEX_V2=1`，原版 CLI + bundled app-server 生命周期）。
+- 文档：契约 `docs/contracts/codex-multi-agent-v2.md`、目录样例 `docs/contracts/fixtures/codex/models.v2.json`、验收矩阵 `docs/roadmap/2026-11-12-codex-v2-acceptance.md` 与收据 `docs/roadmap/receipts/`、配置参考「Codex 试点路由」、测试指南门禁说明。
+
+### Fixed
+- 原生 `/v1/responses` 曾把 `responsesToChat()` 当校验：真实 Codex 的明文 `agent_message`、namespace 工具、`reasoning` 都会 400。现原生信封由 `validateCodexResponsesEnvelope` 判定，Chat 桥语义不再泄漏到原生路径。
+- 未知名模型在 `/v1/responses` 上的默认上游回落可在试点中关闭（`unknown_model`，零上游请求）。
+- 文档门禁：`docs/roadmap/2026-11-09-dsh-cli-live-verification-report.md` 指向仓库外 `../../../../../harness/…` 的相对链接在非原始 checkout 深度（含 CI 与工作树）下必然 FAIL；改为行内代码文本，`npm run docs:check` 恢复 PASS。
+
+### 未验证（不得当通过）
+- 真实 GPT + 真实 DeepSeek 双上游试点、CLI 与 Desktop GUI 的真实验收、ChatGPT 登录/工作区归属：**待用户授权**（认证模式、模型、额度、数据范围、隔离 Desktop 环境）。离线 mock、HTTP 200 与截图均不构成真实验收。
+- 远程 compaction、WebSocket 上游、`previous_response_id` 续轮、托管工具转发不在首版范围。
+- 真实 DeepSeek 对未声明顶层字段（如 `reasoning.summary`）的实际容忍度未经真实上游验证。
+
 ## 2026-11-09 剩余验证闭环与 Responses 客户端兼容（未发布）
 
 ### Fixed

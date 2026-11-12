@@ -50,7 +50,7 @@
 - `models.<名>.capability`：模型能力声明，`chat`（默认，对话/补全/Responses 桥）、`embedding`（仅 `/v1/embeddings`）、`rerank`（仅 `/v1/rerank`）、`audio`（`/v1/audio/*`）、`image`（`/v1/images/*`）或 `video`（`/v1/videos*`）。能力隔离是双向的：任何非 chat 模型从对话入口调用返回 400，其他能力入口也互斥；`/v1/models` 与 `/api/status` 均暴露该字段，模型编辑器可切换。
 - **Video（异步任务池，ADR-0001）**：`POST /v1/videos` 创建任务（`{model, prompt, ...}`，支持 `Idempotency-Key` 幂等）、`GET /v1/videos/:id` 查询（惰性 + 后台轮询上游）、`POST /v1/videos/:id/cancel` 取消、`GET /v1/videos` 列表。只桥接 OpenAI 兼容上游；路径可按模型覆盖 `videoCreatePath`（默认 `/v1/videos`）、`videoStatusPath`（默认 `/v1/videos/{id}`）、`videoCancelPath`（默认 `/v1/videos/{id}/cancel`）。任务持久化到 `<配置目录>/videos.json`（原子写，单进程）；状态机 queued/running/succeeded/failed/canceled；终态保留 7 天、总量上限 500、非终态超 24h 判 failed；启动与每小时 GC。创建/轮询/取消复用 `defaults.timeout` 与 `overallMs` 预算；video 不提供在线探测（避免计费生成）。
 - **Audio / Image**：`POST /v1/audio/speech`（JSON → 二进制音频）、`POST /v1/audio/transcriptions`（multipart）、`POST /v1/images/generations`（JSON）、`POST /v1/images/edits`（multipart）。只桥接 OpenAI 兼容上游（`api=openai`），Anthropic/Gemini/Cohere 等显式 502 且不触上游。multipart 仅解析 `model` 字段用于路由与 per-上游覆盖名替换，文件字节原样转发；请求体受 `server.maxBodyBytes`；响应 content-type 逐字节透传；响应体上限 `defaults.mediaMaxResponseBytes`（默认 64MiB，超限 → 502 `media_too_large`）。usage token（图片 JSON 响应等）计入账本，无 usage 记 0；audio/image 不提供在线探测（避免产生计费媒体）。虚拟模型不支持媒体能力。
-- **Responses 原生透传**：`models.<名>.api="responses"` 时 `/v1/responses` 原样转发到 `responsesPath`（默认 `/v1/responses`，可按模型覆盖），非流式 JSON 的 `model` 回写客户端请求名、流式 SSE 逐字节透传（不翻译事件、原生流不改 model）；其余模型仍走 Chat 桥。
+- **Responses 原生透传**：`models.<名>.api="responses"` 时 `/v1/responses` 原样转发到 `responsesPath`（默认 `/v1/responses`，可按模型覆盖），非流式 JSON 的 `model` 回写客户端请求名、流式 SSE 逐字节透传（不翻译事件、原生流不改 model）；其余模型仍走 Chat 桥。声明了 `codex` 的 responses 模型改为**Codex 试点路由**（单上游投影/完成项恢复），见下节。
 - **Rerank**：`POST /v1/rerank`（兼容 `/rerank`；OpenAI/Jina 风格 `{model,query,documents,top_n,return_documents}`）。上游协议 `api=openai`（默认，`/v1/rerank`）或 `api=cohere`（`/v2/rerank`）；Anthropic/Gemini 无 rerank → 502 且不触上游。响应归一：`results[]` 保留 `index/relevance_score/document`，按分数降序、同分按 index 升序稳定排序，`top_n` 再裁剪，`model` 回写客户端请求名；`meta`/`usage` 原样保留；usage token 计入账本（无 usage 记 0）。复用 provider `fallbacks`、熔断、并发信号量、`overallMs` 预算与 `maxBodyBytes`；`documents` 上限 2048。虚拟模型不支持 rerank。
 - **Embedding**：`POST /v1/embeddings`（OpenAI 兼容：`model`/`input` 字符串或字符串数组/`dimensions`/`encoding_format`）。单次批量上限 2048 条；仅支持文本输入（token-id 数组暂不支持）。OpenAI 兼容上游原样透传；Gemini 上游经 `:batchEmbedContents` 适配（`dimensions → outputDimensionality`，响应 `embeddings[].values → data[].embedding`，Gemini 不返回 usage 时计 0）；Anthropic 无 embeddings 能力 → 502 且不触上游。复用 provider `fallbacks`、熔断、`defaults.timeout`/`overallMs` 预算与 `maxBodyBytes`；usage token 计入模型/日/全局账本。虚拟模型不支持 embeddings。
 - `models.<名>.effortOptions`：允许的思考强度档位（客户端传的档位不在列表 → 本地 400）。`reasoning`：客户端未指定时注入的默认档位。`effortFormat`（可选）：思考强度参数格式——`reasoning_effort`（默认，OpenAI 风格字符串，DeepSeek/OpenAI 系）；`thinking`（MiniMax 风格对象，如 `MiniMax-M3` 认 `thinking:{"type":"adaptive"}`）。客户端入口统一传 `reasoning_effort`，网关按 `effortFormat` 转换注入；虚拟共用名默认不注入，除非设置了 `defaults.reasoning`。
@@ -69,6 +69,58 @@
   - `direct`：全部上游强制直连，无视任何代理配置（断代理排查/临时绕开 Clash）；
   - `global`：非回环上游**全部**强制走全局代理（`defaults.proxy` 或环境变量），忽略单上游名单（含 `direct`）；回环仍自动直连。
   - 三者切换只需保存配置即热生效（`reloadConfig`），不重启网关。
+
+## Codex 试点路由（MG-017）
+
+同一原生 Codex 会话内按模型把请求路由到不同上游时，用 `models.<名>.codex` 声明试点模型（下例为无密钥样例；真实凭据只经 `keys.local.json`/环境变量，不写进配置）：
+
+```jsonc
+{
+  "providers": {
+    "openai-official":   { "baseUrl": "https://api.openai.com",   "apiKeyEnv": "OPENAI_API_KEY",   "api": "responses" },
+    "deepseek-official": { "baseUrl": "https://api.deepseek.com", "apiKeyEnv": "DEEPSEEK_API_KEY", "api": "responses" }
+  },
+  "models": {
+    "codex-gpt": {
+      "provider": "openai-official", "api": "responses",
+      "providerModels": { "openai-official": "gpt-6.1-sol" },
+      "codex": { "multiAgentVersion": "v2", "plaintextTools": true,
+                 "history": { "agentMessage": "preserve", "reasoning": "preserve", "compaction": "reject" } }
+    },
+    "codex-deepseek": {
+      "provider": "deepseek-official", "api": "responses",
+      "providerModels": { "deepseek-official": "deepseek-v4-pro" },
+      "codex": { "multiAgentVersion": "v2", "plaintextTools": true,
+                 "history": { "agentMessage": "project", "reasoning": "drop", "compaction": "reject" } }
+    }
+  },
+  "defaults": { "codex": { "strictModelRouting": true } }
+}
+```
+
+| 字段 | 默认 | 规则 |
+|---|---|---|
+| `models.<名>.codex` | 无（非试点） | 仅允许出现在 `api:"responses"` 的非虚拟模型上；出现即试点路由 |
+| `codex.multiAgentVersion` | 必填 | 仅接受 `"v2"`（其它值保存 400） |
+| `codex.plaintextTools` | 必填 | 布尔；`true` 时把 `spawn_agent`/`send_message`/`followup_task` 投影为普通 function 声明（`message` 为普通 string，删除 `encrypted`） |
+| `codex.namespace` | `"collaboration"` | 仅接受缺省或 `"collaboration"` |
+| `codex.history.agentMessage` | `"preserve"` | `preserve` / `project` / `reject` |
+| `codex.history.reasoning` | `"preserve"` | `preserve` / `drop` / `reject` |
+| `codex.history.compaction` | `"reject"` | `reject` / `drop` |
+| `models.<名>.fallbacks` | 无 | **禁止**；试点模型保存时返回 400（`codex 试点模型不允许 fallbacks`） |
+| `models.<名>.responsesPath` | `/v1/responses` | 端点路径，与 `provider.baseUrl` 拼接 |
+| `models.<名>.providerModels` | 模型名 | 该 provider 侧的上游模型名；试点路由只取 `providerModels[provider]` |
+| `defaults.codex.strictModelRouting` | `false` | `true` 时 `/v1/responses` 只接受 `models` 精确声明（或别名命中）的模型，否则 400 `unknown_model` 且**零上游请求**，不回落 `defaults.provider` |
+
+运行规则（保存校验与运行时同源）：
+
+- **单上游**：试点路由只打 `models.<名>.provider`，不读 `fallbacks`；上游 429/5xx 原状态码归因，不做跨上游迁移或自动重试。
+- **严格路由只收窄 `/v1/responses`**：不影响 `/v1/chat/completions` 与其它能力入口；关闭开关即恢复未知名回落。
+- **模型名匹配**：Codex `model_catalog_json` 的 slug 必须与网关 `models` 名或 `alias` **完全一致**（精确匹配，不做前缀/大小写/模糊匹配）。
+- **凭据隔离**：数据面只注入该路由 provider 的服务端 Key；客户端带来的 `authorization`/`cookie`/`chatgpt-account-id`/`openai-*`/`x-api-key` 一律不转发（客户端 Key 只用于网关自身鉴权）。
+- **客户端来源元数据**：仅 codex 试点路由会从发往上游的副本里剥离 `client_metadata`（thread_id/parent_thread_id 等）与 `prompt_cache_key`，并记一条 lossy 日志（`codex 剥离客户端元数据:client_metadata,prompt_cache_key`）——它们只用于网关日志/收据关联，第三方上游不接收。**普通原生透传**（未声明 `codex` 的 `api:"responses"` 模型）保持既有透传语义，本次不剥离。
+- **原生信封与 Chat 桥分离**：原生 `api:"responses"` 分支使用 Responses 信封校验（放行 `agent_message`、任意 namespace 的工具项、`reasoning`、`store:false`、可丢弃 `include` 与未知顶层键），`responsesToChat` 只服务 Chat 桥。
+- **关闭试点**：删除对应 `codex` 块并把 `strictModelRouting` 置回 `false` 即回到既有入口；语义/验收以 [契约](../contracts/codex-multi-agent-v2.md) 为准。
 
 ## 模型名回写
 
