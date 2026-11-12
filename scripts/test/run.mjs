@@ -62,6 +62,7 @@ export const SUITES = [
   'scripts/test/offline/metrics.test.mjs',
   'scripts/test/offline/model-resolution.test.mjs',
   'scripts/test/offline/n01-catalog-authz.test.mjs',
+  'scripts/test/offline/n03-cli-contract.test.mjs',
   'scripts/test/offline/native-boundary.test.mjs',
   'scripts/test/offline/native-usage.test.mjs',
   'scripts/test/offline/optional-endpoints.test.mjs',
