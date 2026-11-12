@@ -156,6 +156,49 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 | 聚合 slug | 由目录生成器产出：`mg-<provider>-<model>`（`providers` id + `models` 键名净化）。请求该 slug 时网关映射到 `models.<原名>` 的上游及 `providerModels`，响应 `model` 回写 slug。 |
 | `MG_CODEX_OFFICIAL_PASSTHROUGH` | **已退役（F01）**：客户端官方凭据透传已移除。保留该变量只会被判为旧配置并给出迁移提示，不启用任何能力（见下文环境变量表）。 |
 
+### P09 单 provider 反向代理（gatewaySubscription）
+
+让 Codex 只认 ModelGate 一个 provider（`openai_base_url` 指向本机网关），父线程官方 GPT 经网关反向代理，子线程 Go DeepSeek 走同一网关。**默认关闭**，新增键不复用 F01 已退役的 `MG_CODEX_OFFICIAL_PASSTHROUGH`：
+
+```json
+"providers": {
+  "codex-subscription": {
+    "baseUrl": "https://chatgpt.com",
+    "codexIdentity": "official",
+    "gatewaySubscription": { "enabled": true }
+  },
+  "opencodego": { "baseUrl": "https://opencode.ai/inference/go", "pathPrefix": "/openai", "apiKeyEnv": "MG_GO_KEY", "api": "openai" }
+},
+"models": {
+  "codex-gpt": { "provider": "codex-subscription", "api": "responses" },
+  "codex-deepseek": {
+    "provider": "opencodego",
+    "api": "responses",
+    "providerModels": { "opencodego": "deepseek-v4.1-flash" },
+    "codex": { "plaintextTools": true, "history": { "agentMessage": "project", "reasoning": "drop", "compaction": "reject" } }
+  }
+}
+```
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `providers.<id>.gatewaySubscription.enabled` | `false` | 显式允许网关承载本机 Codex 订阅凭据，只用于官方 host 的父模型请求。只读 `CODEX_HOME/auth.json`（未设置时 `~/.codex/auth.json`）的 `tokens.access_token`/`account_id`；不刷新、不写入、不持久化到配置/统计/收据。必须 loopback 监听 + loopback 客户端；目标只允许官方 host 白名单 + `/backend-api/codex`（本机 mock 可用 loopback 例外）。 |
+| 失败语义 | — | 非官方目标/路径 → 403 `gateway_subscription_target_not_allowed`；非 loopback → 403 `gateway_subscription_not_loopback`；凭据缺失/过期/API Key 模式 → 401 `subscription_credential_unavailable`。全部零上游、不重试、不换账号。 |
+| 凭据隔离 | — | token 只进官方请求的 `authorization` 与可选 `chatgpt-account-id`；不写日志/错误体/事件/收据，不发送给第三方。审计只记 provider/target/来源。未开启该键时保持 F01 的 `official_no_gateway_key` fail-closed。 |
+
+**模型级 Codex V2 能力（`models.<名>.codex`）**（只影响 `/v1/responses` 原生路由）：
+
+| 字段 | 说明 |
+| --- | --- |
+| `plaintextTools` | `true` 时扁平化 `collaboration` namespace，并删除三个消息工具 `message.encrypted` 标记；父官方 GPT 不声明。子 Go/DeepSeek 必须显式设为 `true`。 |
+| `history.agentMessage` | `preserve`（官方默认）、`project`（可证明明文才投影；密文 400）、`reject`。 |
+| `history.reasoning` | `preserve`（官方默认）、`drop`（第三方默认）、`reject`。 |
+| `history.compaction` | `reject`（默认）或 `drop`。 |
+| `history.controls` | `drop`（默认）、`preserve`、`reject`。 |
+| `namespace` | 仅支持 `collaboration`。 |
+
+**不可读密文（P0/P1）**：第三方原生目标在任何发送前都会扫描 `encrypted_content`/`encrypted_task_id`（含 item 级字段与 v2 工具 arguments/output 内的字符串值）。含密文且未声明 `plaintextTools=true` → 400（`opaque_agent_message` / `v2_encrypted_task_unsupported` / `encrypted_tool_schema`）零上游；声明了 `plaintextTools` 也只删除工具 schema 的明文标记，绝不解密/删除已有密文。官方 route 保留密文给官方后端。
+
 **官方额度（D7）**：`defaults.codexQuota = { warnPercent: 80, criticalPercent: 95, source: "none" | "trusted" }`。`source:"none"` 时即使注入了读数也不采用（严格 UNKNOWN，不虚构余额）；没有可信数据时显示 `UNKNOWN`。应急态必须显式 `{acknowledged:true, reason, backupPoint}` 才能进入，记录时间线并可恢复；进入/恢复都需用户确认，绝不自动切换 provider、购买额度或退出官方登录。
 
 

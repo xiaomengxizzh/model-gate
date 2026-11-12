@@ -204,6 +204,11 @@ export function normalizeInputToolCall(item) {
 
 function collectOpaque(value, out, depth) {
   if (depth > 6 || value == null) return
+  if (typeof value === 'string') {
+    // 值里也可能内嵌 encrypted_content/encrypted_task_id（例如被序列化进 arguments/output 的 JSON）。
+    if (/\bencrypted_(?:content|task_id)\b/.test(value)) out.push('string_value')
+    return
+  }
   if (Array.isArray(value)) { for (const v of value) collectOpaque(v, out, depth + 1); return }
   if (typeof value !== 'object') return
   for (const key of Object.keys(value)) {
@@ -238,6 +243,10 @@ export function detectOpaqueV2Task(body) {
   for (const item of input) {
     if (!isPlainObject(item)) continue
     const itemType = typeof item.type === 'string' ? item.type : (typeof item.role === 'string' ? 'message:' + item.role : '')
+    // item 级密文字段（任意 item 类型）：存在即不可读，不依赖键名扫描的上下文。
+    if ((item.encrypted_content != null && item.encrypted_content !== '') || (item.encrypted_task_id != null && item.encrypted_task_id !== '')) {
+      signals.push({ kind: 'item_field', itemType, itemId: typeof item.id === 'string' ? item.id : '', encrypted: true })
+    }
     if (itemType === 'agent_message') {
       const fields = []
       collectOpaque(item.content, fields, 0)
@@ -277,6 +286,20 @@ export function detectOpaqueV2Task(body) {
   }
   const opaque = signals.some((s) => s.encrypted === true)
   return { opaque, readable: !opaque, signals }
+}
+
+/** 工具 schema 是否显式声明 encrypted:true（明文投影必须在发送前处理）。 */
+export function detectEncryptedToolSchema(tools) {
+  let found = false
+  const walk = (value, depth) => {
+    if (found || depth > 8 || value == null) return
+    if (Array.isArray(value)) { for (const v of value) walk(v, depth + 1); return }
+    if (typeof value !== 'object') return
+    if (value.encrypted === true) { found = true; return }
+    for (const v of Object.values(value)) walk(v, depth + 1)
+  }
+  walk(tools, 0)
+  return found
 }
 
 /**

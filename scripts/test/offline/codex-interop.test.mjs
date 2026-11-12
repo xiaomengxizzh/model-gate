@@ -328,7 +328,7 @@ function parseSSE(text) {
   })
 }
 
-test('E4 集成：原生 Responses 透传 v2 密文不回归；Chat 桥显式 400', { timeout: 30000 }, async (t) => {
+test('E4 集成：第三方原生密文默认 400；官方原生保留密文；Chat 桥显式 400', { timeout: 30000 }, async (t) => {
   const RESP = { id: 'resp_native', object: 'response', status: 'completed', model: 'vendor-model', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }], output_text: 'ok' }
   const upstream = await startScriptedUpstream(async (req, res, rec) => {
     rec.body = await readBody(req)
@@ -337,9 +337,15 @@ test('E4 集成：原生 Responses 透传 v2 密文不回归；Chat 桥显式 40
   })
   const gw = await startGateway({
     name: 'codex-interop-native',
+    env: { MG_TEST_OFFICIAL_KEY: 'sk-synthetic-official' },
     config: {
-      providers: { mock: { baseUrl: upstream.base } },
-      models: { nativeResp: { provider: 'mock', api: 'responses', providerModels: { mock: 'vendor-model' } }, bridge: { provider: 'mock' } },
+      defaults: { codexOfficialHosts: ['localhost'] },
+      providers: { mock: { baseUrl: upstream.base }, official: { baseUrl: String(upstream.base).replace('127.0.0.1', 'localhost'), codexIdentity: 'official', apiKeyEnv: 'MG_TEST_OFFICIAL_KEY' } },
+      models: {
+        nativeResp: { provider: 'mock', api: 'responses', providerModels: { mock: 'vendor-model' } },
+        officialResp: { provider: 'official', api: 'responses', providerModels: { official: 'vendor-model' } },
+        bridge: { provider: 'mock' },
+      },
     },
   })
   t.after(async () => { await gw.stop(); await upstream.stop() })
@@ -350,22 +356,31 @@ test('E4 集成：原生 Responses 透传 v2 密文不回归；Chat 桥显式 40
     tools: [V2_NAMESPACE, { type: 'web_search' }],
     include: ['reasoning.encrypted_content'],
   }
+  // P0：第三方原生目标含不可读密文且未声明 plaintextTools → 发送前 400，零上游。
   const native = await gw.post('/v1/responses', body, json())
-  assert.equal(native.status, 200, '原生透传不得因 v2 agent_message/密文 400')
-  const nativeHit = upstream.hits.find((h) => h.url.endsWith('/responses'))
-  assert.ok(nativeHit, '原生模型必须走 /v1/responses')
-  assert.equal(nativeHit.body.input[1].type, 'agent_message', 'agent_message 原样交给官方上游')
-  assert.equal(nativeHit.body.input[1].content[1].encrypted_content, FAKE_CIPHER, '密文必须原样转发，网关不解析/不改写')
-  assert.ok(nativeHit.body.tools.some((x) => x.type === 'namespace'), 'namespace 工具原样透传')
-  assert.ok(nativeHit.body.tools.some((x) => x.type === 'web_search'))
+  assert.equal(native.status, 400, '第三方原生目标不得直通密文')
+  const nativeErr = (await native.json()).error
+  assert.equal(nativeErr.code, 'opaque_agent_message')
+  assert.equal(String(nativeErr.message).includes(FAKE_CIPHER), false)
+  assert.equal(upstream.hits.length, 0, '第三方密文拒绝必须零上游')
 
-  const hitsBefore = upstream.hits.length
+  // 官方目标保留密文（官方后端才能理解它）。
+  const official = await gw.post('/v1/responses', Object.assign({}, body, { model: 'officialResp' }), json())
+  const officialBody = await official.json()
+  assert.equal(official.status, 200, '官方原生目标必须保留密文: ' + JSON.stringify(officialBody))
+  const officialHit = upstream.hits.find((h) => h.url.endsWith('/responses'))
+  assert.ok(officialHit, '官方模型必须走 /v1/responses')
+  assert.equal(officialHit.body.input[1].type, 'agent_message', 'agent_message 原样交给官方上游')
+  assert.equal(officialHit.body.input[1].content[1].encrypted_content, FAKE_CIPHER, '官方密文必须原样转发，网关不解析/不改写')
+  assert.ok(officialHit.body.tools.some((x) => x.type === 'namespace'), 'namespace 工具原样透传')
+  assert.ok(officialHit.body.tools.some((x) => x.type === 'web_search'))
+
   const bridge = await gw.post('/v1/responses', Object.assign({}, body, { model: 'bridge' }), json())
   assert.equal(bridge.status, 400)
   const bridgeErr = (await bridge.json()).error
   assert.equal(bridgeErr.type, V2_ENCRYPTED_TASK_UNSUPPORTED)
   assert.equal(String(bridgeErr.message).includes(FAKE_CIPHER), false, '错误不得回显密文')
-  assert.equal(upstream.hits.length, hitsBefore, '桥方向显式失败不得触达上游')
+  assert.equal(upstream.hits.length, 1, '桥方向显式失败不得触达上游')
 })
 
 test('E4 集成：Chat 桥工具往返（namespace 展开 -> 上游 -> 回程还原 name+namespace）', { timeout: 30000 }, async (t) => {

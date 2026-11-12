@@ -32,6 +32,7 @@ export const TARGET_DOMAINS = Object.freeze({ OFFICIAL: 'official', THIRD_PARTY:
 export const CREDENTIAL_MODES = Object.freeze({
   PROVIDER_KEY: 'provider-key',
   OFFICIAL_SUBSCRIPTION: 'official-subscription',
+  GATEWAY_SUBSCRIPTION: 'gateway-subscription',
   NONE: 'none',
 })
 // 显式不跟随重定向：授权记录里带这个标记，接线卡必须把它映射到请求选项（redirect: 'error'）。
@@ -173,8 +174,8 @@ export function allowedSchemeHostPortPath(target, domain, opts) {
   if (target.port && !isLoopbackHost(target.hostname)) {
     return deny('official_port_not_allowlisted', '官方目标只允许默认端口：' + target.host + '（本机回环可用自定义端口）。')
   }
-  if (!officialPathnameAllowed(target.pathname)) {
-    return deny('official_path_not_allowlisted', '官方目标路径不在白名单：' + target.pathname + '（允许 ' + OFFICIAL_PATH_PREFIXES.join(', ') + '）。')
+  if (!officialPathnameAllowed(target.pathname) && !(o.gatewaySubscription === true && (target.pathname === '/backend-api/codex' || target.pathname.startsWith('/backend-api/codex/')))) {
+    return deny('official_path_not_allowlisted', '官方目标路径不在白名单：' + target.pathname + '（允许 ' + OFFICIAL_PATH_PREFIXES.join(', ') + '）')
   }
   return null
 }
@@ -193,6 +194,11 @@ export function credentialModeAllowed(domain, target, callerScope) {
   }
   if (mode === CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION) {
     return deny('credential_mode_retired', RETIRED_CREDENTIAL_HINT)
+  }
+  if (mode === CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION) {
+    if (domain !== TARGET_DOMAINS.OFFICIAL) return deny('credential_mode_forbidden', 'gatewaySubscription 只允许官方目标')
+    if (s.gatewaySubscription !== true) return deny('gateway_subscription_not_enabled', '未开启 gatewaySubscription')
+    return null
   }
   if (![CREDENTIAL_MODES.PROVIDER_KEY, CREDENTIAL_MODES.NONE].includes(mode)) {
     return deny('credential_mode_invalid', '凭据模式不合法：' + String(mode))
@@ -241,6 +247,7 @@ export function resolveCredentialMode(domain, identity, callerScope) {
   const hasKey = s.hasProviderKey === true || (typeof s.providerKey === 'string' && s.providerKey.length > 0) ||
     !!(identity && identity.credential === 'provider-key')
   if (domain === TARGET_DOMAINS.OFFICIAL) {
+    if (s.gatewaySubscription === true) return CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION
     if (hasKey) return CREDENTIAL_MODES.PROVIDER_KEY
     // F01：官方无 key 只剩 NONE（fail-closed）；旧订阅声明仍被识别成 OFFICIAL_SUBSCRIPTION，
     // 以便 credentialModeAllowed 给出「已退役」而不是含糊的「缺凭据」。
@@ -261,11 +268,14 @@ export function officialIngressPolicy(domain, target, opts) {
   if (!isOfficialHost(target.hostname, o.cfg || {})) {
     return deny('official_host_not_allowlisted', '官方目标主机不在白名单：' + target.hostname)
   }
-  if (!officialPathnameAllowed(target.pathname)) {
+  if (!officialPathnameAllowed(target.pathname) && !(o.credentialMode === CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION && (target.pathname === '/backend-api/codex' || target.pathname.startsWith('/backend-api/codex/')))) {
     return deny('official_path_not_allowlisted', '官方目标路径不在白名单：' + target.pathname)
   }
   if (o.credentialMode === CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION) {
     return deny('credential_mode_retired', RETIRED_CREDENTIAL_HINT)
+  }
+  if (o.credentialMode === CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION && !(target.pathname === '/backend-api/codex' || target.pathname.startsWith('/backend-api/codex/'))) {
+    return deny('gateway_subscription_ingress_not_allowed', 'gatewaySubscription 只允许 /backend-api/codex 入口：' + target.pathname)
   }
   return null
 }
@@ -328,8 +338,8 @@ export function buildAllowlistedHeaders(domain, caller, targetCredential) {
   if (cred.mode === CREDENTIAL_MODES.PROVIDER_KEY) {
     if (cred.token == null || String(cred.token) === '') throw deny('official_credential_missing', '官方目标缺少自有 key')
     headers.authorization = 'Bearer ' + String(cred.token)
-  } else {
-    throw deny('official_credential_missing', '官方目标缺少可用凭据（F01 已移除客户端官方凭据透传）')
+  } else if (cred.mode !== CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION) {
+    throw deny('official_credential_missing', '官方目标缺少可用凭据')
   }
   headers['user-agent'] = 'model-gateway/0.1'
   headers['accept-encoding'] = 'identity'
@@ -373,11 +383,10 @@ export function authorizeFinalTarget(intent, catalogGeneration, binding) {
   if (declaredHost && target.hostname !== declaredHost) {
     throw deny('base_url_host_mismatch', 'baseUrl 声明的 host 与实际拼装目标不一致：declared=' + declaredHost + ' actual=' + target.hostname)
   }
-  const shapeDeny = allowedSchemeHostPortPath(target, domain, { cfg })
-  if (shapeDeny) throw shapeDeny
-
   const scope = callerScopeOf(i, b, identity)
   const credentialMode = resolveCredentialMode(domain, identity, scope)
+  const shapeDeny = allowedSchemeHostPortPath(target, domain, { cfg, gatewaySubscription: credentialMode === CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION })
+  if (shapeDeny) throw shapeDeny
   const credScope = Object.assign({}, scope, { credentialMode })
   const credDeny = credentialModeAllowed(domain, target, credScope)
   if (credDeny) throw credDeny
@@ -422,6 +431,7 @@ function callerScopeOf(intent, binding, identity) {
     // 旧环境开关只用于「已退役」提示，不参与任何放行判断。
     legacyPassthrough: legacyPassthroughRequested(binding.env || (typeof process !== 'undefined' ? process.env : {})),
     credentialMode: c.credentialMode || cred.mode || null,
+    gatewaySubscription: c.gatewaySubscription === true,
     incoming: c.incoming || binding.incoming || null,
     threadId: c.threadId,
     sessionHeader: c.sessionHeader,
