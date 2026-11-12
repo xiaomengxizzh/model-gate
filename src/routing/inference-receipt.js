@@ -477,3 +477,76 @@ export function usageMustBeUnknown(terminal) {
 }
 
 export { TERMINAL as TERMINALS }
+
+// —— P06：外部委派回执登记（只加登记，不改变推理路由）——
+// UHR/MCP 委派不是 Codex 原生 child thread：登记时必须显式证明「外部 + 降级」，
+// 并且只接受用户已批准、作用域/幂等键齐全、摘要长度有界的最小摘要。
+export const EXTERNAL_DELEGATION_CONTRACT = 'uhr-mcp-v1'
+export const EXTERNAL_DELEGATION_KIND = 'external_delegation'
+export const EXTERNAL_SUMMARY_MAX_BYTES = 8192
+export const EXTERNAL_REJECT = Object.freeze({
+  BAD_REQUEST: 'UHR_EXT_REJECT_BAD_REQUEST',
+  NOT_EXTERNAL: 'UHR_EXT_REJECT_NATIVE_CLAIM',
+  NOT_APPROVED: 'UHR_EXT_REJECT_APPROVAL_MISSING',
+  SCOPE: 'UHR_EXT_REJECT_SCOPE',
+  SUMMARY: 'UHR_EXT_REJECT_SUMMARY_TOO_LARGE',
+  CONTRACT: 'UHR_EXT_REJECT_CONTRACT',
+})
+
+function extReject(code, message, details) { return Object.freeze({ ok: false, code, message, details: Object.freeze(Object.assign({}, details || {})) }) }
+
+/**
+ * 把一次 UHR 委派结果登记成「外部委派回执」。
+ * @param {object} record { contract, taskRef, state, toolCallId, callerRef, scopeRef, idempotencyKey, summaryBytes, userApproved, native? }
+ * @returns 冻结回执；同输入同输出（可复算），不读时钟/不做 IO。
+ */
+export function registerExternalDelegation(record, options = {}) {
+  const r = isPlain(record) ? record : {}
+  if (toStr(r.contract) && toStr(r.contract) !== EXTERNAL_DELEGATION_CONTRACT) {
+    return extReject(EXTERNAL_REJECT.CONTRACT, '只登记 ' + EXTERNAL_DELEGATION_CONTRACT + ' 契约的委派回执')
+  }
+  if (r.native === true) {
+    return extReject(EXTERNAL_REJECT.NOT_EXTERNAL, '外部委派不得声明 native:true（不是原生 child thread）')
+  }
+  if (r.userApproved !== true) {
+    return extReject(EXTERNAL_REJECT.NOT_APPROVED, '外部委派必须由用户显式批准（userApproved:true）后才能登记')
+  }
+  const taskRef = toStr(r.taskRef).trim()
+  if (!/^task-[a-z0-9]{20}$/.test(taskRef)) return extReject(EXTERNAL_REJECT.BAD_REQUEST, 'taskRef 形状非法（应是 UHR 不透明 id）')
+  const callerRef = toStr(r.callerRef).trim()
+  const scopeRef = toStr(r.scopeRef).trim()
+  if (!callerRef || !scopeRef) return extReject(EXTERNAL_REJECT.SCOPE, '登记外部委派必须带 callerRef 与 scopeRef（作用域绑定）')
+  const idempotencyKey = toStr(r.idempotencyKey).trim()
+  if (!idempotencyKey) return extReject(EXTERNAL_REJECT.BAD_REQUEST, '登记外部委派必须带 idempotencyKey（幂等/去重）')
+  const summaryBytes = Number(r.summaryBytes)
+  const limit = Number.isFinite(Number(options.maxSummaryBytes)) && Number(options.maxSummaryBytes) > 0
+    ? Math.trunc(Number(options.maxSummaryBytes))
+    : EXTERNAL_SUMMARY_MAX_BYTES
+  if (!Number.isFinite(summaryBytes) || summaryBytes < 0) return extReject(EXTERNAL_REJECT.BAD_REQUEST, 'summaryBytes 必须是非负数字')
+  if (summaryBytes > limit) return extReject(EXTERNAL_REJECT.SUMMARY, '摘要超出外部委派上限（' + limit + ' 字节）：拒绝登记', { summaryBytes, limit })
+  const state = toStr(r.state).trim() || 'unknown'
+  const toolCallId = toStr(r.toolCallId).trim()
+  const proof = { contract: EXTERNAL_DELEGATION_CONTRACT, version: UHR_VERSION }
+  const body = {
+    kind: EXTERNAL_DELEGATION_KIND,
+    native: false,
+    degraded: true,
+    proof,
+    taskRef,
+    state,
+    toolCallId: toolCallId || null,
+    callerRef: hashRef('caller', callerRef),
+    scopeRef: hashRef('scope', scopeRef),
+    idempotencyHash: sha256Hex('ext-idem:' + idempotencyKey).slice(0, 24),
+    summaryBytes,
+    userApproved: true,
+  }
+  return deepFreeze(Object.assign(body, { receiptHash: sha256Hex(canonicalJson(body)).slice(0, 32) }))
+}
+
+/** 外部委派一律降级：任何「等价原生」的宣称都必须被调用方拒绝。 */
+export function isNativeDelegationClaim(result) {
+  const r = isPlain(result) ? result : {}
+  return r.native === true || r.degraded === false || r.kind === 'native_child_thread'
+}
+

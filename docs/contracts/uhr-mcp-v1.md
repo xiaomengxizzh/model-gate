@@ -164,3 +164,20 @@ mock 把任务表写到 `<dir>/uhr-tasks.json`（tmp + fsync + rename + 目录 f
 - 非目标：模型推理与回执（M5-1，见 [uhr-inference-v1.md](uhr-inference-v1.md)）、Agent 编排策略、
   工具执行器本身。
 - 适配器是 `forward.js` 之外的隔离实验目录（`src/mcp/`）；接线由 M1-3/M3-3 决定调用点。
+
+## P06 外部委派的降级语义（uhr-mcp-v1）
+
+> 2026-11-12。外部 MCP/UHR 委派是**受控降级路径**，不是 Codex 原生 child thread；本契约不注册生产 MCP，
+> 也不替代原生线程。原生 Gate（Q03/Q04）不能用本节的任何结果充抵。
+
+| 项 | 契约 |
+| --- | --- |
+| 路径标识 | 委派结果与最小回执都带 `delegation: { kind:"external_delegation", native:false, degraded:true, proof:"uhr-mcp-v1" }`；查询/取消同样标注。 |
+| 输入范围 | 只接受显式、限长的可读摘要与不透明引用（`{kind, ref}`）；对话正文、绝对路径、密钥、v2 密文、写工具一律拒绝（零提交）。 |
+| 用户批准 | 回执登记 `registerExternalDelegation` 必须 `userApproved:true`；未批准拒绝码 `UHR_EXT_REJECT_APPROVAL_MISSING`。 |
+| 作用域与幂等 | 绑定 `callerRef`/`scopeRef`（登记只留 sha256 短 id）与 `idempotencyKey`（只留哈希）；同键同摘要复用 taskRef，不同摘要冲突。 |
+| 取消 | `cancel_task` 幂等；已终态不可取消；只有拥有 taskRef 或有 scoped grant 才可读/取消。 |
+| 大小限 | 单行摘要超硬上限默认拒绝，显式 `allowSummaryTruncation` 才裁剪并留痕；回执登记 `summaryBytes` 超过 8192 字节拒绝。 |
+| 不冒充原生 | 任何 `native:true`/`degraded:false`/`kind:"native_child_thread"` 的宣称都必须被拒绝（`isNativeDelegationClaim`）；外部委派不计入原生验收。 |
+| 可禁用 | 不接入 MCP 即回到“手动导出摘要”的路径；本节不改变原生线程、不创建假 child、不产生伪通知。 |
+
