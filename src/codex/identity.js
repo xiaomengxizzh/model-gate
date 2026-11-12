@@ -60,6 +60,21 @@ export function isOfficialHost(host, cfg) {
   return !!host && officialHosts(cfg).includes(host)
 }
 
+// P03：OpenCode Go 入口 host 白名单。Go 属第三方身份域（绝不继承官方凭据），但入口 host
+// 必须可识别，避免「配了任意中转却当 Go 绑定」。defaults.opencodeGoHosts 是替换清单（与官方 host 同语义）。
+export const DEFAULT_OPENCODE_GO_HOSTS = Object.freeze(['opencode.ai'])
+export function opencodeGoHosts(cfg) {
+  const raw = cfg && cfg.defaults && cfg.defaults.opencodeGoHosts
+  if (Array.isArray(raw)) {
+    const list = raw.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean)
+    if (list.length) return list
+  }
+  return DEFAULT_OPENCODE_GO_HOSTS.slice()
+}
+export function isOpencodeGoHost(host, cfg) {
+  return !!host && opencodeGoHosts(cfg).includes(String(host).toLowerCase())
+}
+
 function declaredIdentity(def) {
   const raw = def && (def.codexIdentity != null ? def.codexIdentity : def.codex_identity)
   if (raw == null || raw === '') return null
