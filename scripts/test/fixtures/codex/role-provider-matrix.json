@@ -1,0 +1,134 @@
+{
+  "schema": "mg.codex.role-provider-matrix/v1",
+  "codexVersion": "0.167.0-linux-x64",
+  "capturedAt": "2026-11-12",
+  "provenance": {
+    "localInstall": "package.json version 0.167.0-linux-x64 (read-only inspection of the existing host install)",
+    "sourceCitations": [
+      "openai/codex rust-v0.167.0 codex-rs/core/src/agent/child_config.rs — child provider copied from the parent turn",
+      "openai/codex rust-v0.167.0 codex-rs/core/src/agent/role.rs#L69-L113 — role override whitelist does not include model_provider"
+    ],
+    "sourceVerification": "UNKNOWN_PRIMARY_SOURCE: no local Rust checkout; network access is forbidden in this environment. Citations are carried from the planning package and were not re-fetched.",
+    "localExecution": "BLOCKED_ENV: the harness launcher fails before exec (bwrap: No permissions to create a new namespace). Real CLI cases belong to Q02 and require OS-level egress isolation.",
+    "network": "none",
+    "credentials": "none; no auth.json, no real session; synthetic keys and loopback only"
+  },
+  "resolutionModel": {
+    "providerSource": "parent_turn",
+    "roleProviderOverride": "not_applied",
+    "roleModelOverride": "same_provider_model_only",
+    "unknownRoleFieldPolicy": "report_and_do_not_apply",
+    "roleFieldCoverage": {
+      "model_provider": "EXCLUDED_BY_CITED_SOURCE",
+      "model": "SAME_PROVIDER_MODEL_ONLY",
+      "other": "UNKNOWN_PRIMARY_SOURCE"
+    }
+  },
+  "evidenceLegend": {
+    "CITED_UPSTREAM_SOURCE": "Upstream source path/line cited by the planning package; not locally re-fetched (UNKNOWN_PRIMARY_SOURCE).",
+    "SYNTHETIC_FIXTURE": "Locked by scripts/test/fixtures/codex/role-provider-0.167.0.mjs and its offline test; not a live client result.",
+    "LOCAL_CLI_BLOCKED": "The installed CLI could not be executed in this environment (bwrap unavailable).",
+    "OUT_OF_SCOPE_NATIVE_ROLE": "Not a native Codex role decision; tracked by a separate preview module."
+  },
+  "statusLegend": {
+    "BOUNDARY_LOCKED": "Design boundary fixed for 0.167.0; live behavior remains NOT_RUN.",
+    "UNKNOWN_PREVIEW": "Preview path not implemented and not qualified; no login may be exposed."
+  },
+  "matrix": [
+    {
+      "id": "official-direct",
+      "title": "官方直连（control group）",
+      "parent": {
+        "provider": "openai",
+        "model": "gpt-official"
+      },
+      "role": {
+        "model_provider": "openai",
+        "model": "gpt-child"
+      },
+      "expected": {
+        "provider": "openai",
+        "model": "gpt-child",
+        "providerChanged": false
+      },
+      "evidence": [
+        "CITED_UPSTREAM_SOURCE",
+        "LOCAL_CLI_BLOCKED"
+      ],
+      "status": "BOUNDARY_LOCKED",
+      "note": "No gateway in the path. A role that repeats model_provider=openai changes nothing; live subscription behavior requires Q03 authority."
+    },
+    {
+      "id": "mock-dual-provider",
+      "title": "mock 双 provider（反向 fixture）",
+      "parent": {
+        "provider": "probe-a",
+        "model": "root-model"
+      },
+      "role": {
+        "model_provider": "probe-b",
+        "model": "child-model"
+      },
+      "expected": {
+        "provider": "probe-a",
+        "model": "child-model",
+        "providerChanged": false
+      },
+      "evidence": [
+        "CITED_UPSTREAM_SOURCE",
+        "SYNTHETIC_FIXTURE",
+        "LOCAL_CLI_BLOCKED"
+      ],
+      "status": "BOUNDARY_LOCKED",
+      "note": "Negative row: declaring probe-b in a role must not move the child. The model may change; the provider is inherited. Real CLI verification is Q02, under OS isolation."
+    },
+    {
+      "id": "same-provider",
+      "title": "同 provider（model override only）",
+      "parent": {
+        "provider": "probe-a",
+        "model": "root-model"
+      },
+      "role": {
+        "model_provider": "probe-a",
+        "model": "child-model"
+      },
+      "expected": {
+        "provider": "probe-a",
+        "model": "child-model",
+        "providerChanged": false
+      },
+      "evidence": [
+        "CITED_UPSTREAM_SOURCE",
+        "SYNTHETIC_FIXTURE",
+        "LOCAL_CLI_BLOCKED"
+      ],
+      "status": "BOUNDARY_LOCKED",
+      "note": "Supported shape: one provider identity (ADR-0002) with a child model override. This is what P05 lifecycle fixtures may model."
+    },
+    {
+      "id": "siwc-preview",
+      "title": "SIWC preview（自有客户端）",
+      "parent": {
+        "provider": "siwc-registration",
+        "model": "preview-model"
+      },
+      "role": null,
+      "expected": {
+        "provider": "siwc-registration",
+        "model": "preview-model",
+        "providerChanged": false
+      },
+      "evidence": [
+        "OUT_OF_SCOPE_NATIVE_ROLE"
+      ],
+      "status": "UNKNOWN_PREVIEW",
+      "note": "SIWC preview is our own public-API client, not a native Codex role. Provider identity comes from its own registration/workspace. Not implemented by P01; do not expose login without a qualifying client (P07)."
+    }
+  ],
+  "stopConditions": [
+    "The request contains encrypted/unreadable payload or an unsupported critical tool: reject before any upstream request.",
+    "No legal plaintext delegation path exists: report BLOCKED_VENDOR_CAPABILITY instead of decrypting, deleting ciphertext, or silently downgrading to v1.",
+    "A role fixture appears to switch providers: fail the fixture; do not relax the boundary."
+  ]
+}

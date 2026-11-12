@@ -1,0 +1,23 @@
+# Synthetic isolated client configuration fixture (NOT a real HOME config).
+# Used only by scripts/test/offline/codex-role-provider.test.mjs.
+# P01 does not invoke the real CLI; Q02 owns real CLI execution under OS isolation.
+# No real endpoint, credential, or account identifier is present.
+
+model = "root-model"
+model_provider = "probe-a"
+
+[profiles.role-switch-attempt]
+model_provider = "probe-b"
+model = "child-model"
+
+[model_providers.probe-a]
+name = "Synthetic Probe A"
+base_url = "http://127.0.0.1:1/v1"
+wire_api = "responses"
+env_key = "MG_SYNTHETIC_PROBE_A"
+
+[model_providers.probe-b]
+name = "Synthetic Probe B"
+base_url = "http://127.0.0.1:2/v1"
+wire_api = "responses"
+env_key = "MG_SYNTHETIC_PROBE_B"
