@@ -365,3 +365,26 @@ test('T-ROUTE-02d 日志与错误信封不含密钥哨兵/上游正文片段', {
   assert.equal(log.includes(SENTINEL), false, '日志不得含密钥哨兵')
   assert.equal(log.includes('body-fragment-should-not-leak'), false, '日志不得含上游正文片段')
 })
+
+
+// ============================================================================
+// F03 附：N02 计费策略接线（billingPolicy 透传 + billing_unmetered 状态）
+// ============================================================================
+
+test('N02 接线：defaults.codexBudget.billingPolicy 必须透传到决策器预算；缺省不写字段（保持 fail-closed 默认）', async () => {
+  const { __codexBudgetOfForTest } = await import('../../../src/forward.js')
+  const { ERROR_STATUS_TABLE } = await import('../../../src/attempt-state.js')
+
+  const noPolicy = __codexBudgetOfForTest({ defaults: {} }, 0)
+  assert.equal('billingPolicy' in noPolicy, false, '未配置时不得写入字段（decision.js 用自己的 fail-closed 默认）')
+
+  const allow = __codexBudgetOfForTest({ defaults: { codexBudget: { billingPolicy: 'allow_unmetered' } } }, 0)
+  assert.equal(allow.billingPolicy, 'allow_unmetered', '显式放行必须透传（否则用户只能改代码）')
+  assert.equal(allow.enforceUnknownCost, false)
+
+  const blank = __codexBudgetOfForTest({ defaults: { codexBudget: { billingPolicy: '   ' } } }, 0)
+  assert.equal('billingPolicy' in blank, false, '空白值不得透传')
+
+  assert.equal(ERROR_STATUS_TABLE.billing_unmetered, 403, '发送前拒绝的计费未证实必须登记为 403')
+  assert.equal(ERROR_STATUS_TABLE.upstream_redirect_rejected, 502)
+})

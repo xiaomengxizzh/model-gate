@@ -79,6 +79,9 @@ export const ERROR_STATUS_TABLE = Object.freeze({
   official_host_not_allowlisted: 403,
   official_target_insecure_scheme: 403,
   official_credential_missing: 403,
+  // N02（C）：付费候选但计费未证实（未配费用上限且未接账本）→ 发送前拒绝、零上游。
+  // 状态取 403（策略/授权拒绝，不是上游错误）；显式 data 见 forward.js billingPolicy 透传。
+  billing_unmetered: 403,
   // 路由/模型
   unknown_model: 404,
   catalog_binding_invalid: 404,
