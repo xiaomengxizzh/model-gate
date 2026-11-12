@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
 import { gunzipSync, inflateSync, brotliDecompressSync, zstdDecompressSync } from 'node:zlib'
 import { isIP } from 'node:net'
-import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readJson, readKeysFresh, modelTarget } from './router.js'
+import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readKeysFresh, readLocalConfigStrict, isConfigUnreadable, modelTarget } from './router.js'
 import { beginWrite, recoverStore, TARGET_CONFIG, TARGET_KEYS } from './config-transaction.js'
 import { createLogger } from './logger.js'
 import { forward, probe, probeModel, probeChat, warm, probeEmbedding, probeRerank } from './request.js'
@@ -628,6 +628,11 @@ function transactionFailure(error) {
   if (code === 'store_locked') return { error: '配置写入被拒绝：另一个写者持有配置锁（不排队）', status: 409, code }
   if (code === 'store_conflict') return { error: '配置已被外部修改（磁盘指纹不一致）：已停止写入并保留现场；请人工核对或先 /api/config/reload', status: 409, code }
   if (code === 'injected_fault') return { error: '配置事务被中断（故障注入）', status: 500, code }
+  // F02：坏状态一律 fail-closed，且返回稳定 code 供运维定位；消息不含任何 Key/配置正文。
+  if (code === 'lock_unreadable') return { error: '配置写锁文件损坏（不可解析）：已停止写入以免并发覆盖；请人工检查并删除配置目录下的 ' + 'config-txn.lock 后重试', status: 409, code }
+  if (code === 'keys_unreadable') return { error: 'keys.local.json 损坏或无法解密：已拒绝读写以免清空现有 Key；请恢复主密钥或从备份恢复后重试', status: 409, code }
+  if (code === 'key_encryption_unavailable') return { error: '主密钥不可用，无法加密写入 keys.local.json：已拒绝保存（不会退回明文）', status: 500, code }
+  if (code === 'local_config_unreadable') return { error: 'gateway.local.json 损坏：已拒绝读写以免清空现有配置；请人工修复或从备份恢复后重试', status: 409, code }
   return { error: '配置事务失败：' + ((error && error.message) || 'unknown'), status: 500, code }
 }
 
@@ -773,12 +778,15 @@ async function doSaveConfig(state, body) {
   let keysContent = null
   if (keysChanged) {
     keysContent = keysEncrypt(keys)
-    if (!keysContent) return { error: '无法加密 keys.local.json：缺少主密钥，已拒绝保存' }
+    // F02：旧明文 → 加密写失败时必须整体拒绝（不得退回明文，也不得只写一半）。
+    // 这是服务端凭据材料问题，用 500 + 稳定 code，避免客户端当成参数错误反复重试。
+    if (!keysContent) return { error: '无法加密 keys.local.json：主密钥不可用，已拒绝保存（不会退回明文写入）', status: 500, code: 'key_encryption_unavailable' }
   }
   const newVersion = (cur.configVersion || 0) + 1
   // 删除墓碑（MG-003）：local 是"合并补丁"，缺键无法表达删除；累计记录被删的上游/模型名，
   // 重新加回来时撤销墓碑。虚拟模型整体替换，不需要墓碑。
-  const prevLocal = readJson(state.paths.local, {}) || {}
+  // F02：读盘合并必须用严格读取——损坏的 local 绝不能被当成 {} 再写回（会清空用户配置）。
+  const prevLocal = readLocalConfigStrict(state.paths.local, {}) || {}
   const prevTomb = (prevLocal._removed && typeof prevLocal._removed === 'object') ? prevLocal._removed : {}
   const removedProviders = new Set(Array.isArray(prevTomb.providers) ? prevTomb.providers : [])
   const removedModels = new Set(Array.isArray(prevTomb.models) ? prevTomb.models : [])
@@ -828,10 +836,10 @@ async function doSaveKeys(state, body) {
   if (body.key) keys[keyId] = body.key
   else delete keys[keyId]
   const enc = keysEncrypt(keys)
-  if (!enc) return { error: '无法加密 keys.local.json：缺少主密钥（MG_KEYS_MASTER 未设置且自动主密钥不可用），已拒绝明文写入' }
+  if (!enc) return { error: '无法加密 keys.local.json：主密钥不可用（MG_KEYS_MASTER 未设置且自动主密钥不可用），已拒绝明文写入', status: 500, code: 'key_encryption_unavailable' }
   // key 变更同样推进 configVersion（读盘合并 local 顶层，避免覆盖其他字段）
   const newVersion = (state.cfg.configVersion || 0) + 1
-  const localOut = Object.assign({}, readJson(state.paths.local, {}), { configVersion: newVersion })
+  const localOut = Object.assign({}, readLocalConfigStrict(state.paths.local, {}), { configVersion: newVersion })
   tx.commit({ files: { [TARGET_KEYS]: enc, [TARGET_CONFIG]: JSON.stringify(localOut, null, 2) }, operation: 'keys.save', publish: () => reloadConfig(state) })
   hardenKeyFile(state.paths.keys)
   return { version: newVersion }
@@ -1518,7 +1526,15 @@ function makeHandler(state) {
       if (path === '/api/config/reload' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
         try { recoverStore(state.paths) } catch (error) { const f = transactionFailure(error); sendJson(res, f.status, { error: f.error, code: f.code }); return }
-        reloadConfig(state)
+        try {
+          reloadConfig(state)
+        } catch (error) {
+          // F02：磁盘坏状态（如 keys/local 不可解析）不得降级为「空配置/空 Key」，
+          // 也不能退化成通用 502；返回稳定 code，内存状态保持重载前的可用代际。
+          const f = transactionFailure(error)
+          sendJson(res, f.status, { error: f.error, code: f.code })
+          return
+        }
         sendJson(res, 200, { ok: true })
         return
       }
@@ -2089,7 +2105,19 @@ export function start(opts = {}) {
     process.stderr.write('[config-transaction] RECOVERY_FAILED ' + payload + '\n')
     throw new Error('配置事务恢复失败（fail-closed）：' + ((error && error.code) || 'recovery_failed'))
   }
-  const cfg = opts.config ? loadConfig({ configFile: opts.config }) : loadConfig()
+  let cfg
+  try {
+    cfg = opts.config ? loadConfig({ configFile: opts.config }) : loadConfig()
+  } catch (error) {
+    // F02：配置目标损坏时拒绝启动，不降级到「空配置/空 Key」。
+    if (isConfigUnreadable(error)) {
+      process.stderr.write('[config] CONFIG_UNREADABLE ' + JSON.stringify({ code: error.code, message: error.message }) + '\n')
+      const refused = new Error('配置/Key 文件损坏，已拒绝启动（fail-closed，不降级）：' + error.code)
+      refused.code = error.code
+      throw refused
+    }
+    throw error
+  }
   const mb = process.env.MG_MAX_BODY ? parseInt(process.env.MG_MAX_BODY, 10) : 0
   if (mb > 0) cfg.server = Object.assign({}, cfg.server || {}, { maxBodyBytes: mb })
   // 收集所有密钥值供日志脱敏：环境变量 Key + 面板 Key + extraHeaders 值 + 客户端/管理令牌 + 代理内嵌凭据

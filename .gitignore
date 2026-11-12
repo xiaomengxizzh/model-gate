@@ -5,6 +5,16 @@ config/*.local.json
 *.local.json
 .env
 
+# 配置事务工件（F02）：journal / commit marker / 写锁 / 暂存目录，只在运行时存在，绝不入库
+config/.mg-txn/
+config/config-txn.json
+config/config-txn.commit.json
+config/config-txn.lock
+# 原子写临时文件（含旧 writeJsonAtomic 的 <文件>.<pid>.tmp 遗留形态）
+*.local.json.*.tmp
+*.local.json.*.json.tmp
+config-txn.*.tmp
+
 config/stats.json
 # 配置备份（.bak 及带时间戳后缀）不入库
 *.bak
