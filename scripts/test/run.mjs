@@ -60,6 +60,7 @@ export const SUITES = [
   'scripts/test/offline/media.test.mjs',
   'scripts/test/offline/metrics.test.mjs',
   'scripts/test/offline/model-resolution.test.mjs',
+  'scripts/test/offline/native-boundary.test.mjs',
   'scripts/test/offline/native-usage.test.mjs',
   'scripts/test/offline/optional-endpoints.test.mjs',
   'scripts/test/offline/p03-opencode-go.test.mjs',
