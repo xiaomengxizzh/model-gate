@@ -29,6 +29,9 @@ export function newVideoTask(opts) {
     createdAt: now,
     updatedAt: now,
     idem: opts.idem || null,
+    // F04：主体域幂等——幂等键只在同一主体内生效；inputHash 用于「同键不同输入」冲突判定。
+    subject: (typeof opts.subject === 'string' && opts.subject.trim()) ? opts.subject.trim() : null,
+    inputHash: typeof opts.inputHash === 'string' && opts.inputHash ? opts.inputHash : null,
     prompt: typeof opts.prompt === 'string' ? opts.prompt.slice(0, 2000) : '',
     progress: null,
     result: null,

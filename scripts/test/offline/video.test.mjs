@@ -302,3 +302,97 @@ test('M1-4a 视频幂等：取消只产生一次终态', async (t) => {
   assert.equal(persisted.status, 'canceled')
 })
 
+
+
+// ============================================================================
+// F04 接线：视频创建主体域幂等（HTTP 路径）+ 媒体正文不入日志 + 启动恢复
+// ============================================================================
+
+test('F04 HTTP 幂等主体域：换主体不复用他人任务；同主体同键复用；同键不同输入 409 且零上游', { timeout: 60000 }, async (t) => {
+  const { upstreamP } = mockVideo()
+  const upstream = await upstreamP
+  const dir = await mkdtemp(join(tmpdir(), 'mg-f04-video-'))
+  const config = { providers: { mock: { baseUrl: upstream.base } }, models: { vid: { provider: 'mock', capability: 'video' } } }
+  const IDEM = 'idem-f04-subject'
+  const body = { model: 'vid', prompt: 'a cat' }
+  const KEY_A = 'sk-f04-subject-a'
+  const KEY_B = 'sk-f04-subject-b'
+  const t2 = []
+  t.after(async () => { for (const gw of t2) { try { await gw.stop() } catch {} } await upstream.stop(); await rm(dir, { recursive: true, force: true }) })
+
+  // 主体 A 创建
+  const gwA = await startGateway({ name: 'f04-subject-a', dir, config, env: { MG_CLIENT_KEY: KEY_A } })
+  t2.push(gwA)
+  const a = await gwA.post('/v1/videos', body, Object.assign(json(), { 'idempotency-key': IDEM, authorization: 'Bearer ' + KEY_A }))
+  assert.equal(a.status, 202)
+  const aTask = await a.json()
+  const hitsAfterA = upstream.hits.filter((h) => h.method === 'POST' && h.url === '/v1/videos').length
+  assert.equal(hitsAfterA, 1)
+
+  // 同主体同键同输入 → 复用（200，同 id，零新增上游）
+  const again = await gwA.post('/v1/videos', body, Object.assign(json(), { 'idempotency-key': IDEM, authorization: 'Bearer ' + KEY_A }))
+  assert.equal(again.status, 200)
+  assert.equal((await again.json()).id, aTask.id)
+  assert.equal(upstream.hits.filter((h) => h.method === 'POST' && h.url === '/v1/videos').length, 1, '同主体同键不得二次发')
+
+  // 同主体同键不同输入 → 409，零上游
+  const conflict = await gwA.post('/v1/videos', { model: 'vid', prompt: 'a dog' }, Object.assign(json(), { 'idempotency-key': IDEM, authorization: 'Bearer ' + KEY_A }))
+  assert.equal(conflict.status, 409)
+  assert.equal((await conflict.json()).error.code, 'idempotency_key_reused')
+  assert.equal(upstream.hits.filter((h) => h.method === 'POST' && h.url === '/v1/videos').length, 1, '冲突不得触上游')
+
+  // 换主体（Key 轮换）：同一幂等键必须视为新任务，绝不复用 A 的任务
+  await gwA.stop()
+  const gwB = await startGateway({ name: 'f04-subject-b', dir, config, env: { MG_CLIENT_KEY: KEY_B } })
+  t2.push(gwB)
+  const b = await gwB.post('/v1/videos', body, Object.assign(json(), { 'idempotency-key': IDEM, authorization: 'Bearer ' + KEY_B }))
+  assert.equal(b.status, 202, '不同主体的同键请求必须新建，而不是返回他人任务')
+  const bTask = await b.json()
+  assert.notEqual(bTask.id, aTask.id, '跨主体不得复用任务 id（旧实现 findTaskByIdem 全局查找会泄漏）')
+  assert.equal(upstream.hits.filter((h) => h.method === 'POST' && h.url === '/v1/videos').length, 2)
+
+  // 跨主体按 id 查询：他人的任务按 404 处理（不泄露存在性）
+  const peek = await gwB.get('/v1/videos/' + aTask.id, { authorization: 'Bearer ' + KEY_B })
+  assert.equal(peek.status, 404, '跨主体任务不可见')
+  const own = await gwB.get('/v1/videos/' + bTask.id, { authorization: 'Bearer ' + KEY_B })
+  assert.equal(own.status, 200)
+})
+
+test('F04 媒体正文不入日志：视频 prompt 与 embedding 输入正文不落日志', { timeout: 45000 }, async (t) => {
+  const { upstreamP } = mockVideo()
+  const upstream = await upstreamP
+  const SENTINEL = 'PROMPT-SENTINEL-F04-MEDIA-BODY'
+  const gw = await startGateway({
+    name: 'f04-media-logs',
+    config: { providers: { mock: { baseUrl: upstream.base } }, models: { vid: { provider: 'mock', capability: 'video' } } },
+  })
+  t.after(async () => { await gw.stop(); await upstream.stop() })
+  const created = await gw.post('/v1/videos', { model: 'vid', prompt: SENTINEL }, json())
+  assert.equal(created.status, 202)
+  assert.equal(JSON.stringify(await created.json()).includes(SENTINEL), false, '客户端响应不回显 prompt 正文')
+  const logs = (await (await gw.get('/api/logs?lines=300')).json()).lines.join('\n')
+  assert.equal(logs.includes(SENTINEL), false, '日志不得包含媒体请求正文')
+  assert.ok(/video create ok/.test(logs), '应留结构化审计（promptLen 而不是正文）')
+})
+
+test('F04 启动恢复：pending_send 任务在启动时转 unknown，且不重复创建', { timeout: 45000 }, async (t) => {
+  const { upstreamP } = mockVideo()
+  const upstream = await upstreamP
+  const dir = await mkdtemp(join(tmpdir(), 'mg-f04-recover-'))
+  const now = Date.now()
+  writeFileSync(join(dir, 'videos.json'), JSON.stringify({
+    version: 1,
+    tasks: {
+      vid_pending: { id: 'vid_pending', object: 'video', model: 'vid', provider: 'mock', status: 'pending_send', upstreamId: null, createdAt: now - 1000, updatedAt: now - 1000, idem: null, subject: 'anonymous', inputHash: 'h', prompt: 'x', progress: null, result: null, error: null, lastPollAt: 0 },
+    },
+  }))
+  const gw = await startGateway({ name: 'f04-recover', dir, config: { providers: { mock: { baseUrl: upstream.base } }, models: { vid: { provider: 'mock', capability: 'video' } } } })
+  t.after(async () => { await gw.stop(); await upstream.stop(); await rm(dir, { recursive: true, force: true }) })
+  const got = await gw.get('/v1/videos/vid_pending')
+  assert.equal(got.status, 200)
+  const task = await got.json()
+  assert.equal(task.status, 'unknown', 'pending_send 必须转 unknown（结果未知，禁止重复创建）')
+  assert.equal(upstream.hits.filter((h) => h.method === 'POST' && h.url === '/v1/videos').length, 0, '恢复不得触发新创建')
+  const logs = (await (await gw.get('/api/logs?lines=200')).json()).lines.join('\n')
+  assert.ok(/启动恢复/.test(logs), '恢复动作应留日志')
+})
