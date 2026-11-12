@@ -12,18 +12,41 @@ import {
   decodeError, classifyStreamTerminal,
 } from '../../../src/providers/opencode-go.js'
 
+// 位形证据（未独立复核厂商文档）：plan §3 记录 /inference/go/openai/v1；本树 CHANGELOG 2026-09 记录
+// /inference/go/v1 兼容路径（历史 live 脚本 baseUrl=/inference/go 再由发送层拼 /v1/…）。
+// live 使用前必须以厂商文档或有效凭据下的探针确认位形 —— 本测试只证明「形状识别」。
 const GO_BASE = 'https://opencode.ai/inference/go/openai/v1'
+const GO_V1_BASE = 'https://opencode.ai/inference/go/v1'
 
-test('P03 入口绑定：现行 chat/responses 与遗留 /zen/go 分属不同 binding', () => {
+test('P03 入口绑定：两种现行位形各有 binding，与遗留 /zen/go 分属不同绑定', () => {
   const chat = entryOf({ baseUrl: GO_BASE })
   assert.equal(chat.ok, true)
-  assert.equal(chat.entry.binding, 'go-v1')
+  assert.equal(chat.entry.binding, 'go-openai-v1')
   assert.equal(chat.entry.legacy, false)
 
   const responses = entryOf({ baseUrl: GO_BASE + '/responses' })
   assert.equal(responses.ok, true)
   assert.equal(responses.entry.kind, 'responses')
-  assert.equal(responses.entry.binding, 'go-v1')
+  assert.equal(responses.entry.binding, 'go-openai-v1')
+
+  // 本树 CHANGELOG 记录的另一现行位形：/inference/go/v1（不落到 legacy，也不与 openai/v1 互认）。
+  const v1 = entryOf({ baseUrl: GO_V1_BASE })
+  assert.equal(v1.ok, true)
+  assert.equal(v1.entry.binding, 'go-v1')
+  assert.equal(v1.entry.legacy, false)
+  assert.equal(v1.entry.path, '/inference/go/v1/chat/completions')
+  const v1Responses = entryOf({ baseUrl: GO_V1_BASE + '/responses' })
+  assert.equal(v1Responses.entry.binding, 'go-v1')
+  assert.equal(v1Responses.entry.kind, 'responses')
+
+  // 历史 live 脚本的根形状：/inference/go（由发送层再拼 /v1/…），识别为现行但标 ambiguous。
+  const root = entryOf({ baseUrl: 'https://opencode.ai/inference/go' })
+  assert.equal(root.ok, true)
+  assert.equal(root.entry.binding, 'go-v1')
+  assert.equal(root.ambiguous, true)
+  assert.equal(root.root, true)
+  const rootCheck = validate({ baseUrl: 'https://opencode.ai/inference/go' }, {})
+  assert.ok(rootCheck.warnings.some(w => w.code === 'entry_shape_ambiguous'))
 
   const legacy = entryOf({ baseUrl: 'https://opencode.ai/zen/go/v1' })
   assert.equal(legacy.ok, true)
@@ -33,6 +56,13 @@ test('P03 入口绑定：现行 chat/responses 与遗留 /zen/go 分属不同 bi
   const unknown = entryOf({ baseUrl: 'https://opencode.ai/not-a-go-entry' })
   assert.equal(unknown.ok, false)
   assert.equal(unknown.code, 'opencodego_entry_unknown')
+  // 未登记位形仍拒绝（例如未记录过的 v2 形状），绝不放过到猜测路径。
+  const v2 = entryOf({ baseUrl: 'https://opencode.ai/inference/go/v2' })
+  assert.equal(v2.ok, false)
+  assert.equal(v2.code, 'opencodego_entry_unknown')
+  const v2Chat = entryOf({ baseUrl: 'https://opencode.ai/inference/go/v2/chat/completions' })
+  assert.equal(v2Chat.ok, false)
+  assert.equal(v2Chat.code, 'opencodego_entry_unknown')
   assert.equal(entryOf({}).ok, false)
 })
 
@@ -55,7 +85,7 @@ test('P03 校验：host 白名单、遗留入口默认拒绝、版本与凭据�
 
   const ok = validate({ baseUrl: GO_BASE, opencodeGoVersion: 'go-v1', apiKeyEnv: 'SYNTHETIC_GO_KEY' }, {})
   assert.equal(ok.ok, true)
-  assert.equal(ok.entry.entry.binding, 'go-v1')
+  assert.equal(ok.entry.entry.binding, 'go-openai-v1')
   assert.equal(ok.hasCredential, true)
   assert.equal(JSON.stringify(ok).includes('SYNTHETIC_GO_KEY'), false, '校验结果只留存在性，不回显凭据引用值')
 
