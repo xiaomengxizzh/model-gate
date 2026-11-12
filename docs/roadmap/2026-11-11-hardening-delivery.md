@@ -128,4 +128,19 @@ E 的最终确认（`R00-final2`，绑定 `c20f485` / 代码点 `2d82ea2`）：*
 
 ## 9. 远端动作
 
-**无。** 未 push 任何分支、未创建/更新 PR、未合并远端 main、未 tag、未改分支保护。所有交付物仅存在于本地集成分支与本地运行目录。
+**R01 定稿时：无**（`DELIVERY=local`，未 push / 未建 PR / 未合并 main / 未 tag）。
+
+**交付后追加（用户在同一会话内显式指示「进行 git push」）**：
+
+| 项 | 值 |
+| --- | --- |
+| 动作 | 新建远端分支（`[new branch]`，**非** force push） |
+| 分支 | `dev/modelgate-hardening-a1` |
+| 远端 HEAD | `a1f862736d7bc73e8b1790c29bf757007173b2c6`（与本地一致） |
+| 传输 | SSH（沿用本机既有 `id_ed25519`，认证主体 `xiaomengxizzh`）；HTTPS 匿名写被拒后未做任何凭据搜寻 |
+| `main` | 仍为 `6bc6441fc7bf3e620b19af5af3b4d62543b31193`，**未改动** |
+| 其他分支 | 未改动（`dev/codex-aggregation-20261111` 仍 `64a5c96` 等） |
+| PR | 未创建（用户仅指示 push）。GitHub 提示的建 PR 链接：`https://github.com/xiaomengxizzh/model-gate/pull/new/dev/modelgate-hardening-a1` |
+| 分支保护 / tag / 部署 | 未触碰 |
+
+推送前核对：工作树干净、无 secret/大文件入库、远端 refs 无漂移、目标分支不存在（故无覆盖风险）。
