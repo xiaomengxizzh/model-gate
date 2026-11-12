@@ -510,18 +510,35 @@ function claimsCapability(value) {
   return true
 }
 
-function capabilityEvidenceFor(name, key, evidence) {
+// N01：证据必须可追溯，且可声明有效期。过期证据不得继续支撑能力声明（stale ≠ proven）。
+// freshness 三态：fresh / stale / not-recorded（未写 expiresAt = 有效期未知，保留旧行为但可观察）。
+export function capabilityEvidenceFor(name, key, evidence, opts = {}) {
   const item = evidence && evidence[key]
   if (!isPlainObject(item) || !isNonEmptyString(item.source) || !isObservedAt(item.observedAt)) {
     throw new CatalogError('capability_evidence_missing',
       'models.' + name + '.codex.' + key + ' 声明了未证实能力；必须提供 evidence.' + key + ' = { source, observedAt(YYYY-MM-DD) }',
       { model: name, field: key })
   }
-  return { source: item.source.trim(), observedAt: String(item.observedAt).trim() }
+  const out = { source: item.source.trim(), observedAt: String(item.observedAt).trim() }
+  if (item.expiresAt !== undefined && item.expiresAt !== null && item.expiresAt !== '') {
+    if (!isObservedAt(item.expiresAt)) {
+      throw new CatalogError('capability_evidence_invalid',
+        'models.' + name + '.codex.evidence.' + key + '.expiresAt 必须是 YYYY-MM-DD[THH:MM:SS]',
+        { model: name, field: key })
+    }
+    out.expiresAt = String(item.expiresAt).trim()
+    const expiresMs = Date.parse(out.expiresAt)
+    const now = Number.isFinite(opts.now) ? Number(opts.now) : Date.now()
+    out.freshness = Number.isFinite(expiresMs) && expiresMs <= now ? 'stale' : 'fresh'
+  } else {
+    out.freshness = 'not-recorded'
+  }
+  return out
 }
 
-// 收集显式能力声明（新旧字段都收），逐项要求可追溯证据；返回 { caps, evidence }。
-function collectCapabilities(name, override) {
+// 收集显式能力声明（新旧字段都收），逐项要求可追溯证据；返回 { caps, evidence, stale }。
+// N01：过期证据（expiresAt <= now）从 caps 里剔除并落 warning —— 目录不得把 stale 能力当已证实。
+function collectCapabilities(name, override, warnings = [], options = {}) {
   const declared = Object.create(null)
   if (override.capabilities !== undefined) {
     if (!isPlainObject(override.capabilities)) {
@@ -545,12 +562,27 @@ function collectCapabilities(name, override) {
   }
   const caps = Object.create(null)
   const used = Object.create(null)
+  const stale = Object.create(null)
   for (const key of Object.keys(declared)) {
     const value = declared[key]
-    if (claimsCapability(value) || evidence[key] !== undefined) used[key] = capabilityEvidenceFor(name, key, evidence)
+    if (!claimsCapability(value) && evidence[key] === undefined) {
+      caps[key] = value
+      continue
+    }
+    const item = capabilityEvidenceFor(name, key, evidence, { now: options.now })
+    used[key] = item
+    if (item.freshness === 'stale') {
+      // 过期证据：不写能力字段（回到保守默认），只留可观察证据与 warning。
+      stale[key] = item
+      warnings.push({
+        code: 'capability_evidence_stale', path: 'models.' + name,
+        message: '证据已过期（' + (item.expiresAt || '?') + '），能力 ' + key + ' 不再写入目录；需重新取证后重新生成',
+      })
+      continue
+    }
     caps[key] = value
   }
-  return { caps, evidence: used }
+  return { caps, evidence: used, stale }
 }
 
 function buildThirdPartyEntry(name, entry, template, options, warnings) {
@@ -613,7 +645,7 @@ function buildThirdPartyEntry(name, entry, template, options, warnings) {
   }
 
   // 能力：只有显式 capabilities + evidence 才写入；官方模板里的同名字段一律不复制。
-  const capabilityDecl = collectCapabilities(name, override)
+  const capabilityDecl = collectCapabilities(name, override, warnings, options)
   const baseInstructionsDeclared = override.baseInstructions !== undefined
   if (baseInstructionsDeclared && !isNonEmptyString(override.baseInstructions)) {
     throw new CatalogError('invalid_override', 'models.' + name + '.codex.baseInstructions 必须是非空字符串')
@@ -658,10 +690,15 @@ function buildThirdPartyEntry(name, entry, template, options, warnings) {
       : { origin: 'modelgate:neutral-instructions', confidence: 'conservative' },
     clientBehavior: { origin: 'modelgate:conservative-defaults', confidence: 'conservative', fields: ['shell_type', 'support_verbosity', 'truncation_policy', 'experimental_supported_tools'] },
   }
-  if (Object.keys(capabilityDecl.caps).length) {
+  if (Object.keys(capabilityDecl.evidence).length) {
+    const freshnesses = Object.values(capabilityDecl.evidence)
+      .map(e => (e && e.freshness) || 'not-recorded')
+      .filter(f => f !== 'fresh')
     sources.capabilities = {
       fields: Object.keys(capabilityDecl.caps).map(k => CODEX_CAPABILITY_FIELDS[k]),
       evidence: capabilityDecl.evidence,
+      stale: Object.keys(capabilityDecl.stale),
+      freshness: freshnesses.length ? (freshnesses.includes('stale') ? 'stale' : 'not-recorded') : 'fresh',
     }
   }
 
@@ -680,6 +717,16 @@ function buildThirdPartyEntry(name, entry, template, options, warnings) {
       inheritedFields: [],
       templateFieldsNotInherited: Object.keys(templateModel),
       sources,
+      // N01：证据可观察摘要（source/observedAt/expiresAt/freshness），供管理面/CLI 显示「为什么信/不信」。
+      evidence: {
+        capabilities: capabilityDecl.evidence,
+        stale: capabilityDecl.stale,
+        freshness: capabilityDecl.evidence && Object.keys(capabilityDecl.evidence).length
+          ? (Object.values(capabilityDecl.evidence).some(e => e && e.freshness === 'stale')
+            ? 'stale'
+            : (Object.values(capabilityDecl.evidence).every(e => e && e.freshness === 'fresh') ? 'fresh' : 'not-recorded'))
+          : 'none',
+      },
       warnings: warningsForModel,
     },
   }
@@ -804,10 +851,21 @@ export function buildCatalog({ base, config = null, options = {} }) {
       }
     }
   }
+  // N01：别名随目录一起发布（同一代），目标直接指向聚合目录 ID（slug），
+  // 避免「别名指向 config 模型名、目录却按 slug 命名」的跨代/跨命名漂移。
+  const aliases = {}
+  for (const item of thirdParty) {
+    const entry = (config && config.models && config.models[item.binding.model]) || {}
+    for (const alias of (Array.isArray(entry.alias) ? entry.alias : [])) {
+      if (typeof alias !== 'string' || !alias.trim()) continue
+      aliases[alias.trim()] = { model: item.binding.slug, provider: item.binding.provider, sourceModel: item.binding.model }
+    }
+  }
   const meta = {
     schema: META_SCHEMA,
     catalogSchema: CATALOG_SCHEMA,
     templateModel: template.slug,
+    aliases,
     officialSlugs: [...officialSlugs].sort(),
     counts: { official: officialCatalog.models.length, thirdParty: thirdParty.length, total: catalog.models.length },
     skipped,

@@ -138,6 +138,35 @@ export function buildGenerationRecord({ generation, base, config = null, options
   return generationRecordFromBuilt({ generation, built, text, base: normalized, config, options, format, verified })
 }
 
+export const SNAPSHOT_SCHEMA = 'modelgate.codex-catalog.snapshot/1'
+
+// N01：视图完整性判据（同代完整目录）。缺模型/绑定悬空/别名指向不存在目标 => 不完整，
+// 调用方必须 fail-closed（不得拿半截目录路由）。
+export function catalogViewCompleteness(view) {
+  const issues = []
+  if (!view || typeof view !== 'object') return { ok: false, issues: ['view_missing'] }
+  const models = Array.isArray(view.models) ? view.models : []
+  if (!models.length) issues.push('models_empty')
+  const slugs = new Set()
+  for (const m of models) {
+    if (!m || typeof m.slug !== 'string' || !m.slug) { issues.push('model_slug_missing'); continue }
+    slugs.add(m.slug)
+  }
+  if (view.counts && Number.isInteger(view.counts.total) && view.counts.total !== models.length) {
+    issues.push('counts_total_mismatch')
+  }
+  for (const slug of Object.keys(view.bindings || {})) if (!slugs.has(slug)) issues.push('binding_target_missing:' + slug)
+  for (const slug of view.officialSlugs || []) if (!slugs.has(slug)) issues.push('official_slug_missing:' + slug)
+  // 别名指向墓碑是**路由时**可诊断的失败（alias_to_retired_id），不是目录损坏：
+  // 目录本身仍完整（模型/绑定齐全），因此这里只校验目标存在。
+  for (const [alias, raw] of Object.entries(view.aliases || {})) {
+    const target = raw && typeof raw === 'object' ? raw.model : raw
+    if (typeof target !== 'string' || !target) { issues.push('alias_target_missing:' + alias); continue }
+    if (!slugs.has(target) && !(view.retiredSlugs || []).includes(target)) issues.push('alias_target_unknown:' + alias)
+  }
+  return { ok: issues.length === 0, issues }
+}
+
 // 目录视图：/v1/models 投影、router.resolve、管理面 status 共用同一份（同一 generation/key）。
 export function toCatalogView(record, options = {}) {
   if (!record || !record.catalog || !Array.isArray(record.catalog.models)) {
@@ -147,7 +176,7 @@ export function toCatalogView(record, options = {}) {
   const officialSlugs = record.catalog.models.map(m => m && m.slug).filter(s => s && !bindings[s]).sort()
   const retiredSource = options.retiredSlugs || Object.keys(options.retiredBindings || {})
   const retiredSlugs = [...new Set(retiredSource.filter(s => typeof s === 'string' && s))].sort()
-  return Object.freeze({
+  const view = {
     schema: VIEW_SCHEMA,
     key: record.key,
     generation: record.generation,
@@ -156,10 +185,57 @@ export function toCatalogView(record, options = {}) {
     models: record.catalog.models,
     bindings,
     officialSlugs,
+    // N01：别名与目录同代发布（record.meta.aliases），不再让别名来自另一处配置读取。
+    aliases: (record.meta && record.meta.aliases) || {},
     retiredSlugs,
     verified: record.verified,
     counts: record.counts,
+  }
+  const completeness = catalogViewCompleteness(view)
+  view.complete = completeness.ok
+  if (!completeness.ok) view.incompleteReasons = completeness.issues
+  return Object.freeze(view)
+}
+
+// N01：把「本次请求看到的目录」固化成一个不可变快照（generation + key + 完整视图）。
+// 之后即使 registry 发布了新代，本请求仍按旧代解析与授权（同代生成/授权），绝不混代。
+export function pinCatalogSnapshot(recordOrView, options = {}) {
+  const now = Number.isFinite(options.now) ? Number(options.now) : Date.now()
+  let view
+  if (recordOrView && recordOrView.catalog && Array.isArray(recordOrView.catalog.models)) {
+    view = toCatalogView(recordOrView, options)
+  } else if (recordOrView && Array.isArray(recordOrView.models)) {
+    view = recordOrView
+  } else {
+    throw new CatalogError('invalid_generation', 'pinCatalogSnapshot 需要世代记录或目录视图')
+  }
+  if (!Number.isInteger(view.generation) || view.generation < 1) {
+    throw new CatalogError('invalid_generation', '目录快照缺少整数 generation')
+  }
+  if (!view.key) throw new CatalogError('invalid_generation', '目录快照缺少 key（无法证明同代）')
+  const completeness = catalogViewCompleteness(view)
+  if (!completeness.ok && options.allowIncomplete !== true) {
+    throw new CatalogError('catalog_snapshot_incomplete', '目录快照不完整，拒绝用于路由/授权：' + completeness.issues.join(', '), { issues: completeness.issues })
+  }
+  return Object.freeze({
+    schema: SNAPSHOT_SCHEMA,
+    generation: view.generation,
+    key: view.key,
+    configFingerprint: view.configFingerprint || null,
+    catalogFingerprint: view.catalogFingerprint || null,
+    view,
+    complete: completeness.ok,
+    pinnedAt: now,
   })
+}
+
+// 两个快照是否同代（generation + key 同时一致才算同代；任一不同都不得混用）。
+export function sameCatalogGeneration(a, b) {
+  if (!a || !b) return false
+  if (!Number.isInteger(a.generation) || !Number.isInteger(b.generation)) return false
+  if (a.generation !== b.generation) return false
+  if (!a.key || !b.key) return false
+  return a.key === b.key
 }
 
 // 未知 / 已下架（墓碑）/ 别名指向墓碑 / 别名目标缺失：全部 hard reject，绝不回落默认模型。

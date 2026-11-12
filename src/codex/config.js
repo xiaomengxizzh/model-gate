@@ -1105,3 +1105,121 @@ export function buildDesiredCodexConfig (opts = {}) {
     ],
   }
 }
+
+// —— N01：客户端接入的只读模板 + 可观察 drift ——
+// 只产出文本/结构化样例，**不写任何文件、不碰 auth.json、不改客户端配置**。
+export const CLIENT_TEMPLATE_FORMAT = 'codex-toml-readonly/1'
+
+export function exportClientTemplate (opts = {}) {
+  const built = buildDesiredCodexConfig(opts)
+  const profile = String(opts.profile || 'modelgate').trim() || 'modelgate'
+  if (!/^[A-Za-z0-9._-]+$/.test(profile)) {
+    throw new ConfigError('invalid_profile_name', 'profile 名只允许字母/数字/._-：' + profile)
+  }
+  const role = String(opts.role || 'mg-child').trim() || 'mg-child'
+  const model = built.desired.topLevel.model
+  const aliases = []
+  for (const item of Array.isArray(opts.aliases) ? opts.aliases : []) {
+    if (!item || typeof item !== 'object') continue
+    const alias = String(item.alias == null ? '' : item.alias).trim()
+    const target = String(item.model == null ? '' : item.model).trim()
+    if (alias && target) aliases.push(Object.freeze({ alias, model: target }))
+  }
+  const lines = [
+    '# ModelGate client template (read-only) — 由 exportClientTemplate 生成，不写入任何文件。',
+    '# 用法：codex -p ' + profile + '（profile 文件由用户自行放到 $CODEX_HOME/' + profile + '.config.toml）',
+    'model = ' + tomlValue(model),
+    'model_provider = ' + tomlValue('openai'),
+    'openai_base_url = ' + tomlValue(built.openaiBaseUrl),
+  ]
+  if (built.catalogPath) lines.push('model_catalog_json = ' + tomlValue(built.catalogPath))
+  lines.push(
+    '',
+    '# 别名样例（仅说明网关侧声明；客户端可见 ID 以 /v1/models 目录为准）：',
+  )
+  if (aliases.length) for (const a of aliases) lines.push('# alias ' + a.alias + ' -> ' + a.model)
+  else lines.push('# alias <alias> -> <model>（在网关 config/models[].alias 中声明）')
+  lines.push(
+    '',
+    '# 显式角色样例（**不是** provider 切换）：Codex 0.167 的 child_config 从父 turn 复制 provider，',
+    '# 角色覆盖白名单没有 model_provider —— 角色只能选 model，子代理仍走父会话的 provider。',
+    '# 需要第三方上游请开独立会话/profile，不要把这里当成“原生同会话切模型”。',
+    '# name = ' + tomlValue(role),
+    '# description = ' + tomlValue('read-only sample; model-only override'),
+    '# model = ' + tomlValue(model),
+  )
+  return Object.freeze({
+    format: CLIENT_TEMPLATE_FORMAT,
+    readOnly: true,
+    writesFiles: false,
+    profile,
+    text: lines.join('\n') + '\n',
+    samples: Object.freeze({
+      profile: Object.freeze({ name: profile, topLevel: Object.freeze(Object.assign({}, built.desired.topLevel)) }),
+      role: Object.freeze({
+        name: role,
+        fields: Object.freeze({ model }),
+        providerOverride: 'unsupported',
+        reason: 'codex-0.167-child-config-inherits-provider',
+      }),
+      aliases: Object.freeze(aliases),
+    }),
+    notes: Object.freeze([
+      '只读模板：不写文件、不改 $CODEX_HOME、不创建 profile。',
+      '角色样例只覆盖 model；provider 覆盖在当前锁定版本不受支持，不能替代独立会话。',
+      'openai_base_url 指向网关根地址（不带 /v1）；auth.json 永不由本模块处理。',
+    ]),
+    risks: built.risks,
+  })
+}
+
+// 可观察 drift：把「声明式期望」与「实际文件里被本模块拥有的字段」逐字段对比。
+// 纯函数；返回值只含归一化字段（敏感字段已脱敏），不返回文件正文。
+export function clientConfigDrift (opts = {}) {
+  const built = opts.desired
+    ? { desired: opts.desired }
+    : buildDesiredCodexConfig(opts)
+  const want = normalizeDesired(built.desired)
+  const actualText = String(opts.actualText == null ? '' : opts.actualText)
+  if (Buffer.byteLength(actualText, 'utf8') > MAX_CONFIG_BYTES) {
+    throw new ConfigError('too_large', '实际 config.toml 超过 ' + MAX_CONFIG_BYTES + ' 字节，拒绝对比。')
+  }
+  const actual = readOwnedFields(actualText)
+  const fields = []
+  for (const [key, value] of Object.entries(want.topLevel)) {
+    const expectedRaw = String(tomlValue(value))
+    const entry = actual.topLevel[key]
+    const actualRaw = entry && entry.present ? String(entry.raw).trim() : null
+    if (actualRaw !== expectedRaw) {
+      fields.push(Object.freeze({
+        path: key,
+        expected: redactValue(key, normalizeOwnedValue({ present: true, raw: expectedRaw })),
+        actual: actualRaw === null ? null : redactValue(key, normalizeOwnedValue({ present: true, raw: actualRaw })),
+      }))
+    }
+  }
+  for (const [name, keys] of Object.entries(want.sections)) {
+    for (const [key, value] of Object.entries(keys)) {
+      const expectedRaw = String(tomlValue(value))
+      const entry = actual.sections[name] && actual.sections[name].keys[key]
+      const actualRaw = entry && entry.present ? String(entry.raw).trim() : null
+      if (actualRaw !== expectedRaw) {
+        fields.push(Object.freeze({
+          path: name + '.' + key,
+          expected: redactValue(name + '.' + key, normalizeOwnedValue({ present: true, raw: expectedRaw })),
+          actual: actualRaw === null ? null : redactValue(name + '.' + key, normalizeOwnedValue({ present: true, raw: actualRaw })),
+        }))
+      }
+    }
+  }
+  return Object.freeze({
+    format: 'modelgate.client-config-drift/1',
+    readOnly: true,
+    drift: fields.length > 0,
+    fields: Object.freeze(fields),
+    actualFingerprint: sha256Hex(actualText),
+    ownedSectionsPresent: Object.freeze(Object.entries(actual.sections).filter(([, s]) => s.present).map(([name]) => name)),
+    preserved: actual.preserved,
+  })
+}
+
