@@ -22,6 +22,7 @@ export const SUITES = [
   'scripts/test/virtual-models.mjs',
   'scripts/test/effort-normalize.mjs',
   'scripts/test/upstream-side-4xx.mjs',
+  'scripts/test/circuit.mjs',
   'scripts/test/offline/admin-contract.test.mjs',
   'scripts/test/offline/admin-entry.test.mjs',
   'scripts/test/offline/admin-origin.test.mjs',
