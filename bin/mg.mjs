@@ -481,6 +481,43 @@ function clientExport(flags) {
 }
 
 
+
+async function historyDiagnoseCommand(flags) {
+  const baseUrl = requiredFlag(flags, 'base-url')
+  assertLoopbackTarget(baseUrl)
+  const { token } = adminToken(flags)
+  const root = requiredFlag(flags, 'root')
+  const query = new URLSearchParams({ root })
+  for (const key of ['sessions', 'relPaths']) if (flagString(flags, key === 'relPaths' ? 'rel-paths' : key)) query.set(key, flagString(flags, key === 'relPaths' ? 'rel-paths' : key))
+  return callApi({ baseUrl, token, apiVersion: DEFAULT_API_VERSION, method: 'GET', path: '/api/codex/history/diagnose?' + query.toString() })
+}
+async function historyPlanCommand(flags) {
+  const baseUrl = requiredFlag(flags, 'base-url')
+  assertLoopbackTarget(baseUrl)
+  const { token } = adminToken(flags)
+  const root = requiredFlag(flags, 'root')
+  const query = new URLSearchParams({ root })
+  if (flagString(flags, 'sessions')) query.set('sessions', flagString(flags, 'sessions'))
+  if (flagString(flags, 'rel-paths')) query.set('relPaths', flagString(flags, 'rel-paths'))
+  if (flags.all === true) query.set('all', 'true')
+  return callApi({ baseUrl, token, apiVersion: DEFAULT_API_VERSION, method: 'GET', path: '/api/codex/history/export/plan?' + query.toString() })
+}
+async function historyExportCommand(flags) {
+  const baseUrl = requiredFlag(flags, 'base-url')
+  assertLoopbackTarget(baseUrl)
+  const { token } = adminToken(flags)
+  const root = requiredFlag(flags, 'root')
+  const planId = requiredFlag(flags, 'plan')
+  const outFile = requiredFlag(flags, 'out')
+  const purpose = requiredFlag(flags, 'purpose')
+  if (flags.acknowledge !== true) throw new CliError('acknowledgement_required', '摘要导出必须显式 --acknowledge')
+  await confirmOrThrow(flags, 'history export（导出最小明文摘要到独立文件，原件不变）')
+  return callApi({
+    baseUrl, token, apiVersion: DEFAULT_API_VERSION, method: 'POST', path: '/api/codex/history/export',
+    body: { root, planId, outFile, purpose, acknowledged: true, sessions: splitList(flagString(flags, 'sessions')), relPaths: splitList(flagString(flags, 'rel-paths')), all: flags.all === true },
+  })
+}
+
 // —— N05：额度三态 + 显式应急（本地隔离 state-file 模式；HTTP 模式走管理面）——
 function assertEmergencyStatePath(raw) {
   const p = String(raw || '').trim()
@@ -628,6 +665,9 @@ const USAGE = [
   '  node bin/mg.mjs emergency plan --profile <label> --third-party <a,b> [--state-file <p.json>] [--json]',
   '  node bin/mg.mjs emergency activate --state-file <p.json> --plan <ep_id> --profile <label> --third-party <a,b> --acknowledge --reason <r> --backup-point <b> --yes',
   '  node bin/mg.mjs emergency restore --state-file <p.json> --reason <r> --yes',
+  '  node bin/mg.mjs history diagnose --base-url <url> --root <history-root-id> [--json]',
+  '  node bin/mg.mjs history plan --base-url <url> --root <id> --sessions <a,b> [--json]',
+  '  node bin/mg.mjs history export --base-url <url> --root <id> --plan <hs_id> --sessions <a,b> --out <file.json> --purpose <p> --acknowledge --yes [--json]',
   '',
   '管理写路径（loopback + 管理令牌环境变量 + planId 绑定）：',
   '  node bin/mg.mjs config plan --base-url <url> --root <id> --desired @patch.json [--expected @snap.json] [--json]',
@@ -707,6 +747,24 @@ export async function main(argv = process.argv.slice(2)) {
       const tpl = clientExport(flags)
       emit(tpl, flags, (p) => [p.text.trimEnd()])
       return EXIT.OK
+    }
+    if (command === 'history') {
+      if (sub === 'diagnose') {
+        const out = await historyDiagnoseCommand(flags)
+        emit(out, flags, (p) => ['history diagnose: ' + (p.history && p.history.enabled ? 'ok' : 'unavailable'), 'sessions: ' + (p.history && p.history.scanned ? p.history.scanned.sessions : '-'), 'readOnly: true'])
+        return p.history && p.history.errorCode ? EXIT.NOT_FOUND : EXIT.OK
+      }
+      if (sub === 'plan') {
+        const out = await historyPlanCommand(flags)
+        emit(out, flags, (p) => ['history export plan: ' + (p.plan && p.plan.planId), 'files: ' + (p.plan && p.plan.selection ? p.plan.selection.count : '-'), 'writesNothing: true'])
+        return EXIT.OK
+      }
+      if (sub === 'export') {
+        const out = await historyExportCommand(flags)
+        emit(out, flags, (p) => ['history export: wrote=' + p.wrote + ' file=' + p.outFile, 'originalsUnchanged: ' + p.originalsUnchanged + '  historyWriteSupported: false'])
+        return EXIT.OK
+      }
+      throw new CliError('usage', 'history 只支持 diagnose|plan|export')
     }
     if (command === 'quota') {
       if (sub !== 'status') throw new CliError('usage', 'quota 只支持 status')

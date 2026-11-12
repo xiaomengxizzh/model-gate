@@ -14,6 +14,11 @@
 import { statSync } from 'node:fs'
 import { basename, isAbsolute, normalize, sep } from 'node:path'
 import {
+  diagnoseHistory,
+  exportApprovedSummary,
+  planSummaryExport,
+} from './history.js'
+import {
   QUOTA_DISPLAY_UNKNOWN,
   USAGE_KINDS,
   activateEmergency,
@@ -113,6 +118,9 @@ export const CODEX_API_ROUTES = Object.freeze([
   { method: 'GET', path: '/api/codex/quota', name: 'quota_status', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '官方额度三态（fresh/stale/unknown）；本地统计/导入仅计数' },
   { method: 'GET', path: '/api/codex/emergency', name: 'emergency_plan', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '应急试算：范围/影响/planId；绝不写盘、不改身份' },
   { method: 'POST', path: '/api/codex/emergency', name: 'emergency_apply', kind: CODEX_ROUTE_KIND.MANAGEMENT, write: true, explicitAdmin: true, desc: '按 planId 进入/退出应急态（只配置新 profile，恢复对称）' },
+  { method: 'GET', path: '/api/codex/history/diagnose', name: 'history_diagnose', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '已登记历史根的有界只读诊断（版本/opaque 计数，不读正文）' },
+  { method: 'GET', path: '/api/codex/history/export/plan', name: 'history_export_plan', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '最小明文摘要导出试算：选择/边界/planId，零写入' },
+  { method: 'POST', path: '/api/codex/history/export', name: 'history_export', kind: CODEX_ROUTE_KIND.MANAGEMENT, write: true, explicitAdmin: true, desc: '按 planId 导出最小明文摘要到独立文件；原件不变、历史零改写' },
 ])
 
 export const EXPLICIT_ADMIN_OPERATIONS = Object.freeze(CODEX_API_ROUTES.map((r) => r.name))
@@ -460,6 +468,86 @@ function requireObject (body, label) {
 }
 
 // —— 各端点 ——
+
+
+// —— N04：历史诊断（只读）与经确认的最小明文摘要导出 ——
+function historyLimitsFromQuery (query) {
+  const limits = {}
+  for (const key of ['maxFiles', 'maxTotalBytes', 'maxLineBytes', 'maxLinesPerFile']) {
+    const n = Number(query && query[key])
+    if (Number.isFinite(n) && n > 0) limits[key] = n
+  }
+  return limits
+}
+function historySelectionFromQuery (query) {
+  const split = (raw) => String(raw || '').split(',').map((s) => s.trim()).filter(Boolean)
+  return { sessions: split(query && query.sessions), relPaths: split(query && query.relPaths), all: query && query.all === 'true' }
+}
+function handleHistoryDiagnose (ctx, query) {
+  const rootId = String((query && query.root) || '').trim()
+  if (!rootId) return { status: 400, body: errorBody('invalid_root_id', '必须提供已登记的历史 root id') }
+  return diagnoseHistory({ rootId, limits: historyLimitsFromQuery(query), includeSessions: query && query.sessionsDetail !== 'false', now: ctx && ctx.now }).then((report) => {
+    audit(ctx, 'history_diagnose', { root: rootId, result: report && report.enabled ? 'ok' : (report && report.errorCode) || 'unavailable' })
+    return { status: 200, body: okBody({ history: report, readOnly: true, wrote: false, contentRead: false }) }
+  })
+}
+function handleHistoryPlan (ctx, query) {
+  const rootId = String((query && query.root) || '').trim()
+  if (!rootId) return { status: 400, body: errorBody('invalid_root_id', '必须提供已登记的历史 root id') }
+  const selection = historySelectionFromQuery(query)
+  return diagnoseHistory({ rootId, limits: historyLimitsFromQuery(query), includeSessions: true, now: ctx && ctx.now }).then((diag) => {
+    if (!diag || diag.enabled !== true) {
+      return { status: 404, body: errorBody(diag && diag.errorCode ? String(diag.errorCode) : 'history_root_unavailable', (diag && diag.error) || '历史根不可用（未登记/不存在）') }
+    }
+    const plan = planSummaryExport(diag, { selection, limits: historyLimitsFromQuery(query), now: ctx && ctx.now })
+    audit(ctx, 'history_export_plan', { root: rootId, result: 'ok' })
+    return { status: 200, body: okBody({ plan, readOnly: true, wrote: false }) }
+  })
+}
+function handleHistoryExport (ctx, body, auth) {
+  const shaped = requireObject(body, '请求体')
+  if (!shaped.ok) return shaped
+  if (!auth.adminSubject) return { status: 403, body: errorBody('admin_subject_required', '摘要导出必须绑定显式管理员身份（adminSubject）') }
+  const rootId = typeof shaped.body.root === 'string' ? shaped.body.root.trim() : ''
+  if (!rootId) return { status: 400, body: errorBody('invalid_root_id', '必须提供已登记的历史 root id') }
+  const selection = {
+    sessions: Array.isArray(shaped.body.sessions) ? shaped.body.sessions : [],
+    relPaths: Array.isArray(shaped.body.relPaths) ? shaped.body.relPaths : [],
+    all: shaped.body.all === true,
+  }
+  return exportApprovedSummary({
+    rootId,
+    planId: shaped.body.planId,
+    selection,
+    outFile: shaped.body.outFile,
+    acknowledged: shaped.body.acknowledged === true,
+    purpose: shaped.body.purpose,
+    allowOverwrite: shaped.body.allowOverwrite === true,
+    limits: shaped.body.limits,
+    now: ctx && ctx.now,
+  }).then((result) => {
+    if (!result.ok) {
+      const status = result.code === 'plan_id_mismatch' || result.code === 'out_file_exists' ? 409
+        : (result.code === 'forbidden_out_file' ? 403 : 400)
+      audit(ctx, 'history_export', { root: rootId, result: result.code })
+      return { status, body: errorBody(result.code, result.message) }
+    }
+    audit(ctx, 'history_export', { root: rootId, result: 'ok' })
+    return {
+      status: 200,
+      body: okBody({
+        wrote: true,
+        format: result.format,
+        outFile: result.outFile,
+        sha256: result.sha256,
+        totals: result.totals,
+        originalsUnchanged: result.originalsUnchanged,
+        historyWriteSupported: false,
+        notes: result.notes,
+      }),
+    }
+  })
+}
 
 // —— N05：额度三态与显式应急（管理面）——
 // 官方余额拿不到就 UNKNOWN；本地统计/导入计数只做计数展示。
@@ -888,6 +976,13 @@ export async function handleCodexApi (ctx = {}) {
   if (route.name === 'policy') return handlePolicy(ctx, query, auth)
   if (route.name === 'catalog_status') return handleCatalogStatus(ctx, query)
   if (route.name === 'quota_status') return handleQuotaStatus(ctx)
+  if (route.name === 'history_diagnose') return handleHistoryDiagnose(ctx, query)
+  if (route.name === 'history_export_plan') return handleHistoryPlan(ctx, query)
+  if (route.name === 'history_export') {
+    const historyBody = readBody(ctx)
+    if (historyBody === undefined) return { status: 400, body: errorBody('invalid_body', '请求体必须是合法 JSON 对象') }
+    return handleHistoryExport(ctx, historyBody, auth)
+  }
   if (route.name === 'emergency_plan') return handleEmergencyPlan(ctx, query)
   if (route.name === 'emergency_apply') {
     const emergencyBody = readBody(ctx)

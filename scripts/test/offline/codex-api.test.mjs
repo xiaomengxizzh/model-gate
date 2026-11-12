@@ -109,6 +109,9 @@ test('路由清单与显式管理员声明', () => {
     'GET /api/codex/quota',
     'GET /api/codex/emergency',
     'POST /api/codex/emergency',
+    'GET /api/codex/history/diagnose',
+    'GET /api/codex/history/export/plan',
+    'POST /api/codex/history/export',
   ])
   assert.equal(isCodexApiPath('/api/codex'), true)
   assert.equal(isCodexApiPath('/api/codex/policy'), true)
@@ -116,7 +119,7 @@ test('路由清单与显式管理员声明', () => {
   assert.equal(isCodexApiPath('/api/codexx'), false)
   assert.equal(isCodexApiPath('/v1/models'), false)
   assert.ok(CODEX_API_ROUTES.every((r) => r.explicitAdmin === true), '每个路由都必须声明 explicitAdmin')
-  assert.deepEqual(CODEX_API_ROUTES.filter((r) => r.write).map((r) => r.path), ['/api/codex/config/apply', '/api/codex/config/rollback', '/api/codex/emergency'])
+  assert.deepEqual(CODEX_API_ROUTES.filter((r) => r.write).map((r) => r.path), ['/api/codex/config/apply', '/api/codex/config/rollback', '/api/codex/emergency', '/api/codex/history/export'])
   for (const r of CODEX_API_ROUTES) assert.equal(requiresExplicitAdmin(r.name), true, r.name)
   assert.equal(requiresExplicitAdmin('nope'), false)
 })
@@ -203,7 +206,7 @@ test('GET /api/codex/policy：所有权 + 目录摘要 + 写能力（普通模�
   assert.equal(out.body.paths.rootIdRequired, true)
   assert.equal(out.body.paths.opaqueRootIdsOnly, true)
   assert.equal(out.body.paths.requiredBasenameAtRegistration, 'config.toml')
-  assert.equal(out.body.routes.length, 9, 'N05 起新增 quota/emergency(plan/apply) 三条路由')
+  assert.equal(out.body.routes.length, 12, 'N05/N04 新增 quota、emergency(2)、history(3) 路由')
   assert.equal(out.body.routes.find((r) => r.path === '/api/codex/config/export').explicitAdmin, true)
   assert.equal(out.body.catalog.available, true)
   assert.deepEqual(out.body.catalog.counts, { official: 1, thirdParty: 1, total: 2 })
