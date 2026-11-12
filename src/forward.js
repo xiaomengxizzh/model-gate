@@ -674,6 +674,7 @@ export function authorizeSendTarget({ cfg, provider, pid, path, req, opts, log, 
       passthroughEnabled: opts && opts.passthroughEnabled != null
         ? opts.passthroughEnabled === true
         : officialPassthroughEnabled(),
+      gatewaySubscription: !!(opts && opts.gatewaySubscription === true),
       ...(passthroughToken ? { providerKey: passthroughToken, credentialMode: 'provider-key' } : {}),
     },
   }
@@ -785,7 +786,7 @@ async function closeoutLedger(ledger, receipt, action, log) {
 // 错误信封/日志兜底：上游错误体可能回显请求内容或 Key，网关不得原样回给客户端/落盘。
 const SECRET_TEXT_RE = /\b(?:sk|rk|pk)-[A-Za-z0-9._-]{8,}\b|Bearer\s+[A-Za-z0-9._~+/=-]{8,}/gi
 function scrubSecretText(text) { return String(text == null ? '' : text).replace(SECRET_TEXT_RE, '****') }
-function scrubBody(buf) {
+export function scrubBody(buf) {
   if (!buf || !buf.length) return buf
   try {
     const s = buf.toString('utf8')

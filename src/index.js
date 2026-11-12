@@ -11,17 +11,20 @@ import { createLogger } from './logger.js'
 import { forward, upstreamUrl, probe, probeModel, probeChat, warm, probeEmbedding, probeRerank } from './request.js'
 import { adapterFor, cacheHitMiss, mapErrorEnvelope } from './format.js'
 import { isStreamResponse, writeUpstreamHeaders, relayStream, endInterruptedStream } from './sse.js'
-import { forwardChain, routeLimit, virtualQuotaExceeded, acquireProvider, initForwardLedger, authorizeSendTarget } from './forward.js'
+import { forwardChain, routeLimit, virtualQuotaExceeded, acquireProvider, initForwardLedger, authorizeSendTarget, scrubBody } from './forward.js'
+import { isToolBearingBody } from './retry-policy.js'
 import { createBudget, abortedError } from './budget.js'
-import { responsesToChat, chatToResponse, LEGACY_BRIDGE_COMPAT } from './responses.js'
-import { createResponsesStream } from './responses-stream.js'
+import { responsesToChat, chatToResponse, LEGACY_BRIDGE_COMPAT, prepareCodexNativeRequest } from './responses.js'
+import { createResponsesStream, createCodexStreamAdapter } from './responses-stream.js'
 import { validateEmbeddingRequest, buildEmbeddingRequest, embeddingHeaders, normalizeEmbeddingResponse, supportsEmbeddings, MAX_EMBEDDING_INPUTS } from './embeddings.js'
 import { validateRerankRequest, buildRerankRequest, rerankHeaders, normalizeRerankResponse, supportsRerank } from './rerank.js'
 import { supportsMedia, parseMultipartField, replaceMultipartField, isMultipart, validateSpeechRequest, validateImageRequest, mediaResponseLimit } from './media.js'
 import { defaultVideoPaths, newVideoTask, upstreamTaskId, applyUpstreamStatus, clientTask, loadVideoTasks, saveVideoTasks, gcVideoTasks, findSubjectTask, videoInputHash, recoverInterruptedVideoTasks, validateVideoCreate, VIDEO_POLL_MIN_MS } from './videos.js'
 import { todayKey } from './shared.js'
 import { readNativeUsage, nativeUsageConfig } from './native-usage.js'
-import { classifyTarget } from './codex/identity.js'
+import { classifyTarget, isLoopbackHost } from './codex/identity.js'
+import { restoreResponseJson, detectOpaqueV2Task, detectEncryptedToolSchema } from './codex/interop.js'
+import { readSubscriptionCredential, isGatewaySubscriptionTarget, SubscriptionCredentialError } from './codex/local-subscription.js'
 import { isTargetAuthzError } from './codex/target-authz.js'
 import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
 import { createObservability, hashId } from './observability/events.js'
@@ -435,6 +438,7 @@ function buildStatus(state) {
     return {
       id, baseUrl: p.baseUrl, hasKey: !!pk.key,
       keySource: pk.source,
+      gatewaySubscription: !!(p.gatewaySubscription && p.gatewaySubscription.enabled === true),
       apiKeyEnv: p.apiKeyEnv || null, pathPrefix: p.pathPrefix || '', api: p.api || 'openai', extraHeaders: p.extraHeaders || {}, proxy: p.proxy || '', circuit: p.circuit || null,
       st: {
         requests: o.requests, errors: o.errors, retries: o.retries, tokens: o.tokens,
@@ -682,6 +686,20 @@ async function doSaveConfig(state, body) {
     if (m.forceNoStream != null && typeof m.forceNoStream !== 'boolean') return { error: '模型「' + mn + '」的 forceNoStream 须为布尔值' }
     // 能力声明（MG-011）：chat（默认）/embedding；未知值拦截，避免拼写错误静默变成 chat
     if (m.capability != null && m.capability !== '' && !['chat', 'embedding', 'rerank', 'audio', 'image', 'video'].includes(String(m.capability))) return { error: '模型「' + mn + '」的 capability 仅支持 chat/embedding/rerank/audio/image/video' }
+    if (m.codex != null) {
+      if (!isPlainObject(m.codex)) return { error: '模型「' + mn + '」的 codex 必须为对象' }
+      if (m.codex.multiAgentVersion != null && m.codex.multiAgentVersion !== 'v2') return { error: '模型「' + mn + '」的 codex.multiAgentVersion 仅支持 v2' }
+      if (m.codex.plaintextTools != null && typeof m.codex.plaintextTools !== 'boolean') return { error: '模型「' + mn + '」的 codex.plaintextTools 必须为布尔值' }
+      if (m.codex.namespace != null && m.codex.namespace !== 'collaboration') return { error: '模型「' + mn + '」的 codex.namespace 仅支持 collaboration' }
+      if (m.codex.history != null) {
+        if (!isPlainObject(m.codex.history)) return { error: '模型「' + mn + '」的 codex.history 必须为对象' }
+        const h = m.codex.history
+        if (h.agentMessage != null && !['preserve', 'project', 'reject'].includes(h.agentMessage)) return { error: '模型「' + mn + '」的 codex.history.agentMessage 仅支持 preserve/project/reject' }
+        if (h.reasoning != null && !['preserve', 'drop', 'reject'].includes(h.reasoning)) return { error: '模型「' + mn + '」的 codex.history.reasoning 仅支持 preserve/drop/reject' }
+        if (h.compaction != null && !['reject', 'drop'].includes(h.compaction)) return { error: '模型「' + mn + '」的 codex.history.compaction 仅支持 reject/drop' }
+        if (h.controls != null && !['drop', 'preserve', 'reject'].includes(h.controls)) return { error: '模型「' + mn + '」的 codex.history.controls 仅支持 drop/preserve/reject' }
+      }
+    }
     // video 异步任务路径（可选）：必须以 / 开头，避免把绝对 URL 注入到转发层
     for (const k of ['videoCreatePath', 'videoStatusPath', 'videoCancelPath']) {
       if (m[k] != null && m[k] !== '' && (typeof m[k] !== 'string' || !m[k].startsWith('/'))) return { error: '模型「' + mn + '」的 ' + k + ' 必须是以 / 开头的路径' }
@@ -689,6 +707,10 @@ async function doSaveConfig(state, body) {
   }
   // 单上游代理（名单）：留空/undefined=继承全局；direct/false=强制直连；否则须为合法 http(s):// 地址
   for (const [pid, p] of Object.entries(providers || {})) {
+    if (p && p.gatewaySubscription != null) {
+      if (!isPlainObject(p.gatewaySubscription)) return { error: '上游「' + pid + '」的 gatewaySubscription 必须为对象' }
+      if (p.gatewaySubscription.enabled != null && typeof p.gatewaySubscription.enabled !== 'boolean') return { error: '上游「' + pid + '」的 gatewaySubscription.enabled 必须为布尔值' }
+    }
     const pr = p && p.proxy
     if (pr != null && pr !== '' && pr !== false && pr !== 'direct') {
       if (typeof pr !== 'string') return { error: '上游「' + pid + '」的 proxy 必须为 留空/direct/合法 http(s) 地址' }
@@ -1305,9 +1327,9 @@ export function sanitizeDownstreamHeaders (headers) {
 //   authorizeSendTarget(...) → 冻结目标（含 codified deny）
 //   assertSendTarget(authz, upstreamUrl(provider, path)) → 授权对象 == 实际发送对象
 // 授权失败零发送，返回统一错误信封（不含头值/Key）。
-function authorizeProxySend (state, prov, pid, path, req, log) {
+function authorizeProxySend (state, prov, pid, path, req, log, opts) {
   try {
-    const authz = authorizeSendTarget({ cfg: state.cfg, provider: prov, pid, path, req, log, catalogScoped: false })
+    const authz = authorizeSendTarget({ cfg: state.cfg, provider: prov, pid, path, req, log, catalogScoped: false, opts: Object.assign({}, opts || {}) })
     assertProxySendTarget(authz, prov, path)
     return { authz }
   } catch (error) {
@@ -1350,44 +1372,157 @@ function proxyDeniedResult (denied) {
 // 只在 classifyTarget()==='official' 时使用。客户端官方凭据（OAuth / chatgpt-account-id）不再透传，
 // /backend-api/codex 也不再是允许路径：无网关自有 key 时 targetDeny 直接 fail-closed。
 // 官方请求不重试（可能有工具/托管副作用），3xx 一律拒绝（不跟随重定向、不把凭据带到 Location）。
+// —— P09：Codex 原生 V2 能力与响应投影 ——
+function defaultCodexCaps(official) {
+  return official
+    ? { multiAgentVersion: 'v2', plaintextTools: false, history: { agentMessage: 'preserve', reasoning: 'preserve', compaction: 'reject' }, namespace: 'collaboration' }
+    : { multiAgentVersion: 'v2', plaintextTools: false, history: { agentMessage: 'project', reasoning: 'drop', compaction: 'reject' }, namespace: 'collaboration' }
+}
+function needsCodexProjection(body, def) {
+  return !!(def && def.codex && typeof def.codex === 'object')
+}
+function buildCodexRoute(state, hit, def, prov) {
+  const target = modelTarget(state.cfg, hit.canonicalName, def.provider)
+  const official = !!prov && classifyTarget(prov, state.cfg).kind === 'official'
+  const declared = def && def.codex && typeof def.codex === 'object' ? def.codex : null
+  const base = defaultCodexCaps(official)
+  const codex = Object.assign({}, base, declared || {})
+  codex.history = Object.assign({}, base.history, (declared && declared.history) || {})
+  if (!codex.namespace) codex.namespace = 'collaboration'
+  return { alias: hit.canonicalName, provider: def.provider, upstreamModel: target.servingName, api: 'responses', codex }
+}
+function tallyResponsesUsage(state, modelName, pid, sg, usage) {
+  const u = usage || {}
+  const input = Number(u.input_tokens) > 0 ? Number(u.input_tokens) : 0
+  const output = Number(u.output_tokens) > 0 ? Number(u.output_tokens) : 0
+  const total = Number(u.total_tokens) > 0 ? Number(u.total_tokens) : input + output
+  if (total > 0) {
+    sg.tokens = (sg.tokens || 0) + total
+    sg.inTokens = (sg.inTokens || 0) + input
+    sg.outTokens = (sg.outTokens || 0) + output
+    agg(state, pid, 'tokens', total)
+    tallyDaily(state, modelName, total, 0, 0, input, output)
+  }
+  return total
+}
+function restoreCodexJsonBuffer(buf, route, plan) {
+  if (!route || !plan) return { ok: true, json: null }
+  const j = tryParse(buf)
+  if (!j || typeof j !== 'object') return { ok: true, json: null }
+  const restored = restoreResponseJson(j, route, plan)
+  if (restored.rejected) return { ok: false, rejected: restored.rejected }
+  return { ok: true, json: restored.json, lossy: restored.lossy || [] }
+}
+function streamCodexResponse(state, budget, log, opts) {
+  const { up, res, route, plan, model, modelName, pid, sg, prov } = opts
+  const adapter = createCodexStreamAdapter(res, {
+    plan, route, model, log,
+    onUsage: (usage) => tallyResponsesUsage(state, modelName, pid, sg, usage),
+  })
+  const destroyUp = () => { try { up.stream.destroy() } catch { /* ignore */ } }
+  const onAbort = () => destroyUp()
+  const onClose = () => destroyUp()
+  if (budget && budget.signal) {
+    if (budget.signal.aborted) onAbort()
+    else { try { budget.signal.addEventListener('abort', onAbort, { once: true }) } catch { /* ignore */ } }
+  }
+  try { res.once('close', onClose) } catch { /* ignore */ }
+  ;(async () => {
+    try { for await (const chunk of up.stream) await adapter.push(chunk); await adapter.end() }
+    catch { destroyUp(); await adapter.fail('upstream stream interrupted', {}) }
+    if (budget && budget.signal) { try { budget.signal.removeEventListener('abort', onAbort) } catch { /* ignore */ } }
+    try { res.removeListener('close', onClose) } catch { /* ignore */ }
+    if (adapter.terminal === 'response.failed') {
+      agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+      if (prov) markFail(state, pid, prov.circuit)
+    } else { markOk(state, pid); noteAffinity(state, modelName, pid) }
+  })()
+  return { streamed: true }
+}
+function opaqueRejectionCode(opaque) {
+  const signals = opaque && Array.isArray(opaque.signals) ? opaque.signals : []
+  if (signals.some((s) => s && s.kind === 'agent_message')) return 'opaque_agent_message'
+  return 'v2_encrypted_task_unsupported'
+}
+function checkThirdPartyOpaque(state, nProv, nDef, body) {
+  if (!nProv || classifyTarget(nProv, state.cfg).kind === 'official') return null
+  const opaque = detectOpaqueV2Task(body)
+  if (opaque.opaque) return { status: 400, code: opaqueRejectionCode(opaque), message: '第三方目标收到不可读密文：网关拒绝发送（不解密/不删除/不降级）' }
+  const plaintext = !!(nDef && nDef.codex && nDef.codex.plaintextTools === true)
+  if (!plaintext && detectEncryptedToolSchema(body && body.tools)) return { status: 400, code: 'encrypted_tool_schema', message: '第三方目标含 encrypted:true 工具 schema，但未声明 plaintextTools=true' }
+  return null
+}
+
 async function proxyOfficialResponses(state, budget, log, opts) {
-  const { req, body, modelName, def, res } = opts
+  const { req, body, modelName, def, res, codexRoute, codexPlan } = opts
   const candidates = [def.provider, ...(def.fallbacks || [])].filter(Boolean)
+  const jsonError = (status, code, message, type) => ({
+    status,
+    contentType: 'application/json; charset=utf-8',
+    buf: Buffer.from(JSON.stringify({ error: { message, code, type: type || 'official_target_rejected' } })),
+  })
+  const serverHost = (state.cfg.server && state.cfg.server.host) || '127.0.0.1'
+  const singleShot = isToolBearingBody(body)
+  let localCredential = null
   let lastErr = null
   for (const pid of candidates) {
     if (!state.cfg.providers[pid]) continue
     const prov = buildProvider(state.cfg, pid)
     const pdef = prov._def || {}
     const identity = classifyTarget(prov, state.cfg)
+    const gatewaySubscription = !!(pdef.gatewaySubscription && pdef.gatewaySubscription.enabled === true)
+    if (gatewaySubscription) {
+      if (!isLoopbackHost(serverHost) || !isLoopbackPeer(req)) return jsonError(403, 'gateway_subscription_not_loopback', 'gatewaySubscription 只允许 loopback 监听与 loopback 客户端')
+      if (identity.kind !== 'official') return jsonError(403, 'gateway_subscription_target_not_allowed', 'gatewaySubscription 只允许官方目标')
+    }
     // 官方目标只允许官方候选：绝不因故障把官方请求递给第三方（身份串线）。
     if (identity.kind !== 'official') { lastErr = new Error('候选上游不是官方目标：' + pid); continue }
-    // F01：官方直连只走 API 路径（/v1/responses）。/backend-api/codex 已从白名单移除，
-    // 旧配置里残留该 responsesPath 会在 targetDeny 处 403 official_path_not_allowlisted（零发送）。
-    const upstreamPath = (typeof def.responsesPath === 'string' && def.responsesPath) || (typeof pdef.responsesPath === 'string' && pdef.responsesPath) || '/v1/responses'
-    const deny = targetDeny({ identity, provider: prov, cfg: state.cfg, path: upstreamPath, env: process.env })
-    if (deny) {
-      log && log.warn('官方目标被拒绝', deny.code, pid)
-      return { status: deny.status, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: deny.message, code: deny.code, type: 'official_target_rejected' } })) }
+    const upstreamPath = (typeof def.responsesPath === 'string' && def.responsesPath) || (typeof pdef.responsesPath === 'string' && pdef.responsesPath) || (gatewaySubscription ? '/backend-api/codex/responses' : '/v1/responses')
+    if (gatewaySubscription) {
+      if (!isGatewaySubscriptionTarget(identity, upstreamPath, state.cfg)) return jsonError(403, 'gateway_subscription_target_not_allowed', 'gatewaySubscription 只允许官方订阅入口')
+      if (!localCredential) try { localCredential = readSubscriptionCredential() } catch (error) {
+        if (error instanceof SubscriptionCredentialError || (error && error.code === 'subscription_credential_unavailable')) {
+          return jsonError(401, 'subscription_credential_unavailable', '本机 Codex 登录凭据不可用或已过期，请在 Codex 中重新登录')
+        }
+        throw error
+      }
+      log && log.info('gateway_subscription', 'provider=' + pid, 'target=' + identity.host + upstreamPath, 'credential=local_codex_auth')
+    } else {
+      const deny = targetDeny({ identity, provider: prov, cfg: state.cfg, path: upstreamPath, env: process.env })
+      if (deny) {
+        log && log.warn('官方目标被拒绝', deny.code, pid)
+        return jsonError(deny.status, deny.code, deny.message)
+      }
     }
     const target = modelTarget(state.cfg, modelName, pid)
     const payload = Buffer.from(JSON.stringify(Object.assign({}, body, { model: target.servingName })))
-    // F01：官方目标只有「网关自有 key」一条路（客户端凭据透传已移除）。头集合仍由 codex/auth
-    // 单一真源决定：白名单内非凭据头保留，authorization 只由下面这一行按自有 key 注入。
-    if (!prov.apiKey) {
-      // 双保险：targetDeny 已按无 key fail-closed，这里防止未来调用顺序变化悄悄放行。
-      return { status: 403, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: '官方目标未配置网关自有 key（客户端官方凭据透传已移除）', code: 'official_no_gateway_key', type: 'official_target_rejected' } })) }
+    let headers
+    let dropped = []
+    if (gatewaySubscription) {
+      const plan = planTargetHeaders({ identity, provider: prov, cfg: state.cfg, incoming: req.headers })
+      dropped = plan.dropped
+      headers = Object.assign({}, plan.headers, {
+        'content-type': 'application/json',
+        'content-length': payload.length,
+        'accept-encoding': 'identity',
+        authorization: localCredential.authorization,
+      })
+      if (localCredential.accountId) headers['chatgpt-account-id'] = localCredential.accountId
+    } else {
+      if (!prov.apiKey) {
+        return jsonError(403, 'official_no_gateway_key', '官方目标未配置网关自有 key（客户端官方凭据透传已移除）')
+      }
+      const plan = planTargetHeaders({ identity, provider: prov, cfg: state.cfg, incoming: req.headers })
+      dropped = plan.dropped
+      headers = Object.assign({}, plan.headers, {
+        'content-type': 'application/json',
+        'content-length': payload.length,
+        'accept-encoding': 'identity',
+        authorization: 'Bearer ' + prov.apiKey,
+      })
     }
-    const plan = planTargetHeaders({ identity, provider: prov, cfg: state.cfg, incoming: req.headers })
-    const dropped = plan.dropped
-    const headers = Object.assign({}, plan.headers, {
-      'content-type': 'application/json',
-      'content-length': payload.length,
-      'accept-encoding': 'identity',
-      authorization: 'Bearer ' + prov.apiKey,
-    })
     if (dropped.length) log && log.info('官方目标丢弃头（仅名称）', dropped.slice(0, 20).join(','))
-    // F03：冻结目标 + 发送前二次校验（此前本代理直接 forward，绕过 target-authz）。
-    const gate = authorizeProxySend(state, prov, pid, upstreamPath, req, log)
+    const gate = authorizeProxySend(state, prov, pid, upstreamPath, req, log, gatewaySubscription ? { gatewaySubscription: true } : undefined)
     if (gate.denied) {
       log && log.warn('官方目标发送授权被拒绝', gate.denied.code, pid)
       return proxyDeniedResult(gate.denied)
@@ -1396,17 +1531,11 @@ async function proxyOfficialResponses(state, budget, log, opts) {
     try {
       release = await acquireProvider(state, pid, state.cfg, budget.signal)
       const up = await forward(prov, upstreamPath, 'POST', headers, payload, state.cfg.defaults || {}, log, { budget, signal: budget.signal, noRetry: true })
-      // F01 边界：官方目标 3xx 一律不跟随（Node http 本身不跟随，但把 3xx 原样回给客户端会
-      // 让客户端/中间层替我们跟随，把凭据送去 Location）。统一按上游错误 502 收口，零二次命中。
       if (up.status >= 300 && up.status < 400) {
         try { await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true }) } catch {}
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1
         log && log.warn('官方目标返回重定向，已拒绝跟随', 'provider=' + pid, 'status=' + up.status)
-        return {
-          status: 502,
-          contentType: 'application/json; charset=utf-8',
-          buf: Buffer.from(JSON.stringify({ error: { message: '官方上游返回重定向（' + up.status + '），网关拒绝跟随', code: 'upstream_redirect_rejected', type: 'upstream_error' } })),
-        }
+        return jsonError(502, 'upstream_redirect_rejected', '官方上游返回重定向（' + up.status + '），网关拒绝跟随', 'upstream_error')
       }
       if (up.ok) {
         state.st.counters.requests += 1
@@ -1416,34 +1545,43 @@ async function proxyOfficialResponses(state, budget, log, opts) {
         markOk(state, pid); noteAffinity(state, modelName, pid)
         const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
         if (/text\/event-stream/i.test(ct)) {
+          if (codexRoute && codexPlan) return streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov })
           writeUpstreamHeaders(res, up)
           await streamRawResponses(res, up.stream, budget)
           return { streamed: true }
         }
         const buf = await collectBody(up.stream, 128 * 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
+        const restored = restoreCodexJsonBuffer(buf, codexRoute, codexPlan)
+        if (!restored.ok) return jsonError(502, restored.rejected.code || 'codex_restore_rejected', restored.rejected.message || 'Codex 原生响应恢复失败', 'codex_restore_rejected')
+        if (restored.json) return { status: up.status, contentType: ct, buf: Buffer.from(JSON.stringify(restored.json)) }
         return { status: up.status, contentType: ct, buf }
       }
       const ebuf = await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1
       markFail(state, pid, prov.circuit)
-      return { status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: ebuf }
+      return { status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: scrubBody(ebuf) }
     } catch (err) {
       if (err && err.aborted) throw err
       lastErr = err
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1
       markFail(state, pid, prov.circuit)
+      // 工具历史/已发状态：不得跨候选重放。
+      if (singleShot || (err && err.noReplay)) {
+        return jsonError(502, err && err.code ? err.code : 'no_replay', '上游失败且请求含工具历史/已发状态：终止而不换候选重放')
+      }
     } finally { if (release) release() }
   }
-  return { status: 502, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: '官方上游失败：' + (lastErr ? lastErr.message : 'all providers failed'), type: 'all_providers_failed' } })) }
+  return jsonError(502, 'all_providers_failed', '官方上游失败：' + (lastErr ? lastErr.message : 'all providers failed'), 'all_providers_failed')
 }
 
 // —— MG-015 原生 Responses 透传：模型显式 api:"responses" 时，不做 Chat 桥转换 ——
 // 非流式：JSON 原样透传并把响应 model 回写客户端请求名；流式：上游 SSE 原样管道（不翻译事件、不改 model）。
 // 仍复用 forward 的 retry/timeout 与请求预算；错误体原样/映射透传。
 async function proxyNativeResponses(state, budget, log, opts) {
-  const { body, modelName, def, wantStream, res } = opts
+  const { req, body, modelName, def, wantStream, res, codexRoute, codexPlan } = opts
   const candidates = [def.provider, ...(def.fallbacks || [])].filter(Boolean)
   const upstreamPath = (typeof def.responsesPath === 'string' && def.responsesPath) ? def.responsesPath : '/v1/responses'
+  const singleShot = isToolBearingBody(body)
   let lastErr = null
   for (const pid of candidates) {
     if (!state.cfg.providers[pid]) continue
@@ -1453,9 +1591,7 @@ async function proxyNativeResponses(state, budget, log, opts) {
     const target = modelTarget(state.cfg, modelName, pid)
     const payload = Buffer.from(JSON.stringify(Object.assign({}, body, { model: target.servingName })))
     const headers = videoJsonHeaders(state, prov, payload.length)
-    // F03：原生 Responses 也曾绕过 target-authz。现在发送前必须拿到冻结目标授权，
-    // 且一次终态（noRetry）——Responses 请求可能带工具/托管副作用，绝不能自动重放。
-    const gate = authorizeProxySend(state, prov, pid, upstreamPath, opts.req, log)
+    const gate = authorizeProxySend(state, prov, pid, upstreamPath, req, log)
     if (gate.denied) {
       log && log.warn('responses 目标发送授权被拒绝', gate.denied.code, pid)
       return proxyDeniedResult(gate.denied)
@@ -1468,11 +1604,7 @@ async function proxyNativeResponses(state, budget, log, opts) {
         try { await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true }) } catch {}
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1
         log && log.warn('responses 目标返回重定向，已拒绝跟随', 'provider=' + pid, 'status=' + up.status)
-        return {
-          status: 502,
-          contentType: 'application/json; charset=utf-8',
-          buf: Buffer.from(JSON.stringify({ error: { message: '上游返回重定向（' + up.status + '），网关拒绝跟随', code: 'upstream_redirect_rejected', type: 'upstream_error' } })),
-        }
+        return { status: 502, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: '上游返回重定向（' + up.status + '），网关拒绝跟随', code: 'upstream_redirect_rejected', type: 'upstream_error' } })) }
       }
       if (up.ok) {
         state.st.counters.requests += 1
@@ -1482,23 +1614,27 @@ async function proxyNativeResponses(state, budget, log, opts) {
         markOk(state, pid); noteAffinity(state, modelName, pid)
         const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
         if (/text\/event-stream/i.test(ct)) {
+          if (codexRoute && codexPlan) return streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov })
           writeUpstreamHeaders(res, up)
           await streamRawResponses(res, up.stream, budget)
           return { streamed: true }
         }
         const buf = await collectBody(up.stream, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024) * 4, { budget, signal: budget.signal, destroyOnAbort: true })
-        const j = tryParse(buf)
+        const restored = restoreCodexJsonBuffer(buf, codexRoute, codexPlan)
+        if (!restored.ok) return { status: 502, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: restored.rejected.message || 'Codex 原生响应恢复失败', code: restored.rejected.code || 'codex_restore_rejected', type: 'codex_restore_rejected' } })) }
+        const j = restored.json || tryParse(buf)
         if (j && typeof j === 'object') {
           if (typeof j.model === 'string') j.model = body.model
-          const usage = j.usage || {}
-          const tokens = Number(usage.total_tokens) > 0 ? Number(usage.total_tokens) : (Number(usage.input_tokens) > 0 || Number(usage.output_tokens) > 0 ? (Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0) : 0)
-          if (tokens > 0) { sg.tokens = (sg.tokens || 0) + tokens; agg(state, pid, 'tokens', tokens); tallyDaily(state, modelName, tokens, 0, 0, tokens, 0) }
+          tallyResponsesUsage(state, modelName, pid, sg, j.usage || {})
           return { status: up.status, contentType: ct, buf: Buffer.from(JSON.stringify(j)) }
         }
         return { status: up.status, contentType: ct, buf }
       }
       const ebuf = await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
-      const mapped = mapErrorEnvelope(target.api, up.status, ebuf) || ebuf
+      const mapped = scrubBody(mapErrorEnvelope(target.api, up.status, ebuf) || ebuf)
+      if (singleShot) {
+        return { status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: mapped }
+      }
       if (up.status === 402 || up.status === 403 || up.status === 404 || up.status === 429 || up.status >= 500) {
         lastErr = new Error('upstream ' + up.status)
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1
@@ -1511,6 +1647,9 @@ async function proxyNativeResponses(state, budget, log, opts) {
       lastErr = err
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1
       markFail(state, pid, prov.circuit)
+      if (singleShot || (err && err.noReplay)) {
+        return { status: 502, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: '上游失败且请求含工具历史/已发状态：终止而不换候选重放', code: err && err.code ? err.code : 'no_replay', type: 'no_replay' } })) }
+      }
     } finally { if (release) release() }
   }
   return { status: 502, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: 'responses 上游失败：' + (lastErr ? lastErr.message : 'all providers failed'), type: 'all_providers_failed' } })) }
@@ -2074,16 +2213,43 @@ function makeHandler(state) {
           if (classifyTarget(nProv, state.cfg).kind === 'official') {
             const nconvOfficial = responsesToChat(body, { mode: 'native' })
             if (nconvOfficial.rejected) { sendJson(res, 400, { error: { message: nconvOfficial.rejected.message, type: nconvOfficial.rejected.code || 'unsupported_parameter' } }); return }
-            const noutOfficial = await proxyOfficialResponses(state, budget, log, { req, body, modelName: nHit.canonicalName, def: nDef, res })
+            let codexRoute = null
+            let codexPlan = null
+            if (needsCodexProjection(body, nDef)) {
+              codexRoute = buildCodexRoute(state, nHit, nDef, nProv)
+              const prep = prepareCodexNativeRequest(body, codexRoute)
+              if (prep.rejected) { sendJson(res, 400, { error: { message: prep.rejected.message, code: prep.rejected.code, type: prep.rejected.code || 'unsupported_parameter' } }); return }
+              if (prep.lossy && prep.lossy.length) log && log.info('codex native lossy', prep.lossy.slice(0, 20).join(','))
+              body = prep.body
+              codexPlan = prep.plan
+            }
+            const noutOfficial = await proxyOfficialResponses(state, budget, log, { req, body, modelName: nHit.canonicalName, def: nDef, res, codexRoute, codexPlan })
             if (noutOfficial && noutOfficial.streamed) return
             res.writeHead(noutOfficial.status, { 'content-type': noutOfficial.contentType }); res.end(noutOfficial.buf); return
           }
         }
         if (nDef && !nDef.isVirtualModel && !nDef.virtual && nDef.api === 'responses') {
-          const nconv = responsesToChat(body, { mode: 'native' })   // 仅复用顶层拒绝矩阵；input/tools 原样透传（含 v2 密文）
+          const nconv = responsesToChat(body, { mode: 'native' })
           if (nconv.rejected) { sendJson(res, 400, { error: { message: nconv.rejected.message, type: nconv.rejected.code || 'unsupported_parameter' } }); return }
           if ((nDef.capability || 'chat') !== 'chat') { sendJson(res, 400, { error: { message: '模型 ' + nHit.canonicalName + ' 的能力不是 chat，不能用于 /v1/responses', type: 'unsupported_model' } }); return }
-          const nout = await proxyNativeResponses(state, budget, log, { req, body, modelName: nHit.canonicalName, def: nDef, wantStream: !!body.stream, res })
+          const nProv = state.cfg.providers[nDef.provider] ? buildProvider(state.cfg, nDef.provider) : null
+          if (nProv && nProv._def && nProv._def.gatewaySubscription && nProv._def.gatewaySubscription.enabled === true && classifyTarget(nProv, state.cfg).kind !== 'official') {
+            sendJson(res, 403, { error: { message: 'gatewaySubscription 只允许官方目标，拒绝非官方上游', code: 'gateway_subscription_target_not_allowed', type: 'official_target_rejected' } })
+            return
+          }
+          const opaqueReject = checkThirdPartyOpaque(state, nProv, nDef, body)
+          if (opaqueReject) { sendJson(res, opaqueReject.status, { error: { message: opaqueReject.message, code: opaqueReject.code, type: 'codex_native_rejected' } }); return }
+          let codexRoute = null
+          let codexPlan = null
+          if (needsCodexProjection(body, nDef)) {
+            codexRoute = buildCodexRoute(state, nHit, nDef, nProv)
+            const prep = prepareCodexNativeRequest(body, codexRoute)
+            if (prep.rejected) { sendJson(res, 400, { error: { message: prep.rejected.message, code: prep.rejected.code, type: prep.rejected.code || 'unsupported_parameter' } }); return }
+            if (prep.lossy && prep.lossy.length) log && log.info('codex native lossy', prep.lossy.slice(0, 20).join(','))
+            body = prep.body
+            codexPlan = prep.plan
+          }
+          const nout = await proxyNativeResponses(state, budget, log, { req, body, modelName: nHit.canonicalName, def: nDef, wantStream: !!body.stream, res, codexRoute, codexPlan })
           if (nout && nout.streamed) return
           res.writeHead(nout.status, { 'content-type': nout.contentType }); res.end(nout.buf); return
         }
@@ -2375,6 +2541,9 @@ export function start(opts = {}) {
     dialogue: {},        // 对话维度统计：id -> { requests, tokens, hit, miss, startAt, lastAt, named }
     dUnnamed: null,      // 无会话 ID 时的当前兜底对话（按间隔切分）
     stats: { global: { requests:0, errors:0, retries:0, interrupts:0, tokens:0, latencySum:0, confirmed:0, lats: [], latTrend: [] }, byProvider: pids, byModel: {}, daily: {}, hourly: {} },
+  }
+  for (const [pid, p] of Object.entries(cfg.providers || {})) {
+    if (p && p.gatewaySubscription && p.gatewaySubscription.enabled === true) log.info('gateway_subscription configured', 'provider=' + pid, 'scope=loopback+official', 'credential=local_codex_auth')
   }
   // P0-2：受控自管 Codex 配置根只在显式环境开关下登记（默认关闭）；失败保持关闭。
   setupCodexManagedRoot(state)
