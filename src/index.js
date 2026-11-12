@@ -18,11 +18,12 @@ import { createResponsesStream } from './responses-stream.js'
 import { validateEmbeddingRequest, buildEmbeddingRequest, embeddingHeaders, normalizeEmbeddingResponse, supportsEmbeddings, MAX_EMBEDDING_INPUTS } from './embeddings.js'
 import { validateRerankRequest, buildRerankRequest, rerankHeaders, normalizeRerankResponse, supportsRerank } from './rerank.js'
 import { supportsMedia, parseMultipartField, replaceMultipartField, isMultipart, validateSpeechRequest, validateImageRequest, mediaResponseLimit } from './media.js'
-import { defaultVideoPaths, newVideoTask, upstreamTaskId, applyUpstreamStatus, clientTask, loadVideoTasks, saveVideoTasks, gcVideoTasks, findTaskByIdem, validateVideoCreate, VIDEO_POLL_MIN_MS } from './videos.js'
+import { defaultVideoPaths, newVideoTask, upstreamTaskId, applyUpstreamStatus, clientTask, loadVideoTasks, saveVideoTasks, gcVideoTasks, findSubjectTask, videoInputHash, recoverInterruptedVideoTasks, validateVideoCreate, VIDEO_POLL_MIN_MS } from './videos.js'
 import { todayKey } from './shared.js'
 import { readNativeUsage, nativeUsageConfig } from './native-usage.js'
 import { classifyTarget } from './codex/identity.js'
 import { isTargetAuthzError } from './codex/target-authz.js'
+import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
 import { buildCatalog } from './codex/catalog.js'
 import { generationRecordFromBuilt, toCatalogView } from './codex/catalog-generation.js'
 import { microFromUsd } from './routing/facts.js'
@@ -712,6 +713,23 @@ async function doSaveConfig(state, body) {
   if (defaults.proxyMode != null && defaults.proxyMode !== '' && !['auto', 'direct', 'global'].includes(String(defaults.proxyMode))) {
     return { error: 'defaults.proxyMode 仅支持 auto（按配置）/direct（全直连）/global（全走代理）' }
   }
+  // F04：可选端点能力开关。只允许「已证实」的 5 类能力；未知能力名一律 400
+  // （防止用户以为配了新能力就生效，也防止把拼写错误当开关）。
+  if (defaults.optionalEndpoints !== undefined) {
+    const oe = defaults.optionalEndpoints
+    if (!oe || typeof oe !== 'object' || Array.isArray(oe)) {
+      return { error: 'defaults.optionalEndpoints 必须是对象：{ embedding|rerank|audio|image|video: false | { enabled, reason } }' }
+    }
+    for (const [cap, val] of Object.entries(oe)) {
+      if (!PROVEN_OPTIONAL_CAPABILITIES.includes(cap)) {
+        return { error: 'defaults.optionalEndpoints 含未证实的可选能力：' + cap + '（只允许 ' + PROVEN_OPTIONAL_CAPABILITIES.join('/') + '）' }
+      }
+      if (val === true || val === false) continue
+      if (!val || typeof val !== 'object' || Array.isArray(val)) return { error: '可选能力「' + cap + '」的开关必须是布尔或 { enabled, reason }' }
+      if (val.enabled !== undefined && typeof val.enabled !== 'boolean') return { error: '可选能力「' + cap + '」的 enabled 必须是布尔' }
+      if (val.reason !== undefined && typeof val.reason !== 'string') return { error: '可选能力「' + cap + '」的 reason 必须是字符串' }
+    }
+  }
   const clean = {}
   for (const [id, p] of Object.entries(providers || {})) clean[id] = stripRuntimeFields(p, PROVIDER_RUNTIME_FIELDS)
   // 模型：同样剥离运行时统计/探针字段后再落盘（未知扩展字段保留）
@@ -1115,6 +1133,45 @@ async function handleMediaProxy(state, budget, log, opts) {
 }
 
 // —— MG-014 Video 异步任务池（ADR-0001）：创建/轮询/取消；上游只桥接 OpenAI 兼容 ——
+// —— F04：可选端点能力门 ——
+// config：defaults.optionalEndpoints = { embedding|rerank|audio|image|video: false | { enabled:false, reason? } }。
+// 语义：已证实的 5 类能力默认启用（既有行为）；显式关闭 → 501 optional_endpoint_disabled 且零上游请求；
+// 未证实的能力名在保存时被 400 拒绝（只放行经配置的旧能力）。
+function optionalRegistryOf(cfg) {
+  const raw = (cfg.defaults && cfg.defaults.optionalEndpoints) || {}
+  const overrides = {}
+  for (const cap of PROVEN_OPTIONAL_CAPABILITIES) {
+    const v = raw[cap]
+    if (v === false) overrides[cap] = { enabled: false, reason: 'disabled_by_config' }
+    else if (v && typeof v === 'object' && v.enabled === false) overrides[cap] = { enabled: false, reason: (typeof v.reason === 'string' && v.reason.trim()) ? v.reason.trim() : 'disabled_by_config' }
+  }
+  return createCapabilityRegistry(overrides)
+}
+function optionalGate(state, res, capability) {
+  const st = optionalRegistryOf(state.cfg).stateOf(capability)
+  if (st.enabled) return false
+  sendJson(res, 501, {
+    error: {
+      message: '可选端点「' + capability + '」未启用（可用 defaults.optionalEndpoints 显式开启；未证实的可选能力默认关闭）',
+      type: 'capability_disabled',
+      code: 'optional_endpoint_disabled',
+      capability,
+      reason: st.reason,
+    },
+  })
+  return true
+}
+
+// F04：可选端点的调用主体（不落 Key 原文）。数据面鉴权只有一把全局 client Key 或无鉴权匿名；
+// 主体取「鉴权来源 + Key 的 sha256 前缀」：同 Key 稳定、不可逆、跨主体不可关联。
+function optionalSubjectOf(state, req) {
+  const key = currentClientKey(state)
+  if (!key) return 'anonymous'
+  const auth = String((req && req.headers && req.headers.authorization) || '').replace(/^Bearer\s+/i, '').trim()
+  if (!auth || auth !== key) return 'anonymous'
+  try { return 'client:' + sha256Hex(auth).slice(0, 16) } catch { return 'client:hashed' }
+}
+
 function videoJsonHeaders(state, provider, payloadLen) {
   const headers = { 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }
   const extra = Object.assign({}, (state.cfg.defaults && state.cfg.defaults.extraHeaders) || {}, (provider && provider.extraHeaders) || {})
@@ -1126,7 +1183,7 @@ function videoJsonHeaders(state, provider, payloadLen) {
 function saveVideos(state, log) { try { saveVideoTasks(state.paths.videos, state.videos) } catch (e) { log && log.warn('videos 落盘失败', e.message) } }
 
 async function createVideoTask(state, budget, log, opts) {
-  const { modelName, def, body, idem } = opts
+  const { modelName, def, body, idem, subject, inputHash } = opts
   const paths = defaultVideoPaths(def)
   const candidates = [def.provider, ...(def.fallbacks || [])].filter(Boolean)
   let lastErr = null
@@ -1146,7 +1203,9 @@ async function createVideoTask(state, budget, log, opts) {
       const outBuf = await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
       if (up.ok) {
         const j = tryParse(outBuf)
-        const task = newVideoTask({ model: modelName, provider: pid, idem, prompt: body.prompt })
+        // F04：任务记录主体与输入指纹；日志只记模型/主体前缀，绝不记 prompt 正文。
+        const task = newVideoTask({ model: modelName, provider: pid, idem, subject, inputHash, prompt: body.prompt })
+        log && log.info('video create ok', 'model=' + modelName, 'provider=' + pid, 'subject=' + (subject || '-'), 'promptLen=' + (typeof body.prompt === 'string' ? body.prompt.length : 0))
         task.upstreamId = upstreamTaskId(j)
         applyUpstreamStatus(task, j)
         if (!task.upstreamId && task.status === 'queued') task.error = 'upstream 未返回任务 id，无法轮询'
@@ -1712,6 +1771,8 @@ function makeHandler(state) {
 
       // —— MG-011：POST /v1/embeddings（能力声明 + 上游适配 + 记账 + 熔断/回退） ——
       if (path === '/v1/embeddings') {
+        // F04：能力门先于读请求体/解析路由：关闭时 501 且零上游调用。
+        if (optionalGate(state, res, 'embedding')) return
         if (req.method !== 'POST') { sendJson(res, 405, { error: { message: '仅支持 POST /v1/embeddings', type: 'invalid_request_error' } }); return }
         const ebuf = await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024), { budget, signal: budget.signal })
         const ebody = tryParse(ebuf)
@@ -1774,6 +1835,7 @@ function makeHandler(state) {
 
       // —— MG-012：POST /v1/rerank（capability=rerank；OpenAI 兼容 /v1/rerank 与 Cohere /v2/rerank） ——
       if (path === '/v1/rerank' || path === '/rerank') {
+        if (optionalGate(state, res, 'rerank')) return
         if (req.method !== 'POST') { sendJson(res, 405, { error: { message: '仅支持 POST /v1/rerank', type: 'invalid_request_error' } }); return }
         const rbuf = await collectBody(req, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024), { budget, signal: budget.signal })
         const rbody = tryParse(rbuf)
@@ -1835,6 +1897,7 @@ function makeHandler(state) {
 
       // —— MG-013：Audio / Image 媒体桥接（multipart 原样转发、二进制响应、体积/预算/取消） ——
       if (path === '/v1/audio/speech' || path === '/v1/audio/transcriptions' || path === '/v1/images/generations' || path === '/v1/images/edits') {
+        if (optionalGate(state, res, path.startsWith('/v1/audio/') ? 'audio' : 'image')) return
         if (req.method !== 'POST') { sendJson(res, 405, { error: { message: '仅支持 POST ' + path, type: 'invalid_request_error' } }); return }
         const multipartPath = path.endsWith('/transcriptions') || path.endsWith('/edits')
         const ctype = String(req.headers['content-type'] || (multipartPath ? '' : 'application/json'))
@@ -1879,6 +1942,7 @@ function makeHandler(state) {
 
       // —— MG-014：Video 异步任务池（ADR-0001）：创建 / 列表 / 查询 / 取消 ——
       if (path === '/v1/videos' && req.method === 'POST') {
+        if (optionalGate(state, res, 'video')) return
         const vmax = (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024
         const vbuf = await collectBody(req, vmax, { budget, signal: budget.signal })
         const vbody = tryParse(vbuf)
@@ -1891,20 +1955,41 @@ function makeHandler(state) {
         const vcap = vdef.capability || 'chat'
         if (vcap !== 'video') { sendJson(res, 400, { error: { message: '模型 ' + vhit.canonicalName + ' 不是 video 模型（capability=' + vcap + '）', type: 'unsupported_model' } }); return }
         const idem = String(req.headers['idempotency-key'] || '').trim() || null
-        const existing = findTaskByIdem(state.videos, idem)
-        if (existing) { sendJson(res, 200, clientTask(existing)); return }   // 幂等：同 key 不重复创建/不重复计上游
-        const created = await createVideoTask(state, budget, log, { modelName: vhit.canonicalName, def: vdef, body: vbody, idem })
+        const subject = optionalSubjectOf(state, req)
+        const inputHash = videoInputHash(Object.assign({}, vbody, { model: vhit.canonicalName }))
+        // F04：幂等键按**主体域**隔离——不同主体用同一个 Idempotency-Key 绝不复用他人任务
+        // （旧实现 findTaskByIdem 全局查找 = 跨主体任务泄漏）。同主体同键同输入 → 复用；
+        // 同键不同输入 → 409（不静默换内容），且**零上游调用**。
+        const existing = findSubjectTask(state.videos, subject, idem)
+        if (existing) {
+          if (existing.inputHash && existing.inputHash !== inputHash) {
+            sendJson(res, 409, { error: { message: '幂等键已用于不同输入，拒绝创建', type: 'idempotency_conflict', code: 'idempotency_key_reused' } })
+            return
+          }
+          sendJson(res, 200, clientTask(existing)); return
+        }
+        const created = await createVideoTask(state, budget, log, { modelName: vhit.canonicalName, def: vdef, body: vbody, idem, subject, inputHash })
         if (created.ok) { sendJson(res, 202, clientTask(created.task)); return }
         res.writeHead(created.status, { 'content-type': created.contentType }); res.end(created.buf); return
       }
       if (path === '/v1/videos' && req.method === 'GET') {
-        const list = Object.values(state.videos).sort((a, b) => b.createdAt - a.createdAt).slice(0, 50).map(clientTask)
+        if (optionalGate(state, res, 'video')) return
+        const subject = optionalSubjectOf(state, req)
+        // F04：有主体的任务只对该主体可见（旧任务无 subject 字段，保持可见以兼容历史数据）。
+        const list = Object.values(state.videos)
+          .filter((t) => !t.subject || t.subject === subject)
+          .sort((a, b) => b.createdAt - a.createdAt).slice(0, 50).map(clientTask)
         sendJson(res, 200, { object: 'list', data: list }); return
       }
       const vmatch = /^\/v1\/videos\/([^/]+)(\/cancel)?$/.exec(path)
+      if (vmatch && optionalGate(state, res, 'video')) return
       if (vmatch) {
         const vid = decodeURIComponent(vmatch[1])
         const task = state.videos[vid]
+        // F04：跨主体访问按「不存在」处理（不泄露他人任务是否存在）。
+        if (task && task.subject && task.subject !== optionalSubjectOf(state, req)) {
+          sendJson(res, 404, { error: { message: '未知视频任务: ' + vid, type: 'not_found' } }); return
+        }
         if (!task) { sendJson(res, 404, { error: { message: '未知视频任务: ' + vid, type: 'not_found' } }); return }
         if (vmatch[2] === '/cancel') {
           if (req.method !== 'POST') { sendJson(res, 405, { error: { message: '仅支持 POST /v1/videos/:id/cancel', type: 'invalid_request_error' } }); return }
@@ -2264,7 +2349,15 @@ export function start(opts = {}) {
     } state.st.lastServing = _j.lastServing || null; state.stats.daily = Object.assign({}, state.stats.daily, _j.daily || {}); state.stats.hourly = Object.assign({}, state.stats.hourly, _j.hourly || {}); for (const [n, t] of Object.entries(_j.byModel || {})) { state.stats.byModel[n] = Object.assign(state.stats.byModel[n] || { requests: 0, errors: 0 }, { tokens: (t && t.tokens) || 0, inTokens: (t && t.inTokens) || 0, outTokens: (t && t.outTokens) || 0 }) }; const _dlg = _j.dialogue || {}; for (const k of Object.keys(_dlg)) state.dialogue[k] = _dlg[k]; let _u = null; for (const k of Object.keys(state.dialogue)) { if (k.startsWith('conv-') && (!_u || state.dialogue[k].lastAt > _u.lastAt)) _u = state.dialogue[k] } state.dUnnamed = _u || null; const _g = _j.global || {}; for (const k of ['requests','errors','retries','interrupts','tokens','latencySum','confirmed']) if (typeof _g[k] === 'number') state.stats.global[k] = _g[k]; if (Array.isArray(_g.lats)) state.stats.global.lats = _g.lats; if (Array.isArray(_g.latTrend)) state.stats.global.latTrend = _g.latTrend; for (const [pid, po] of Object.entries(_j.byProvider || {})) { const o = ensureSt(state, pid); for (const k of ['requests','errors','retries','latencySum','latencyCount','tokens']) if (typeof po[k] === 'number') o[k] = po[k]; if (Array.isArray(po.lats)) o.lats = po.lats; if (po.probe) o.probe = po.probe } } catch { /* 统计文件缺失/损坏则从空开始 */ }
   every(30000, () => { try { writeStats(state) } catch (e) { log && log.warn('stats 写盘失败', e.message) } })
   // —— MG-014 Video 任务池：加载 + GC + 后台轮询（ADR-0001；文件损坏不阻塞启动） ——
-  try { state.videos = loadVideoTasks(state.paths.videos) } catch (e) { state.videos = {}; log && log.warn('videos.json 读取失败，按空任务池启动', e.message) }
+  try {
+    state.videos = loadVideoTasks(state.paths.videos)
+    // F04：重启恢复——PENDING_SEND（进程在上游结果未知时死亡）一律转 UNKNOWN，
+    // 只允许查状态/人工核对，绝不再次 create（避免重复计费/重复生成）。
+    if (recoverInterruptedVideoTasks(state.videos)) {
+      try { saveVideoTasks(state.paths.videos, state.videos) } catch (e) { log && log.warn('videos 恢复落盘失败', e.message) }
+      log && log.info('videos 启动恢复：pending_send → unknown（禁止重复创建）')
+    }
+  } catch (e) { state.videos = {}; log && log.warn('videos.json 读取失败，按空任务池启动', e.message) }
   try { if (gcVideoTasks(state.videos)) saveVideoTasks(state.paths.videos, state.videos) } catch {}
   every(5000, async () => {
     if (state.closed) return

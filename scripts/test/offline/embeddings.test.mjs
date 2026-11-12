@@ -152,3 +152,61 @@ test('embedding 预算：慢上游受 overallMs 约束 → 504 request_timeout',
   assert.equal((await res.json()).error.type, 'request_timeout')
   assert.ok(Date.now() - t0 < 2500)
 })
+
+
+// ============================================================================
+// F04 接线：可选端点能力门（config → 501，且零上游调用）+ 配置只接受已证实能力
+// ============================================================================
+
+test('F04 可选端点关闭：defaults.optionalEndpoints.embedding=false → 501 且零上游调用', { timeout: 30000 }, async (t) => {
+  const hits = []
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    for await (const _ of req) { /* drain */ }
+    hits.push({ url: req.url })
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(EMB_OK))
+  })
+  const gw = await startGateway({
+    name: 'f04-optional-off',
+    config: {
+      defaults: { optionalEndpoints: { embedding: false } },
+      providers: { mock: { baseUrl: upstream.base } },
+      models: { emb: { provider: 'mock', capability: 'embedding' } },
+    },
+  })
+  t.after(async () => { await gw.stop(); await upstream.stop() })
+
+  const res = await gw.post('/v1/embeddings', { model: 'emb', input: 'hi' }, json())
+  assert.equal(res.status, 501, '关闭的可选端点必须显式 501（不是 404/静默放行）')
+  const body = await res.json()
+  assert.equal(body.error.code, 'optional_endpoint_disabled')
+  assert.equal(body.error.capability, 'embedding')
+  assert.equal(body.error.reason, 'disabled_by_config')
+  assert.equal(hits.length, 0, '禁用态零上游调用')
+})
+
+test('F04 可选端点配置：只接受已证实能力，未知能力名/非法形状 → 400 且不落盘', { timeout: 30000 }, async (t) => {
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    for await (const _ of req) { /* drain */ }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(EMB_OK))
+  })
+  const gw = await startGateway({ name: 'f04-optional-config', config: { providers: { mock: { baseUrl: upstream.base } }, models: { emb: { provider: 'mock', capability: 'embedding' } } } })
+  t.after(async () => { await gw.stop(); await upstream.stop() })
+
+  const unknown = await gw.post('/api/config/save', { defaults: { optionalEndpoints: { brand_new_modal: false } } })
+  assert.equal(unknown.status, 400)
+  assert.match((await unknown.json()).error, /未证实/)
+
+  const badShape = await gw.post('/api/config/save', { defaults: { optionalEndpoints: { embedding: 'off' } } })
+  assert.equal(badShape.status, 400)
+
+  // 合法形状可保存并在下一请求生效
+  assert.equal((await gw.post('/api/config/save', { defaults: { optionalEndpoints: { embedding: false, rerank: { enabled: false, reason: 'contract_not_signed_off' } } } })).status, 200)
+  const disabled = await gw.post('/v1/embeddings', { model: 'emb', input: 'hi' }, json())
+  assert.equal(disabled.status, 501)
+  assert.equal((await disabled.json()).error.reason, 'disabled_by_config')
+  const rerank = await gw.post('/v1/rerank', { model: 'emb', query: 'q', documents: ['a'] }, json())
+  assert.equal(rerank.status, 501, 'rerank 关闭同样 501')
+  assert.equal((await rerank.json()).error.reason, 'contract_not_signed_off')
+})
