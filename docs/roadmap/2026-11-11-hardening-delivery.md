@@ -4,8 +4,8 @@
 - **交付模式**: `DELIVERY=local` —— 仅本地集成分支与候选提交；**未 push、未开/改 PR、未合并远端 main**（本轮无远端写授权动作发生）。
 - **时间**: 2026-11-11 21:58 → 2026-11-12 01:2x（Asia/Shanghai，+0800），跨午夜。
 - **集成分支**: `dev/modelgate-hardening-a1`
-- **R00 受审交付点（代码）**: `2d82ea2e663db5726c866fa261be36fc09f8d8b3`
-- **最终 HEAD**: 本报告与其数字校正所在的 docs-only 提交（父提交即上面的受审交付点；两者之间无代码差异）。
+- **R00 受审交付点（代码）**: `2d82ea2e663db5726c866fa261be36fc09f8d8b3`（E 的最终确认绑定于其 docs-only 子提交 `c20f485`）
+- **最终 HEAD**: `efbec41f6acae4bd0920659d66ff06da3e2ccfd7`（= 受审交付点 + docs 计数修正 + M2-3 脚本重写/一行死导入清理）。受审点之后的增量：1 行未使用 import 删除 + 1 个默认拒跑的 opt-in 脚本 + 3 处文档计数，**无路由/鉴权/发送逻辑变化**。
 - **基线**: 远端 main `6bc6441`（实时 `ls-remote` 核对一致）→ 基线采纳 `64a5c96`
 - **开发模型**: 全队（队长 + A/B/C/D/E）均为 `opencode-go/deepseek-v4.1-flash`，请求 `reasoningEffort: high`。实际生效取舍由 harness 记录；本轮无独立遥测，**实际生效力度/上下文记为 UNKNOWN**。
 
@@ -47,7 +47,7 @@
 | M1-4a | A | 部分 | 可选端点统一策略入口（未证实能力默认 501 关闭）+ 视频"先落 PENDING_SEND 再发上游"幂等（并发单次/主体隔离/重启不重发）。**入口接线未做** |
 | M2-1 | C | PASS | `target-authz`：一次规范化 + 冻结 + `assertSendTarget`；第三方头从空白构造 + HMAC 域派生会话；订阅身份禁止用于计费路径 |
 | M2-2 | C | PASS | 目录世代：wire 配置指纹入 cache key、同世代三元同源、CAS 发布保旧代、零碰撞 fail-closed、第三方不再继承官方模板行为字段、能力需 `evidence{source,observedAt}` |
-| M2-3 | C | **NOT_RUN** | 真实 Codex CLI 三轮回环双 mock 未取得确定性结果；见 §5 重开条件 |
+| M2-3 | C | **NOT_RUN** + 清理完成 | 交付安全双 mock 脚本（默认 exit 2 拒跑，仅 `MGR_E2E_NETWORK_ISOLATED=1` 才运行）+ 死导入清理 + 矩阵原因具体化。**关键发现**：`codex-cli 0.167.0` 在空 `CODEX_HOME` 首次启动会触发 curated plugin sync（`git fetch https://github.com/openai/plugins.git`）；本机 `unshare -Urn` 不可用（uid_map 拒绝），无法证明零外连 ⇒ 早期那次 3 轮 / 27 checks 全过按安全前置**主动作废**，不作为证据。接线后复跑 22/27（第 2 轮 502「候选池无可用项」），未取得可复现 PASS，不硬凑 |
 | M3-1 / M3-1b | D | PASS | 证据化候选选择（能力/健康/价格/授权各自带来源与时间）；官方订阅排除出通用池；稳定排序与脱敏 audit；legacy 伪造能力在混池中失效；D7 身份闸门归一化（不能证明"非官方"就不许自动离开官方池）；`MG_FB_BUDGET_EXCEEDED` |
 | M3-2 | D | PASS | 持久预算账本：micro 整数 + 显式币种、单写者 + `O_EXCL` 跨进程锁、`(requestId,digest)` 幂等不双记、未知用量不归零、超预估封顶后续消费、固定时区跨日、脱敏落盘 |
 | M3-3 | B（并入 M1-3a） | 部分 | reserve→send→settle/release/markUnknown 已接；`STOP_RECONCILE` 已接；**账本默认未配置时**仅在有费用上限时拒绝发送（默认部署不启用账本） |
@@ -77,7 +77,7 @@ E 全程以"不信作者声明"的方式独立构造反例，被推翻并修复�
 
 | 项 | 状态 | 原因 | 重开条件 |
 | --- | --- | --- | --- |
-| 真实 Codex CLI 三轮回环双 mock（M2-3） | NOT_RUN | 本轮未在空 HOME/合成身份下取得确定性三轮结果 | 在可隔离主机上，`env -i` + 临时 HOME/`CODEX_HOME` + 合成 Key + 回环双 mock，三轮同一 thread 并逐轮断言模型/上游/工具配对/目录来源/完成事件 |
+| 真实 Codex CLI 三轮回环双 mock（M2-3） | NOT_RUN | ① `codex-cli` 在空 `CODEX_HOME` 首次启动会出网同步 curated plugins，本机无网络命名空间（`unshare -Urn` uid_map 拒绝）⇒ 无法证明零外连；② 接线后该路径第 2 轮出现 502「候选池无可用项」 | 在具备 netns 或主机级 egress 阻断的主机上设 `MGR_E2E_NETWORK_ISOLATED=1` 跑 `scripts/test/codex-e2e.mjs`；同时复验聚合 slug + 回环第三方 mock 的授权/能力证据条件（见风险 7） |
 | 真实官方上游 / 真实第三方上游 | NOT_RUN | 零真实产品上游预算；需独立授权 | 独立授权 + 真实账号 + 出网；先以双 mock 通过为前提 |
 | Desktop GUI | NOT_RUN | 本轮未启动桌面客户端 | 独立 profile + 保证回环 + 真实 GUI 手测 |
 | 真实 UHR 委派 | BLOCKED | 需读到现行授权接口与明确写集 | 拿到 UHR 授权接口契约与写集后另开分支 |
@@ -109,6 +109,8 @@ E 全程以"不信作者声明"的方式独立构造反例，被推翻并修复�
 4. **M2-2 零碰撞错误信息会回显模型名原文**（E 发现，P2）：模型名不是凭据，但若有人把秘密写进模型名会外泄；未修，记录为已知项。
 5. **`codex-catalog-coherence`/`codex-routing-catalog` 的 200 断言依赖目录 record 注入**：若将来去掉注入，这两处会 403（设计如此）。
 6. 配额数字随分支变化，**不得写死**（文档已注明判读规则）。
+7. **聚合 slug 路径在缺能力证据时表现为 502「候选池无可用项」**（C 在 M2-3 复跑中发现）：这是 M2-2「能力必须带证据」的预期后果，但**诊断信息不足** —— 用户看到 502 而非 `capability_evidence_missing`。建议后续把候选池为空的**主要排除原因**回填到错误信封（P2 可诊断性，不阻断本轮）。
+8. **真实 CLI 的网络前置**：`codex-cli` 在空 `CODEX_HOME` 下会尝试拉取 curated plugins。任何离线 CLI 验收都必须先证明 egress 被阻断，否则结果不可作为证据。
 
 ## 8. 过程偏差（如实披露）
 
@@ -117,6 +119,10 @@ E 全程以"不信作者声明"的方式独立构造反例，被推翻并修复�
 3. **lead 两次给出过错误数字**（把 `fbeda55` 的 52/465 说成 `2f809c4` 的数；漏登记 `codex-target-authz`），均由 E 的对账纠正，已修正并在账本留痕。
 4. **lead 一处标准定错并自行纠正**：曾要求"官方目标缺 catalog record 一律 fail-closed"，会导致所有普通官方 Chat 403；纠正为"目录参与才强制 record，普通官方 Chat 用 config-declared 世代但仍产出授权记录"。
 5. 写集审计（A 独立机械核对）：**越界项 0**；共享/禁改项零违规；3 处同里程碑相邻模块变更判为非越界。
+
+## 8.1 独立 QA 的最终结论
+
+E 的最终确认（`R00-final2`，绑定 `c20f485` / 代码点 `2d82ea2`）：**PASS**，「本轮可以结案」；两条 R00 阻塞全部关闭。其提出的两处 P2 计数笔误（矩阵离线用例 54→56、docs 链接按树区分）已在最终提交修正。E 明确复验通过：T3 五个非规范构造全部 **403 + 上游命中 0 + 账本 attempt 0**、两条正向 pathname 正确、T1/T2/T4/T5/T6/T7 全部 PASS、P0-2 入口（无令牌 403 / 跨源 403 / 回环 200 / 非回环 403）。
 
 ## 9. 远端动作
 
