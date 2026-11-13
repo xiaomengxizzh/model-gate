@@ -1,0 +1,40 @@
+{
+  "_comment": "合法 modelgate_delegate_task 调用。provider/model/URL/凭据均不出现在参数里：它们只能来自服务端 allowlist（契约 §8.1）。",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "fixture-delegate-1",
+    "method": "tools/call",
+    "params": {
+      "name": "modelgate_delegate_task",
+      "arguments": {
+        "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+        "idempotencyKey": "fixture-delegate-0001",
+        "workspace": {
+          "root": "mg-self",
+          "refs": [
+            {
+              "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+              "mode": "read"
+            }
+          ],
+          "permissionMode": "read_only",
+          "toolPolicy": [
+            "read_file",
+            "search"
+          ]
+        },
+        "reasoningEffort": "high",
+        "budget": {
+          "maxElapsedMs": 120000,
+          "maxToolCalls": 20
+        },
+        "parentThreadId": "codex-parent-fixture-01"
+      }
+    }
+  },
+  "expect": {
+    "ok": true,
+    "state": "ADMITTED",
+    "duplicate": false
+  }
+}

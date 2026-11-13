@@ -1,0 +1,234 @@
+{
+  "contract": "modelgate-mcp-delegation-v1",
+  "version": 1,
+  "framing": {
+    "encoding": "utf-8",
+    "delimiter": "\\n",
+    "oneMessagePerLine": true,
+    "contentLengthFraming": false,
+    "batch": "unsupported",
+    "maxLineBytes": 1048576,
+    "stdout": "JSON-RPC messages only",
+    "stderr": "redacted logs only",
+    "supportedProtocolVersions": [
+      "2024-11-05",
+      "2025-06-18"
+    ],
+    "fallbackProtocolVersion": "2024-11-05"
+  },
+  "note": "逐条消息样例。带 expect 的项是拒绝对照：expect.error 是服务端必须给出的 JSON-RPC error（通道 A），data.modelgateCode 是稳定码。parse-error 与 frame-too-large 检查的是原始行，payload 用 rawLine 表示。",
+  "messages": [
+    {
+      "id": "initialize.request",
+      "kind": "request",
+      "note": "客户端首条消息。capabilities 里的 sampling/roots 一律忽略：服务端不会反向发请求。",
+      "payload": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2024-11-05",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "codex",
+            "version": "0.167.0"
+          }
+        }
+      }
+    },
+    {
+      "id": "initialize.response",
+      "kind": "response",
+      "note": "serverInfo.version 形状为 ^\\\\d+\\\\.\\\\d+\\\\.\\\\d+$；具体数值由实现给出。",
+      "payload": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+          "protocolVersion": "2024-11-05",
+          "capabilities": {
+            "tools": {
+              "listChanged": false
+            }
+          },
+          "serverInfo": {
+            "name": "modelgate-delegation",
+            "version": "1.0.0"
+          }
+        }
+      }
+    },
+    {
+      "id": "initialized.notification",
+      "kind": "notification",
+      "note": "通知永不回响应（包括不回错误）。",
+      "payload": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "id": "ping.request",
+      "kind": "request",
+      "note": "初始化前后都可用。",
+      "payload": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "ping"
+      }
+    },
+    {
+      "id": "ping.response",
+      "kind": "response",
+      "payload": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {}
+      }
+    },
+    {
+      "id": "negotiate.unknown-version",
+      "kind": "request",
+      "note": "客户端版本不在支持集合内：不报错，以 2024-11-05 回显（协商降级）。",
+      "payload": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2099-01-01",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "future-client",
+            "version": "9.9.9"
+          }
+        }
+      },
+      "expect": {
+        "protocolVersion": "2024-11-05"
+      }
+    },
+    {
+      "id": "reject.batch",
+      "kind": "request",
+      "note": "顶层数组即批处理：不支持，整条拒绝。",
+      "payload": [
+        {
+          "jsonrpc": "2.0",
+          "id": 4,
+          "method": "ping"
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 5,
+          "method": "ping"
+        }
+      ],
+      "expect": {
+        "error": {
+          "code": -32600,
+          "modelgateCode": "MCP_BATCH_UNSUPPORTED"
+        }
+      }
+    },
+    {
+      "id": "reject.unknown-method",
+      "kind": "request",
+      "payload": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "resources/list"
+      },
+      "expect": {
+        "error": {
+          "code": -32601,
+          "modelgateCode": "MCP_METHOD_NOT_FOUND"
+        }
+      }
+    },
+    {
+      "id": "reject.not-initialized",
+      "kind": "request",
+      "note": "initialize 之前的工具调用：-32002。",
+      "payload": {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/list"
+      },
+      "expect": {
+        "error": {
+          "code": -32002,
+          "modelgateCode": "MCP_SERVER_NOT_INITIALIZED"
+        }
+      }
+    },
+    {
+      "id": "reject.unknown-tool",
+      "kind": "request",
+      "note": "工具名不在 5 个之内：通道 A，-32602。",
+      "payload": {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_spawn_native_agent",
+          "arguments": {}
+        }
+      },
+      "expect": {
+        "error": {
+          "code": -32602,
+          "modelgateCode": "MCP_UNKNOWN_TOOL"
+        }
+      }
+    },
+    {
+      "id": "reject.duplicate-initialize",
+      "kind": "request",
+      "note": "重复 initialize 不重置状态。",
+      "payload": {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2024-11-05",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "codex",
+            "version": "0.167.0"
+          }
+        }
+      },
+      "expect": {
+        "error": {
+          "code": -32600,
+          "modelgateCode": "MCP_INVALID_REQUEST"
+        }
+      }
+    },
+    {
+      "id": "reject.parse-error",
+      "kind": "request",
+      "note": "该行不是合法 JSON：id 为 null，连接继续。",
+      "rawLine": "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"ping\"",
+      "expect": {
+        "error": {
+          "code": -32700,
+          "modelgateCode": "MCP_PARSE_ERROR",
+          "id": null
+        }
+      }
+    },
+    {
+      "id": "reject.frame-too-large",
+      "kind": "request",
+      "note": "单行超过 1048576 字节：返回错误后 flush 并关闭连接（分帧已不可信，不再续读）。",
+      "rawLine": "<single line longer than 1048576 bytes>",
+      "expect": {
+        "error": {
+          "code": -32600,
+          "modelgateCode": "MCP_FRAME_TOO_LARGE"
+        },
+        "closeAfter": true
+      }
+    }
+  ]
+}

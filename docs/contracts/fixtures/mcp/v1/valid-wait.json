@@ -1,0 +1,20 @@
+{
+  "_comment": "合法 modelgate_wait_task 调用：timeoutMs 默认 15000、上限 60000。窗口结束返回 timedOut:true 且任务状态不变——等待超时不等于任务失败（契约 §5.4）。",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "fixture-wait-1",
+    "method": "tools/call",
+    "params": {
+      "name": "modelgate_wait_task",
+      "arguments": {
+        "taskRef": "mgtask-0123456789abcdef",
+        "timeoutMs": 15000,
+        "includeResult": true
+      }
+    }
+  },
+  "expect": {
+    "ok": true,
+    "timedOutIsNotFailure": true
+  }
+}
