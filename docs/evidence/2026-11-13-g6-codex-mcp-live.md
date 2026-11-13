@@ -61,18 +61,18 @@ codex exec --json --ephemeral --ignore-user-config --skip-git-repo-check \
 
 ## 4. 结果（真实回执）
 
-父模型最终单行回执（原样，来自 `receipt.json`）：
+父模型最终单行回执（原样，来自 `receipt.json`；本收据在**最终修复提交 `4159472` 之后的代码**上复跑）：
 
 ```
-E2E_OK | round1=MG-R1-E036FCBAAFEAF023 | round2=MG-R2-479B241A98DA1CC0 | taskRef=mgtask-be66411758f2ded8 | r1_state=RESULT_READY | r2_state=RESULT_READY | r1_sha256=676adc05189f8f7d936ef053b6a19eedb3ffb731615e01fa14b89d103bd2ae5f | r2_sha256=ecc56fed42a99c38d46cb3db1cf463feeed2a12f9a919c372a5a48dcfd108605
+E2E_OK | round1=MG-R1-6D64E746C4AF7A67 | round2=MG-R2-7EF3C40078C34F6A | taskRef=mgtask-76060688d83d54d8 | r1_state=RESULT_READY | r2_state=RESULT_READY | r1_sha256=5bd7c671c6b59a0861ed065181c6327e19b450447ab0829a146026cb7729e41b | r2_sha256=047dc8fb1b6ad4cf26cb3c14a8ee2c5cd71ea8eb4f07af3e29d022f04345a8ac
 ```
 
-- Codex 退出码 **0**；事件 15 条；父模型发起的 MCP 工具调用 4 次，全部 `completed`：
+- Codex 退出码 **0**；事件 14 条；父模型发起的 MCP 工具调用 4 次，全部 `completed`：
   `delegate_task` → `wait_task` → `followup_task` → `wait_task`。
-- 磁盘事实：`round1.txt` = `MG-R1-E036FCBAAFEAF023`（22 字节，sha256 = 父端报的 `676adc…`），`round2.txt` = `MG-R2-479B241A98DA1CC0`（22 字节，sha256 = `ecc56f…`）。**父端报的哈希与磁盘一致**，说明结果确实完整回到父模型。
-- MCP 侧任务记录：单 taskRef `mgtask-be66411758f2ded8`，provider `opencodego`，model `deepseek-v4.1-flash`；
-  两个 turn（delegate / followup）都是 `ACKNOWLEDGED`（父端读取过结果）；工具调用 2 次 / 6 次，失败 0 次；
-  每 turn 各自有独立 `resultDigest`。
+- 磁盘事实：`round1.txt` = `MG-R1-6D64E746C4AF7A67`（22 字节，sha256 = 父端报的 `5bd7c67…`），`round2.txt` = `MG-R2-7EF3C40078C34F6A`（22 字节，sha256 = `047dc8f…`）。**父端报的哈希与磁盘一致**，说明结果确实完整回到父模型。
+- MCP 侧任务记录：单 taskRef `mgtask-76060688d83d54d8`，provider `opencodego`，model `deepseek-v4.1-flash`；
+  两个 turn（delegate / followup）都是 `ACKNOWLEDGED`（父端读取过结果）；工具调用 2 次 / 3 次，失败 0 次；
+  每 turn 各自有独立 `resultDigest`（`08a270c1…` / `7b8a6f65…`），且不含 `state`。
 - **父端回执写 `RESULT_READY`、而记录里是 `ACKNOWLEDGED` 的解释**：MCP 的结果投递是"读取即确认"——
   `wait_task` 返回那一刻状态是 `RESULT_READY`（父端看到的就是这个值），同一次响应投递完成后服务端把它推进到
   `ACKNOWLEDGED`（契约 T11）。两者不是矛盾，而是同一事实的前后两点；`resultDigest` 不含 `state`，
@@ -80,9 +80,15 @@ E2E_OK | round1=MG-R1-E036FCBAAFEAF023 | round2=MG-R2-479B241A98DA1CC0 | taskRef
 - **同一 session 追派**：两轮共享同一 `taskRef` 与同一 `sessionRef`（记录里只有一条 sessionRef）。
 - **无重复派发**：父端只有 4 次 MCP 调用（2 次 delegate-family + 2 次 wait），MCP 侧只有 2 个 turn，没有重复创建。
 
-第一轮（更早一次运行，因工具调用超时未写出 receipt.json，但产物已落盘）：
-`round1.txt` = `MG-R1-09EA9E999FAC60A1`（sha256 `9c801a6e…`），`round2.txt` = `MG-R2-48788FD58488F32E`（sha256 `ccecc882…`），
-两轮同样 `ACKNOWLEDGED`、工具 2/3 次、使用量 1175/1309 tokens。两次独立运行都通过。
+### 三次独立真实运行（均为同一链路，互相独立）
+
+| 运行 | 挑战 1 / sha256 | 挑战 2 / sha256 | 工具调用 | 结果 |
+| --- | --- | --- | --- | --- |
+| #1（预修复代码；回执未落盘：工具调用超时，产物已落盘） | `MG-R1-09EA9E999FAC60A1` / `9c801a6e…` | `MG-R2-48788FD58488F32E` / `ccecc882…` | 2 / 3 | 两轮 `ACKNOWLEDGED` |
+| #2（预修复代码，完整收据） | `MG-R1-E036FCBAAFEAF023` / `676adc05…` | `MG-R2-479B241A98DA1CC0` / `ecc56fed…` | 2 / 6 | 两轮 `ACKNOWLEDGED`，父端回执 |
+| #3（**修复后代码**，当前提交基） | `MG-R1-6D64E746C4AF7A67` / `5bd7c671…` | `MG-R2-7EF3C40078C34F6A` / `047dc8fb…` | 2 / 3 | 两轮 `ACKNOWLEDGED`，父端回执 |
+
+三次都出现「父端回执 sha256 = 磁盘实际 sha256」，因此该结论不是单次偶然。
 
 ## 5. 未覆盖的真实项（不冒充）
 
