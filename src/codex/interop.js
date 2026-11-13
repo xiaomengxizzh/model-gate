@@ -721,7 +721,9 @@ function projectAgentMessage(item, mode, lossy) {
     }
   }
   if (own(item, 'encrypted_content') && item.encrypted_content != null && item.encrypted_content !== '') {
-    return { rejected: rejected('opaque_agent_message', 'agent_message 含非空 encrypted_content（密文/未知来源，绝不解密）') }
+    // The caller explicitly opted into plaintext projection. The encrypted field is
+    // never decoded or forwarded; it is dropped and the readable parts are kept.
+    lossy.push('agent_message_encrypted_field_dropped')
   }
   if (own(item, 'author') && item.author != null && typeof item.author !== 'string') {
     return { rejected: rejected('opaque_agent_message', 'agent_message.author 不是字符串') }
@@ -730,12 +732,18 @@ function projectAgentMessage(item, mode, lossy) {
     return { rejected: rejected('opaque_agent_message', 'agent_message.recipient 不是字符串') }
   }
   let body = ''
+  let encryptedParts = 0
   if (typeof item.content === 'string') {
     body = item.content
   } else if (Array.isArray(item.content)) {
     for (const part of item.content) {
       if (!isPlainObject(part)) {
         return { rejected: rejected('opaque_agent_message', 'agent_message.content 含非对象 part') }
+      }
+      if (part.type === 'encrypted_content' || own(part, 'encrypted_content')) {
+        encryptedParts++
+        lossy.push('agent_message_encrypted_part_dropped')
+        continue
       }
       for (const key of Object.keys(part)) {
         if (!CONTENT_PART_KEYS.has(key)) {
@@ -752,6 +760,14 @@ function projectAgentMessage(item, mode, lossy) {
     }
   } else {
     return { rejected: rejected('opaque_agent_message', 'agent_message.content 必须是字符串或 input_text/text 数组') }
+  }
+  if (body === '' && encryptedParts > 0) {
+    lossy.push('agent_message_dropped_opaque_only')
+    return { drop: true }
+  }
+  if (body === '' && own(item, 'encrypted_content') && item.encrypted_content != null && item.encrypted_content !== '') {
+    lossy.push('agent_message_dropped_opaque_only')
+    return { drop: true }
   }
   const author = typeof item.author === 'string' && item.author !== '' ? item.author : null
   const recipient = typeof item.recipient === 'string' && item.recipient !== '' ? item.recipient : null
@@ -857,6 +873,7 @@ export function projectOrderedHistory(input, route, plan) {
     if (type === 'agent_message') {
       const projected = projectAgentMessage(item, history.agentMessage, lossy)
       if (projected.rejected) return { input: null, lossy, rejected: projected.rejected }
+      if (projected.drop) continue
       out.push(projected.item)
       continue
     }

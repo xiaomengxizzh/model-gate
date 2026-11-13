@@ -439,19 +439,25 @@ export function createRouter(cfg) {
       capability: typeof rawBinding.capability === 'string' && rawBinding.capability ? rawBinding.capability : 'chat',
     }
     if (!cfg.providers || !cfg.providers[binding.provider]) throw catalogError(model, 'catalog_binding_invalid', '聚合目录模型 ' + model + ' 绑定的上游 ' + binding.provider + ' 未配置')
+    // The catalog binding carries identity, not wire/runtime policy. Resolve those
+    // from the original config entry so a native Responses child keeps api=responses
+    // and its codex projection flags after it becomes an aggregate slug.
+    const sourceModel = (cfg.models && cfg.models[binding.model]) || {}
+    const resolvedDef = {
+      provider: binding.provider,
+      api: sourceModel.api === 'responses' ? 'responses' : 'openai',
+      providerModels: { [binding.provider]: binding.model },
+      codexAggregate: true,
+      servingModel: binding.model,
+      capability: binding.capability,
+    }
+    if (sourceModel.codex) resolvedDef.codex = sourceModel.codex
     return {
       canonicalName: model,
       known: true,
       catalogGeneration: genOf(cat),
       catalogKey: cat.key || null,
-      def: {
-        provider: binding.provider,
-        api: 'openai',
-        providerModels: { [binding.provider]: binding.model },
-        codexAggregate: true,
-        servingModel: binding.model,
-        capability: binding.capability,
-      },
+      def: resolvedDef,
     }
   }
   function genOf(cat) {

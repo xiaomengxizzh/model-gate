@@ -111,6 +111,27 @@ test('P09 子 Go：plaintextTools 扁平化/删 encrypted，agent_message 明文
   assert.match(JSON.stringify(sent.input), /do work/)
 })
 
+test('P09 子 Go：加密 agent_message 只保留可读文本，密文片段不转发', { timeout: 30000 }, async (t) => {
+  const home = await makeAuthHome(makeToken('P09_PARTIAL_CANARY'))
+  const official = await startScriptedUpstream(async (req, res) => { res.writeHead(500); res.end('{}') })
+  const goHits = []
+  const go = await startScriptedUpstream(async (req, res, rec) => { rec.body = await readBody(req); goHits.push(rec); res.writeHead(200, { 'content-type': 'application/json' }); res.end(respJson('PARTIAL_OK')) })
+  const gw = await startGateway({ name: 'p09-partial', env: { HOME: home, CODEX_HOME: join(home, '.codex') }, config: config(official.base, go.base) })
+  t.after(async () => { await gw.stop(); await official.stop(); await go.stop(); await rm(home, { recursive: true, force: true }) })
+  const body = {
+    model: 'codex-deepseek',
+    input: [{ type: 'agent_message', author: '/root', recipient: '/root/w', content: [{ type: 'input_text', text: 'do work' }, { type: 'encrypted_content', encrypted_content: 'CIPHER' }] }],
+    tools: CHILD.tools,
+  }
+  const res = await gw.post('/v1/responses', body)
+  assert.equal(res.status, 200)
+  assert.equal((await res.json()).output_text, 'PARTIAL_OK')
+  const sent = goHits[0].body
+  assert.match(JSON.stringify(sent.input), /do work/)
+  assert.equal(JSON.stringify(sent).includes('CIPHER'), false)
+  assert.equal(JSON.stringify(sent).includes('encrypted_content'), false)
+})
+
 test('P09 第三方密文/加密工具 schema：发送前 400 零上游（item 级、字符串值、tool schema）', { timeout: 30000 }, async (t) => {
   const home = await makeAuthHome(makeToken('P09_OPAQUE_CANARY'))
   const official = await startScriptedUpstream(async (req, res) => { res.writeHead(200); res.end(respJson('must not hit')) })

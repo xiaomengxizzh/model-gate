@@ -70,6 +70,13 @@ test('聚合 slug：绑定 provider + 原模型名，providerModels/servingModel
   assert.equal(isCodexOfficialSlug(cfg, OFFICIAL_SLUG), true)
 })
 
+test('聚合 slug 保留原生 Responses 与 codex 投影策略', () => {
+  const cfg = cfgWith({ models: { 'vendor-chat': { provider: 'third', api: 'responses', codex: { plaintextTools: true, history: { agentMessage: 'project' } } } } })
+  const hit = createRouter(cfg).resolve(BINDING_SLUG)
+  assert.equal(hit.def.api, 'responses')
+  assert.deepEqual(hit.def.codex, { plaintextTools: true, history: { agentMessage: 'project' } })
+})
+
 test('聚合 slug 继承原模型能力声明（协议/思考强度/输出上限）', () => {
   const cfg = cfgWith({ models: { 'vendor-chat': { provider: 'third', api: 'openai', effortFormat: 'thinking', maxTokensMax: 4096 } } })
   const hit = createRouter(cfg).resolve(BINDING_SLUG)

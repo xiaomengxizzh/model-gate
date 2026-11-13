@@ -251,15 +251,28 @@ test('P02 agent_message=project：unicode 多 part 拼接、空正文、方向�
   assert.equal(noDirection.input[0].content[0].text, 'x')
 })
 
-test('P02 agent_message：reject/密文/未知字段/非字符串正文 → 发送前拒绝', () => {
+test('P02 agent_message：reject/未知字段/非字符串正文拒绝；密文可读部分投影', () => {
   const plan = buildToolPlan(undefined, makeRoute()).plan
   const reject = projectOrderedHistory([REAL_AGENT_MESSAGE], makeRoute({ history: { agentMessage: 'reject' } }), plan)
   assert.equal(reject.rejected.code, 'agent_message_unsupported')
+
+  const encrypted = projectOrderedHistory([
+    { type: 'agent_message', content: [{ type: 'input_text', text: 'x' }, { type: 'encrypted_content', encrypted_content: 'CIPHER' }] },
+  ], makeRoute(), plan)
+  assert.equal(encrypted.rejected, null)
+  assert.match(JSON.stringify(encrypted.input), /x/)
+  assert.equal(JSON.stringify(encrypted).includes('CIPHER'), false, '投影结果不得转发密文')
+
+  const encryptedOnly = projectOrderedHistory([
+    { type: 'agent_message', content: [{ type: 'encrypted_content', encrypted_content: 'CIPHER' }] },
+  ], makeRoute(), plan)
+  assert.equal(encryptedOnly.rejected, null)
+  assert.deepEqual(encryptedOnly.input, [])
+  assert.ok(encryptedOnly.lossy.includes('agent_message_dropped_opaque_only'))
+
   for (const bad of [
-    { type: 'agent_message', content: [{ type: 'input_text', text: 'x' }], encrypted_content: 'CIPHER' },
     { type: 'agent_message', content: [{ type: 'input_text', text: 'x' }], unexpected: true },
     { type: 'agent_message', content: [{ type: 'input_text', text: 7 }] },
-    { type: 'agent_message', content: [{ type: 'encrypted_content', encrypted_content: 'CIPHER' }] },
     { type: 'agent_message', content: 7 },
   ]) {
     const r = projectOrderedHistory([bad], makeRoute(), plan)
@@ -502,13 +515,14 @@ test('P02 prepareCodexNativeRequest：投影 body/plan/lossy，且不改原 body
   assert.deepEqual(body, snapshot)
 })
 
-test('P02 prepareCodexNativeRequest：不可读密文/未支持项在发送前拒绝（零 body）', () => {
+test('P02 prepareCodexNativeRequest：密文可读部分投影，未支持项仍拒绝', () => {
   const encrypted = prepareCodexNativeRequest({
     model: 'codex-deepseek',
     input: [{ type: 'agent_message', content: [{ type: 'input_text', text: 'x' }, { type: 'encrypted_content', encrypted_content: 'CIPHER' }] }],
   }, makeRoute())
-  assert.equal(encrypted.body, null)
-  assert.equal(encrypted.rejected.code, 'opaque_agent_message')
+  assert.notEqual(encrypted.body, null)
+  assert.equal(encrypted.rejected, null)
+  assert.match(JSON.stringify(encrypted.body.input), /x/)
   assert.equal(JSON.stringify(encrypted).includes('CIPHER'), false)
   const store = prepareCodexNativeRequest({ model: 'codex-deepseek', input: 'hi', store: true }, makeRoute())
   assert.equal(store.body, null)

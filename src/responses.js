@@ -572,6 +572,13 @@ export function prepareCodexNativeRequest(body, route) {
     if (history.rejected) return fail(history.rejected)
     const projected = Object.assign({}, body)
     projected.input = history.input
+    // OpenCode Go rejects portable-only top-level controls that are specific to the
+    // official target. They carry no conversation content, so drop them for third-party
+    // native routes; keep them for the official branch.
+    if (!(route && route.codex && route.codex.official === true)) {
+      delete projected.access_programs
+      delete projected.prompt_cache_key
+    }
     if (planned.plan.declarations !== undefined) projected.tools = planned.plan.declarations
     else delete projected.tools
     if (planned.plan.toolChoice !== undefined) projected.tool_choice = planned.plan.toolChoice
