@@ -339,7 +339,10 @@ function appendCallItems(inputItems, calls, results) {
     if (!call) continue
     const callId = call.call_id || call.id || null
     const argsText = typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments || {})
-    inputItems.push({ type: 'function_call', call_id: callId, name: call.name || '', arguments: argsText })
+    // 回传上游给的 item id（若存在）：部分 Responses 实现在续轮要求 id 与 call_id 同时对上。
+    const item = { type: 'function_call', call_id: callId, name: call.name || '', arguments: argsText }
+    if (typeof call.id === 'string' && call.id) item.id = call.id
+    inputItems.push(item)
     const out = results[i] ? results[i].payload : JSON.stringify({ error: ERRORS.TOOL_EXEC_FAILED })
     inputItems.push({ type: 'function_call_output', call_id: callId, output: out })
   }

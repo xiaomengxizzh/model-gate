@@ -14,18 +14,18 @@
 | G3 MCP MVP | 完成 | `bin/mg-mcp.mjs` + `src/mcp/delegation-{contract,store,tools,executor,server}.js`；delegate/get/wait/cancel + 本地受限工具；证据：[G3/G4 证据](evidence/2026-11-13-mcp-delegation-g3-g4.md) |
 | G4 同 session 追派与恢复 | 完成（mock） | followup 复用同一 Go session；重启对账把在途回合标 `UNKNOWN` 且禁止重发；ACK 语义与 `resultDigest` 稳定 |
 | G5 安全与协议验收 | 完成（mock） | 拒绝矩阵 15 条 + 归属隔离 + 凭据/会话头隔离；SSE 终态/取消/超时独立回归 8 用例：[审计](evidence/2026-11-13-sse-lifecycle-audit.md) |
-| G6 CLI 真实验收 | 待执行 | 需要 `gpt6luna` 父模型 + 真实 Go 额度授权；未执行前标记 `NOT_RUN` |
-| G7 Desktop | NOT_RUN | 独立验收矩阵，不从 CLI 推断 |
-| G8 GUI 与发布整合 | NOT_RUN | 需所有者批准后才 push/PR/合并 |
+| G6 CLI 真实验收 | **完成（PASS real）** | 真实 Codex 0.167.0 + 父模型 `gpt-6-luna`（官方直连）+ 真实 OpenCode Go `deepseek-v4.1-flash`；两轮 `ACKNOWLEDGED`、父端最终回执含两个正确 sha256：[G6 证据](evidence/2026-11-13-g6-codex-mcp-live.md)、[脱敏收据](evidence/2026-11-13-g6-receipt.json) |
+| G7 Desktop | NOT_RUN | 需所有者在本机 GUI 会话按 [Desktop 验收矩阵](roadmap/2026-11-13-g7-desktop-acceptance-matrix.md) 独立执行；本轮不从 CLI 推断 |
+| G8 GUI 与发布整合 | 准备完成、未合并 | [发布整合方案](roadmap/2026-11-13-g8-release-integration.md)：整合形态为 fast-forward 语义，风险在审阅面；未 push/未 PR/未合并 |
 
 本轮门禁（本机复跑）：
 
 | 命令 | exit | 结果 |
 | --- | --- | --- |
 | `npm run check` | 0 | 全 `node --check` + UI 16/16 |
-| `npm test` | 0 | 79 套件通过 / 0 失败；806 通过 / 1 跳过 |
-| `npm run docs:check` | 0 | 见本轮提交前复跑 |
-| `node scripts/check-metadata.mjs` | 0 | 见本轮提交前复跑 |
+| `npm test` | 0 | 79 套件通过 / 0 失败；806 通过 / 1 跳过（75.1s） |
+| `npm run docs:check` | 0 | PASS |
+| `node scripts/check-metadata.mjs` | 0 | PASS (39) |
 | `git diff --check` | 0 | 无空白错误 |
 
 ## 2026-11-13 原生 Codex 执行复核

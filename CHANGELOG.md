@@ -2,6 +2,13 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+### Verified (real) —— G6
+
+- **真实链路已通过**：Codex CLI 0.167.0（用户自己的 ChatGPT 官方登录，父模型 `gpt-6-luna` 直连官方服务）通过本机 stdio MCP 调用 `modelgate_delegate_task` → `modelgate_wait_task` → `modelgate_followup_task` → `modelgate_wait_task`，两个回合均 `ACKNOWLEDGED`，子任务（`deepseek-v4.1-flash`，provider `opencodego`）真实执行本地文件工具并落盘，父端最终回执里的两个 `sha256` 与磁盘一致。
+- 运行参数：`--ephemeral`（不写会话文件）、`--ignore-user-config`（不加载/不修改 `config.toml`）、MCP 服务经 `-c` 命令行覆盖注入；未读取或转发 `auth.json`。
+- 父模型标识核验：CLI 显式 `-m gpt-6-luna` + `codex doctor --json` 解析结果为 `model=gpt-6-luna / model provider=openai` + `codex debug models` 目录存在该 slug；**限制**：`exec --json` 事件流不含 `model` 字段，已在证据文档记录该限制，未从会话文件反推。
+- 证据：[G6 真实链路](docs/evidence/2026-11-13-g6-codex-mcp-live.md)、[脱敏收据](docs/evidence/2026-11-13-g6-receipt.json)。
+
 ## [Unreleased] —— 2026-11-13 本地 MCP 委派（G2–G5）
 
 ### Added

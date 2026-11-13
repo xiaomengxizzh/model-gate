@@ -1,0 +1,100 @@
+{
+  "contract": "modelgate-mcp-delegation-v1",
+  "date": "2026-11-13",
+  "runId": "e2e8a1121",
+  "codex": {
+    "version": "0.167.0",
+    "exitCode": 0,
+    "model": "gpt-6-luna",
+    "modelVerifiedBy": [
+      "-m gpt-6-luna pinned at invocation",
+      "codex doctor --json -c model=\"gpt-6-luna\" => model=gpt-6-luna, model provider=openai",
+      "codex debug models => slug gpt-6-luna present",
+      "no model_provider/base_url override => official endpoint"
+    ],
+    "flags": [
+      "--json",
+      "--ephemeral",
+      "--ignore-user-config",
+      "--skip-git-repo-check",
+      "--dangerously-bypass-approvals-and-sandbox"
+    ]
+  },
+  "evidenceLimitation": "codex exec --json (0.167.0) 的事件流不含 model 字段（实测 modelSeenInEvents=null）；因此父模型标识由「CLI 显式 -m + 运行时 doctor 解析结果 + 目录条目」三方交叉确认，未从会话文件推断。",
+  "parentToolCalls": [
+    {
+      "name": "modelgate_delegate_task",
+      "server": "modelgate",
+      "status": "completed"
+    },
+    {
+      "name": "modelgate_wait_task",
+      "server": "modelgate",
+      "status": "completed"
+    },
+    {
+      "name": "modelgate_followup_task",
+      "server": "modelgate",
+      "status": "completed"
+    },
+    {
+      "name": "modelgate_wait_task",
+      "server": "modelgate",
+      "status": "completed"
+    }
+  ],
+  "parentFinalMessage": "E2E_OK | round1=MG-R1-E036FCBAAFEAF023 | round2=MG-R2-479B241A98DA1CC0 | taskRef=mgtask-be66411758f2ded8 | r1_state=RESULT_READY | r2_state=RESULT_READY | r1_sha256=676adc05189f8f7d936ef053b6a19eedb3ffb731615e01fa14b89d103bd2ae5f | r2_sha256=ecc56fed42a99c38d46cb3db1cf463feeed2a12f9a919c372a5a48dcfd108605",
+  "files": {
+    "round1": {
+      "bytes": 22,
+      "sha256": "676adc05189f8f7d936ef053b6a19eedb3ffb731615e01fa14b89d103bd2ae5f",
+      "text": "MG-R1-E036FCBAAFEAF023"
+    },
+    "round2": {
+      "bytes": 22,
+      "sha256": "ecc56fed42a99c38d46cb3db1cf463feeed2a12f9a919c372a5a48dcfd108605",
+      "text": "MG-R2-479B241A98DA1CC0"
+    }
+  },
+  "tasks": [
+    {
+      "taskRef": "mgtask-be66411758f2ded8",
+      "provider": "opencodego",
+      "model": "deepseek-v4.1-flash",
+      "turns": [
+        {
+          "turnRef": "mgturn-56926875bbe5e8d0",
+          "state": "ACKNOWLEDGED",
+          "kind": "delegate",
+          "toolCallCount": 2,
+          "digest": "ae6209f1c48ce2d9567413e5629abac0708489aa21e18252769809048cfb0316",
+          "error": null
+        },
+        {
+          "turnRef": "mgturn-1a43e129a7bde4e1",
+          "state": "ACKNOWLEDGED",
+          "kind": "followup",
+          "toolCallCount": 6,
+          "digest": "7fe3ef550dd3926272931e84528080c007a2091e66abb1fd2df0c122d487eef4",
+          "error": null
+        }
+      ]
+    }
+  ],
+  "eventTypes": [
+    "thread.started",
+    "turn.started",
+    "item.completed",
+    "item.started",
+    "turn.completed"
+  ],
+  "stdoutEvents": 15,
+  "stderrTail": "2026-11-13T14:01:42.331449Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out\n2026-11-13T14:01:42.358949Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out\n2026-11-13T14:01:47.630534Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out\n",
+  "secretScan": {
+    "patterns": [
+      "sk-<16+>"
+    ],
+    "hits": 2,
+    "note": "两处命中均为 mgtask-<hex> 中的子串 \"sk-\"，非凭据；未发现 Bearer/eyJ 命中"
+  }
+}
