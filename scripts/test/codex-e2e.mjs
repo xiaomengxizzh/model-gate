@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// M2-3：真实 Codex CLI 0.167.0 三轮回环双 mock（opt-in，不进默认 SUITES）。
+// 真实 Codex CLI 0.167.0 + ModelGate + 双回环 mock（opt-in）。
+// 默认验证三轮模型切换，--native-v2 验证原生父子派发、工具结果与同子追派。
 import http from 'node:http'
+import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -91,10 +93,12 @@ function checkManifest() {
 
 const CODEX = process.env.CODEX_BIN || '/home/xiaomengxizi/.local/bin/codex'
 const SYNTHETIC_KEY = 'sk-synthetic-not-real'
+const SYNTHETIC_GO_KEY = 'sk-synthetic-go-not-real'
 const PRODUCT_DEFAULT_MAX_BODY = 32 * 1024 * 1024
 const FIXTURE_MAX_BODY = 1024 * 1024
 const OFFICIAL_SLUG = 'gpt-synthetic-official'
-const THIRD_MODEL = 'deepseek-mock'
+const NATIVE_V2 = process.argv.includes('--native-v2')
+const THIRD_MODEL = NATIVE_V2 ? 'deepseek-v4.1-flash' : 'deepseek-mock'
 const TURN1 = 'TURN1_OK'
 const TURN2 = 'TURN2_OK'
 const TURN3 = 'TURN3_OK'
@@ -103,6 +107,9 @@ const TOOL_CALL_ID = 'call_turn1_pwd'
 function arg (name, dflt) { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : dflt }
 const codexBin = arg('--codex', CODEX)
 const KEEP = process.argv.includes('--keep')
+const TASK_A = 'MG_A_' + randomUUID()
+const TASK_B = 'MG_B_' + randomUUID()
+const CHILD_TASK = 'modelgate_worker'
 
 const checks = []
 function check (name, ok, detail) {
@@ -147,15 +154,18 @@ function sseText (res, model, text) {
   })
 }
 
-function sseToolCall (res, model, callId, toolArgs) {
+function sseToolCall (res, model, callId, toolArgs, spec = {}) {
   const argText = JSON.stringify(toolArgs)
+  const { plaintext, ...identity } = { name: 'exec_command', ...spec }
+  const completed = { id: 'fc1', type: 'function_call', status: 'completed', ...identity, arguments: argText, call_id: callId }
+  if (plaintext) completed.encrypted_function_args = []
   sse(res, (emit) => {
     emit('response.created', { type: 'response.created', response: { id: 'r-' + Date.now(), object: 'response', status: 'in_progress', model, output: [] } })
-    emit('response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: { id: 'fc1', type: 'function_call', status: 'in_progress', name: 'exec_command', arguments: '', call_id: callId } })
+    emit('response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: { id: 'fc1', type: 'function_call', status: 'in_progress', ...identity, arguments: '', call_id: callId } })
     emit('response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', item_id: 'fc1', output_index: 0, delta: argText })
     emit('response.function_call_arguments.done', { type: 'response.function_call_arguments.done', item_id: 'fc1', output_index: 0, arguments: argText })
-    emit('response.output_item.done', { type: 'response.output_item.done', output_index: 0, item: { id: 'fc1', type: 'function_call', status: 'completed', name: 'exec_command', arguments: argText, call_id: callId } })
-    emit('response.completed', { type: 'response.completed', response: { id: 'r-' + Date.now(), object: 'response', status: 'completed', model, output: [{ id: 'fc1', type: 'function_call', status: 'completed', name: 'exec_command', arguments: argText, call_id: callId }], usage: { input_tokens: 8, output_tokens: 4, total_tokens: 12 } } })
+    emit('response.output_item.done', { type: 'response.output_item.done', output_index: 0, item: completed })
+    emit('response.completed', { type: 'response.completed', response: { id: 'r-' + Date.now(), object: 'response', status: 'completed', model, output: [completed], usage: { input_tokens: 8, output_tokens: 4, total_tokens: 12 } } })
   })
 }
 
@@ -187,6 +197,35 @@ async function readAll (req) {
   return Buffer.concat(chunks)
 }
 
+function nativeV2Parent(res, body, state) {
+  const input = body.input || []
+  const collab = body.tools?.find((tool) => tool.type === 'namespace' && tool.name === 'collaboration')
+  const spawn = collab?.tools?.find((tool) => tool.name === 'spawn_agent')
+  state.nativeTools = Boolean(spawn && collab.tools.some((tool) => tool.name === 'followup_task'))
+  const observed = bodyTextOf(input)
+  if (!state.nativeTools) return sseText(res, body.model, 'NATIVE_TOOLS_UNAVAILABLE')
+  const invoke = (name, id, args, plaintext = false) => sseToolCall(res, body.model, id, args, { name, namespace: 'collaboration', plaintext })
+  if (!state.spawned) {
+    state.spawned = true
+    return invoke('spawn_agent', 'call_mg_spawn', { task_name: CHILD_TASK, model: aggregateSlug, fork_turns: 'none', message: TASK_A }, true)
+  }
+  if (observed.includes('CHILD_DONE_' + TASK_A) && !state.followedUp) {
+    state.followedUp = true
+    return invoke('followup_task', 'call_mg_followup', { target: '/root/' + CHILD_TASK, message: TASK_B }, true)
+  }
+  if (observed.includes('CHILD_DONE_' + TASK_B)) {
+    state.receivedBoth = state.followedUp === true
+    return sseText(res, body.model, 'MODEL_GATE_NATIVE_OK')
+  }
+  if (input.some((item) => item.type === 'function_call' && item.name === 'wait_agent' &&
+      input.some((output) => output.type === 'function_call_output' && output.call_id === item.call_id && /Wait timed out/.test(output.output)))) {
+    return sseText(res, body.model, 'NATIVE_WAIT_TIMEOUT')
+  }
+  state.waits = (state.waits || 0) + 1
+  if (state.waits > 5) return sseText(res, body.model, 'NATIVE_CHILD_RESULT_MISSING')
+  return invoke('wait_agent', 'call_mg_wait_' + state.waits, { timeout_ms: 5000 })
+}
+
 async function startOfficialMock () {
   const hits = []
   const state = { toolCallSeen: null, toolOutput: null, round3Context: null, lastUserTexts: [] }
@@ -197,7 +236,7 @@ async function startOfficialMock () {
     try { body = JSON.parse(raw.toString('utf8')) } catch {}
     const input = Array.isArray(body.input) ? body.input : []
     hits.push({ url: req.url, headers: req.headers, model: body.model, input, len: raw.length })
-    const outputs = input.filter((i) => i && i.type === 'function_call_output')
+    if (NATIVE_V2) return nativeV2Parent(res, body, state)
     const text = lastUserText(input)
     state.lastUserTexts.push(text.slice(0, 60))
     const lastItem = input.length ? input[input.length - 1] : null
@@ -229,6 +268,18 @@ async function startThirdMock () {
     let body = {}
     try { body = JSON.parse(raw.toString('utf8')) } catch {}
     hits.push({ url: req.url, headers: req.headers, body, len: raw.length })
+    if (NATIVE_V2) {
+      const input = Array.isArray(body.input) ? body.input : []
+      const text = bodyTextOf(input)
+      const marker = text.includes(TASK_B) ? TASK_B : text.includes(TASK_A) ? TASK_A : null
+      if (!marker) return sseText(res, body.model, 'CHILD_TASK_MISSING')
+      const toolCallId = 'call_tool_' + marker
+      const output = input.find((item) => item.type === 'function_call_output' && item.call_id === toolCallId)
+      if (!output) return sseToolCall(res, body.model, toolCallId, { cmd: "printf '%s\\n' " + marker })
+      state.toolOutputs ||= new Set()
+      if (String(output.output).includes(marker)) state.toolOutputs.add(marker)
+      return sseText(res, body.model, state.toolOutputs.has(marker) ? 'CHILD_DONE_' + marker : 'CHILD_TOOL_RESULT_MISSING')
+    }
     state.lastMessages = (body.messages || []).map((m) => ({ role: m && m.role, text: typeof (m && m.content) === 'string' ? m.content.slice(0, 160) : String(JSON.stringify(m && m.content)).slice(0, 160) }))
     const text = bodyTextOf((body.messages || []).map((m) => ({ content: m && m.content })))
     state.contextSeen = /TURN1_OK/.test(text)
@@ -322,8 +373,9 @@ const codexHome = await mkdtemp(join(runtimeTmp, 'mg-e2e-cli-ch-'))
 const cwd = await mkdtemp(join(runtimeTmp, 'mg-e2e-cli-cwd-'))
 const work = await mkdtemp(join(runtimeTmp, 'mg-e2e-cli-work-'))
 const basePath = join(work, 'official-base.json')
+const parentCatalogRow = officialModel(NATIVE_V2 ? { multi_agent_version: 'v2' } : {})
 const catalogPath = join(work, 'codex-catalog.json')
-await writeFile(basePath, JSON.stringify({ models: [officialModel()] }), 'utf8')
+await writeFile(basePath, JSON.stringify({ models: [parentCatalogRow] }), 'utf8')
 await writeFile(join(home, 'README-synthetic.txt'), 'synthetic home; no real credentials\n', 'utf8')
 
 const gatewayConfig = {
@@ -336,19 +388,29 @@ const gatewayConfig = {
     timeout: { firstByteMs: 60000, idleMs: 60000 },
   },
   providers: {
-    'codex-official': { baseUrl: 'http://localhost:' + official.port, codexIdentity: 'official', responsesPath: '/backend-api/codex/responses' },
-    third: { baseUrl: 'http://127.0.0.1:' + third.port + '/v1', api: 'openai' },
+    'codex-official': { baseUrl: 'http://localhost:' + official.port, codexIdentity: 'official', apiKeyEnv: 'MG_E2E_OFFICIAL_KEY' },
+    third: { baseUrl: 'http://127.0.0.1:' + third.port + '/v1', api: 'openai', ...(NATIVE_V2 ? { apiKeyEnv: 'MG_E2E_GO_KEY' } : {}) },
   },
   models: {
-    [THIRD_MODEL]: { provider: 'third', api: 'openai', maxContext: 128000, effortOptions: ['low', 'medium', 'high'], reasoning: 'low' },
+    [THIRD_MODEL]: {
+      provider: 'third', api: NATIVE_V2 ? 'responses' : 'openai', maxContext: 128000, effortOptions: ['low', 'medium', 'high'], reasoning: 'low',
+      codex: {
+        ...(NATIVE_V2 ? { plaintextTools: true, history: { agentMessage: 'project' } } : {}),
+        capabilities: { shellType: 'unified_exec', applyPatchToolType: 'freeform' },
+        evidence: {
+          shellType: { source: 'offline loopback fixture', observedAt: new Date().toISOString() },
+          applyPatchToolType: { source: 'offline loopback fixture', observedAt: new Date().toISOString() },
+        },
+      },
+    },
   },
 }
 
-const built = buildCatalog({ base: { models: [officialModel()] }, config: gatewayConfig })
+const built = buildCatalog({ base: { models: [parentCatalogRow] }, config: gatewayConfig })
 const aggregateSlug = Object.keys(built.meta.bindings || {})[0]
 await writeFile(catalogPath, serializeCatalog(built.catalog, { format: 'catalog-json' }), 'utf8')
 
-const gw = await startGateway({ name: 'm4e2e', env: { MG_CODEX_OFFICIAL_PASSTHROUGH: '1' }, config: gatewayConfig })
+const gw = await startGateway({ name: 'm4e2e', env: { MG_E2E_OFFICIAL_KEY: SYNTHETIC_KEY, MG_E2E_GO_KEY: SYNTHETIC_GO_KEY }, config: gatewayConfig })
 
 const env = {
   HOME: home,
@@ -362,7 +424,7 @@ const env = {
   HTTP_PROXY: 'http://127.0.0.1:9',
   HTTPS_PROXY: 'http://127.0.0.1:9',
   ALL_PROXY: 'http://127.0.0.1:9',
-  NO_PROXY: '',
+  NO_PROXY: '127.0.0.1,localhost,::1',
 }
 
 async function assertLockedVersion(env, cwd) {
@@ -385,10 +447,37 @@ const round3Strace = join(work, 'round3.strace')
 const debugStrace = join(work, 'debug.strace')
 
 
-try {
-  await assertLockedVersion(env, cwd)
-  console.log('v2LifecycleManifest=' + JSON.stringify({ version: LOCKED_CODEX_VERSION, cases: V2_CASES.length, status: 'FIXTURE_PREPARED', execution: 'Q02' }))
+async function runNativeV2Fixture() {
+  const args = baseArgs(OFFICIAL_SLUG, 'Run the synthetic native collaboration fixture.', false)
+  args.splice(args.indexOf('exec'), 0, '--enable', 'multi_agent_v2')
+  const result = await runCodex(args, env, cwd, round1Strace, 45000)
+  const evidence = { nativeTools: !!official.state.nativeTools, spawned: !!official.state.spawned, followedUp: !!official.state.followedUp, parentHits: official.hits.length, childHits: third.hits.length, toolRounds: third.state.toolOutputs?.size || 0 }
+  check('ModelGate 原生 V2：父工具已发布并完成两轮', result.code === 0 && official.state.receivedBoth && result.out.includes('MODEL_GATE_NATIVE_OK'), JSON.stringify(evidence))
+  const childCalls = third.hits.map(({ body }) => bodyTextOf((body.input || []).filter((item) => item.type === 'message' && item.role === 'user')))
+  check('ModelGate 原生 V2：第三方两轮各自收到任务并回填真实 Codex 工具结果',
+    [TASK_A, TASK_B].every((marker) => childCalls.some((text) => text.includes(marker)) && third.state.toolOutputs?.has(marker)), JSON.stringify(evidence))
+  check('ModelGate 原生 V2：子请求命中独立路由与原模型名', third.hits.length > 0 &&
+    third.hits.every(({ body, url }) => body.model === THIRD_MODEL && url === '/v1/responses'), JSON.stringify(evidence))
+  check('ModelGate 原生 V2：父子上游各自只收到配置的合成 Key', official.hits.length > 0 && third.hits.length > 0 &&
+    official.hits.every(({ headers }) => headers.authorization === 'Bearer ' + SYNTHETIC_KEY) &&
+    third.hits.every(({ headers }) => headers.authorization === 'Bearer ' + SYNTHETIC_GO_KEY && !headers['chatgpt-account-id']))
+  const parentId = (result.out.match(/"type":"thread\.started","thread_id":"([0-9a-f-]{36})"/) || [])[1]
+  const children = []
+  const sessions = join(codexHome, 'sessions')
+  if (existsSync(sessions)) {
+    for (const file of await readdir(sessions, { recursive: true })) {
+      if (!file.endsWith('.jsonl')) continue
+      const events = (await readFile(join(sessions, file), 'utf8')).trim().split('\n').map(JSON.parse)
+      const meta = events.find((event) => event.type === 'session_meta')?.payload
+      if (parentId && meta?.source?.subagent?.thread_spawn?.parent_thread_id === parentId) children.push(events)
+    }
+  }
+  check('ModelGate 原生 V2：仅一个原生子线程，且同一子线程有两个独立 turn', children.length === 1 &&
+    new Set(children[0].filter((event) => event.type === 'turn_context').map((event) => event.payload.turn_id)).size === 2)
+  if (!official.state.receivedBoth) console.log('CLI fixture diagnostics:', result.out.slice(-2100), result.err.slice(-800))
+}
 
+async function runSwitchingFixture() {
   // 0) 目录可验证：真实 CLI debug models 加载生成目录
   const dbg = await runCodex(['--disable', 'plugins', '--disable', 'remote_plugin', '--disable', 'plugin_discovery_prefetch', 'debug', 'models', '-c', 'model_catalog_json="' + catalogPath + '"'], env, cwd, debugStrace, 120000)
   let dbgModels = []
@@ -418,7 +507,7 @@ try {
   if (!third.state.contextSeen) console.log('DEBUG third messages=' + JSON.stringify(third.state.lastMessages))
   check('第2轮：上下文连续（第三方收到第1轮内容）', third.state.contextSeen === true, 'round2=' + String(third.state.round2Text))
   check('第2轮：无历史 502 candidate-pool 回归（M2-3 22/27）', r2.code === 0 && !/502|candidate pool|候选池无可用项/i.test(r2.out + r2.err), (r2.err || r2.out).slice(-300))
-  check('第2轮：上游收到原模型名而不是聚合 slug', third.hits.every((h) => (h.body.model || '') === THIRD_MODEL), JSON.stringify(third.hits.map((h) => h.body.model)))
+  check('第2轮：上游收到原模型名而不是聚合 slug', third.hits.length > 0 && third.hits.every((h) => h.body.model === THIRD_MODEL), JSON.stringify(third.hits.map((h) => h.body.model)))
 
   // 第 3 轮：同线程切回官方
   const officialBefore3 = official.hits.length
@@ -467,7 +556,7 @@ try {
     body: JSON.stringify({ model: aggregateSlug, input: [{ type: 'agent_message', content: [{ type: 'input_text', text: 'hello', encrypted_content: 'sk-cipher-sentinel' }] }] }),
   })
   const v2text = await v2res.text()
-  check('v2 密文：400 显式拒绝', v2res.status === 400 && /v2_encrypted_task_unsupported/.test(v2text), 'status=' + v2res.status + ' body=' + v2text.slice(0, 300))
+  check('v2 密文：400 显式拒绝', v2res.status === 400 && /opaque_agent_message|v2_encrypted_task_unsupported/.test(v2text), 'status=' + v2res.status + ' body=' + v2text.slice(0, 300))
   check('v2 密文：零上游命中', official.hits.length === beforeV2.official && third.hits.length === beforeV2.third, JSON.stringify(beforeV2) + ' -> ' + JSON.stringify({ official: official.hits.length, third: third.hits.length }))
 
   // 请求体上限（夹具 1 MiB；产品默认 32 MiB；旧 65,536 字节上限的回归）
@@ -483,6 +572,15 @@ try {
   check('线程：第2/3轮均以同一 thread id resume 成功', r1.code === 0 && r2.code === 0 && r3.code === 0 && !!thread)
   console.log('\nthread=' + thread + ' aggregate=' + aggregateSlug + ' officialHits=' + official.hits.length + ' thirdHits=' + third.hits.length)
   console.log('fixtureMaxBody=' + FIXTURE_MAX_BODY + ' productDefaultMaxBody=' + PRODUCT_DEFAULT_MAX_BODY)
+}
+
+try {
+  await assertLockedVersion(env, cwd)
+  if (NATIVE_V2) await runNativeV2Fixture()
+  else {
+    console.log('v2LifecycleManifest=' + JSON.stringify({ version: LOCKED_CODEX_VERSION, cases: V2_CASES.length, status: 'FIXTURE_PREPARED', execution: 'Q02' }))
+    await runSwitchingFixture()
+  }
 } finally {
   await gw.stop()
   await official.stop()

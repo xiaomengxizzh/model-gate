@@ -4,7 +4,7 @@ import { gunzipSync } from 'node:zlib'
 import { Readable } from 'node:stream'
 import { randomUUID, createHash } from 'node:crypto'
 import { adapterFor, cacheHitMiss, hasTools, mapErrorEnvelope } from './format.js'
-import { buildProvider, modelTarget } from './router.js'
+import { buildProvider, codexBindingFor, modelTarget } from './router.js'
 import { isStreamResponse } from './sse.js'
 import { forwardOnce, execute, makeAdapter, upstreamUrl } from './request.js'
 import { createDeadline } from './deadline.js'
@@ -377,10 +377,17 @@ function codexBudgetOf(cfg, spentUsd) {
 // 生产路径仍只经 codexBudgetForDecision 调用，不新增行为。
 export function __codexBudgetOfForTest(cfg, spentUsd) { return codexBudgetOf(cfg, spentUsd) }
 
+function codexModelDefinition(cfg, model, pid) {
+  const models = cfg.models || {}
+  if (models[model]) return models[model]
+  const binding = codexBindingFor(cfg, model)
+  return binding && binding.provider === pid ? models[binding.model] : undefined
+}
+
 // 单次费用估算：models.<m>.costEstimateUsd > providers.<p>.costEstimateUsd；都未配置 = 未知。
 function codexEstimateFor(cfg) {
   return (model, pid) => {
-    const m = cfg.models && model ? cfg.models[model] : null
+    const m = codexModelDefinition(cfg, model, pid)
     const p = cfg.providers && pid ? cfg.providers[pid] : null
     for (const v of [m && m.costEstimateUsd, p && p.costEstimateUsd]) {
       const n = Number(v)
@@ -428,8 +435,7 @@ function codexRequestInfoOf(body) {
 
 // 候选能力只来自配置/目录声明，绝不复制请求 tools（审计 P1 / T-ROUTE-01）。
 // 未声明 capabilities ⇒ 工具能力为空（请求带工具时该候选不可入选），而不是"请求需要什么就支持什么"。
-function codexCapabilitiesOf(cfg, model) {
-  const md = cfg.models && model ? cfg.models[model] : null
+function codexCapabilitiesOf(md) {
   const codex = md && md.codex && typeof md.codex === 'object' ? md.codex : {}
   const declared = codex.capabilities && typeof codex.capabilities === 'object' ? codex.capabilities : null
   const contextWindow = Number((md && md.maxContext) || codex.contextWindow || 0) || 0
@@ -447,7 +453,7 @@ function codexCandidateFor(cfg, model, pid, now, primary) {
   const built = buildProvider(cfg, pid)
   const identity = classifyTarget(built, cfg)
   const official = identity.kind === 'official'
-  const md = cfg.models && model ? cfg.models[model] : null
+  const md = codexModelDefinition(cfg, model, pid)
   const keyMissing = !!(built._def && built._def.apiKeyEnv && !built.keyOk)
   const bag = {
     authorization: facts.evidence(!official && !keyMissing, { source: facts.FACT_SOURCE.CONFIG, observedAt: now }),
@@ -456,7 +462,7 @@ function codexCandidateFor(cfg, model, pid, now, primary) {
       name: model || '',
       scope: primary ? 'primary' : 'fallback',
     }, { source: facts.FACT_SOURCE.CONFIG, observedAt: now }),
-    capabilities: facts.evidence(codexCapabilitiesOf(cfg, model), {
+    capabilities: facts.evidence(codexCapabilitiesOf(md), {
       source: md && md.codex ? facts.FACT_SOURCE.CATALOG : facts.FACT_SOURCE.CONFIG,
       observedAt: now,
     }),
@@ -726,7 +732,7 @@ function sendIdentityOf(req, opts, bodyBuf, model, pid) {
 }
 
 function quoteFor(cfg, model, pid, now, ledger) {
-  const md = cfg.models && model ? cfg.models[model] : null
+  const md = codexModelDefinition(cfg, model, pid)
   const pd = cfg.providers && pid ? cfg.providers[pid] : null
   let usd = null
   for (const v of [md && md.costEstimateUsd, pd && pd.costEstimateUsd]) {

@@ -1414,7 +1414,7 @@ function restoreCodexJsonBuffer(buf, route, plan) {
   if (restored.rejected) return { ok: false, rejected: restored.rejected }
   return { ok: true, json: restored.json, lossy: restored.lossy || [] }
 }
-function streamCodexResponse(state, budget, log, opts) {
+async function streamCodexResponse(state, budget, log, opts) {
   const { up, res, route, plan, model, modelName, pid, sg, prov } = opts
   const adapter = createCodexStreamAdapter(res, {
     plan, route, model, log,
@@ -1423,22 +1423,33 @@ function streamCodexResponse(state, budget, log, opts) {
   })
   const destroyUp = () => { try { up.stream.destroy() } catch { /* ignore */ } }
   const onAbort = () => destroyUp()
-  const onClose = () => destroyUp()
-  if (budget && budget.signal) {
-    if (budget.signal.aborted) onAbort()
-    else { try { budget.signal.addEventListener('abort', onAbort, { once: true }) } catch { /* ignore */ } }
+  if (budget.signal.aborted) onAbort()
+  else budget.signal.addEventListener('abort', onAbort, { once: true })
+  res.once('close', onAbort)
+  // The caller owns the request budget and provider permit until the relay settles.
+  try {
+    for await (const chunk of up.stream) {
+      await adapter.push(chunk)
+      if (adapter.terminal) break
+    }
+    await adapter.end()
+  } catch {
+    destroyUp()
+    if (!budget.cancelled()) {
+      const timedOut = budget.timedOut()
+      if (timedOut && !res.headersSent) throw abortedError('request_timeout')
+      await adapter.fail(timedOut ? 'request exceeded overall timeout' : 'upstream stream interrupted', { timeout: timedOut })
+    }
+  } finally {
+    budget.signal.removeEventListener('abort', onAbort)
+    res.removeListener('close', onAbort)
   }
-  try { res.once('close', onClose) } catch { /* ignore */ }
-  ;(async () => {
-    try { for await (const chunk of up.stream) await adapter.push(chunk); await adapter.end() }
-    catch { destroyUp(); await adapter.fail('upstream stream interrupted', {}) }
-    if (budget && budget.signal) { try { budget.signal.removeEventListener('abort', onAbort) } catch { /* ignore */ } }
-    try { res.removeListener('close', onClose) } catch { /* ignore */ }
+  if (!budget.expired()) {
     if (adapter.terminal === 'response.failed') {
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1
       if (prov) markFail(state, pid, prov.circuit)
     } else { markOk(state, pid); noteAffinity(state, modelName, pid) }
-  })()
+  }
   return { streamed: true }
 }
 function opaqueRejectionCode(opaque) {
@@ -1553,7 +1564,7 @@ async function proxyOfficialResponses(state, budget, log, opts) {
         markOk(state, pid); noteAffinity(state, modelName, pid)
         const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
         if (/text\/event-stream/i.test(ct)) {
-          if (codexRoute && codexPlan) return streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov })
+          if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov })
           writeUpstreamHeaders(res, up)
           await streamRawResponses(res, up.stream, budget)
           return { streamed: true }
@@ -1626,7 +1637,7 @@ async function proxyNativeResponses(state, budget, log, opts) {
         markOk(state, pid); noteAffinity(state, modelName, pid)
         const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
         if (/text\/event-stream/i.test(ct)) {
-          if (codexRoute && codexPlan) return streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov })
+          if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov })
           writeUpstreamHeaders(res, up)
           await streamRawResponses(res, up.stream, budget)
           return { streamed: true }

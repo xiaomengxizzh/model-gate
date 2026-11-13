@@ -6,6 +6,13 @@
 
 > 本段记录从 A1 基线 `2a735fb` 起的新集成线：G0 冻结 + G1 后端/协议/控制面的定向移植与收紧。**CLI 原生门（Q03/Q04）与正式 GUI（U01–U07）未开始**，本段不表示发布就绪。
 
+### Fixed
+
+- Codex 原生 Responses 投影等待流完成后释放请求预算和上游并发槽位，避免上游延迟发送终态时被网关提前取消。
+- 第三方收到只有 Codex 协作信封和密封正文的任务时，发送前返回 `opaque_agent_message`。混合消息仍支持投影已有的可读正文。
+- Codex 聚合别名沿同一供应商绑定读取原模型的能力和报价，避免丢失工具能力后返回 `MG_FB_NO_CANDIDATE`。
+- 隔离 CLI 三轮用例改用当前支持的合成上游 Key，回环流量绕过出站代理。
+
 ### Security —— 行为变更（部署前必须确认）
 
 1. **官方原生凭据透传彻底退役（F01）**：`/backend-api/codex` 与 `MG_CODEX_OFFICIAL_PASSTHROUGH` 不再启用任何能力。官方目标无网关自有 Key 时 `403 official_no_gateway_key`；设了旧开关则 `403 official_passthrough_retired`（含迁移提示）。两者均零上游请求，绝不改投第三方；网关不读取 `auth.json`/`CODEX_HOME`。`credentialModeAllowed('official-subscription')` 返回 `credential_mode_retired`。

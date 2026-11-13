@@ -266,9 +266,20 @@ test('P02 agent_message：reject/未知字段/非字符串正文拒绝；密文�
   const encryptedOnly = projectOrderedHistory([
     { type: 'agent_message', content: [{ type: 'encrypted_content', encrypted_content: 'CIPHER' }] },
   ], makeRoute(), plan)
-  assert.equal(encryptedOnly.rejected, null)
-  assert.deepEqual(encryptedOnly.input, [])
-  assert.ok(encryptedOnly.lossy.includes('agent_message_dropped_opaque_only'))
+  assert.equal(encryptedOnly.rejected.code, 'opaque_agent_message')
+
+  for (const type of ['NEW_TASK', 'MESSAGE']) {
+    const envelope = 'Message Type: ' + type + '\nTask name: /root/worker\nSender: /root\nPayload:\n'
+    const encryptedPart = { type: 'encrypted_content', encrypted_content: 'CIPHER' }
+    const project = (text) => projectOrderedHistory([
+      { type: 'agent_message', content: [{ type: 'input_text', text }, encryptedPart] },
+    ], makeRoute(), plan)
+    assert.equal(project(envelope).rejected.code, 'opaque_agent_message', type)
+    const readable = project(envelope + 'Readable task')
+    assert.equal(readable.rejected, null)
+    assert.equal(readable.input[0].content[0].text, envelope + 'Readable task')
+    assert.equal(JSON.stringify(readable).includes('CIPHER'), false)
+  }
 
   for (const bad of [
     { type: 'agent_message', content: [{ type: 'input_text', text: 'x' }], unexpected: true },

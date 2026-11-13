@@ -54,7 +54,7 @@
 - `defaults.model`：**虚拟共用模型名**。客户端统一请求这个名字时，网关把它当作「默认链」——沿 `defaults.directory` 首项把**真实模型名**发给上游，并把响应里的 `model` 回写为该虚拟名（虚拟名会出现在 `/v1/models`）。不会把虚拟名透传给上游（否则上游会报 `Model <虚拟名> is not supported`）。
 - `defaults.clientKey`：数据面鉴权 Key。面板录入后改存**加密 keys 库**，`/api/status` 与 `/api/config` 只回掩码 `********`，不会明文落盘。保存语义是**三态**：省略该字段或回传掩码（`^\s*\*{8}\s*$`，允许首尾空白）= 保持现有 Key（省略绝不等于清空）；显式发送空字符串 `""` = 删除数据面全局 Key；非空字符串 = 替换。非法值（非字符串/纯空白/控制字符）返回 400 且不落盘。优先级固定为 `MG_CLIENT_KEY` 环境变量 > 加密 keys 库（`__mg_client`）> 旧版 `defaults.clientKey` 明文（省略字段保存时自动迁移进加密库并清掉明文）。审计日志只记动作（`clientKeyAction=...`）与配置代际（`version=N`），不记 Key 值。
 - `defaults.directory`：跨模型兜底。`mode: afterAll` 表示按序全部尝试，`onFail` 表示仅当前模型失败时才启用后续。**整条链(a→b→c)一轮全败后网关会回到队首反复重试（循环兜底）**，直到成功 / 业务 4xx / 整体超时 / 全部熔断；单轮兜底时间上限由 `defaults.timeout.loopMs`（默认 120000ms）约束，最长一次请求的兜底重试时长不会超过它。请求日志会带 `chain=实际尝试过的模型链` 标记，可直接看到兜底是否触发。
-- `defaults.timeout`：三层超时 + 请求级整体预算。`connectMs`（建连/代理 CONNECT 首包）、`firstByteMs`（等上游响应头）、`idleMs`（响应头后无字节/无 SSE 数据事件）各自兜底；`loopMs`（默认 120000）限制模型兜底链循环。`overallMs`（默认 0=不限）是**单次数据面请求的硬上限**：从请求进入网关起算，覆盖读客户端 body、全部排队等待（QPS 令牌/provider 并发/模型并发/429 退避）、代理 CONNECT、上游建连与等响应头、非流式读体、SSE 中继与断流续传，并把 `loopMs` 进一步钳制到剩余预算；每个阶段的有效上限 = min(该阶段配置, 剩余预算)。**`overallMs>0` 时包含流式阶段**——长生成任务请调大或设为 0。预算耗尽：响应头未发出 → `504` 且 `error.type=request_timeout`；已进入流式 → SSE `error` 事件（`type=stream_interrupted, code=REQUEST_TIMEOUT`）+ `[DONE]`，已发出的状态码与内容不撤回。**客户端断开始终会取消排队与在途上游请求（不依赖 `overallMs`）**，按客户端断开记账：不计上游失败、不熔断。契约见 [请求生命周期契约](../contracts/request-lifecycle-v1.md)。
+- `defaults.timeout`：三层超时 + 请求级整体预算。`connectMs`（建连/代理 CONNECT 首包）、`firstByteMs`（等上游响应头）、`idleMs`（响应头后无字节/无 SSE 数据事件）各自兜底；`loopMs`（默认 120000）限制模型兜底链循环。`overallMs`（默认 0=不限）是**单次数据面请求的硬上限**：从请求进入网关起算，覆盖读客户端 body、全部排队等待（QPS 令牌/provider 并发/模型并发/429 退避）、代理 CONNECT、上游建连与等响应头、非流式读体、SSE 中继与断流续传，并把 `loopMs` 进一步钳制到剩余预算；每个阶段的有效上限 = min(该阶段配置, 剩余预算)。**`overallMs>0` 时包含流式阶段**——长生成任务请调大或设为 0。预算耗尽：响应头未发出 → `504` 且 `error.type=request_timeout`；已进入流式 → Chat SSE 以错误帧和 `[DONE]` 收尾，Codex 投影的原生 Responses SSE 则以单个 `response.failed`（`error.code=REQUEST_TIMEOUT`）收尾。已发出的状态码与内容保留。**客户端断开始终会取消排队与在途上游请求（不依赖 `overallMs`）**，按客户端断开记账：不计上游失败、不熔断。契约见 [请求生命周期契约](../contracts/request-lifecycle-v1.md)。
 - **SSE 背压**：慢客户端不再导致无界缓冲——`res.write()` 返回 false 后网关暂停读取上游并等待 `drain`；等待超过 30s 或未写出缓冲超过 8MiB 即销毁客户端连接与上游流，按客户端断开记账（不计上游故障）。这两个是内置上限，当前不提供配置项。
 - `models.<名>.capability`：模型能力声明，`chat`（默认，对话/补全/Responses 桥）、`embedding`（仅 `/v1/embeddings`）、`rerank`（仅 `/v1/rerank`）、`audio`（`/v1/audio/*`）、`image`（`/v1/images/*`）或 `video`（`/v1/videos*`）。
 - `defaults.optionalEndpoints`（F04）：可选端点能力总开关，作用于 embedding / rerank / audio / image / video 五类**已证实**能力。形如 `{ "embedding": false, "rerank": { "enabled": false, "reason": "contract_not_signed_off" } }`：
@@ -153,7 +153,7 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 | --- | --- |
 | `defaults.codexCatalogBasePath` | 官方基线目录文件（`codex debug models` 导出）；网关用它 + 已配置第三方模型生成完整 Codex 目录，服务 `GET /v1/models?client_version=…`（`{models:[ModelInfo…]}`）与 `model_catalog_json`。未配置时回落旧的 `{object:"list",data:[…]}` 形状（Codex 会报 `failed to decode models response`）。目录构建失败时 fail-closed：官方/聚合 slug 按 unknown 处理并写日志。 |
 | `defaults.codexOfficialProvider` | 官方模型 slug 的上游 provider id。官方模型**不需要**出现在 `models`（目录生成器禁止复用官方 slug）；缺该字段时官方 slug 判 unknown（404），不会回落 `defaults.provider`。 |
-| 聚合 slug | 由目录生成器产出：`mg-<provider>-<model>`（`providers` id + `models` 键名净化）。请求该 slug 时网关映射到 `models.<原名>` 的上游及 `providerModels`，响应 `model` 回写 slug。 |
+| 聚合 slug | 由目录生成器产出：`mg-<provider>-<model>`（`providers` id + `models` 键名净化）。请求该 slug 时网关映射到 `models.<原名>` 的上游及 `providerModels`，响应 `model` 回写 slug。Chat 桥候选筛选与报价复用该绑定的原模型声明。 |
 | `MG_CODEX_OFFICIAL_PASSTHROUGH` | **已退役（F01）**：客户端官方凭据透传已移除。保留该变量只会被判为旧配置并给出迁移提示，不启用任何能力（见下文环境变量表）。 |
 
 ### P09 单 provider 反向代理（gatewaySubscription）
@@ -191,13 +191,13 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 | 字段 | 说明 |
 | --- | --- |
 | `plaintextTools` | `true` 时扁平化 `collaboration` namespace，并删除三个消息工具 `message.encrypted` 标记；父官方 GPT 不声明。子 Go/DeepSeek 必须显式设为 `true`。 |
-| `history.agentMessage` | `preserve`（官方默认）、`project`（可证明明文才投影；密文 400）、`reject`。 |
+| `history.agentMessage` | `preserve`（官方默认）、`project`（投影可读正文，只有信封或密文的任务返回 400）、`reject`。 |
 | `history.reasoning` | `preserve`（官方默认）、`drop`（第三方默认）、`reject`。 |
 | `history.compaction` | `reject`（默认）或 `drop`。 |
 | `history.controls` | `drop`（默认）、`preserve`、`reject`。 |
 | `namespace` | 仅支持 `collaboration`。 |
 
-**不可读密文（P0/P1）**：第三方原生目标在任何发送前都会扫描 `encrypted_content`/`encrypted_task_id`（含 item 级字段与 v2 工具 arguments/output 内的字符串值）。含密文且未声明 `plaintextTools=true` → 400（`opaque_agent_message` / `v2_encrypted_task_unsupported` / `encrypted_tool_schema`）零上游；声明了 `plaintextTools` 也只删除工具 schema 的明文标记，绝不解密/删除已有密文。官方 route 保留密文给官方后端。
+**不可读密文（P0/P1）**。第三方原生路由发送前检查密文任务。只在显式声明 `plaintextTools:true` 和 `history.agentMessage:"project"` 时，才从混合 `agent_message` 提取可读正文，省略同项里的密文片段。只有信封或密文时返回 400 `opaque_agent_message`，零上游请求。工具参数里的非空密封参数仍显式拒绝。官方保留模式原样交给官方后端。
 
 **官方额度（D7）**：`defaults.codexQuota = { warnPercent: 80, criticalPercent: 95, source: "none" | "trusted" }`。`source:"none"` 时即使注入了读数也不采用（严格 UNKNOWN，不虚构余额）；没有可信数据时显示 `UNKNOWN`。应急态必须显式 `{acknowledged:true, reason, backupPoint}` 才能进入，记录时间线并可恢复；进入/恢复都需用户确认，绝不自动切换 provider、购买额度或退出官方登录。
 

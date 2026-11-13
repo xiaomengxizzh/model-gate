@@ -720,11 +720,8 @@ function projectAgentMessage(item, mode, lossy) {
       return { rejected: rejected('opaque_agent_message', 'agent_message 含未知字段: ' + key + '（无法证明明文）') }
     }
   }
-  if (own(item, 'encrypted_content') && item.encrypted_content != null && item.encrypted_content !== '') {
-    // The caller explicitly opted into plaintext projection. The encrypted field is
-    // never decoded or forwarded; it is dropped and the readable parts are kept.
-    lossy.push('agent_message_encrypted_field_dropped')
-  }
+  const hasEncryptedField = item.encrypted_content != null && item.encrypted_content !== ''
+  if (hasEncryptedField) lossy.push('agent_message_encrypted_field_dropped')
   if (own(item, 'author') && item.author != null && typeof item.author !== 'string') {
     return { rejected: rejected('opaque_agent_message', 'agent_message.author 不是字符串') }
   }
@@ -761,13 +758,13 @@ function projectAgentMessage(item, mode, lossy) {
   } else {
     return { rejected: rejected('opaque_agent_message', 'agent_message.content 必须是字符串或 input_text/text 数组') }
   }
-  if (body === '' && encryptedParts > 0) {
-    lossy.push('agent_message_dropped_opaque_only')
-    return { drop: true }
-  }
-  if (body === '' && own(item, 'encrypted_content') && item.encrypted_content != null && item.encrypted_content !== '') {
-    lossy.push('agent_message_dropped_opaque_only')
-    return { drop: true }
+  if (hasEncryptedField || encryptedParts > 0) {
+    // Codex emits a readable envelope separately from the sealed task payload.
+    const text = body.trim()
+    const envelopeOnly = /^Message Type: [^\r\n]+\r?\nTask name: [^\r\n]+\r?\nSender: [^\r\n]+\r?\nPayload:$/.test(text)
+    if (!text || envelopeOnly) {
+      return { rejected: rejected('opaque_agent_message', '第三方子代理无法读取密封任务正文，请使用提供可读任务的原生协作路径') }
+    }
   }
   const author = typeof item.author === 'string' && item.author !== '' ? item.author : null
   const recipient = typeof item.recipient === 'string' && item.recipient !== '' ? item.recipient : null
@@ -873,7 +870,6 @@ export function projectOrderedHistory(input, route, plan) {
     if (type === 'agent_message') {
       const projected = projectAgentMessage(item, history.agentMessage, lossy)
       if (projected.rejected) return { input: null, lossy, rejected: projected.rejected }
-      if (projected.drop) continue
       out.push(projected.item)
       continue
     }
