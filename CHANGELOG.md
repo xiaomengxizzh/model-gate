@@ -2,6 +2,32 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-13 本地 MCP 委派（G2–G5）
+
+### Added
+
+- **本机 OpenCode Go 委派 MCP 服务（stdio）**：`bin/mg-mcp.mjs` + `src/mcp/delegation-*.js`，提供 `modelgate_delegate_task` / `modelgate_get_task` / `modelgate_wait_task` / `modelgate_followup_task` / `modelgate_cancel_task` 五个工具。JSON-RPC 2.0 换行分隔，stdout 只走协议、日志走 stderr。
+- **持久化任务状态机**：`CREATED→ADMITTED→DISPATCHED→RUNNING→RESULT_READY→ACKNOWLEDGED`，另有 `FAILED/CANCELLED/UNKNOWN`；`DISPATCHED` 在发起网络写入前落盘，进程重启把在途回合对账成 `UNKNOWN` 并**禁止重发**。幂等键只落哈希，同键同摘要回放、同键不同摘要冲突。
+- **本地受限工作区工具**：子模型只能调用 `read_file`/`list_dir`/`write_file`/`stat_path`，根目录由 `MG_MCP_WORKSPACE` 指定；绝对路径、`..` 与符号链接逃逸一律拒绝；引用路径在任务前后计算 `sha256` 作为真实改动证据。
+- **结果回执**：`resultText` + `toolCalls` + `artifacts[{sha256Before,sha256After,changed}]` + `usage` + `lossy` + `resultDigest`（不含 `state`，ACK 前后一致）。默认完整回执，只有 `allowResultTruncation=true` 才裁剪。
+- 回归 `scripts/test/offline/mcp-delegation.test.mjs`（11 用例）与 `scripts/test/offline/sse-lifecycle.test.mjs`（8 用例）；`npm test` 增至 79 套件。
+
+### Security
+
+- 工具参数**不能**指定 URL/host/provider/model/凭据：任意层级键名按「V2 密文 → 凭据 → 目标 URL → provider → model → 值级凭据形状」顺序拒绝，命中即零提交（`MCP_V2_OPAQUE` / `MCP_CREDENTIAL_IN_ARGUMENT` / `MCP_URL_NOT_ALLOWED` / `MCP_PROVIDER_NOT_ALLOWED` / `MCP_MODEL_NOT_ALLOWED` / `MCP_SECRET_IN_ARGUMENT`）。
+- `ownerRef`（配置目录 + OS 用户派生）做归属隔离，跨 owner 读写一律 `MCP_NOT_OWNER`；模型无法控制该值。
+- Go 凭据只出现在上游请求头，不返回给调用方、不落盘；上游 `opencodego_*` 内部码不外透。
+- SSE 生命周期独立回归覆盖 completed/failed 唯一终态、无终态 close、客户端断开、首字节前取消、整体 deadline、长首字节，并断言上游命中次数以证明无重复发送。
+
+### Docs
+
+- 新增 [MCP 委派契约 v1](docs/contracts/modelgate-mcp-delegation-v1.md)、[实现对齐记录](docs/contracts/modelgate-mcp-delegation-v1-alignment.md)、[威胁模型](docs/explanation/mcp-delegation-threat-model.md)、[G0 审计](docs/evidence/2026-11-13-g0-repo-audit.md)、[G3/G4 证据](docs/evidence/2026-11-13-mcp-delegation-g3-g4.md)、[SSE 生命周期审计](docs/evidence/2026-11-13-sse-lifecycle-audit.md)。
+
+### Not verified
+
+- 真实 OpenCode Go 上游与真实 Codex CLI 父模型闭环（G6）未执行；**本段不表示真实上游已验收**。
+- Codex Desktop（G7）、GUI 与发布整合（G8）未执行；未 push、未开 PR、未合并。
+
 ## [Unreleased] —— 2026-11-13 认证边界退役（G1）
 
 ### Security —— 行为变更（部署前必须确认）

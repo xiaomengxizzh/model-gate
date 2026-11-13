@@ -1,0 +1,1704 @@
+
+> model-gateway@0.2.3 test
+> node scripts/test/run.mjs
+
+
+== virtual-models.mjs ==
+PASS  status 暴露 configVersion
+PASS  缺 version 宽容放行且递增
+PASS  过期 version 409
+PASS  并发 5 同 version 恰 1 成功
+PASS  /v1/models 聚合虚拟模型
+PASS  route-preview 命中虚拟模型
+PASS  gate-a 路由 200 且 model 回写 :: "{\"code\":200,\"model\":\"gate-a\",\"keys\":[\"code\",\"id\",\"object\",\"model\",\"choices\",\"usage\"]}"
+PASS  未知名 404（已配置虚拟模型）
+PASS  gatemodel 旧入口回归
+PASS  虚拟名与真实模型冲突 400
+PASS  虚拟模型日额度超限 429 :: "code=429"
+PASS  链首真实模型档位补校验 400（先于额度） :: "code=400"
+PASS  gate-a+正确独立 key → 200 :: "code=200"
+PASS  gate-a+错 key → 401
+PASS  未知名+任意 key → 401 统一文案（防枚举）
+PASS  全局 key 超级语义放行
+PASS  删除虚拟模型同步清 key
+PASS  status 暴露虚拟模型 meta
+  （virtual-models 子结果: 18/18）
+-- ok 379ms (pid tree reaped: true)
+
+== effort-normalize.mjs ==
+PASS  嵌套 reasoning.effort 不再被严格上游拒绝 :: "code=200 {\"code\":200,\"id\":\"m1\",\"object\":\"chat.completion\",\"model\":\"m-strict\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"pong\"},\"finish_reason\":\"stop\""
+PASS  出站体已剔除嵌套 reasoning 键
+PASS  嵌套 effort 并入平面 reasoning_effort :: "high"
+PASS  平面优先且嵌套对象一并剔除 :: "code=200"
+PASS  仅 summary 的 reasoning 对象被剔除且不注入档位 :: "code=200"
+PASS  关闭拼写 none 归一为 none 且被上游接受 :: "code=200 got=none"
+PASS  关闭拼写 off 归一为 none 且被上游接受 :: "code=200 got=none"
+PASS  关闭拼写 disabled 归一为 none 且被上游接受 :: "code=200 got=none"
+PASS  关闭拼写 false 归一为 none 且被上游接受 :: "code=200 got=none"
+PASS  平面 none + 嵌套 none：上游词表内且不被拒 :: "code=200"
+PASS  兜底切到 thinking 格式模型：请求成功 :: "code=200 {\"code\":200,\"id\":\"m1\",\"object\":\"chat.completion\",\"model\":\"chain-f2t\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"pong\"},\"finish_reason\":\"stop"
+PASS  兜底 thinking 模型收到 thinking:{type:enabled} :: "{\"type\":\"enabled\"}"
+PASS  兜底 thinking 模型不再收到平面 reasoning_effort
+PASS  兜底切到平面格式模型：请求成功 :: "code=200"
+PASS  兜底平面模型收到 reasoning_effort:high :: "\"high\""
+PASS  兜底平面模型不再收到 thinking 对象
+PASS  虚拟入口未给档位时不注入任何档位字段 :: "code=200"
+PASS  真实模型入口仍注入配置默认档位 :: "low"
+PASS  档位白名单仍本地拦截(400) :: "code=400"
+PASS  客户端显式档位优先于配置默认 :: "medium"
+  （effort-normalize 子结果: 20/20）
+-- ok 1366ms (pid tree reaped: true)
+
+== upstream-side-4xx.mjs ==
+PASS  ①4xx 上游侧故障(422 upstream_error) 继续链，客户端拿到 200 :: "code=200 {\"id\":\"m1\",\"object\":\"chat.completion\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"pong\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,"
+PASS  ①兜底模型被实际调用 :: {"ok":1,"before":0}
+PASS  ①返回的是兜底模型的正常响应 :: "{\"id\":\"m1\",\"object\":\"chat.completion\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"pong\"},\"finish_reas"
+PASS  ①上游侧故障计入失败统计（供熔断计数） :: 1
+PASS  ②整链上游侧故障 → 透传 422（保留上游原始错误，非 502） :: "code=422 {\"error\":{\"message\":\"Inference request failed.\",\"type\":\"atria_api_error\",\"code\":\"upstream_error\"}}"
+PASS  ③确定性参数错误(400 invalid_request) 直接返回 400 :: "code=400 {\"error\":{\"message\":\"max_tokens must be an integer between 1 and 65536.\",\"type\":\"atria_api_error\",\"code\":\"invalid_request\"}}"
+PASS  ③未误伤：兜底模型没被调用（不空跑整条链） :: {"ok":1,"before":1}
+  （upstream-side-4xx 子结果: 7/7）
+-- ok 355ms (pid tree reaped: true)
+
+== circuit.mjs ==
+PASS  熔断·连续失败数=2 即 open :: {"state":"open","openUntilMs":2997,"hits":2}
+PASS  熔断·冷却到点后放行半开探测（冷却不被持续流量续期） :: {"retried":1,"firstRetryMs":3000,"CD":3000,"hits":3,"hitsAtOpen":2}
+  （circuit 子结果: 2/2）
+-- ok 3192ms (pid tree reaped: true)
+
+== affinity.mjs ==
+PASS  1·首请求命中主上游 A :: {"A":1,"B":0}
+PASS  2·A 503 为单次终态：A 命中 +1、B 零命中、请求 502 :: {"status":502,"A":2,"B":0}
+PASS  3·熔断后的下一请求切到备用 B :: {"A":2,"B":1}
+PASS  4·TTL 未到期时保持亲和 B（不抖动） :: {"A":2,"B":2}
+PASS  5·TTL 过期且 A 冷却结束后回流主上游 A :: {"A":3,"B":2,"before5":{"A":2,"B":2}}
+  （affinity 子结果: 5/5）
+-- ok 3685ms (pid tree reaped: true)
+
+== offline/downstream-headers.test.mjs ==
+✔ Q01-GAP1 200 响应：上游夹带 set-cookie/x-upstream-secret/CSP/retry-after 一律不透传 (126.205332ms)
+✔ Q01-GAP1 429 响应：只透传 retry-after，set-cookie/x-upstream-secret 不得出现 (413.844905ms)
+✔ Q01-GAP1 500 响应：上游错误头的 set-cookie/x-upstream-secret/CSP 不得污染客户端 (100.921364ms)
+✔ Q01-GAP1 流式 200：逐头透传路径也必须剥离 set-cookie/x-upstream-secret/CSP/上游 retry-after (101.128385ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 797.156967
+-- ok 824ms (pid tree reaped: true)
+
+== offline/affinity.test.mjs ==
+✔ 1·首请求命中主上游 A (118.052858ms)
+✔ 2·A 503 为单次终态：A 命中 +1、B 零命中、请求 502（T-LIFE-04c） (3.719041ms)
+✔ 3·熔断后的下一请求切到备用 B (3.296119ms)
+✔ 4·TTL 未到期时保持亲和 B（不抖动） (2.661603ms)
+✔ 5·TTL 过期且 A 冷却结束后回流主上游 A (3505.216444ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3695.180804
+-- ok 3719ms (pid tree reaped: true)
+
+== offline/admin-contract.test.mjs ==
+✔ 管理 API：无令牌本地初始化，设置令牌后全表加锁 (96.641574ms)
+✔ 管理 API：鉴权矩阵、错误码、版本冲突与参数夹取 (127.740595ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 278.864902
+-- ok 302ms (pid tree reaped: true)
+
+== offline/admin-entry.test.mjs ==
+✔ P0-2 入口：无令牌 ⇒ 403 且未读 body（超大 Content-Length 也不会 413） (137.535004ms)
+✔ P0-2 入口：错令牌/缺令牌 403；正确令牌 + 回环 + 同源 200；日志不含令牌 (161.317354ms)
+✔ P0-2 入口：非回环 peer 403；显式 allowRemote 才放行 (184.543411ms)
+✔ managedRoot 默认关闭：apply/rollback 403 write_disabled（不是 404） (99.920116ms)
+✔ MG_CODEX_MANAGED_ROOT：启动期登记 → plan 只回白名单字段差异、无哨兵；apply/rollback 可用 (101.967827ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 746.109893
+-- ok 774ms (pid tree reaped: true)
+
+== offline/admin-origin.test.mjs ==
+✔ MG-001 回环实例：同源放行、跨源与坏 Host 拒绝、CLI 无 Origin 放行 (95.953328ms)
+✔ MG-001 显式白名单：allowedHosts / allowedOrigins 是唯一放行入口 (101.344228ms)
+✔ MG-001 数据面：跨源网页不能借网关凭据发请求，非浏览器调用不受影响 (115.81674ms)
+✔ MG-001 远程对端（只绑回环）：匿名远程管理写与读被拒，配好令牌后可用，数据面保持开放 (209.831457ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 581.308271
+-- ok 613ms (pid tree reaped: true)
+
+== offline/admin-projection.test.mjs ==
+✔ D-2 保存配置剥离投影运行时字段，未知扩展字段保留 (85.587313ms)
+✔ /api/keys 标识白名单：只允许投影/历史可达的身份 (104.978603ms)
+✔ D-7 /api/keys 带版本：过期 409、当前 200、缺省 200 (97.391157ms)
+✔ D-3 面板：dirty 时冻结 baseVersion 且 Key 保存带版本（静态检查） (0.69273ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 344.082089
+-- ok 387ms (pid tree reaped: true)
+
+== offline/admin-secrets.test.mjs ==
+✔ 管理 API：状态、日志与磁盘均不泄露明文凭据 (129.105307ms)
+✔ F02 坏状态错误路径不泄露文件内容：损坏 keys 的启动失败只报 code，不回显 Key (80.722436ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 268.177559
+-- ok 300ms (pid tree reaped: true)
+
+== offline/boundary.test.mjs ==
+✔ HTTP boundaries, virtual credentials and isolated configuration (1137.62476ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1188.415431
+-- ok 1226ms (pid tree reaped: true)
+
+== offline/codex-api.test.mjs ==
+✔ 路由清单与显式管理员声明 (0.976194ms)
+✔ P0-2：无显式管理员 ⇒ 每个路由 403（含实例未设置 adminToken 的旧语义） (0.646095ms)
+✔ 鉴权：注入函数已写响应（headersSent）时返回 null，不二次写头 (0.079336ms)
+✔ 来源：非本机拒绝 403，本机放行；allowRemote 显式放宽 (0.276692ms)
+✔ 未知路由 404、方法不匹配 405（鉴权之后才暴露） (0.156573ms)
+✔ GET /api/codex/policy：所有权 + 目录摘要 + 写能力（普通模式关闭） (0.551311ms)
+✔ GET /api/codex/catalog/status：计数 + 世代 + 截断 slugs，不回全量 (0.283353ms)
+✔ 路径护栏（登记时）：绝对路径 + config.toml，拒 auth.json/sessions/非 .toml/.. (0.199298ms)
+✔ 登记根：符号链接 / 相对路径 / 非法 id 在登记时拒绝 (6.938869ms)
+✔ P0-2：任意路径 / 未登记 id / 原始 TOML 一律拒绝 (1.874928ms)
+✔ POST /config/plan：只读、白名单字段差异、无原文/无哨兵、confirmToken 绑定 (3.173432ms)
+✔ plan：空 desired 的 changed 为空；plan 仍不回正文 (1.284673ms)
+✔ P0-2：普通产品模式 apply/rollback 一律 403 disabled；readonly 登记根也拒绝 (2.200858ms)
+✔ 写接口门禁：缺 expected / 缺/错 confirmToken / 缺 adminSubject 一律拒绝且不写盘 (1.877901ms)
+✔ apply：预览后外部修改 ⇒ 409 且不写（hash/size/mtime 二次快照） (1.318849ms)
+✔ apply → 成功写入 + 不透明 backupId + 可回滚令牌；rollback 完全恢复 (2.710331ms)
+✔ confirmToken 绑定：跨文件 / 跨操作 / 过期 / 重复使用一律拒绝 (3.095402ms)
+✔ rollback 门禁：路径/绝对 backupId/未知 id/跨根 backup 一律拒绝 (1.779239ms)
+✔ GET /config/export：只回所拥有字段的归一化投影（无保留行/无凭据/无原文） (0.789625ms)
+✔ 不存在 / allowCreate：默认 404，显式放行才创建（受控 managed 根） (1.07464ms)
+✔ 请求体解析：支持 ctx.body / JSON 字符串 / rawBody Buffer；坏 JSON 400 (1.022508ms)
+✔ desired 所有权：非声明字段 400，非对象 400，多行值 400 (1.224328ms)
+✔ 日志函数缺失时不影响响应（不依赖 ctx.log） (1.22733ms)
+✔ summarizeCodexCatalog：limit 夹紧与缺字段容错 (0.137581ms)
+✔ UI 探测：/api/codex/policy 成功 → 写入/世代/所有权改用服务端声明 (11.250335ms)
+✔ UI 探测失败：401/403/404/网络错误 → 回落 export-only，不抛错不编造 (0.567495ms)
+✔ UI 探测：服务端只给部分路由时仍标记仅导出 (0.210035ms)
+ℹ tests 27
+ℹ suites 0
+ℹ pass 27
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 91.230156
+-- ok 119ms (pid tree reaped: true)
+
+== offline/codex-catalog-coherence.test.mjs ==
+✔ 目录与路由同源：/v1/models 列出聚合 slug，下架后 404 且零上游 (105.346076ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 160.174718
+-- ok 181ms (pid tree reaped: true)
+
+== offline/codex-catalog.test.mjs ==
+✔ 拒绝普通 OpenAI /v1/models 形状 (0.921557ms)
+✔ serde 必填字段缺失时 fail-closed（supported_reasoning_levels） (0.531274ms)
+✔ base_instructions 与 instructions_template 至少一个 (0.143447ms)
+✔ 上下文窗口是策略必填且必须为正整数 (0.219069ms)
+✔ 枚举与类型校验（visibility/shell_type/priority/truncation） (0.177694ms)
+✔ 重复 slug 被拒绝 (0.113037ms)
+✔ 默认推理档位必须受支持 (0.09039ms)
+✔ 稳定聚合 ID：可预测、不可重绑定、非法输入报错 (0.151104ms)
+✔ 完整 ModelInfo 合并：官方直通 + 第三方补充，绑定可追溯 (1.514506ms)
+✔ 跳过非 chat / disabled / 官方直连 provider (0.320894ms)
+✔ 遮蔽官方模型 ID 被拒绝 (0.692997ms)
+✔ 第三方上下文未知时拒绝生成（不猜数字） (0.128549ms)
+✔ codex 覆盖：上下文、模态、档位、优先级可显式声明；未知字段拒绝 (0.58952ms)
+✔ 未声明推理档位时按 assumed 生成并留下警告 (0.214764ms)
+✔ 模板模型可注入，缺失时明确报错 (0.204994ms)
+✔ 差异摘要：新增/移除/变更字段 + 长字符串摘要 (0.635743ms)
+✔ 同一聚合 ID 指向不同 provider/model 时识别为重绑定冲突 (0.285952ms)
+✔ 版本记录、历史上限与回滚目标解析 (0.346934ms)
+✔ 两种输出格式都是 Codex ModelsResponse 形状且同源 (0.454453ms)
+✔ CLI：生成 -> 版本递增 -> 差异 -> 回滚 -> 状态陈旧检测 (124.212352ms)
+✔ CLI：--dry-run 不落盘 (31.293229ms)
+✔ CLI：校验失败 fail-closed（退出码 3，不产出半成品） (30.09109ms)
+✔ CLI：聚合 ID 重绑定 fail-closed（退出码 4） (68.904332ms)
+✔ CLI：拒绝写入 ~/.codex (28.02681ms)
+✔ CLI：--strict 把警告升级为错误（退出码 3） (62.21165ms)
+✔ CLI：--verify-codex 缺少 codex 时 fail-closed（退出码 6，不发布） (35.198299ms)
+﹣ CLI：真实 codex 可解析生成物（离线，需 MG_CODEX_VERIFY=1） (0.073415ms) # SKIP
+✔ P1：第三方能力必须带 source+observedAt；缺失/非法证据 fail-closed (0.749551ms)
+✔ P1：真实模型 / 别名 / 虚拟模型 / 保留名零碰撞；别名指向墓碑硬拒绝 (0.594585ms)
+✔ P1：目录外 / 墓碑 / 别名指向墓碑全部 hard reject，不回退默认模型 (1.671786ms)
+✔ P1：同一世代贯穿 /v1/models 投影、router.resolve 与管理投影 (1.704156ms)
+✔ P1：cache/generation key 包含 wire 配置指纹；同名模型改配置 ⇒ 新世代，运行时统计不触发 (2.095871ms)
+✔ P1：并发读固定捕获开始时的世代；CAS 发布拒绝；失败保留旧代；回滚整代替换 (1.900833ms)
+✔ M2-1 接口闭环：generation record 生成 authorize binding，验证标志单一来源 (2.274687ms)
+✔ P1：官方条目保留必要字段与来源版本；第三方不带未证实能力字段 (0.681068ms)
+✔ CLI：世代号单调（回滚后不复用版本号）+ 状态记录 generation key (129.652517ms)
+ℹ tests 36
+ℹ suites 0
+ℹ pass 35
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 583.729587
+-- ok 608ms (pid tree reaped: true)
+
+== offline/codex-config.test.mjs ==
+✔ 契约与所有权声明：只含 D1-A 可写字段，明确拒绝内置 provider 覆盖 (0.994261ms)
+✔ 模块自身不读 HOME、不触网、不碰 auth.json 内容 (0.425707ms)
+✔ mergeOwnedFields：只改 owned 行，未知字段/MCP/projects/权限/注释逐字节保留 (1.006825ms)
+✔ mergeOwnedFields：diff 展示原值，保留用户已有的 openai_base_url (0.223588ms)
+✔ diffConfigText：行级前后差异 + 字段所有者标注 (0.46464ms)
+✔ 解析器：分段/键定位/多行值识别/summarizePreserved (0.174874ms)
+✔ 路径护栏：拒绝相对路径、非 config.toml、auth.json、符号链接 (0.262851ms)
+✔ 路径护栏：符号链接指向的 config.toml 拒绝写入 (6.066355ms)
+✔ 拒绝整文件覆盖：非所有权字段、多行值、重复键、未知段 (0.344906ms)
+✔ features 段：白名单键可写，且不改其它 feature (0.262745ms)
+✔ planConfigApply：纯预览默认不回传正文，includeTexts 才返回 (2.549544ms)
+✔ 写入门禁：缺快照/缺确认令牌/错令牌一律拒绝，且不改文件 (3.624416ms)
+✔ 并发冲突：预览后外部修改被拦截（sha256 / size / exists） (2.408073ms)
+✔ 写入成功：原子替换、无 tmp 残留、.bak 保留旧内容、模式保留、读回校验 (3.478759ms)
+✔ 备份轮转：连续两次写入保留 .bak 与 .bak.prev (1.81926ms)
+✔ 回滚：恢复完全一致的原文件，并把回滚前状态另存 .bak.pre-rollback (1.499345ms)
+✔ 回滚：备份不存在时明确报错，不写文件 (0.637802ms)
+✔ 写失败可恢复：目录不可写时原文件零改动 (0.913843ms)
+✔ allowCreate：不存在时默认拒绝，显式放行则创建 0600 新文件 (1.333743ms)
+✔ 既有 [model_providers.openai] 段：告警但不删改（客户端会因此启动失败） (0.89867ms)
+✔ CRLF 与无结尾换行：换行风格与文件结构不被破坏 (2.344379ms)
+✔ D1-A 目标配置：openai_base_url 指向网关、无 [model_providers.openai]、风险如实说明 (0.412316ms)
+✔ readOwnedFields：报告既有值，供 diff/确认页面展示 (0.063819ms)
+✔ snapshotConfigFile：不存在时返回 exists=false，不改任何东西 (0.650783ms)
+✔ UI 模板：D1-A 只写 openai_base_url 系字段，绝不生成 [model_providers.openai] (0.424288ms)
+✔ UI 预览：逐字段 add/replace/same + 保留项 + reserved 段阻断，且不生成整份文件 (0.371465ms)
+✔ UI 预览：既有 [model_providers.openai] 直接阻断（客户端会启动失败） (0.081113ms)
+✔ UI 扫描：顶层键与段内键分离，行号从 1 开始 (0.062712ms)
+✔ UI 目录世代/写盘能力：只认真实字段，缺失即 UNKNOWN（不编造） (0.449187ms)
+✔ UI 导出计划：export-only 契约，不含任何凭据字段 (0.275873ms)
+✔ UI 字段所有权表覆盖三类所有者，含禁止触碰项 (0.073721ms)
+✔ M4-1a 登记根：不透明 id 替代任意路径；非法 id/模式/符号链接拒绝 (1.74852ms)
+✔ M4-1a 登记根：父目录被替换/搬走 ⇒ root_changed（fail closed） (1.018811ms)
+✔ M4-1a 确认令牌：绑定 root/操作/管理员/代际；跨用/过期/重复使用拒绝 (0.409007ms)
+✔ M4-1a 字段投影：归一化取值 + 敏感字段只回 <redacted> (0.286097ms)
+✔ M4-1a 登记根级 plan/apply：CAS 令牌 + 备份不透明 id + 回滚可恢复 (3.357721ms)
+✔ M4-1a 只读登记根 / 跨根备份 / export 投影 (1.491002ms)
+ℹ tests 37
+ℹ suites 0
+ℹ pass 37
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 84.251232
+-- ok 113ms (pid tree reaped: true)
+
+== offline/codex-control-items.test.mjs ==
+✔ Chat 桥：configuration_update / additional_tools 被显式丢弃而非 400 (125.424376ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 210.120979
+-- ok 238ms (pid tree reaped: true)
+
+== offline/codex-fallback-forward.test.mjs ==
+✔ 429 + Retry-After → retry_same 同上游重试后成功（命中 2 次 p1 / 0 次 p2） (136.746309ms)
+✔ 5xx（已收到响应头）→ 一次终态，不换候选重放（p2 命中 0） (106.855859ms)
+✔ 402 → failover（不重试同上游）；404 → failover 到已授权候选 (212.002685ms)
+✔ tool_call 后断流 → stop_with_error，不换上游（p2 命中 0） (128.61452ms)
+✔ 内容已交付后断流 → stop_with_error，不换上游（p2 命中 0） (125.101623ms)
+✔ 官方 402 未确认应急 → stop；确认 codexEmergency 后才 failover 到第三方（config-declared official） (212.311935ms)
+✔ 官方候选被列进目录兜底也不会被 failover 选中（p3 命中 0） (101.029281ms)
+✔ 预算耗尽 → stop MG_FB_BUDGET，不换便宜候选（p2 命中 0） (98.145268ms)
+✔ 400 确定性拒绝 → stop MG_FB_BAD_REQUEST，不换模型（p2 命中 0） (101.954728ms)
+✔ 非聚合模型 5xx 仍走旧 forwardChain 兜底（决策器不介入） (100.479623ms)
+ℹ tests 10
+ℹ suites 0
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1377.572168
+-- ok 1404ms (pid tree reaped: true)
+
+== offline/codex-fallback.test.mjs ==
+✔ classifyError：429/5xx/402/404/400/422/401/403/网络/超时/断流/取消/v2/工具副作用 (0.803985ms)
+✔ classifyError：Retry-After 秒数 / HTTP-date（注入 now，确定性）/ 显式毫秒优先 (0.251786ms)
+✔ advancePhase：合法推进 / 非法回退 / 未知阶段 / 终态 (1.091731ms)
+✔ assessReplaySafety：无副作用/宿主风险/预执行拒绝/已证明副作用 (0.130829ms)
+✔ 纯文本 5xx（已受理、无副作用）→ 同上游退避重试，并给出费用预估 (0.499933ms)
+✔ 429 + Retry-After 等得下 → 按 Retry-After 重试；等不下 → 直接换模型 (0.956253ms)
+✔ 同上游重试次数用尽 → 换模型；换模型次数也用尽 → 显式失败（不无限重放） (0.301322ms)
+✔ 402/404/401 不重试同上游但可换已授权候选；400 确定性拒绝不换模型 (0.433296ms)
+✔ 候选池只有未授权项 → 停机且零费用（绝不使用未授权候选） (3.572079ms)
+✔ 官方订阅永不进通用 fallback 池（D7）：即使更便宜/更健康也不可选 (0.370319ms)
+✔ 官方额度耗尽（402）走手动应急：未确认 → 停机，不自动进第三方池 (0.213716ms)
+✔ 应急范围候选未确认 → 过滤；确认后才可用 (0.185158ms)
+✔ 已出现工具副作用 → 任何错误都停机，零新调用（禁止重复外部操作） (0.160928ms)
+✔ 宿主工具风险 + 5xx → 停机；同风险 + 429 → 允许重试（处理前拒绝） (0.141226ms)
+✔ 已交付有效流 → 停机，不拼接另一模型输出伪装无中断 (0.06836ms)
+✔ 任务部分提交 → 停机，不重复提交 (0.05622ms)
+✔ 用户取消 → 停机且零费用；即便还有可用候选也不重放 (0.075843ms)
+✔ v2 加密任务不可读 → 显式失败，不换上游（D3×D4） (0.114097ms)
+✔ 日预算已耗尽 → 停机且不使用更便宜候选（不降级） (0.092037ms)
+✔ 重试预计费用突破单请求预算 → 停机（不是换便宜模型） (0.088518ms)
+✔ 费用未知的付费候选在预算闸门下 fail-closed（可显式关闭） (0.092119ms)
+✔ 费用估算接口可注入，且注入结果进入决策与审计 (0.086666ms)
+✔ 候选筛选：授权/能力/模态/上下文/工具/健康逐项给出原因 (0.153334ms)
+✔ 健康状态可注入：注入器判定不健康时该候选被过滤（不必复制状态进候选） (0.339904ms)
+✔ 候选评分确定性：打乱输入顺序仍选同一最优，同输入两次结果完全相同 (0.296424ms)
+✔ triedTargets：已尝试过的候选不再被选中，防止重复外部操作 (0.112084ms)
+✔ 发送前选候选（continue）：只选已授权健康候选，并给出费用 (0.120315ms)
+✔ 决策结果不含凭据与请求正文（最小化审计） (0.117008ms)
+✔ 默认上限与常量契约稳定（供文档/接入方引用） (0.047838ms)
+ℹ tests 29
+ℹ suites 0
+ℹ pass 29
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 56.408036
+-- ok 90ms (pid tree reaped: true)
+
+== offline/codex-history.test.mjs ==
+✔ M4-3a 根登记：只接受绝对路径/真实目录，符号链接与不存在都有拒绝码 (4.651759ms)
+✔ E7 历史诊断：provider/model 统计、目录缺失、工具风险、v2 加密 unreadable、符号链接跳过 (13.130755ms)
+✔ M4-3a 根受限：未登记目录拒绝；rootId 缺失拒绝；逃生门仅隔离测试可用 (1.147495ms)
+✔ M4-3a 限额：只能调低、超限截断并标注原因（文件/字节/行数） (4.366276ms)
+✔ M4-3a 损坏 JSONL：记坏行数而不是整体崩，其余会话照常诊断 (2.993972ms)
+✔ M4-3a 只读承诺：诊断与计划前后文件 hash/mtime/目录清单完全不变 (4.056912ms)
+✔ E7 迁移预演：只读导出计划（sha256/字段/备份建议），写入一律 not_authorized (3.653862ms)
+✔ M4-3a 根被替换成符号链接：诊断拒绝（防越根） (1.438903ms)
+✔ E7 输入边界：catalog 形态归一（root 与 path 的边界见上） (0.148169ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 83.37572
+-- ok 114ms (pid tree reaped: true)
+
+== offline/codex-identity.test.mjs ==
+✔ 复现→修复：第三方目标剥除官方专用头，仅保留网关注入的自有 key (127.878977ms)
+✔ 复现→修复：恶意 extraHeaders 不得覆盖/注入鉴权头（忽略并审计） (101.552254ms)
+✔ 第三方目标无自有 key：不得继承客户端 Authorization（宁可 401） (99.810049ms)
+✔ 官方目标分类矩阵：名字不参与判定，声明与 host 冲突即 fail-closed (0.741728ms)
+✔ 官方目标（无自有 key）：403 official_no_gateway_key，零上游请求（F01：透传已移除） (94.764257ms)
+✔ 官方目标（旧透传开关残留）：403 official_passthrough_retired，客户端官方头零到达、零上游请求 (101.600072ms)
+✔ 官方目标（自有 key）：网关注入 key，客户端官方凭据不透传（两条路互斥） (111.385313ms)
+✔ 官方目标 host/path/scheme 白名单（fail-closed）与 extraHeaders 守卫（单元） (1.686925ms)
+✔ buildHeaders 直连断言：官方白名单 vs 第三方剥离集逐条核对 (0.883541ms)
+✔ embeddings/rerank：extraHeaders 同样不得覆盖或注入鉴权头 (0.312189ms)
+✔ 复现→修复：未知聚合保留 ID 硬失败（404，零上游请求） (134.119541ms)
+✔ 聚合保留 ID：已配置即正常路由，旧接口兜底兼容不变 (117.647616ms)
+✔ WS upgrade 的 GET /v1/responses 不得被当普通请求转发 (124.352191ms)
+✔ 重定向不跟随：302 不把请求/凭据送到 Location (144.309881ms)
+✔ targetDeny 旧入参形状保持兼容：拒绝消息不含头值/密钥，身份域/凭据不变量不变 (0.572348ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1235.513901
+-- ok 1265ms (pid tree reaped: true)
+
+== offline/codex-interop.test.mjs ==
+✔ interop：Codex 0.167 真实 tools 形状 -> Chat function 可逆展开 (1.724452ms)
+✔ interop：v2 namespace=collaboration 展开 + 未知/嵌套不可表达工具显式标记 (0.870589ms)
+✔ interop：onUnsupported=reject 让不可表达工具显式失败（默认 drop 保持真实 Codex 可用） (0.895897ms)
+✔ interop：call_id 配对诊断覆盖并行调用 / 缺失 / 孤儿结果 (0.1614ms)
+✔ interop：v2 加密任务判定只给信号，不返回/不记录密文 (0.347473ms)
+✔ §4 命名空间 function_call 展开成与 tools 一致的扁平名，call_id 保序配对 (0.506387ms)
+✔ §4 并行 tool_call：多条调用合并进同一条 assistant 消息，结果按 call_id 回填 (0.273867ms)
+✔ §4 缺 call_id：映射不伪造配对，显式记 lossy 并报告配对问题 (0.173591ms)
+✔ §4 v2 加密 agent_message：桥方向显式 400 code=v2_encrypted_task_unsupported，不解析/不删除/不伪造 (0.203909ms)
+✔ §4 可读 agent_message（纯文本）：降级为 user 消息并显式记 lossy (0.272887ms)
+✔ §4 native 模式不受 Chat 桥限制污染：v2 agent_message / 托管工具 / namespace 原样放行 (0.216916ms)
+✔ §4 native legacy 拒绝矩阵（无 nativeContract）：明确 unsupported_native_parameter (0.163458ms)
+✔ §4 native nativeContract 显式驱动：声明支持的字段放行、未声明仍拒绝 (0.109841ms)
+✔ §5 chatToResponse：扁平展开名还原 name+namespace；普通/custom 工具不受影响 (0.335312ms)
+✔ §6 SSE writer：begin/end/completed 三处都还原 namespace（Codex 按 item 事件路由） (0.432304ms)
+✔ E4 集成：第三方原生密文默认 400；官方原生保留密文；Chat 桥显式 400 (166.805937ms)
+✔ E4 集成：Chat 桥工具往返（namespace 展开 -> 上游 -> 回程还原 name+namespace） (142.513948ms)
+ℹ tests 17
+ℹ suites 0
+ℹ pass 17
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 380.363643
+-- ok 409ms (pid tree reaped: true)
+
+== offline/codex-official.test.mjs ==
+✔ 官方直连（网关自有 key）：SSE 原样回传，客户端官方凭据零透传 (139.069164ms)
+✔ 官方原生透传已移除：旧开关残留 + 无 key → 403 official_passthrough_retired，零上游命中 (100.817336ms)
+✔ 官方目标无 key：403 official_no_gateway_key，零上游命中 (95.801595ms)
+✔ 第三方模型：官方专用头一个都不到第三方上游 (115.87187ms)
+✔ WS upgrade：网关回 404 让客户端回落，且零上游命中 (92.86059ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 612.774216
+-- ok 638ms (pid tree reaped: true)
+
+== offline/codex-opencode-session.test.mjs ==
+✔ opencodego：从 Codex session-id 派生 x-opencode-session（不转发原值） (153.571472ms)
+✔ opencodego：同线程派生值稳定（会话亲和），跨进程/跨请求无引用时给独立 id (153.209034ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 391.689581
+-- ok 428ms (pid tree reaped: true)
+
+== offline/codex-quota.test.mjs ==
+✔ E8 unknown：无来源/来源失败/非法值一律 UNKNOWN，绝不虚构百分比 (2.478552ms)
+✔ M4-3a 三态：fresh / stale / unknown 真区分，窗口边界（正好等于 maxAgeMs）算 fresh (0.634421ms)
+✔ M4-3a 契约入口：只有 fresh 才返回 ok:true；stale/unknown 返回稳定原因 (0.386626ms)
+✔ E8 阈值：normal / 80 warn / 95 critical / 100 耗尽（只认 fresh 读数） (1.616084ms)
+✔ E8 耗尽：只给建议动作与确认步骤，绝不自动切换/购买/退出登录 (0.663923ms)
+✔ M4-3a 硬约束：额度不足且未显式应急 ⇒ 不改变身份路由 (0.947932ms)
+✔ E8 应急态：确认三元组缺一不可、可恢复、影响声明完整、subject 进审计 (0.77215ms)
+✔ E8 状态持久化：形状稳定、可往返、非法输入回退 normal (0.355054ms)
+✔ E8 脱敏：来源对象的 token/apiKey/嵌套字段与自由文本错误不得进入输出 (0.638824ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 77.117784
+-- ok 117ms (pid tree reaped: true)
+
+== offline/codex-role-provider.test.mjs ==
+✔ P01 fixture version is locked to Codex 0.167.0 (1.229676ms)
+✔ P01 matrix contains exactly the four required configurations (0.853364ms)
+✔ P01 no matrix row lets a role change the provider (0.240141ms)
+✔ P01 dual-provider row is a real negative fixture (0.297325ms)
+✔ P01 evidence stays honest: no live/verified claim, source and execution marked unknown/blocked (0.493459ms)
+✔ P01 resolver inherits the parent provider and ignores a role model_provider (0.280295ms)
+✔ P01 same-provider model override works without moving the provider (0.150682ms)
+✔ P01 unknown role fields are reported, not applied, and inputs are not mutated (0.194414ms)
+✔ P01 missing parent provider fails closed instead of inventing one (0.184265ms)
+✔ P01 isolated config parser reads the negative role fixture (0.482198ms)
+✔ P01 restricted parser refuses syntax it does not model (0.429018ms)
+✔ P01 fixture module has no IO, network, environment, or credential access (0.256107ms)
+✔ P01 fixtures contain no host-absolute path or secret-like token (1.107229ms)
+✔ P01 stop conditions forbid decryption, ciphertext deletion, and v1 downgrade (0.21744ms)
+✔ P01 ADR records the boundary, four-row matrix, and UNKNOWN/BLOCKED evidence levels (0.4544ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 73.198958
+-- ok 109ms (pid tree reaped: true)
+
+== offline/codex-v2-responses.test.mjs ==
+✔ P02 COLLABORATION_TOOLS 固定为三个原生协作工具 (1.718735ms)
+✔ P02 信封：合法 input 通过，不误拒 agent_message/reasoning/namespace (0.25927ms)
+✔ P02 信封：model/input 非法 → invalid_envelope (0.153249ms)
+✔ P02 信封：store/background/previous_response_id/truncation 显式拒绝 (0.108492ms)
+✔ P02 信封：include 仅接受可丢弃项并记 lossy，其它拒绝 (0.09525ms)
+✔ P02 声明投影：真实 namespace 扁平化，三消息工具去 encrypted，其余原样 (0.692327ms)
+✔ P02 声明投影：tools 缺省/空数组/非数组 (0.106567ms)
+✔ P02 声明投影：plaintextTools=false 时 namespace 原样，不建立明文映射 (0.166638ms)
+✔ P02 声明投影：同名冲突使用确定性别名，声明顺序不影响映射 (0.230147ms)
+✔ P02 声明投影：重复名/别名再冲突 → tool_identity_conflict (0.191602ms)
+✔ P02 tool_choice：字符串/function/allowed_tools 映射，未知形状记 lossy (0.296337ms)
+✔ P02 agent_message=project：真实抓线形状投影为 user message，保留方向前缀 (0.526317ms)
+✔ P02 agent_message=project：unicode 多 part 拼接、空正文、方向字段缺失 (0.118223ms)
+✔ P02 agent_message：reject/未知字段/非字符串正文拒绝；密文可读部分投影 (0.379581ms)
+✔ P02 reasoning：preserve/drop/reject 三态，密文永远不转文本 (0.097342ms)
+✔ P02 compaction：默认 reject → unsupported_input_item；drop → 省略并记 lossy (0.057036ms)
+✔ P02 控制项：显式分类，默认 drop + lossy，可 preserve/reject (0.138465ms)
+✔ P02 有序历史：工具按 call_id 配对、顺序保持、namespace 映射为扁平名并剥离目标不认识的字段 (0.265424ms)
+✔ P02 工具配对：缺 call_id/孤立 output/重复 call/kind 不匹配/同名歧义 → 拒绝 (0.179669ms)
+✔ P02 历史工具：非空 encrypted_function_args → opaque_function_args，绝不猜测 (0.101134ms)
+✔ P02 marker 矩阵：缺失/null/[]/未声明/非协作 namespace/普通函数 (0.297839ms)
+✔ P02 完成项恢复：6 个 namespace 工具恢复 namespace/原名，仅三消息工具补 marker (0.190506ms)
+✔ P02 完成项恢复：普通函数绝不添加 namespace；added/in_progress 只恢复身份 (0.091587ms)
+✔ P02 恢复：幂等、未知字段/非法参数拒绝、custom_tool_call 原样 (0.165447ms)
+✔ P02 restoreResponseJson：output[] 逐项恢复，model/其它字段不回写、不改入参 (0.17579ms)
+✔ P02 generation 边界：空 plan/旧 plan 不恢复身份 (0.062371ms)
+✔ P02 大小上限：项数与序列化字节数在发送前拒绝 (13.514913ms)
+✔ P02 prepareCodexNativeRequest：投影 body/plan/lossy，且不改原 body (0.443758ms)
+✔ P02 prepareCodexNativeRequest：密文可读部分投影，未支持项仍拒绝 (0.190494ms)
+ℹ tests 29
+ℹ suites 0
+ℹ pass 29
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 77.476497
+-- ok 113ms (pid tree reaped: true)
+
+== offline/codex-v2-lifecycle.test.mjs ==
+✔ P05 清单锁定 Codex 0.167.0，且 13 个生命周期 case 齐全 (1.184921ms)
+✔ P05 清单不声称真实执行通过；隔离边界写明 BLOCKED_ENV / Q02 (0.164482ms)
+✔ P05 22/27 第 2 轮 502 candidate-pool 回归已登记 (0.232111ms)
+✔ P05 角色配置夹具存在，且只表达同 provider model override + 反向 model_provider (0.138929ms)
+✔ P05 e2e --list 与 manifest 一致；--check-manifest 全 PASS；默认仍 exit 2 拒跑 (162.758837ms)
+✔ P05 生命周期 mock：nonce 从 child 工具回到 parent wait；wait 前不伪造完成 (0.5032ms)
+✔ P05 生命周期 mock：followup_task 生成新 nonce 并触发下一轮 (0.175958ms)
+✔ P05 生命周期 mock：send_message 走明文投影；cancel 后不再 followup/wait 成功 (0.211226ms)
+✔ P05 生命周期 mock：权限拒绝零执行；允许后执行一次 (0.223425ms)
+✔ P05 生命周期 mock：fork_turns none/all 历史边界 (0.171908ms)
+✔ P05 生命周期 mock：并发上限与 parent/child identity (0.117942ms)
+✔ P05 生命周期 mock：resume 返回同一 root/child/history；未知会话显式失败 (0.123553ms)
+✔ P05 生命周期 mock：role 的 model_provider 不改变 provider（P01 边界） (0.111273ms)
+✔ P05 fixture 静态边界：无网络/CLI/真实端点 (0.272115ms)
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 215.568564
+-- ok 251ms (pid tree reaped: true)
+
+== offline/codex-v2-stream.test.mjs ==
+✔ P04 严格支持列表：终态仅 completed/failed/incomplete (0.652183ms)
+✔ P04 A1 Chat 桥流入口保持导出（原生适配层不替换它） (0.078037ms)
+✔ P04 解析器：多帧增量、注释块、空行跳过 (0.746307ms)
+✔ P04 解析器：flush 吐出残帧，二次 flush 为空 (0.219253ms)
+✔ P04 解析器：UTF-8 多字节逐字节分片仍完整 (0.709623ms)
+✔ P04 解析器：CRLF、纯 CR、跨分片 CRLF 等价 (0.231187ms)
+✔ P04 解析器：多行 data 保留，超长单帧跨分片不截断 (55.879436ms)
+✔ P04 适配器：非关键帧逐字节透传、首帧写 SSE 头、events 记录 (0.927139ms)
+✔ P04 适配器：UTF-8 中文跨 chunk 分片不损坏；无 event: 行按 data.type 识别 (0.335559ms)
+✔ P04 适配器：added 只恢复身份，done 才补 marker；id/call_id/序号保持 (0.950862ms)
+✔ P04 适配器：并行/反序分片按 output_index 保持顺序与各自身份 (0.422459ms)
+✔ P04 适配器：重复 added 不重编号不吞帧 (0.272363ms)
+✔ P04 适配器：done 缺失时 completed.output[] 仍恢复身份与 marker (0.425499ms)
+✔ P04 适配器：普通函数工具不补 namespace/marker (0.147183ms)
+✔ P04 适配器：completed.output[] 逐项恢复，usage 只记一次且原值保留 (0.285842ms)
+✔ P04 适配器：completed 缺 output/output_text/usage 时补空并记 0，不臆造 (0.145047ms)
+✔ P04 适配器：缺 output_text 时按 output 文本补，不伪造 item (0.16644ms)
+✔ P04 适配器：终态后帧全部忽略，usage 不重复 (0.145172ms)
+✔ P04 适配器：Responses 流中的 [DONE] 丢弃，不写出 (0.158883ms)
+✔ P04 适配器：response.incomplete 是终态，output[] 恢复身份且 status/details 保留 (0.187421ms)
+✔ P04 适配器：incomplete 中普通工具项不带 namespace/marker (0.133ms)
+✔ P04 适配器：终态前 EOF → 合成 response.failed STREAM_INTERRUPTED，不重发旧帧 (0.437811ms)
+✔ P04 适配器：end() 幂等；终态后 end() 不追加失败帧 (0.202062ms)
+✔ P04 适配器：显式 fail 写一次，重复 fail 幂等 (0.135115ms)
+✔ P04 适配器：上游非空 encrypted_function_args 显式失败，不覆盖成 [] (0.239921ms)
+✔ P04 适配器：工具项未知字段显式失败（不猜测） (0.152185ms)
+✔ P04 背压：write false 暂停，drain 后继续 (7.373628ms)
+✔ P04 背压：等待超时 → clientStalled，未写出缓冲超限 → 拒绝，客户端断开 → clientGone (26.66141ms)
+✔ P04 JSON 与 SSE 恢复出的工具身份字段完全相同 (0.448316ms)
+✔ P04 适配器：恢复身份时保留事件级字段与已知 item 字段 (0.211064ms)
+ℹ tests 30
+ℹ suites 0
+ℹ pass 30
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 154.828133
+-- ok 190ms (pid tree reaped: true)
+
+== offline/codex-p09-native-proxy.test.mjs ==
+✔ 退役静态扫描：src 递归不出现 auth.json/CODEX_HOME/local-subscription/订阅后端路径 (23.298444ms)
+✔ 授权层：gatewaySubscription 旧模式/旧开关一律 typed deny，订阅后端路径永不进白名单 (0.504171ms)
+✔ 残留 gatewaySubscription：官方 /v1/responses → 403 retired、零上游、合成登录态不出现 (118.647349ms)
+✔ 残留 gatewaySubscription：第三方 /v1/responses → 403 retired、零上游 (101.466687ms)
+✔ 残留 gatewaySubscription：官方 Chat 桥 → 403 retired、零上游 (129.213318ms)
+✔ gatewaySubscription 关闭且无自有 key：保持 F01 official_no_gateway_key fail-closed (98.610151ms)
+✔ 官方直连自有 key：只发 /v1/responses、客户端官方头零透传、父 V2 不扁平化 (98.238805ms)
+✔ 子 Go：plaintextTools 扁平化/删 encrypted，agent_message 明文投影，零官方凭据 (96.944965ms)
+✔ 子 Go：加密 agent_message 只保留可读文本，密文片段不转发 (96.890727ms)
+✔ 第三方密文/加密工具 schema：发送前 400 零上游（item 级、字符串值、tool schema） (97.221341ms)
+✔ 上游 4xx 体回客户端前脱敏：Bearer/sk- 不出现在响应 (96.153088ms)
+✔ 带工具历史：首个候选失败后不得跨候选重发 (103.34158ms)
+✔ 子原生 SSE：adapter 恢复 namespace/marker、单终态、usage once；EOF 合成 failed (100.629348ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1237.66395
+-- ok 1265ms (pid tree reaped: true)
+
+== offline/codex-routing-catalog.test.mjs ==
+✔ 官方 slug：不在 config.models 也能解析为官方 responses 路由 (1.661639ms)
+✔ 聚合 slug：绑定 provider + 原模型名，providerModels/servingModel 供转发与探活共用 (0.14581ms)
+✔ 聚合 slug 保留原生 Responses 与 codex 投影策略 (0.105826ms)
+✔ 聚合 slug 继承原模型能力声明（协议/思考强度/输出上限） (0.095709ms)
+✔ 官方 slug 缺 defaults.codexOfficialProvider / 上游不存在：fail-closed，绝不回退 defaults.provider (0.134148ms)
+✔ 绑定损坏 / 上游不存在：fail-closed（catalog_binding_invalid），不回退默认上游 (0.10895ms)
+✔ 冲突检测：目录 slug 同时被 config.models/别名声明 → 判 unknown（两侧都不静默胜出） (0.159901ms)
+✔ 严格性不变：mg-/mg/ 未命中仍 404，无目录时与 E1 完全一致 (0.213936ms)
+✔ 目录结构与注入时序：懒失效（先建 router 后注入也生效）与畸形目录安全 (0.216841ms)
+✔ 回归：普通模型的 providerModels 映射仍优先于任何目录推断 (0.106669ms)
+✔ 端到端：目录注入后聚合 slug 上游名/回写，官方 slug 走 /v1/responses，目录 404 严格 (138.666634ms)
+✔ M2-2：世代视图不改变路由语义；未知/墓碑 ID 仍 404 且不回退默认上游 (1.208658ms)
+ℹ tests 12
+ℹ suites 0
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 204.230451
+-- ok 235ms (pid tree reaped: true)
+
+== offline/codex-target-authz.test.mjs ==
+✔ canonicalizeUrlOnce 与 upstreamUrl 同构：尾斜杠、/v1 去重、大小写主机、默认端口、百分号编码 (0.959039ms)
+✔ 第三方授权：最终目标固化、空白头 + 域派生会话、记录不可变 (1.475601ms)
+✔ 拼装后二次校验：合法 upstreamUrl 通过；path/query/host/port/相对路径漂移全部拒绝 (0.370038ms)
+✔ 拼装前允许 + 拼装后漂移（官方）：@ 注入 / 主机后缀 / 双重 /v1 / query 均拒绝 (0.438719ms)
+✔ fail-closed：unknown / 未验证 / host 冲突 / generation 不匹配零发送，消息不含密钥 (0.302152ms)
+✔ 域与凭据分离：官方订阅身份已退役，任何声明都被显式拒绝（F01） (0.244141ms)
+✔ 官方订阅入口（/backend-api/codex）已移除：路径先于凭据被拒，客户端官方头零放行 (0.161689ms)
+✔ 官方自有 key：注入网关 key，客户端官方凭据不透传（两条路互斥） (0.137373ms)
+✔ 第三方派生会话：同域稳定、跨域不可关联、不泄露原线程 id (0.316322ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 61.12831
+-- ok 90ms (pid tree reaped: true)
+
+== offline/config-projection.test.mjs ==
+✔ GET /api/config：只读配置投影（无运行时字段/无明文 Key，扩展字段保留） (108.405743ms)
+✔ GET /api/config 需要管理鉴权；投影可直接用于保存并保留扩展字段 (100.388142ms)
+✔ D-1：面板使用 _extra 不透明袋并在保存时合并（静态检查） (0.747217ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 267.282727
+-- ok 296ms (pid tree reaped: true)
+
+== offline/config-schema.test.mjs ==
+✔ MG-003 形状与保留键：非法输入返回 400 且不写盘、不改内存 (130.636124ms)
+✔ MG-003 并发保存：同一 version 只有一个成功，另一个 409 (95.178168ms)
+✔ MG-003 删除语义：删除的上游/模型重启后不复活，重新加回则恢复 (384.658478ms)
+✔ MG-003/MG-009 keys 标识：保留键、空 id 与未知标识被拒 (94.248092ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 758.440814
+-- ok 795ms (pid tree reaped: true)
+
+== offline/config-transaction.test.mjs ==
+✔ M0-3 正常提交：两文件同代际、0600、工件清理、锁释放、日志不含正文 (3.501512ms)
+✔ M0-3 故障注入 @before_stage → 重启恢复为一致代际（不混合） (22.861088ms)
+✔ M0-3 故障注入 @before_stage_fsync → 重启恢复为一致代际（不混合） (22.445515ms)
+✔ M0-3 故障注入 @before_intent → 重启恢复为一致代际（不混合） (29.782603ms)
+✔ M0-3 故障注入 @after_intent → 重启恢复为一致代际（不混合） (30.699417ms)
+✔ M0-3 故障注入 @after_rename_keys → 重启恢复为一致代际（不混合） (37.695109ms)
+✔ M0-3 故障注入 @after_rename_config → 重启恢复为一致代际（不混合） (37.402826ms)
+✔ M0-3 故障注入 @before_commit_marker → 重启恢复为一致代际（不混合） (25.929858ms)
+✔ M0-3 故障注入 @after_commit_marker → 重启恢复为一致代际（不混合） (30.287452ms)
+✔ M0-3 故障注入 @before_publish → 重启恢复为一致代际（不混合） (26.052078ms)
+✔ M0-3 真实进程 SIGKILL @after_rename_keys → 恢复旧代际且权限 0600 (30.987174ms)
+✔ M0-3 外部修改：beginWrite 指纹不一致 → fail-closed，保留用户文件 (0.750032ms)
+✔ M0-3 待决事务遇到外部修改 → 保留现场、结构化冲突、不覆盖 (23.046291ms)
+✔ M0-3 锁竞争：另一个写者被立即拒绝（不排队），不产生半成品 (58.02218ms)
+✔ M0-3 静态约束：配置目标只经事务原子替换，不再直写 (0.653094ms)
+✔ M0-3 旧格式兼容：无 journal 的明文 keys + local 可直接读入并升级 (0.676325ms)
+✔ 网关：事务注入失败返回 500，不发布内存、不降低鉴权、不改磁盘 (248.68675ms)
+✔ 网关：rename 后真实进程退出，重启恢复旧代际且鉴权一致 (449.45604ms)
+✔ 网关：启动时遇到不可判定的待决事务 → fail-closed 拒绝启动并记录结构化冲突 (111.122633ms)
+✔ 网关：外部修改后保存 fail-closed，reload 后才继续 (140.528563ms)
+✔ F02 损坏的 keys.local.json：拒绝加载（不回落空 Key），文件原样保留 (0.705833ms)
+✔ F02 损坏的 gateway.local.json：拒绝加载（不回落 base 配置），文件原样保留 (0.239295ms)
+✔ F02 损坏 keys 的网关拒绝启动（fail-closed，不降级为无 Key），坏文件不被改写 (79.36287ms)
+✔ F02 锁文件：空文件（旧实现崩溃残留）可回收；不可解析 → lock_unreadable 且不擅自删除；死 pid 可回收 (0.764887ms)
+✔ F02 旧 staging 共存：遗留 <目标>.<pid>.tmp 与无 journal 的 .mg-txn 被安全清理，目标文件不变 (0.301418ms)
+✔ F02 真实加密 Key 回滚：SIGKILL 于 rename 后，恢复旧代际且旧 Key 可解密、未丢 (32.62593ms)
+ℹ tests 26
+ℹ suites 0
+ℹ pass 26
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1507.320653
+-- ok 1539ms (pid tree reaped: true)
+
+== offline/deadline.test.mjs ==
+✔ AC-1 满队列（QPS 令牌）+ 小 overallMs：排队请求 504、不触达上游、队列可继续 (1637.031453ms)
+✔ AC-1b 客户端在 QPS 排队中断开：预留令牌归还、队列可继续 (1316.549306ms)
+✔ AC-2 代理 CONNECT 挂起：预算内 504、隧道 socket 关闭 (603.774152ms)
+✔ AC-3 慢上游响应头：预算内 504、上游连接销毁、不重试 (402.850101ms)
+✔ AC-3b 慢上游响应体：非流式读体受预算约束，504 且上游销毁 (503.747096ms)
+✔ AC-4a 客户端在模型并发队列中断开：waiter 移除、不触达上游、槽位可复用 (830.933164ms)
+✔ AC-4b 客户端在上游等待中断开：上游 socket 关闭、不重试 (536.684786ms)
+✔ AC-4c 客户端在流式中途断开：上游 socket 关闭、不续传 (583.548436ms)
+✔ AC-5 流式阶段预算耗尽：SSE error(REQUEST_TIMEOUT) + [DONE]、上游销毁、不续传 (899.633005ms)
+✔ AC-6a SSE 背压：write=false 后暂停拉取上游，drain 后恢复（契约 §5） (150.529116ms)
+✔ AC-6b SSE 背压：等待 drain 超时 → 中止并销毁客户端/上游（契约 §5 WRITE_WAIT_MS） (81.400947ms)
+✔ AC-6c SSE 背压：未写出缓冲超限 → 立即中止，禁止无界缓冲（契约 §5 MAX_CLIENT_BUFFER_BYTES） (0.92671ms)
+✔ AC-6d SSE 背压：等待 drain 期间客户端断开 → 立即中止（契约 §5 / §3） (120.724683ms)
+✔ AC-6e 背压等待期间 noEventMs 看门狗生效：快速中止而非等满 writeTimeoutMs (150.877324ms)
+✔ AC-4e 已完成流不判超时：终止帧写入瞬间预算到期仍为 completed (1.209191ms)
+✔ AC-4d 分类：client_closed 与 request_timeout 不混淆（单元） (111.314938ms)
+✔ AC-7 慢请求 body：读取受预算约束，504 且释放连接 (419.845012ms)
+✔ T-LIFE-02a 单调 deadline 钳制等待：5000ms 等待在 100ms 预算处醒来（注入时钟） (1.576508ms)
+✔ T-LIFE-02b 排队等待消耗同一 deadline：到期唤醒、waiter 移除、令牌不泄漏 (1.34011ms)
+✔ T-LIFE-02b2 排队等待被取消唤醒：CANCELLED 原因、waiter 移除、令牌归还 (0.51878ms)
+✔ T-LIFE-02c 连接/读响应头阶段超时：同一 deadline 中止、不重试、上游连接销毁 (172.731434ms)
+✔ T-LIFE-02d 写请求体阶段受同一 deadline 约束：大 body 挂起仍按时中止 (153.380123ms)
+✔ T-LIFE-02e 流读取阶段受同一 deadline 约束：超时销毁流、一次终态、不重放 (221.778796ms)
+✔ T-LIFE-02f 429 Retry-After 等待计入同一 deadline（注入时钟） (3.424763ms)
+ℹ tests 24
+ℹ suites 0
+ℹ pass 24
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 8976.931508
+-- ok 9002ms (pid tree reaped: true)
+
+== offline/forward-wiring.test.mjs ==
+✔ T-LIFE-04a execute 在真实 dispatch 前自行置位 onWriteBegin：写后异常不得退化成 UNSENT 重放 (1.746126ms)
+✔ T-LIFE-04b 生产路径写后断 socket：上游命中 1 次、不重放 (90.403197ms)
+✔ T-LIFE-04c 生产路径 5xx 收到响应头：命中 1 次、不换候选 (103.014062ms)
+✔ T-LIFE-04d 工具意图后断流：命中 1、一次流内终态、不换候选 (134.205229ms)
+✔ T-LIFE-04e 402/404/429（证明未执行）才允许下一跳 (315.920217ms)
+✔ T-LIFE-04f 每次发送前已有持久预留，成功后结算 (101.724097ms)
+✔ T-LIFE-04g 进程被 kill 后重启：同请求不重复扣费、不重放 (222.797545ms)
+✔ T-ROUTE-02a 授权漂移（baseUrl userinfo）→ typed deny、零上游 (101.077848ms)
+✔ T-ROUTE-02b 能力未证实的候选不出现在执行序列；无账本却配置上限 → 拒绝发送 (186.127919ms)
+✔ T-ROUTE-02c 裁决 target 与上游实际收到的 model/provider 逐字段一致 (104.740537ms)
+✔ T-ROUTE-02d 日志与错误信封不含密钥哨兵/上游正文片段 (100.250664ms)
+✔ N02 接线：defaults.codexBudget.billingPolicy 必须透传到决策器预算；缺省不写字段（保持 fail-closed 默认） (6.316598ms)
+ℹ tests 12
+ℹ suites 0
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1528.618252
+-- ok 1562ms (pid tree reaped: true)
+
+== offline/embeddings.test.mjs ==
+✔ OpenAI embedding：请求透传、model 回写、记账与模型发现 (93.574092ms)
+✔ 能力隔离：embedding 模型不能走对话入口，chat 模型不能走 embeddings (94.102443ms)
+✔ Gemini embedding：batchEmbedContents 路径/请求体/协议头与响应归一 (97.024234ms)
+✔ Anthropic 无 embedding 能力：明确失败且不触上游 (90.498118ms)
+✔ embedding fallback：主上游 500 → 备用成功并记账 (105.379626ms)
+✔ embedding 探测：/api/model-test 走 embeddings 端点 (99.509823ms)
+✔ embedding 预算：慢上游受 overallMs 约束 → 504 request_timeout (396.445238ms)
+✔ F04 可选端点关闭：defaults.optionalEndpoints.embedding=false → 501 且零上游调用 (93.505021ms)
+✔ F04 可选端点配置：只接受已证实能力，未知能力名/非法形状 → 400 且不落盘 (103.142768ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1243.85693
+-- ok 1281ms (pid tree reaped: true)
+
+== offline/hosted-tools.test.mjs ==
+✔ hosted tools: bridge() 默认严格 typedUnsupported；显式有损/兼容预设才丢弃（不得静默） (1.388686ms)
+✔ hosted tools: native Responses preserves web_search/namespace; Chat bridge drops them explicitly (133.895272ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 196.057925
+-- ok 220ms (pid tree reaped: true)
+
+== offline/inference-receipt.test.mjs ==
+✔ M5-1：成功回执关联四类引用，且对外只有哈希（明文不外泄） (1.939589ms)
+✔ M5-1：缺失身份、未授权作用域、过期作用域 ⇒ 稳定拒绝码 (0.172681ms)
+✔ M5-1：越权候选与未授权的官方订阅候选都拒绝（不静默降级） (0.364862ms)
+✔ M5-1：超时间预算 / 超费用预算 ⇒ 拒绝码，且数字如实回显 (0.177886ms)
+✔ M5-1：六种 attempt 阶段映射到六个终态；未知阶段拒绝 (0.542123ms)
+✔ M5-1：终态优先级 —— 工具风险 > 对账 > 已发送未知 > 未发送 > 成功/失败 (0.300158ms)
+✔ M5-1：未知用量输出 unknown（不得填 0）；仅 CANCELLED_UNSENT 是已知 0 (0.261244ms)
+✔ M5-1：exact route 与裁决目标、上游实见逐字段一致（不一致即拒绝） (0.283538ms)
+✔ M5-1：账本 receipt 决定已知费用；链路/币种/金额不一致必须拒绝 (0.280552ms)
+✔ M5-1：回执/拒绝理由都不含密钥、URL 凭据或原始标识 (0.255847ms)
+✔ M5-1：回执深度冻结，同输入同输出（含键顺序无关的 receiptHash） (1.087489ms)
+✔ M5-1：没有 attempt 的回执不是回执（拒绝），且拒绝码集合稳定 (0.093114ms)
+ℹ tests 12
+ℹ suites 0
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 67.548872
+-- ok 95ms (pid tree reaped: true)
+
+== offline/key-tristate.test.mjs ==
+✔ T-KEY-01 三态判定：省略/掩码=保留，空串=显式清空，非法=400 (1.09247ms)
+✔ T-KEY-02 过期解析：毫秒 / 带时区 ISO / 旧 datetime-local / 非法与歧义 (0.616866ms)
+✔ T-KEY-02 旧格式固定时区夹具：同一 wall-clock 在不同 TZ 解析为不同 instant (118.420137ms)
+✔ T-KEY-02 到期边界：到期前 1ms / 瞬间 / 后 1ms 与非法值 deny (0.26029ms)
+✔ P0-1 省略字段不清空全局 Key；掩码保留；替换与显式清空生效 (156.79658ms)
+✔ P0-1 面板侧：未编辑不发送 clientKey，清空需显式动作（静态契约） (0.766163ms)
+✔ T-KEY-01 旧明文迁移：省略字段时把 defaults.clientKey 迁入加密库并清掉明文 (112.226831ms)
+✔ T-KEY-01 env 覆盖优先：MG_CLIENT_KEY > keys 库 > 旧 defaults (111.037297ms)
+✔ T-KEY-01 无权限/无令牌：401 且不改配置 (98.348591ms)
+✔ T-KEY-01 非法值 400 且不落盘、不改内存 (105.839009ms)
+✔ T-KEY-01 审计与秘密边界：只记动作+代际，日志/响应不含 Key (94.988286ms)
+✔ T-KEY-02 虚拟 Key 过期：保存校验、规范化落盘、鉴权拒绝 (122.843791ms)
+✔ T-KEY-03 vm meta 三态判定：整个数组/单字段省略=保留，显式空值=清空 (0.287731ms)
+✔ T-KEY-03 省略 virtualModels 不得清空 meta：已过期 Key 保存后仍然 401 (127.081314ms)
+✔ F02 旧明文 keys + 主密钥不可用：加密写失败 → 500 key_encryption_unavailable，明文与旧鉴权都不变 (104.077661ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1230.653956
+-- ok 1252ms (pid tree reaped: true)
+
+== offline/lifecycle.test.mjs ==
+✔ MG-007 SIGTERM：退出码 0、连接排空、统计最终落盘并在重启后恢复 (226.066474ms)
+✔ MG-007 损坏 stats：先备份再重建，网关照常启动 (92.883342ms)
+✔ T-LIFE-01 尝试阶段单调前向：写开始即 SENT_UNKNOWN、非法回退被拒绝、证据决定可否再发 (0.490656ms)
+✔ T-LIFE-02 已写出请求体后连接断开 → SENT_UNKNOWN，上游命中 1 次、不重放 (3.350841ms)
+✔ T-LIFE-03 收到响应头后断流 → 不重放（命中 1） (33.055724ms)
+✔ T-LIFE-03b 已交付首个语义事件后断流 → 仍不重放（命中 1） (34.457399ms)
+✔ T-LIFE-03c 工具意图已观测后失败 → TOOL_RISK，不重放（命中 1） (4.364046ms)
+✔ T-LIFE-04 挂起队列中的请求被取消 → CANCELLED_UNSENT，且不影响其他请求 (15.272808ms)
+✔ T-LIFE-05 并发/限流令牌在异常路径归还（finally 语义） (1.167901ms)
+✔ T-LIFE-06 取消独立于失败：Retry-After 等待中取消 → 一次 CANCELLED 终态，不再发送 (41.60356ms)
+ℹ tests 10
+ℹ suites 0
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 523.589697
+-- ok 555ms (pid tree reaped: true)
+
+== offline/logger-secrets.test.mjs ==
+✔ MG-005 logger：启动词表、运行期刷新、代理凭据与 Bearer 兜底 (4.91536ms)
+✔ MG-005 端到端：通过 API 热更新的凭据在日志里即刻脱敏 (117.891432ms)
+✔ N06 canary：请求正文、Bearer、encrypted_content 与原始 parent id 均不出现在日志/事件中 (105.880866ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 279.826128
+-- ok 317ms (pid tree reaped: true)
+
+== offline/mcp-uhr-contract.test.mjs ==
+✔ M5-2：正常委派 —— 返回 taskRef/state 与最小回执，并落盘 (3.427653ms)
+✔ M5-2：重复提交幂等 —— 同 idempotencyKey 同摘要复用 taskRef，且不重复执行 (0.847839ms)
+✔ M5-2：取消幂等；已终态不可取消；未知 taskRef 明确拒绝 (1.02457ms)
+✔ M5-2：重启后 taskRef 仍可查（真实目录重建实例） (0.782335ms)
+✔ M5-2：缺失/过期/未授权的连接身份都必须拒绝 (0.379265ms)
+✔ M5-2：预算必须 > 0 且不超身份/策略上限；截止不得越过作用域 (0.511704ms)
+✔ M5-2：对话正文/绝对路径/密钥不得进摘要（拒绝）；超长摘要默认拒绝，显式 allow 才裁剪 (0.569813ms)
+✔ M5-2：引用只能是不透明 {kind, ref}（拒绝内联正文/绝对路径/穿越/凭据 URL） (0.406513ms)
+✔ M5-2：v2 不透明密文在任何字段里都拒绝跨域转发（绝不解密） (0.311756ms)
+✔ M5-2：工具范围只允许授权的只读子集 (0.495369ms)
+✔ M5-2：MCP 结果必须原样回填 toolCallId（成功与失败都一样） (0.556897ms)
+✔ M5-2：只有拥有 taskRef 或有 scoped grant 才能读取/取消 (0.550965ms)
+✔ M5-2：被拒的密钥/路径不落盘；上游结果里的密钥在返回前脱敏 (1.011584ms)
+✔ M5-2：mock 边界 —— 已终态不可重复完成；任务表损坏拒绝启动 (0.819669ms)
+✔ M5-2：工具描述只暴露契约字段（无实现细节），且禁止未声明的写工具 (0.300106ms)
+✔ M5-2b：5000 字符单行摘要默认拒绝且零提交；显式 allowSummaryTruncation 才裁剪 (0.499971ms)
+✔ M5-2b：空或缺失 toolCallId 一律拒绝（零提交，不得返回 isError:false） (0.213479ms)
+✔ M5-2b：v2 检测只看键名 —— 键级拒绝、值级不拒绝（设计边界，不是 bug） (0.409343ms)
+ℹ tests 18
+ℹ suites 0
+ℹ pass 18
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 61.472052
+-- ok 86ms (pid tree reaped: true)
+
+== offline/mcp-delegation.test.mjs ==
+✔ 契约：delegate 入参拒绝矩阵（未知键/超长/密文/凭据/预算/幂等键） (1.864405ms)
+✔ 状态机：非法转移被拒绝；重启把在途回合对账成 UNKNOWN 且不重发 (1.734246ms)
+✔ 完整闭环：delegate → 真实 SSE → 本地工具执行 → 结果回执 → ACK，且凭据/会话头隔离 (16.529165ms)
+✔ 幂等：同 key 同摘要是回放、同 key 不同摘要冲突；都不产生第二次上游调用 (4.809987ms)
+✔ 同 session 追派：复用 taskRef/session，两轮各自独立回执，幂等不重复派发 (4.319329ms)
+✔ wait 超时不等于失败；取消后状态为 CANCELLED 且如实记录上游停止未知 (85.109537ms)
+✔ 上游 5xx：任务 FAILED 且只发一次（不重试、不换上游、不重复执行） (8.597944ms)
+✔ 工作区工具：路径逃逸与绝对路径一律拒绝；未启用工具时不虚构工具执行 (3.345792ms)
+✔ 结果脱敏与截断：默认不静默裁剪，显式允许才截断 (0.334104ms)
+✔ 归属隔离：不同 ownerRef 不能读取/取消他人 taskRef（NOT_OWNER，不泄露内容） (3.819409ms)
+✔ MCP 协议：initialize / tools/list / 未知方法 / 未知工具 (0.798252ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 204.635834
+-- ok 231ms (pid tree reaped: true)
+
+== offline/media.test.mjs ==
+✔ Audio speech：JSON 请求、二进制响应透传与记账 (127.397485ms)
+✔ Audio transcription：multipart 原样转发，路由字段 model 正确解析 (101.271892ms)
+✔ Image generations：JSON 透传、usage 记账与模型发现 (103.046562ms)
+✔ Image edits：multipart 转发与响应透传 (92.630381ms)
+✔ 媒体能力隔离：audio/image 与 chat/其他能力互斥 (97.208619ms)
+✔ 不支持的桥接明确拒绝：Anthropic 上游 audio → 502 且不触上游 (92.324593ms)
+✔ 媒体响应体积上限：超过 defaults.mediaMaxResponseBytes → 502 media_too_large (108.550851ms)
+✔ 媒体预算：慢上游受 overallMs 约束 → 504，且 multipart 缺 model 返回 400 (399.931998ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1181.796441
+-- ok 1211ms (pid tree reaped: true)
+
+== offline/metrics.test.mjs ==
+✔ MG-006 一次请求只计一次对话请求（流式 usage+缓存不重复计数） (126.197759ms)
+✔ MG-006 容量上限：对话字典不会无界增长（落盘后 ≤80 条） (166.53273ms)
+✔ N06 收据：终态按 (requestId,terminal) 只记一次；未知用量写 unknown 不填 0 (1.364588ms)
+✔ N06 事件：正文/凭据/密文/原始 id 一律拒绝（父子只收显式哈希关联） (0.467874ms)
+✔ N06 分页：版本化 cursor 分页、hasMore、有界历史与 dropped 计数 (0.305534ms)
+✔ N06 网关：/api/observability/events 版本化分页，正文/原始 id/密钥一律不出现 (100.886724ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 450.653881
+-- ok 482ms (pid tree reaped: true)
+
+== offline/model-resolution.test.mjs ==
+✔ modelTarget：providerModels/api 优先级与探测/预热/failback 同一来源 (0.787194ms)
+✔ warm（预热）按模型协议与上游模型名整形：Anthropic (10.218167ms)
+✔ warm（预热）按模型协议与上游模型名整形：Gemini (2.123448ms)
+✔ probeChat（failback）按模型协议与上游模型名探活：Anthropic SSE (1.460644ms)
+✔ mapErrorEnvelope：原生错误映射为 OpenAI 信封，OpenAI 形状不动 (0.246413ms)
+✔ 集成：Anthropic 上游 400 原生错误 → 客户端收到 OpenAI 信封与原始状态码 (110.865473ms)
+✔ 集成：OpenAI 上游错误体原样透传（不误映射） (118.734259ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 315.777472
+-- ok 348ms (pid tree reaped: true)
+
+== offline/n01-catalog-authz.test.mjs ==
+✔ N01 证据 fresh：能力写入目录，并记录来源/有效期/新鲜度 (1.897639ms)
+✔ N01 证据过期：不写入能力字段，保留 stale 证据与 warning（stale ≠ proven） (0.28803ms)
+✔ N01 证据未写有效期：能力保留但标 not-recorded，便于管理面观察 (0.245023ms)
+✔ N01 证据格式非法（expiresAt 非日期）fail-closed (0.299878ms)
+✔ N01 目录视图携带同代别名，并通过完整性判据 (0.994165ms)
+✔ N01 快照 pin：不可变、同代判定、拒绝不完整目录 (0.919137ms)
+✔ N01 固定快照：目录换代后，旧快照仍按旧代解析（不混代） (0.894463ms)
+✔ N01 下架模型零上游：墓碑优先，且不回落默认上游 (0.675944ms)
+✔ N01 同代别名解析：返回 aliasTarget + generation，目标缺失/墓碑 fail-closed (1.002613ms)
+✔ N01 不完整快照：路由前 fail-closed（零上游） (0.380457ms)
+✔ N01 只读模板：profile/别名/显式角色样例，明确标注 provider 覆盖不支持 (0.339842ms)
+✔ N01 可观察 drift：逐字段对比，匹配=零 drift、改值=可观察且脱敏 (1.059601ms)
+ℹ tests 12
+ℹ suites 0
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 60.887489
+-- ok 103ms (pid tree reaped: true)
+
+== offline/n02-routing-budget.test.mjs ==
+✔ N02 无预算设施：付费候选被拒（billing_unmetered），免费候选与显式声明放行 (2.987861ms)
+✔ N02 无预算设施：legacy 候选自述 paid/未知价也不得走计费路径 (0.358144ms)
+✔ N02 账本不混币：非 USD 账本视图不得喂给 USD 决策器 (0.335048ms)
+✔ N02 重复请求仅一次 + 重启后可对账（不双记、不释放 unknown） (10.546914ms)
+✔ N02 429 deadline 边界：等得起/等不起按安全余量精确分界 (0.09728ms)
+✔ N02 跨域零命中：官方候选不进入通用池，第三人候选不受影响 (0.230958ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 55.609563
+-- ok 79ms (pid tree reaped: true)
+
+== offline/n04-history-diagnose.test.mjs ==
+✔ N04 诊断：有界只读、opaque 计数、原件 hash/mtime/目录不变 (14.59757ms)
+✔ N04 摘要导出试算：planId 绑定、只导出 user/assistant 明文、排除工具/密文 (10.348696ms)
+✔ N04 越界与未登记：未登记根/符号链接/缺配置一律拒绝（零读取） (0.198855ms)
+✔ N04 管理面：诊断/试算只读、导出需显式管理员 + planId，拒绝 409 (4.241985ms)
+✔ N04 CLI：history 命令只走 loopback + 管理令牌，拒绝非本机目标 (96.444312ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 178.659197
+-- ok 208ms (pid tree reaped: true)
+
+== offline/n05-quota-emergency.test.mjs ==
+✔ N05 用量来源三分：本地统计/导入仅计数，账户额度才参与额度判断 (0.569914ms)
+✔ N05 额度三态：fresh/stale/unknown 与缺身份→UNKNOWN（不猜余额） (0.583911ms)
+✔ N05 应急试算：必须有新 profile + 第三方范围；声明零身份/历史变更 (0.833566ms)
+✔ N05 激活/恢复：planId 绑定、三元组、profile 审计、对称恢复 (0.768075ms)
+✔ N05 原身份/历史不变：应急状态机不碰任何 auth/历史文件（合成分隔证明） (5.652112ms)
+✔ N05 管理面：quota 未接线→UNKNOWN；emergency 无 store→只读试算/写路径 503；有 store 时 planId 绑定 (0.980675ms)
+✔ N05 CLI：quota 未接线→UNKNOWN；应急 plan/activate/restore 只写隔离 state-file，拒绝 auth/历史路径 (205.66671ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 276.092903
+-- ok 303ms (pid tree reaped: true)
+
+== offline/n03-cli-contract.test.mjs ==
+✔ N03 CLI --version：自证契约/版本/API，不读配置不联网 (31.550296ms)
+✔ N03 CLI doctor：纯检出可跑、纯 JSON、声明不联网、不读全局配置 (29.494766ms)
+✔ N03 只读命令：provider/model/route 用显式配置，不打印凭据 (192.659703ms)
+✔ N03 client codex export：只读模板，角色样例标注 provider 覆盖不支持 (41.273373ms)
+✔ N03 管理面：403、版本协商、授权先于 body、planId 绑定 (1.161454ms)
+✔ N03 CLI 写路径：loopback/令牌门禁 + plan→apply→rollback（临时配置） (486.433571ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 843.409527
+-- ok 871ms (pid tree reaped: true)
+
+== offline/native-boundary.test.mjs ==
+✔ 路径白名单：/backend-api/codex 已移除，官方只剩 /v1 (0.729167ms)
+✔ 凭据分类：官方无 key = none（不再产生 client-passthrough） (0.127207ms)
+✔ 头计划：合成 OAuth/账户/opaque 字段在官方与第三方域都进不了头集合（旧 passthrough 参数被忽略） (0.292692ms)
+✔ 旧开关只做识别：legacyPassthroughRequested 判真，officialPassthroughEnabled 恒为 false（模板已删除） (0.788354ms)
+✔ 凭据模式：official-subscription 与旧声明一律 typed deny（不静默启用） (0.200323ms)
+✔ 不读取登录态：递归扫描全部 src，不碰 auth.json / CODEX_HOME / local-subscription (13.447482ms)
+✔ 集成：第三方零收到 + 官方内部目标零发送（旧开关残留、无自有 key） (120.864007ms)
+✔ 集成：官方直连 302 禁跟随 —— 502 收口、Location 零命中、响应不带 Location (101.095187ms)
+✔ 集成：官方直连保留（自有 key 200），客户端凭据零透传、白名单外层丢弃 (93.975799ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 388.062897
+-- ok 411ms (pid tree reaped: true)
+
+== offline/native-usage.test.mjs ==
+✔ native usage: read-only aggregation from Codex session logs (85.942812ms)
+✔ native usage: disabled by default and missing directory is explicit (184.244401ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 336.10572
+-- ok 367ms (pid tree reaped: true)
+
+== offline/optional-endpoints.test.mjs ==
+✔ 能力注册表：已证实能力默认 ENABLED；未证实的新端点默认 DISABLED 且明确 501（不是 404） (0.886387ms)
+✔ 身份解析单一实现：缺少可识别主体 → 401（所有端点一致） (0.569945ms)
+✔ 429：保留状态与 Retry-After，不折叠成 502；5xx 才折叠为 502 (0.517134ms)
+✔ 取消：一次终态，迟到的上游结果被忽略；已取消的 signal 直接返回 499 (5.651216ms)
+✔ 本地限流：按主体+能力计数，超限 429 带 Retry-After 秒数 (0.268285ms)
+✔ 每类可选端点都走同一策略实现，仅声明差异 (0.47013ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 61.231057
+-- ok 85ms (pid tree reaped: true)
+
+== offline/p03-opencode-go.test.mjs ==
+✔ P03 入口绑定：两种现行位形各有 binding，与遗留 /zen/go 分属不同绑定 (1.050491ms)
+✔ P03 校验：host 白名单、遗留入口默认拒绝、版本与凭据只判存在性 (0.217217ms)
+✔ P03 别名/effort：strict mapping，不静默宣称未证实档位 (0.59564ms)
+✔ P03 能力证据：无关证据=unknown，过期=stale，不接受配置自证 (0.24133ms)
+✔ P03 头构造：本服务 UA + 域派生会话标识，不转发原始 Codex id (1.569431ms)
+✔ P03 encode/usage/错误映射/断流判定 (0.601694ms)
+✔ P03 网关 POST：路径/模型/UA/派生会话头，且不转发 Codex 官方头 (122.057072ms)
+✔ P03 多轮 tool loop：工具定义与 tool 结果原样进入下一轮 (105.878808ms)
+✔ P03 stream：SSE 透传、usage 保留、会话标识同线程稳定 (101.495756ms)
+✔ P03 429/401/403：状态与脱敏，不自动溢出到计费路径 (1607.656432ms)
+✔ P03 断流：已出帧后上游中断，不得伪装成成功终态 (131.702223ms)
+✔ P03 会话域隔离：同线程打到两个 Go 绑定得到不同会话标识 (204.423666ms)
+ℹ tests 12
+ℹ suites 0
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2337.263084
+-- ok 2365ms (pid tree reaped: true)
+
+== offline/p06-external-delegation.test.mjs ==
+✔ P06 委派结果显式标为外部降级（native=false/degraded=true），查询/取消同样标注 (4.919478ms)
+✔ P06 回执登记：必须显式用户批准、作用域/幂等键齐全、摘要限长；同输入同回执 (1.004572ms)
+✔ P06 回执登记拒绝：native 宣称/未批准/缺作用域/超长摘要/错误契约 (0.614043ms)
+✔ P06 无工具扩权：mock 只暴露已声明的只读工具，未声明写工具不存在 (0.869621ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 57.739549
+-- ok 87ms (pid tree reaped: true)
+
+== offline/probe.test.mjs ==
+✔ OpenAI probe uses OpenAI path, model name, and bearer auth (10.301935ms)
+✔ Anthropic probe uses Messages API and protocol headers (3.086759ms)
+✔ Gemini probe uses generateContent path and API-key header (1.841804ms)
+✔ probe can use a provider-specific model name (1.176687ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 81.103153
+-- ok 111ms (pid tree reaped: true)
+
+== offline/request-encoding.test.mjs ==
+✔ 请求体 content-encoding=zstd：解压转发且不携带编码头 (149.460969ms)
+✔ 请求体 content-encoding=gzip：解压转发且不携带编码头 (122.785066ms)
+✔ 未知 content-encoding：415 且零上游命中 (93.394284ms)
+✔ 损坏的 zstd 请求体：415 且零上游命中 (125.870301ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 572.365061
+-- ok 608ms (pid tree reaped: true)
+
+== offline/rerank.test.mjs ==
+✔ OpenAI 兼容 rerank：透传、稳定排序、top_n、model 回写与记账 (154.967705ms)
+✔ Cohere rerank：/v2/rerank 路径与请求体，响应保留 meta (99.290122ms)
+✔ rerank 能力隔离：rerank 模型不能 chat/embeddings，chat 模型不能 rerank (151.330073ms)
+✔ rerank fallback：主上游 500 → 备用成功 (126.466255ms)
+✔ rerank 校验：documents 空/含非字符串、top_n 非法 → 400 且不触上游 (121.508419ms)
+✔ rerank 探测与预算：/api/model-test 走 rerank 端点；慢上游受 overallMs 约束 (424.221968ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1151.642182
+-- ok 1188ms (pid tree reaped: true)
+
+== offline/responses-endpoint.test.mjs ==
+✔ Responses 非流式：Chat 桥请求整形 + response 对象 + usage 映射 (176.370687ms)
+✔ Responses 拒绝矩阵：store/previous_response_id/background 400 且不触上游（托管工具改为丢弃放行） (125.38221ms)
+✔ Responses 流式：SSE 事件序列、无 [DONE]、文本完整 (141.567744ms)
+✔ Responses 流式工具调用：参数分片映射为 function_call 事件与 completed.output (133.634573ms)
+✔ Responses 错误：上游 OpenAI 错误体透传状态码与信封 (104.530385ms)
+✔ Responses 方法限制：GET /v1/responses → 405 (122.47222ms)
+✔ T-SSE-02a 流式桥：两个 callId 交错 delta 不串线、item id 贯穿完成帧、恰好一个 completed (4.849889ms)
+✔ T-SSE-02b 半截流：恰好一个 response.failed、无 completed；重复 finish 不写第二次 (0.679079ms)
+✔ T-SSE-02c 取消/预算：客户端断开只销毁上游且不写二次终态；预算终态恰好一次 (11.034639ms)
+✔ M1-2 入口：孤儿 tool_output / v2 顶层密文在发送前 400，零上游命中 (126.121071ms)
+✔ M1-2 入口：桥流式断流 → 恰好一个 response.failed，无 completed (130.566266ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1157.208436
+-- ok 1183ms (pid tree reaped: true)
+
+== offline/responses-mapping.test.mjs ==
+✔ §4 基础映射：input 字符串 / instructions 在前 / 采样 / 预算 / reasoning / stream (2.272639ms)
+✔ §4 input[] 角色映射与多段文本拼接；非文本 part 丢弃并记 lossy (0.241493ms)
+✔ §4 function_call / function_call_output / role=tool 映射 (0.290358ms)
+✔ §4 custom tool：format 有损；custom_tool_call 自由文本编码为 {"input":...} (0.288998ms)
+✔ §4 tools/tool_choice 映射：function strict、指定函数、allowed_tools 有损降级 (0.265702ms)
+✔ §4 拒绝矩阵：store/previous_response_id/background/include/truncation/托管工具 → rejected (0.421619ms)
+✔ §4/§7 元数据与未知字段：丢弃但显式记 lossy (0.10402ms)
+✔ §5 mapUsage：三件套 + cached/reasoning 明细；无来源写 0 (0.132049ms)
+✔ §5 finishToStatus：length/content_filter → incomplete，其余 completed (0.10032ms)
+✔ §5 chatToResponse：响应形状、model 回写、usage、output_text (0.30608ms)
+✔ §5 chatToResponse：tool_calls → function_call items（call_id/name/arguments/status） (3.373098ms)
+✔ §5 chatToResponse：length/content_filter → incomplete + incomplete_details (0.133318ms)
+✔ §6 文本流：created→added→part.added→delta*→done→part.done→item.done→completed；sequence 单调、无 [DONE] (0.445139ms)
+✔ §6 工具流：output_item.added → arguments.delta* → arguments.done → output_item.done → completed (0.266086ms)
+✔ §6 created/in_progress：一旦发出 in_progress 必须紧跟 created；多 item id 唯一、output_index 递增 (0.204343ms)
+✔ §6 失败终态：response.failed 带 error.code/message，之后不得再发 completed (0.141556ms)
+✔ canonEffort：off/none/disabled/false 归一为 none，其它小写 (0.047088ms)
+✔ M1-2 bridge() 严格默认：托管工具/控制项/未知字段 typedUnsupported；显式有损才放行 (0.249645ms)
+✔ M1-2 allowed_tools 作用域：精确表达保留；子集默认拒绝（不放宽）；有损模式才降级 (0.16574ms)
+✔ M1-2 配对阻断：孤儿 tool_output / 缺 id 的结果 / 重复 call_id 不发送；待执行调用不阻断 (0.177939ms)
+✔ M1-2 v2 密文顶层与嵌套扫描；opaque agent 任务/continuation 发送前拒绝 (0.21962ms)
+✔ M1-2 nativeContract：未提供 → 明确 typedUnsupported；提供后按契约放行/拒绝；原生不受桥限制 (0.192434ms)
+✔ M1-2 writer：多 callId 交错 delta 不串线，item id 贯穿 add/delta/done/completed (0.278569ms)
+ℹ tests 23
+ℹ suites 0
+ℹ pass 23
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 52.88093
+-- ok 78ms (pid tree reaped: true)
+
+== offline/responses-native.test.mjs ==
+✔ 原生 Responses 非流式：不转换成 Chat，model 覆盖与回写、usage 记账 (119.158405ms)
+✔ 原生 Responses 流式：SSE 事件逐字节透传（不翻译、不追加 [DONE]） (101.046873ms)
+✔ 原生 Responses legacy 拒绝矩阵（无 nativeContract）：明确 unsupported_native_parameter 且零上游 (100.992897ms)
+✔ 原生 Responses 错误与预算：上游错误体透传；慢上游 → 504 (412.511855ms)
+✔ Codex 投影原生流等待延迟完成帧，并保持请求预算至流结束 (185.947316ms)
+✔ Codex 投影拒绝只有信封和密文的当前任务，零上游请求 (93.501346ms)
+✔ Codex 投影原生流按下游是否已开流返回 504 或一次超时终态 (1103.015105ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2173.973614
+-- ok 2200ms (pid tree reaped: true)
+
+== offline/retry-governance.test.mjs ==
+✔ classify429：平台额度/模型容量/速率限流/未知 四类归因（含头大小写） (1.093931ms)
+✔ parseRetryAfterMs：秒数 / 0 / HTTP-date / 非法值 (0.316059ms)
+✔ retryWaitCap/retryWaitFits：等待必须落在剩余预算内且不超过单次上限 (0.120396ms)
+✔ isToolBearingBody：tools / input 工具项 / tool 结果 / tool_calls 均判为非幂等 (0.126323ms)
+✔ 上游 429 → HTTP 429 + Retry-After + 归因（不是 502） (443.791983ms)
+✔ Retry-After 在预算内 → 按等待时长重发后成功 (1114.29778ms)
+✔ Retry-After 超出剩余预算 → 不空等，立即 429（仅一次上游尝试） (419.413479ms)
+✔ 连续 429 不打开熔断（不 markFail） (1940.480152ms)
+✔ 普通请求 5xx 收到响应头 → 一次终态，不按 retry.maxAttempts 重放 (101.497037ms)
+✔ tool 请求：写后失败不重试、不换上游、不回队首重放（M1-3a 收紧） (510.073904ms)
+✔ 预算耗尽 → 504 request_timeout，不计上游失败、不熔断 (505.337283ms)
+✔ T-LIFE-03a 状态分类：402/404 证明未执行可换候选；5xx/业务 4xx 不得推导可安全重放 (1.696858ms)
+✔ T-LIFE-03b 429 Retry-After 预算判定：装得下才等、装不下立即终态（纯函数） (0.339019ms)
+✔ T-LIFE-03c 429 归因与熔断解耦：attribution/code 保留、不计 provider 失败 (0.209509ms)
+✔ T-LIFE-03d 工具请求：SENT_UNKNOWN 一律不重放；402 证明未执行仍可换候选 (1.992173ms)
+✔ T-LIFE-03e 工具请求遇 429 前置限流：可等待重发（已证明未执行） (0.369679ms)
+✔ T-LIFE-03f 5xx 已收到响应头：即使 maxAttempts>1 也只命中一次（不按状态码推导可重放） (0.213061ms)
+ℹ tests 17
+ℹ suites 0
+ℹ pass 17
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5105.478397
+-- ok 5127ms (pid tree reaped: true)
+
+== offline/routing-decision.test.mjs ==
+✔ M3-1：未授权 / 授权无证据 / 授权过期的候选都不入选 (3.24798ms)
+✔ M3-1：能力未证明（缺失/无信封/过期）不得入选，且不从需求复制 (0.573719ms)
+✔ M3-1：冷却中的候选不入选；冷却到点按 half-open 放行一次探测 (0.342059ms)
+✔ M3-1：过期健康事实按未知处理（不排除、但排在已知健康之后） (0.30831ms)
+✔ M3-1：价格未知或过期且有费用上限时不得入选；没有上限才允许未知价格 (0.370866ms)
+✔ M3-1：超预算与最坏情况超预算都不入选 (0.245679ms)
+✔ M3-1：官方订阅身份候选不得因便宜/健康进入通用池 (0.259641ms)
+✔ M3-1：请求点名身份时，身份不符或无法证明即排除 (0.323682ms)
+✔ M3-1：同分排序确定性——打乱输入顺序得到同一候选 (0.809994ms)
+✔ M3-1：STOP_RECONCILE —— 可能已提交且无可信续传时不得换下一个候选 (0.260761ms)
+✔ M3-1：理由与审计脱敏（凭据、带凭据 URL、上游原始错误体不外泄） (0.309552ms)
+✔ M3-1：task/daily 已花费不可验证时 fail-closed，可注入账本 (0.212263ms)
+✔ M3-1：调用方取消或截止已到时，不选任何候选 (0.120168ms)
+✔ M3-1：事实新鲜度判定与形状契约（注入时钟，不 sleep） (0.177049ms)
+✔ M3-1：旧形状候选（无 facts）继续按原语义入选 (0.746685ms)
+✔ M3-1b：混池里 legacy 的能力声明不得入围（伪造能力不能击败 evidence 候选） (0.288203ms)
+✔ M3-1b：legacy-only 池仍可用，但审计必须标出 capability 来自未验证声明 (0.143529ms)
+✔ M3-1b：evidence 形状的官方候选 + 402 ⇒ 停机（不得自动离开官方池） (0.269324ms)
+✔ M3-1b：官方判定只有一个入口 —— kind 归一化，legacy 名字/标记也映射进来 (0.298715ms)
+✔ F-b2：全部排除原因都是预算类时用 MG_FB_BUDGET_EXCEEDED (0.296995ms)
+ℹ tests 20
+ℹ suites 0
+ℹ pass 20
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 58.94088
+-- ok 84ms (pid tree reaped: true)
+
+== offline/routing-ledger.test.mjs ==
+✔ M3-2：金额只收整数最小单位与显式币种（拒绝浮点/缺币种/跨币种） (11.098537ms)
+✔ M3-2：幂等 (requestId, digest) —— 同键同摘要返回既有 receipt，不双记 (1.417281ms)
+✔ M3-2：unknown 不填 0、不释放（继续占额度），由 reconcile 收口 (1.574481ms)
+✔ M3-2：实际超预估如实记账（overrun）并封顶下一笔，不静默吞掉 (0.794175ms)
+✔ M3-2：固定时区日切 + 跨日在途/结算记原预留日 (0.750664ms)
+✔ M3-2：并发 reserve 合计不越上限（失败分支零副作用） (2.943836ms)
+✔ M3-2：跨进程并发（3 个进程 × 5 笔）合计不越上限 (51.073627ms)
+✔ M3-2：重启恢复——从落盘状态重建在途/未知预留并可继续结算 (1.373143ms)
+✔ M3-2：锁争用——活进程持锁报 BUSY 且零副作用；死进程残锁可抢占 (99.965015ms)
+✔ M3-2：账本损坏或配置冲突时拒绝启动（不自动重置已花的钱） (2.100672ms)
+✔ M3-2：对外摘要与落盘内容脱敏（sk- 哨兵不外泄） (1.791287ms)
+✔ M3-2：release 幂等，已结算不得再释放/再标记未知 (2.589467ms)
+✔ M3-2：报价快照时效与 worstCase 上界（按时效拒绝旧报价） (1.243189ms)
+✔ M3-2：budgetFromLedger 把账本整数视图喂给决策器，且 micro 单位只换算一次 (6.958799ms)
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 237.385445
+-- ok 261ms (pid tree reaped: true)
+
+== offline/siwc-preview.test.mjs ==
+✔ P07 默认 off：即使客户端与注册都合格，也不暴露登录 (0.744809ms)
+✔ P07 合格客户端 + 合格注册 + enabled 才可用 (0.411006ms)
+✔ P07 不合格客户端一律不暴露登录：缺版本/非自有预览/非 loopback (0.148359ms)
+✔ P07 缺 scope / 非 loopback 注册 / 非 https issuer 都会拒绝 (0.151811ms)
+✔ P07 PKCE S256：challenge 可验证，错误 verifier 被 mock 拒绝 (1.297769ms)
+✔ P07 授权 URL 固定公开合同：state/nonce/PKCE/scope/loopback，无 client_secret (0.217845ms)
+✔ P07 state 不匹配在出网前拒绝 (0.243302ms)
+✔ P07 nonce / aud / exp 校验 (1.401218ms)
+✔ P07 授权缺少必需 scope 时拒绝，且不入 session (0.526223ms)
+✔ P07 成功登录：scope 校验、独立 key、固定 endpoint、lease 不含 refresh token (0.503628ms)
+✔ P07 状态与日志脱敏：access/refresh token 不出现在 status/日志 (0.38756ms)
+✔ P07 并发续期单飞：5 个 getSession 只触发一次 refresh，全部拿到新 token (0.678429ms)
+✔ P07 轮换：旧 refresh token 失效，只有最新 token 可再次续期 (3.720393ms)
+✔ P07 暂时断网：保留 grant，返回 TEMPORARILY_UNAVAILABLE；恢复后可续期 (0.505075ms)
+✔ P07 invalid_grant / revoked：清理 token 并回到 SIGN_IN_REQUIRED (0.523487ms)
+✔ P07 登出：先停止 admission、再撤销、清 token、保留注册 (0.403585ms)
+✔ P07 登出时撤销端点不可达：标 unconfirmed，但本地 token 必须清理 (0.26942ms)
+✔ P07 账户/工作区隔离：同 account 不同 workspace 各自独立，登出一个不影响另一个 (0.402729ms)
+✔ P07 隔离 launcher/工具环境：令牌只给 app-server，tool/shell/mcp 拿不到，refresh 永不入 env (0.840896ms)
+✔ P07 模块静态边界：不直接联网、不读 HOME/auth、无真实 OpenAI 端点 (0.486642ms)
+✔ P07 错误对象不回显 token/正文 (0.229192ms)
+ℹ tests 21
+ℹ suites 0
+ℹ pass 21
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 65.745954
+-- ok 89ms (pid tree reaped: true)
+
+== offline/sse-chunking.test.mjs ==
+✔ T-SSE-01a UTF-8 多字节字符被任意字节边界切开仍正确解码（emoji/中文分 3 段喂入） (2.066849ms)
+✔ T-SSE-01b 帧边界：
+ / 
+ /  及其混用都识别为空行 (0.186198ms)
+✔ T-SSE-01c 多帧同 chunk / 边界跨 chunk：按到达顺序产出，不合并、不丢帧 (0.182921ms)
+✔ T-SSE-01d 单帧超长被有界拒绝（不进入无界缓冲），失败后不可继续使用 (0.507134ms)
+✔ T-SSE-01e 未闭合缓冲超长被有界拒绝；不完整尾部 flush 不合成半截帧 (0.219648ms)
+✔ T-SSE-01f relayStream：UTF-8/CRLF 跨 chunk 的 Chat 流逐事件中继，内容完整且 [DONE] 一次 (1.596271ms)
+✔ T-SSE-01g relayStream：单帧超限 → 一次中断终态、不续传、销毁上游 (16.636333ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 66.430777
+-- ok 90ms (pid tree reaped: true)
+
+== offline/sse-lifecycle.test.mjs ==
+✔ G5-SSE-01 response.completed 唯一终态：终态后的 completed/failed 帧被丢弃，上游命中 1 次 (373.496849ms)
+✔ G5-SSE-02 response.failed 唯一终态：不再追加 completed，上游命中 1 次 (353.246043ms)
+✔ G5-SSE-03 无终态上游提前 close：合成唯一 response.failed(STREAM_INTERRUPTED)，不重放 (404.175414ms)
+✔ G5-SSE-04 客户端流中断开：上游 socket 关闭、零上游错误、槽位可复用 (434.502841ms)
+✔ G5-SSE-05 并发槽位在终态前不释放：第二个请求排队到首个终态 (461.507756ms)
+✔ G5-SSE-06 取消（首字节前 abort）：不写终态、上游销毁、零错误、槽位归还 (452.26056ms)
+✔ G5-SSE-07 整体 deadline 在流中触发：恰好一个 response.failed(REQUEST_TIMEOUT)，不重复终态 (1004.329719ms)
+✔ G5-SSE-08 长首字节：TTFB 500ms 仍未超 firstByteMs，得到唯一 completed 终态 (690.178376ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4228.784823
+-- ok 4256ms (pid tree reaped: true)
+
+== offline/ui-contract.test.mjs ==
+✔ UI contract: /api/config is editable, lossless and versioned (118.911786ms)
+✔ UI contract: secrets never echoed and keys are versioned separately (102.443107ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 282.80307
+-- ok 321ms (pid tree reaped: true)
+
+== offline/ui-next.test.mjs ==
+✔ UI: static tree, CSP, auth and traversal protection (123.740305ms)
+✔ UI source: no HTML injection sinks, no credential persistence, no fake data strings (2.030098ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 171.534531
+-- ok 194ms (pid tree reaped: true)
+
+== offline/ui-state.test.mjs ==
+✔ 状态完备：loading / ready / error 可由 phaseOf 区分，error 不保留伪造数据 (1.178049ms)
+✔ 401 会话失效：清空状态与已渲染敏感投影并锁屏；功能级 403 只做局部错误 (0.832555ms)
+✔ 409 冲突：保留用户草稿逐字段不变，不覆盖用户输入 (0.934192ms)
+✔ 空白掩码/未编辑字段：save payload 中完全不出现 clientKey (0.2178ms)
+✔ 保存去抖与重试：并发共享一次提交，失败后可重试成功 (20.216434ms)
+✔ 差异脱敏：secret 只显示已设置/已修改，不泄露值、不泄露代理凭据 (0.583396ms)
+✔ 来源/代际与有效期状态：只展示后端 expiresAtState，未知不当作正常 (0.332742ms)
+✔ 客户端导出：只含客户端字段，零凭据零服务端私有字段 (0.200455ms)
+✔ loading 骨架：首屏/刷新/切路由在数据到达前可达，旧数据不得顶替 (25.273713ms)
+✔ clients：功能级 403 只做局部提示，页面正常渲染、会话与其它数据保留 (70.937052ms)
+ℹ tests 10
+ℹ suites 0
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 172.818658
+-- ok 195ms (pid tree reaped: true)
+
+== offline/user-env.test.mjs ==
+✔ resolveKey 来源优先级：keys 存储 > 进程环境 > 用户级环境 > 无 (0.902395ms)
+✔ 用户级环境：60s TTL 正/负缓存与清缓存后可重查 (0.13759ms)
+✔ 变量名白名单：非法 apiKeyEnv 不查询用户级环境，也不抛错 (0.114484ms)
+✔ readEnvironmentDir：按文件名排序后者覆盖、注释与非法行忽略、缺失返回 null (3.712812ms)
+✔ readEnvironmentDir：双引号值还原内部转义（systemd 风格） (1.884431ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 47.717609
+-- ok 78ms (pid tree reaped: true)
+
+== offline/wiring-e2e.test.mjs ==
+✔ M1-3b catalog slug：注入 catalogRecord 后 200；上游 model = 裁决 target；发送前已有账本预留 (125.278097ms)
+✔ M1-3b official Chat（非目录参与）200，不要求 catalogRecord (104.356142ms)
+✔ M1-3b catalogScoped 但 record 缺失 → 403 catalog_generation_missing（单元） (1.515738ms)
+✔ M1-3c 非规范目标形状：发送前 403、零命中、零账本残留 (506.626407ms)
+✔ M1-3c 正向：既有 /v1 去重与合法 pathPrefix 不被过度收紧 (209.649735ms)
+✔ M1-3b 未配置 ledger + 配置费用上限 → typed 拒绝，零上游 (95.00998ms)
+✔ F03 下游响应头白名单（R1 2c4f2a9 反向断言）：上游 429 夹带 set-cookie/x-*/location 一律不到客户端 (402.351886ms)
+✔ F03 Responses 旁路封口：官方 responses 目标含 userinfo → 403 typed、零上游命中 (94.160847ms)
+✔ F03 原生 Responses 一次终态：上游 3xx → 502 upstream_redirect_rejected，Location 零命中、只发一次 (93.663252ms)
+✔ F03 错误状态表与下游头白名单（单元）：码→状态唯一真源，白名单只放行 retry-after (9.148447ms)
+✔ N06 有限历史与重启：ring 有界并计数 dropped；重启后事件从头开始且契约稳定 (191.11255ms)
+✔ N06 短期 SSE：连接即收到有界快照，且事件体不含正文 (157.520201ms)
+ℹ tests 12
+ℹ suites 0
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2075.378523
+-- ok 2110ms (pid tree reaped: true)
+
+== offline/video.test.mjs ==
+✔ Video：创建 → 轮询 → 完成（结果与持久化） (1873.965203ms)
+✔ Video：Idempotency-Key 幂等创建，不重复打上游 (98.442273ms)
+✔ Video：取消调用上游取消路径并落定为 canceled (97.550519ms)
+✔ Video：重启恢复任务与轮询；GC 清理过期任务 (1998.517951ms)
+✔ Video 能力隔离与不支持协议 (98.911037ms)
+✔ Video 校验与预算：缺 prompt 400；慢创建受 overallMs 约束 → 504 (401.34908ms)
+✔ M1-4a 视频幂等：PENDING_SEND 先落盘再调上游；并发同键只创建一次 (5.308404ms)
+✔ M1-4a 视频幂等：同键不同输入 → 409 冲突且不触上游；主体隔离 (2.327098ms)
+✔ M1-4a 视频幂等：上游异常 → UNKNOWN，只允许查状态/人工核对，不得再次 create (2.030819ms)
+✔ M1-4a 视频幂等：进程中断（pending_send）在重启时恢复为 UNKNOWN 且不重发 (1.933569ms)
+✔ M1-4a 视频幂等：取消只产生一次终态 (4.749155ms)
+✔ F04 HTTP 幂等主体域：换主体不复用他人任务；同主体同键复用；同键不同输入 409 且零上游 (193.86606ms)
+✔ F04 媒体正文不入日志：视频 prompt 与 embedding 输入正文不落日志 (97.43268ms)
+✔ F04 启动恢复：pending_send 任务在启动时转 unknown，且不重复创建 (90.442307ms)
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5020.559328
+-- ok 5046ms (pid tree reaped: true)
+
+== offline/wire-format.test.mjs ==
+✔ anthropic build：system 归并、多模态文本、tool schema/tool_choice、stop/stream (1.127743ms)
+✔ anthropic build：并行 tool_calls 的 tool_result 合并进同一个 user 消息 (0.133329ms)
+✔ anthropic build：thinking 预算整形（温度剔除、max_tokens 抬高、关闭档） (0.196974ms)
+✔ anthropic build：tool_choice 四态映射 (0.127933ms)
+✔ anthropic fromUpstream：content block 拼接、tool_calls、finish_reason、usage (0.245887ms)
+✔ anthropic fromUpstream：stop_reason 映射表与未知值收敛 (0.181007ms)
+✔ anthropic SSE：extractStreamContent / extractStreamFinish 抽取契约 (0.127179ms)
+✔ gemini build：contents/systemInstruction/generationConfig/path (0.251327ms)
+✔ gemini build：无 stream -> generateContent；model 名做 URL 编码 (0.08092ms)
+✔ gemini build：tools 场景 path、functionDeclarations、tool_choice 映射 (0.338369ms)
+✔ gemini build：并行 tool_calls 的 functionResponse 合并进同一个 user turn (0.167631ms)
+✔ gemini build：tool 消息缺 tool_call_id 时回退为 fn（有损，不做断言扩展） (0.06221ms)
+✔ gemini fromUpstream：文本/多 part 拼接、tool_calls、finish_reason、usage (0.148853ms)
+✔ gemini fromUpstream：finishReason 映射与 promptFeedback 安全阻塞 (0.151803ms)
+✔ gemini fromUpstream：无 usageMetadata 时 usage 为 0（不虚报） (0.0399ms)
+✔ gemini SSE：extractStreamContent 拼接全部 text part / extractStreamFinish 抽取 (0.126618ms)
+✔ gemini fromUpstream：thought part 不混入 content，model 缺失时回退 modelVersion (0.049824ms)
+✔ gemini SSE：thought part 不混入 content (0.065475ms)
+✔ adapterFor：仅 anthropic/gemini 有适配器，OpenAI 走透传 (0.032064ms)
+✔ hasTools：空 tools 数组不算带工具 (0.035618ms)
+✔ makeOA：OpenAI chat.completion 形状与 usage 缺省 (0.05566ms)
+✔ cacheHitMiss：四桶口径按协议取数 (0.147789ms)
+ℹ tests 22
+ℹ suites 0
+ℹ pass 22
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 51.807318
+-- ok 87ms (pid tree reaped: true)
+
+== offline/runner-selftest.test.mjs ==
+✔ 清单：非空、无重复、保留全部 45 个基线套件，且每个条目文件真实存在 (1.191ms)
+✔ 清单是字面量：run.mjs 不再用 readdirSync 扫描 offline 目录 (0.204648ms)
+✔ 清单外的 *.test.mjs 不会被自动执行（哨兵文件） (40.172138ms)
+✔ 超时：假套件超时后返回非 0，且 leader 与孙进程都被回收 (2009.807725ms)
+✔ 正常退出：假套件 exit 0 但留下孙进程 → runSuite ok=true 且 treeReaped=true、孙 pid 已不可达 (84.058779ms)
+✔ 环境白名单：宿主哨兵变量与真实凭据不会透传进子进程 (19.213295ms)
+✔ 白名单构造：危险 NODE_OPTIONS 被剔除，配置入口被清空 (0.233655ms)
+✔ 汇总语义：套件级 skipped 派生、未运行套件单列 notRun、测试级 skip 独立统计 (0.308336ms)
+✔ live runner 正向白名单：真实仓库 47 顶层 / 27 允许 / 20 未允许 / 0 缺失 (79.044934ms)
+✔ live runner 正向白名单：拼接/大小写/base64 反例都不在清单，命名也不执行 (182.472031ms)
+✔ live runner 白名单不变量：缺文件/清单内危险特征 → --scan-only fail-closed (72.383002ms)
+✔ codex-v1-live fail-closed：缺显式授权/真实凭据时立即非 0 退出，不复制任何凭据 (77.004373ms)
+ℹ tests 12
+ℹ suites 0
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2613.087196
+-- ok 2641ms (pid tree reaped: true)
+
+== summary ==
+suites: 79 passed, 0 failed, 0 skipped, 0 timed out, 0 not run (manifest 79/selected 79)
+tests:  806 passed, 0 failed, 1 skipped (74/79 suites reported node:test counts)
+total time: 75.2s

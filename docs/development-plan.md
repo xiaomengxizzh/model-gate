@@ -2,6 +2,32 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
+## 2026-11-13 本地 MCP 委派执行（G0–G5，分支 `feat/modelgate-native-delegation-20261113`）
+
+执行基线 `plan/modelgate-native-delegation-20261113` @ `dc7d15f`（= `integration/modelgate-release` @ `c6d97da` + 方案）。隔离工作树 `.agents/worktrees/native-delegation`；**新增大型安装/下载：无**。主工作树（`dev/gateway-audit-20261108`）与其未提交改动保持不变。
+
+| 阶段 | 结果 | 证据 |
+| --- | --- | --- |
+| G0 现场冻结与分支审计 | 完成 | [G0 审计](evidence/2026-11-13-g0-repo-audit.md)：release 相对 main ahead 246 / behind 0，merge-base = main head（纯增量，可 fast-forward），310 文件 +64960/-1419；基线 `npm test` 77 套件 / 782 通过 / 1 跳过 |
+| G1 认证边界收口（P0） | 完成 | 删除 `src/codex/local-subscription.js`；生产不再读 `auth.json`/`CODEX_HOME`，不再向 `chatgpt.com/backend-api/codex/responses` 发本机 token；残留 `gatewaySubscription` 三入口 403 `gateway_subscription_retired` 且零上游。证据：[退役记录](evidence/2026-11-13-auth-boundary-retirement.md) |
+| G2 Go MCP 委派契约 | 完成（含对齐 delta） | [契约 v1](contracts/modelgate-mcp-delegation-v1.md)、[实现对齐记录](contracts/modelgate-mcp-delegation-v1-alignment.md)、[威胁模型](explanation/mcp-delegation-threat-model.md)、`docs/contracts/fixtures/mcp/v1/`（29 条拒绝负例） |
+| G3 MCP MVP | 完成 | `bin/mg-mcp.mjs` + `src/mcp/delegation-{contract,store,tools,executor,server}.js`；delegate/get/wait/cancel + 本地受限工具；证据：[G3/G4 证据](evidence/2026-11-13-mcp-delegation-g3-g4.md) |
+| G4 同 session 追派与恢复 | 完成（mock） | followup 复用同一 Go session；重启对账把在途回合标 `UNKNOWN` 且禁止重发；ACK 语义与 `resultDigest` 稳定 |
+| G5 安全与协议验收 | 完成（mock） | 拒绝矩阵 15 条 + 归属隔离 + 凭据/会话头隔离；SSE 终态/取消/超时独立回归 8 用例：[审计](evidence/2026-11-13-sse-lifecycle-audit.md) |
+| G6 CLI 真实验收 | 待执行 | 需要 `gpt6luna` 父模型 + 真实 Go 额度授权；未执行前标记 `NOT_RUN` |
+| G7 Desktop | NOT_RUN | 独立验收矩阵，不从 CLI 推断 |
+| G8 GUI 与发布整合 | NOT_RUN | 需所有者批准后才 push/PR/合并 |
+
+本轮门禁（本机复跑）：
+
+| 命令 | exit | 结果 |
+| --- | --- | --- |
+| `npm run check` | 0 | 全 `node --check` + UI 16/16 |
+| `npm test` | 0 | 79 套件通过 / 0 失败；806 通过 / 1 跳过 |
+| `npm run docs:check` | 0 | 见本轮提交前复跑 |
+| `node scripts/check-metadata.mjs` | 0 | 见本轮提交前复跑 |
+| `git diff --check` | 0 | 无空白错误 |
+
 ## 2026-11-13 原生 Codex 执行复核
 
 审计及本地补丁位于 `mg-codex-native` 工作树，基线 `9e037db`。新增大型安装/下载为无，历史提议仅供研究。项目主工作树仍为 `dev/gateway-audit-20261108`，本次只在原生实验工作树修改。

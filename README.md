@@ -44,7 +44,9 @@ npm test
 
 原生 ChatGPT/直连流量默认不经过网关；可在「安全与设置」启用只读的 Codex sessions 采集，在「监控与诊断」中把原生用量与代理流量分开展示。
 
-配置与变量见[参考](docs/reference/configuration.md)，运行与凭据边界见[操作指南](docs/how-to/operations.md)。日常进程在线状态、私有配置、价格均不由本 README 证明。
+配置与变量见[参考](docs/reference/configuration.md)，运行与凭据边界见[操作指南](docs/how-to/operations.md)。
+
+本地 MCP 委派（实验，默认不随网关启动）：`bin/mg-mcp.mjs` 以 stdio JSON-RPC 提供 `modelgate_delegate_task` / `modelgate_get_task` / `modelgate_wait_task` / `modelgate_followup_task` / `modelgate_cancel_task`，用 OpenCode Go 自己的凭据执行子任务并把完整回执返回调用方。它是**工具驱动的外部 worker 委派**，不是 Codex 原生 `spawn_agent` 跨供应商子线程；契约见 [MCP 委派契约](docs/contracts/modelgate-mcp-delegation-v1.md)，实现差异见 [对齐记录](docs/contracts/modelgate-mcp-delegation-v1-alignment.md)。日常进程在线状态、私有配置、价格均不由本 README 证明。
 
 ## 能力与验证状态（2026-11-11 加固轮）
 
