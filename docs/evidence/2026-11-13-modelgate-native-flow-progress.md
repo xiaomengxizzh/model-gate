@@ -1,5 +1,7 @@
 # ModelGate 原生 Codex 完整链路：进度与阻塞汇总（2026-11-13）
 
+> 本页保留提交 `9e037db` 时的历史取证。后续本地审计已复现并修复请求预算提前销毁的问题，并复核 CC Switch 原生会话的工作区任务交接。见 [开发计划的复核记录](../development-plan.md#2026-11-13-原生-codex-执行复核)。
+
 ## 结论
 
 ModelGate 已经承担了父官方 Responses 转发、Codex 模型目录和子代理到 OpenCode Go 的原生路由；子代理请求实际到达 Go，并用同一份投影后 body 直接回放得到完整 `response.completed`。**完整 A4/A5 仍未签收**：子 Codex 在长流式响应期间以 `ERR_STREAM_PREMATURE_CLOSE` 结束，尚未产出两个合成产物，也未完成同子追派。

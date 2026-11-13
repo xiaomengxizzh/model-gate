@@ -1,0 +1,247 @@
+{
+  "codexVersion": "0.167.0",
+  "parentThreadId": "01a1d44a-e358-7240-a11d-937dd6bc288a",
+  "childThreadId": "01a1d44b-4935-7740-bd56-1a8d03be0d85",
+  "spawnCount": 1,
+  "followupCount": 1,
+  "phases": [
+    {
+      "phase": "A",
+      "taskSha256": "93a9397b63feafecfae2b2a74d6488bb37dabc3138a791ec6533b9171ff0e68b",
+      "childToolResultMatched": true,
+      "childFinalMatched": true,
+      "parentNativeMessageMatched": false
+    },
+    {
+      "phase": "B",
+      "taskSha256": "957cbd29d674e2d3cca70c009c74d40c7bee1ca501dc1acb632539716609337a",
+      "childToolResultMatched": true,
+      "childFinalMatched": true,
+      "parentNativeMessageMatched": true
+    }
+  ],
+  "routes": {
+    "route.jsonl": [
+      {
+        "id": 1,
+        "host": "chatgpt.com",
+        "path": "/backend-api/codex/responses",
+        "model": "gpt-6-luna",
+        "bytes": 624028,
+        "userHasA": false,
+        "userHasB": false,
+        "outputHasA": false,
+        "outputHasB": false,
+        "goCredential": false,
+        "officialAccountHeader": true,
+        "tools": [
+          "exec",
+          "wait",
+          "request_user_input",
+          "request_user_input_async",
+          "clock"
+        ],
+        "status": 200,
+        "ttfbMs": 4110
+      },
+      {
+        "id": 2,
+        "host": "chatgpt.com",
+        "path": "/backend-api/codex/responses",
+        "model": "gpt-6-luna",
+        "bytes": 625109,
+        "userHasA": false,
+        "userHasB": false,
+        "outputHasA": false,
+        "outputHasB": false,
+        "goCredential": false,
+        "officialAccountHeader": true,
+        "tools": [
+          "exec",
+          "wait",
+          "request_user_input",
+          "request_user_input_async",
+          "clock"
+        ],
+        "status": 200,
+        "ttfbMs": 4127
+      },
+      {
+        "id": 3,
+        "host": "opencode.ai",
+        "path": "/inference/go/v1/responses",
+        "model": "deepseek-v4.1-flash",
+        "bytes": 937544,
+        "userHasA": true,
+        "userHasB": false,
+        "outputHasA": false,
+        "outputHasB": false,
+        "goCredential": true,
+        "officialAccountHeader": false,
+        "status": 200,
+        "ttfbMs": 32675
+      },
+      {
+        "id": 4,
+        "host": "chatgpt.com",
+        "path": "/backend-api/codex/responses",
+        "model": "gpt-6-luna",
+        "bytes": 625838,
+        "userHasA": false,
+        "userHasB": false,
+        "outputHasA": false,
+        "outputHasB": false,
+        "goCredential": false,
+        "officialAccountHeader": true,
+        "tools": [
+          "exec",
+          "wait",
+          "request_user_input",
+          "request_user_input_async",
+          "clock"
+        ],
+        "status": 200,
+        "ttfbMs": 3952
+      },
+      {
+        "id": 5,
+        "host": "opencode.ai",
+        "path": "/inference/go/v1/responses",
+        "model": "deepseek-v4.1-flash",
+        "bytes": 938340,
+        "userHasA": true,
+        "userHasB": false,
+        "outputHasA": true,
+        "outputHasB": false,
+        "goCredential": true,
+        "officialAccountHeader": false,
+        "status": 200,
+        "ttfbMs": 10511
+      }
+    ],
+    "resume-route.jsonl": [
+      {
+        "id": 1,
+        "host": "chatgpt.com",
+        "path": "/backend-api/codex/responses",
+        "model": "gpt-6-luna",
+        "bytes": 626974,
+        "userHasA": false,
+        "userHasB": false,
+        "outputHasA": false,
+        "outputHasB": false,
+        "goCredential": false,
+        "officialAccountHeader": true,
+        "tools": [
+          "exec",
+          "wait",
+          "request_user_input",
+          "request_user_input_async",
+          "clock"
+        ],
+        "status": 200,
+        "ttfbMs": 7033
+      },
+      {
+        "id": 2,
+        "host": "chatgpt.com",
+        "path": "/backend-api/codex/responses",
+        "model": "gpt-6-luna",
+        "bytes": 627895,
+        "userHasA": false,
+        "userHasB": false,
+        "outputHasA": false,
+        "outputHasB": false,
+        "goCredential": false,
+        "officialAccountHeader": true,
+        "tools": [
+          "exec",
+          "wait",
+          "request_user_input",
+          "request_user_input_async",
+          "clock"
+        ],
+        "status": 200,
+        "ttfbMs": 3366
+      },
+      {
+        "id": 3,
+        "host": "opencode.ai",
+        "path": "/inference/go/v1/responses",
+        "model": "deepseek-v4.1-flash",
+        "bytes": 939049,
+        "userHasA": true,
+        "userHasB": true,
+        "outputHasA": true,
+        "outputHasB": false,
+        "goCredential": true,
+        "officialAccountHeader": false,
+        "status": 200,
+        "ttfbMs": 8050
+      },
+      {
+        "id": 4,
+        "host": "opencode.ai",
+        "path": "/inference/go/v1/responses",
+        "model": "deepseek-v4.1-flash",
+        "bytes": 939849,
+        "userHasA": true,
+        "userHasB": true,
+        "outputHasA": true,
+        "outputHasB": true,
+        "goCredential": true,
+        "officialAccountHeader": false,
+        "status": 200,
+        "ttfbMs": 9477
+      },
+      {
+        "id": 5,
+        "host": "chatgpt.com",
+        "path": "/backend-api/codex/responses",
+        "model": "gpt-6-luna",
+        "bytes": 628623,
+        "userHasA": false,
+        "userHasB": false,
+        "outputHasA": false,
+        "outputHasB": false,
+        "goCredential": false,
+        "officialAccountHeader": true,
+        "tools": [
+          "exec",
+          "wait",
+          "request_user_input",
+          "request_user_input_async",
+          "clock"
+        ],
+        "status": 200,
+        "ttfbMs": 4362
+      },
+      {
+        "id": 6,
+        "host": "chatgpt.com",
+        "path": "/backend-api/codex/responses",
+        "model": "gpt-6-luna",
+        "bytes": 629843,
+        "userHasA": false,
+        "userHasB": false,
+        "outputHasA": false,
+        "outputHasB": false,
+        "goCredential": false,
+        "officialAccountHeader": true,
+        "tools": [
+          "exec",
+          "wait",
+          "request_user_input",
+          "request_user_input_async",
+          "clock"
+        ],
+        "status": 200,
+        "ttfbMs": 2523
+      }
+    ]
+  },
+  "initialParentExit": "SIGKILL at the 230 s parent-process deadline; the first child had already completed",
+  "resumedParentExit": 0,
+  "resumedParentReportedB": true,
+  "productionConfigHashUnchanged": true
+}
