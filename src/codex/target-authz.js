@@ -27,12 +27,14 @@ import {
 } from './auth.js'
 
 export const TARGET_DOMAINS = Object.freeze({ OFFICIAL: 'official', THIRD_PARTY: 'thirdParty' })
-// F01：OFFICIAL_SUBSCRIPTION（客户端官方订阅凭据 / /backend-api/codex）已退役。
+// F01：OFFICIAL_SUBSCRIPTION（客户端官方订阅凭据 / 订阅后端路径）已退役。
 // 常量保留只为把旧调用方识别出来并给出 typed deny（credential_mode_retired），绝不回落到可用状态。
+// G1（2026-11-13）：GATEWAY_SUBSCRIPTION（网关读本机 Codex 登录态并代理订阅后端）已退役，
+// 不再保留为可用模式。旧调用方传 gatewaySubscription=true 或 credentialMode='gateway-subscription'
+// 时，由 credentialModeAllowed/officialIngressPolicy 给出 gateway_subscription_retired typed deny。
 export const CREDENTIAL_MODES = Object.freeze({
   PROVIDER_KEY: 'provider-key',
   OFFICIAL_SUBSCRIPTION: 'official-subscription',
-  GATEWAY_SUBSCRIPTION: 'gateway-subscription',
   NONE: 'none',
 })
 // 显式不跟随重定向：授权记录里带这个标记，接线卡必须把它映射到请求选项（redirect: 'error'）。
@@ -174,7 +176,8 @@ export function allowedSchemeHostPortPath(target, domain, opts) {
   if (target.port && !isLoopbackHost(target.hostname)) {
     return deny('official_port_not_allowlisted', '官方目标只允许默认端口：' + target.host + '（本机回环可用自定义端口）。')
   }
-  if (!officialPathnameAllowed(target.pathname) && !(o.gatewaySubscription === true && (target.pathname === '/backend-api/codex' || target.pathname.startsWith('/backend-api/codex/')))) {
+  // G1：订阅后端入口已随本机登录态代理一并退役，官方目标只剩 /v1。
+  if (!officialPathnameAllowed(target.pathname)) {
     return deny('official_path_not_allowlisted', '官方目标路径不在白名单：' + target.pathname + '（允许 ' + OFFICIAL_PATH_PREFIXES.join(', ') + '）')
   }
   return null
@@ -184,7 +187,12 @@ export function allowedSchemeHostPortPath(target, domain, opts) {
 // provider-key   = 网关自持 API Key（唯一可用凭据，官方/第三方同规则）
 // official-subscription = 已退役（F01）：任何声明都返回 credential_mode_retired + 迁移提示
 // none           = 无凭据（第三方宁可 401，官方必须 fail-closed）
-const RETIRED_CREDENTIAL_HINT = '客户端官方订阅凭据透传（official-subscription / MG_CODEX_OFFICIAL_PASSTHROUGH / /backend-api/codex）已移除（F01）：请为官方目标配置网关自有 key（apiKeyEnv 或面板 Key）。'
+const RETIRED_CREDENTIAL_HINT = '客户端官方订阅凭据透传（official-subscription / MG_CODEX_OFFICIAL_PASSTHROUGH / 订阅后端入口）已移除（F01）：请为官方目标配置网关自有 key（apiKeyEnv 或面板 Key）。'
+// G1：gatewaySubscription 退役码与迁移提示。消息只描述迁移动作，不暗示任何读取本机登录态的能力仍可用。
+// 导出给请求入口（index.js）与转发链（forward.js）复用，避免同一稳定错误码出现多份字面量。
+export const GATEWAY_SUBSCRIPTION_RETIRED_CODE = 'gateway_subscription_retired'
+export const GATEWAY_SUBSCRIPTION_RETIRED_MESSAGE = 'gatewaySubscription（本机 Codex 登录态反向代理）已于 2026-11-13 退役（G1）：网关不再读取 Codex 登录态，也不会向订阅后端发送本机 token。请为官方目标配置网关自有 key（apiKeyEnv 或面板 Key）。'
+const GATEWAY_SUBSCRIPTION_HINT = GATEWAY_SUBSCRIPTION_RETIRED_MESSAGE
 export function credentialModeAllowed(domain, target, callerScope) {
   const s = callerScope || {}
   const mode = s.credentialMode
@@ -195,10 +203,9 @@ export function credentialModeAllowed(domain, target, callerScope) {
   if (mode === CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION) {
     return deny('credential_mode_retired', RETIRED_CREDENTIAL_HINT)
   }
-  if (mode === CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION) {
-    if (domain !== TARGET_DOMAINS.OFFICIAL) return deny('credential_mode_forbidden', 'gatewaySubscription 只允许官方目标')
-    if (s.gatewaySubscription !== true) return deny('gateway_subscription_not_enabled', '未开启 gatewaySubscription')
-    return null
+  // G1：旧模式/旧开关一律 typed retired，绝不回落到 provider-key 或 none 的可用状态。
+  if (mode === 'gateway-subscription' || s.gatewaySubscription === true) {
+    return deny(GATEWAY_SUBSCRIPTION_RETIRED_CODE, GATEWAY_SUBSCRIPTION_HINT)
   }
   if (![CREDENTIAL_MODES.PROVIDER_KEY, CREDENTIAL_MODES.NONE].includes(mode)) {
     return deny('credential_mode_invalid', '凭据模式不合法：' + String(mode))
@@ -247,7 +254,7 @@ export function resolveCredentialMode(domain, identity, callerScope) {
   const hasKey = s.hasProviderKey === true || (typeof s.providerKey === 'string' && s.providerKey.length > 0) ||
     !!(identity && identity.credential === 'provider-key')
   if (domain === TARGET_DOMAINS.OFFICIAL) {
-    if (s.gatewaySubscription === true) return CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION
+    // G1：gatewaySubscription 不再是可解析的凭据模式；残留声明留给 credentialModeAllowed 识别并拒绝。
     if (hasKey) return CREDENTIAL_MODES.PROVIDER_KEY
     // F01：官方无 key 只剩 NONE（fail-closed）；旧订阅声明仍被识别成 OFFICIAL_SUBSCRIPTION，
     // 以便 credentialModeAllowed 给出「已退役」而不是含糊的「缺凭据」。
@@ -268,14 +275,15 @@ export function officialIngressPolicy(domain, target, opts) {
   if (!isOfficialHost(target.hostname, o.cfg || {})) {
     return deny('official_host_not_allowlisted', '官方目标主机不在白名单：' + target.hostname)
   }
-  if (!officialPathnameAllowed(target.pathname) && !(o.credentialMode === CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION && (target.pathname === '/backend-api/codex' || target.pathname.startsWith('/backend-api/codex/')))) {
+  // G1：订阅代理退役后，官方入口只允许 /v1；旧模式/旧开关先给 retired，不进入路径判定。
+  if (o.credentialMode === 'gateway-subscription' || o.gatewaySubscription === true) {
+    return deny(GATEWAY_SUBSCRIPTION_RETIRED_CODE, GATEWAY_SUBSCRIPTION_HINT)
+  }
+  if (!officialPathnameAllowed(target.pathname)) {
     return deny('official_path_not_allowlisted', '官方目标路径不在白名单：' + target.pathname)
   }
   if (o.credentialMode === CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION) {
     return deny('credential_mode_retired', RETIRED_CREDENTIAL_HINT)
-  }
-  if (o.credentialMode === CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION && !(target.pathname === '/backend-api/codex' || target.pathname.startsWith('/backend-api/codex/'))) {
-    return deny('gateway_subscription_ingress_not_allowed', 'gatewaySubscription 只允许 /backend-api/codex 入口：' + target.pathname)
   }
   return null
 }
@@ -333,12 +341,13 @@ export function buildAllowlistedHeaders(domain, caller, targetCredential) {
   }
   if (domain !== TARGET_DOMAINS.OFFICIAL) throw deny('intent_domain_invalid', '未知身份域：' + String(domain))
   if (cred.mode === CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION) throw deny('credential_mode_retired', RETIRED_CREDENTIAL_HINT)
+  if (cred.mode === 'gateway-subscription') throw deny(GATEWAY_SUBSCRIPTION_RETIRED_CODE, GATEWAY_SUBSCRIPTION_HINT)
   const plan = planTargetHeaders({ identity: { kind: 'official', credential: 'provider-key' }, provider: {}, incoming: c.incoming || {} })
   const headers = plan.headers
   if (cred.mode === CREDENTIAL_MODES.PROVIDER_KEY) {
     if (cred.token == null || String(cred.token) === '') throw deny('official_credential_missing', '官方目标缺少自有 key')
     headers.authorization = 'Bearer ' + String(cred.token)
-  } else if (cred.mode !== CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION) {
+  } else {
     throw deny('official_credential_missing', '官方目标缺少可用凭据')
   }
   headers['user-agent'] = 'model-gateway/0.1'
@@ -385,7 +394,7 @@ export function authorizeFinalTarget(intent, catalogGeneration, binding) {
   }
   const scope = callerScopeOf(i, b, identity)
   const credentialMode = resolveCredentialMode(domain, identity, scope)
-  const shapeDeny = allowedSchemeHostPortPath(target, domain, { cfg, gatewaySubscription: credentialMode === CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION })
+  const shapeDeny = allowedSchemeHostPortPath(target, domain, { cfg })
   if (shapeDeny) throw shapeDeny
   const credScope = Object.assign({}, scope, { credentialMode })
   const credDeny = credentialModeAllowed(domain, target, credScope)
@@ -431,6 +440,7 @@ function callerScopeOf(intent, binding, identity) {
     // 旧环境开关只用于「已退役」提示，不参与任何放行判断。
     legacyPassthrough: legacyPassthroughRequested(binding.env || (typeof process !== 'undefined' ? process.env : {})),
     credentialMode: c.credentialMode || cred.mode || null,
+    // G1：只用于识别旧调用方的退役声明（typed deny），不参与任何放行判断。
     gatewaySubscription: c.gatewaySubscription === true,
     incoming: c.incoming || binding.incoming || null,
     threadId: c.threadId,

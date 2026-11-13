@@ -10,7 +10,7 @@
 // 全部离线：本地 mock 上游 + 动态回环端口 + OS 临时配置目录；不使用真实凭据/上游。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { startGateway, startScriptedUpstream } from './harness.mjs'
@@ -20,6 +20,7 @@ import {
 } from '../../../src/codex/auth.js'
 import { classifyTarget } from '../../../src/codex/identity.js'
 import { CREDENTIAL_MODES, TARGET_DOMAINS, credentialModeAllowed } from '../../../src/codex/target-authz.js'
+import { scanAuthBoundary } from './auth-boundary-scan.mjs'
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url))
 
@@ -143,12 +144,17 @@ test('凭据模式：official-subscription 与旧声明一律 typed deny（不�
   assert.equal(credentialModeAllowed(TARGET_DOMAINS.OFFICIAL, target, { credentialMode: CREDENTIAL_MODES.NONE }).code, 'official_credential_missing')
 })
 
-test('不读取登录态：凭据/身份模块与 index.js 都不碰 auth.json / CODEX_HOME', () => {
-  for (const rel of ['src/codex/auth.js', 'src/codex/identity.js', 'src/index.js']) {
-    const src = readFileSync(join(ROOT, rel), 'utf8')
-    assert.equal(/auth\.json/.test(src), false, rel + ' 不得读取官方登录凭据文件')
-    assert.equal(/CODEX_HOME/.test(src), false, rel + ' 不得依赖 Codex 登录环境变量')
-  }
+test('不读取登录态：递归扫描全部 src，不碰 auth.json / CODEX_HOME / local-subscription', () => {
+  // F01 回归教训：旧断言只扫 auth.js/identity.js/index.js，漏掉了 src/codex/local-subscription.js。
+  // 现在由 auth-boundary-scan 递归扫描 src/**/*.js：CODEX_HOME 读取、auth.json 读取、
+  // local-subscription 引用、订阅后端路径字面量、~/.codex 目录拼装都会失败。
+  const violations = scanAuthBoundary(ROOT)
+  assert.deepEqual(violations, [], '生产代码认证边界违规:\n' + violations.join('\n'))
+  assert.equal(existsSync(join(ROOT, 'src/codex/local-subscription.js')), false, 'local-subscription.js 必须删除，而不是留在生产树里')
+  const indexSrc = readFileSync(join(ROOT, 'src/index.js'), 'utf8')
+  assert.equal(/from\s+['"][^'"]*local-subscription/.test(indexSrc), false, 'src/index.js 不得再 import local-subscription.js')
+  // 退役模式不得回流：旧常量既不能导出，也不能被授权层识别成可用模式。
+  assert.equal(Object.prototype.hasOwnProperty.call(CREDENTIAL_MODES, 'GATEWAY_SUBSCRIPTION'), false, 'GATEWAY_SUBSCRIPTION 模式必须从 CREDENTIAL_MODES 移除')
 })
 
 // —— 集成边界 ——

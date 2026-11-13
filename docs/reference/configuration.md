@@ -143,6 +143,7 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 - **官方目标**：只放行白名单（`accept`/`accept-encoding`/`content-type`/`user-agent`/`originator`/`version`/`session-id`/`thread-id`/`x-client-request-id`/`openai-beta` + `x-codex-*`/`x-openai-internal-*`/`openai-*` 前缀），其余丢弃并记头名。**凭据只有一条路**：
   - **网关自有 key**（keys/apiKeyEnv）→ 注入 `Authorization: Bearer <自有 key>`；客户端带来的 `authorization` / `chatgpt-account-id` 一律丢弃（不在白名单内，且凭据类有独立守卫）。
   - **客户端官方凭据透传已移除（F01）**：`/backend-api/codex` 订阅后端与 `MG_CODEX_OFFICIAL_PASSTHROUGH` 开关不再启用任何能力。官方目标没有自有 key 时：设置了旧开关 → 403 `official_passthrough_retired`（含迁移提示）；未设置 → 403 `official_no_gateway_key`。两种情况都**零上游请求**，也绝不改投第三方。网关不读取客户端登录态（`auth.json`/`CODEX_HOME` 从不访问）。
+  - **2026-11-13 G1：`gatewaySubscription` 同样退役**：本机 Codex 登录态反向代理已删除；残留 `providers.<id>.gatewaySubscription.enabled=true` 在官方原生、第三方原生与官方 Chat 桥入口均返回 403 `gateway_subscription_retired`，**零上游、不降级**。见下文 P09 段落与[退役证据](../evidence/2026-11-13-auth-boundary-retirement.md)。
 - 官方目标还受 host/scheme/path 白名单约束：必须是 `https`（回环例外），路径前缀只剩 `/v1`（`/backend-api/codex` 已移除）；错误码 `official_target_insecure_scheme` / `official_host_not_allowlisted` / `official_path_not_allowlisted`。上游 3xx 一律按上游错误处理（502 `upstream_redirect_rejected`），**不跟随重定向**（不把凭据送到 Location），Location 目标零命中。
 
 严格路由：`defaults.aggregatePrefixes`（默认 `mg-`、`mg/`）是**聚合保留 ID 前缀**。命中前缀但未在 `models` 显式声明（含别名）时，`/v1/*` 返回 404 `{type:"unknown_model", code:"unknown_model", available:[…]}` 且**零上游请求**，绝不回退 `defaults.provider`；已配置的聚合 ID 与非保留前缀的未知模型维持原行为（后者仍按 `defaults.provider` 兜底，旧接口兼容）。
@@ -156,21 +157,23 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 | 聚合 slug | 由目录生成器产出：`mg-<provider>-<model>`（`providers` id + `models` 键名净化）。请求该 slug 时网关映射到 `models.<原名>` 的上游及 `providerModels`，响应 `model` 回写 slug。Chat 桥候选筛选与报价复用该绑定的原模型声明。 |
 | `MG_CODEX_OFFICIAL_PASSTHROUGH` | **已退役（F01）**：客户端官方凭据透传已移除。保留该变量只会被判为旧配置并给出迁移提示，不启用任何能力（见下文环境变量表）。 |
 
-### P09 单 provider 反向代理（gatewaySubscription）
+### P09 单 provider 反向代理（gatewaySubscription）—— 已退役（2026-11-13，G1）
 
-让 Codex 只认 ModelGate 一个 provider（`openai_base_url` 指向本机网关），父线程官方 GPT 经网关反向代理，子线程 Go DeepSeek 走同一网关。**默认关闭**，新增键不复用 F01 已退役的 `MG_CODEX_OFFICIAL_PASSTHROUGH`：
+**状态：已退役，不可启用。** 2026-11-13 的认证边界收口（G1）删除了 `src/codex/local-subscription.js` 与生产发送分支：网关不再读取 Codex 登录态（`CODEX_HOME/auth.json` 或 `~/.codex/auth.json`），不再从 `CODEX_HOME` 推导订阅凭据，也不再向 ChatGPT 订阅后端（`chatgpt.com/backend-api/codex/responses`）发送本机 Codex token。本段保留仅用于迁移说明与历史溯源。
+
+**迁移：官方目标必须配置网关自有 key**（与 F01 一致），父模型直接由用户自己的 Codex 客户端原生登录并直连官方服务；第三方子任务改用 OpenCode Go provider（使用 Go 自有 key）：
 
 ```json
 "providers": {
-  "codex-subscription": {
-    "baseUrl": "https://chatgpt.com",
+  "codex-official": {
+    "baseUrl": "https://api.openai.com",
     "codexIdentity": "official",
-    "gatewaySubscription": { "enabled": true }
+    "apiKeyEnv": "MG_OPENAI_KEY"
   },
   "opencodego": { "baseUrl": "https://opencode.ai/inference/go", "pathPrefix": "/openai", "apiKeyEnv": "MG_GO_KEY", "api": "openai" }
 },
 "models": {
-  "codex-gpt": { "provider": "codex-subscription", "api": "responses" },
+  "codex-gpt": { "provider": "codex-official", "api": "responses" },
   "codex-deepseek": {
     "provider": "opencodego",
     "api": "responses",
@@ -182,9 +185,11 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `providers.<id>.gatewaySubscription.enabled` | `false` | 显式允许网关承载本机 Codex 订阅凭据，只用于官方 host 的父模型请求。只读 `CODEX_HOME/auth.json`（未设置时 `~/.codex/auth.json`）的 `tokens.access_token`/`account_id`；不刷新、不写入、不持久化到配置/统计/收据。必须 loopback 监听 + loopback 客户端；目标只允许官方 host 白名单 + `/backend-api/codex`（本机 mock 可用 loopback 例外）。 |
-| 失败语义 | — | 非官方目标/路径 → 403 `gateway_subscription_target_not_allowed`；非 loopback → 403 `gateway_subscription_not_loopback`；凭据缺失/过期/API Key 模式 → 401 `subscription_credential_unavailable`。全部零上游、不重试、不换账号。 |
-| 凭据隔离 | — | token 只进官方请求的 `authorization` 与可选 `chatgpt-account-id`；不写日志/错误体/事件/收据，不发送给第三方。审计只记 provider/target/来源。未开启该键时保持 F01 的 `official_no_gateway_key` fail-closed。 |
+| `providers.<id>.gatewaySubscription.enabled` | —（已退役） | 不再启用任何能力。配置仍可加载（兼容旧文件），但仅用于识别旧配置并 fail-closed；启动写一条退役告警。**请删除该键。** |
+| 失败语义 | — | 命中该 provider 的请求（官方原生 `/v1/responses`、第三方原生 `/v1/responses`、官方 Chat 桥）一律 403 `gateway_subscription_retired`（稳定码，含迁移提示）。**零上游请求**、不重试、不换账号、不改投第三方或其它候选。 |
+| 凭据隔离 | — | 网关不读、不复制、不刷新、不持久化 Codex 登录态；Codex token 不再进入任何上游请求、日志、错误体、事件或收据。 |
+| 与 F01 的关系 | — | F01 移除“客户端官方凭据透传”；G1 补齐“网关读本机登录态并代理订阅后端”的实验路径。两者的共同边界：官方目标只认网关自有 key，订阅后端路径永不进白名单。 |
+| 与 P07 SIWC 的关系 | — | `src/subscription/*` 是独立的应用自有 OAuth 合成预览（默认关闭），只使用应用自己经授权流程获得的 token，不读取 Codex 登录态；本退役不改动它。 |
 
 **模型级 Codex V2 能力（`models.<名>.codex`）**（只影响 `/v1/responses` 原生路由）：
 

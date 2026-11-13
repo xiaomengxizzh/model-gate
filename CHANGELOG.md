@@ -2,6 +2,28 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-13 认证边界退役（G1）
+
+### Security —— 行为变更（部署前必须确认）
+
+- **`gatewaySubscription` 生产认证路径退役（G1）**：删除 `src/codex/local-subscription.js`。网关不再读取 Codex 登录态（`auth.json` / `CODEX_HOME` 推导），不再向 `chatgpt.com/backend-api/codex/responses` 发送本机 Codex token；官方目标只保留网关自有 key 直连。
+- **残留配置 fail-closed**：`providers.<id>.gatewaySubscription.enabled=true` 在官方原生 `/v1/responses`、第三方原生 `/v1/responses`、官方 Chat 桥三个入口均返回 403 `gateway_subscription_retired`，**零上游请求**、不降级、不读取登录态。请删除旧配置并为官方目标配置 `apiKeyEnv`/面板 Key。
+- **授权层移除 `GATEWAY_SUBSCRIPTION` 模式**：`CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION` 不再存在；旧调用方传 `gatewaySubscription=true` 或 `credentialMode='gateway-subscription'` 得到 typed `gateway_subscription_retired`。`/backend-api/codex` 永不进入官方路径白名单。
+
+### Changed
+
+- `/api/status` 的 provider `gatewaySubscription` 恒为 `false`；残留旧配置另以 `gatewaySubscriptionRetired` 暴露，仅用于迁移提示。
+- `src/forward.js` 不再把 `opts.gatewaySubscription` 传入授权 intent（参数保留仅为兼容旧签名，实际忽略）；转发链在获取并发/预算与任何上游发送前统一 fail-closed。
+- 回归：`native-boundary` 的“不读取登录态”改为递归扫描全部 `src/**/*.js`（覆盖 F01 回归漏掉的 `local-subscription.js`）；`codex-p09-native-proxy` 由正向代理验证改造为“退役 + 静态扫描”套件。
+
+### Docs
+
+- 配置参考 P09 段标记为已退役并给出迁移；ADR-0002 增加 2026-11-13 G1 修订；新增 [认证边界退役证据](docs/evidence/2026-11-13-auth-boundary-retirement.md)。
+
+### Not changed
+
+- P07 SIWC 原型（`src/subscription/*`）仍默认关闭；本次不改变其能力与边界。
+
 ## [Unreleased] —— 2026-11-12 收工闭环（`integration/modelgate-release`）
 
 > 本段记录从 A1 基线 `2a735fb` 起的新集成线：G0 冻结 + G1 后端/协议/控制面的定向移植与收紧。**CLI 原生门（Q03/Q04）与正式 GUI（U01–U07）未开始**，本段不表示发布就绪。
