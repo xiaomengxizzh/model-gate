@@ -233,7 +233,13 @@ export function createDelegationServer(opts = {}) {
           : { code: (err && err.code && String(err.code).startsWith('MCP_')) ? err.code : ERRORS.INTERNAL, message: String((err && err.message) || 'task failed') }
         const rec2 = store.get(taskRef)
         const turn2 = rec2 && rec2.turns.find((t) => t.turnId === turnId)
-        const target = cancelled ? STATES.CANCELLED : STATES.FAILED
+        // 结果未知（已写入上游但没收到终态）必须落 UNKNOWN，不能落 FAILED；
+        // FAILED 会让父端以为「没执行过」而重发，正好违反不重复派发。
+        const unknownOutcome = !cancelled && err && (
+          (err.extra && err.extra.outcomeUnknown === true) ||
+          err.code === ERRORS.UPSTREAM_UNKNOWN
+        )
+        const target = cancelled ? STATES.CANCELLED : (unknownOutcome ? STATES.UNKNOWN : STATES.FAILED)
         if (turn2 && (turn2.state === STATES.DISPATCHED || turn2.state === STATES.RUNNING || turn2.state === STATES.ADMITTED)) {
           try {
             store.transition(taskRef, turnId, target, cancelled

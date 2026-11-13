@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import { once } from 'node:events'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, readdirSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -73,7 +73,6 @@ function makeSetup(mock, opts = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'mg-mcp-'))
   const stateDir = join(dir, 'state')
   const workspace = join(dir, 'ws')
-  const { mkdirSync } = require_fs()
   mkdirSync(stateDir, { recursive: true })
   mkdirSync(workspace, { recursive: true })
   const cfg = {
@@ -104,8 +103,6 @@ function makeSetup(mock, opts = {}) {
     provider: () => buildProvider(cfg, 'opencodego'),
   }
 }
-function require_fs() { return { mkdirSync: (p, o) => { const fs = fsRef; return fs.mkdirSync(p, o) } } }
-import * as fsRef from 'node:fs'
 
 async function waitState(store, taskRef, states, ms = 4000) {
   const t0 = Date.now()
@@ -409,6 +406,48 @@ test('归属隔离：不同 ownerRef 不能读取/取消他人 taskRef（NOT_OWN
   const deniedCancel = await otherServer.callTool('modelgate_cancel_task', { taskRef })
   assert.equal(deniedCancel.structuredContent.error.code, ERRORS.NOT_OWNER)
   await otherServer.shutdown()
+})
+
+test('QA 修复回归：任务记录不落明文幂等键；无终态记 UNKNOWN；重启后 ADMITTED 不搁死', async (t) => {
+  // (a) 无终态流 → UNKNOWN（不是 FAILED，也不能被追派/假装取消成功）
+  const noTerminal = await startGoMock([() => ({ sse: [sseFrame('response.created', { type: 'response.created', response: { id: 'resp_noterm' } })] })])
+  const envA = makeSetup(noTerminal)
+  t.after(async () => { await envA.server.shutdown(); await noTerminal.close(); envA.cleanup() })
+  const a = await envA.server.callTool('modelgate_delegate_task', { task: '只发一半的流', idempotencyKey: 'idem-noterm-1' })
+  const taskRefA = a.structuredContent.taskRef
+  const w = await envA.server.callTool('modelgate_wait_task', { taskRef: taskRefA, timeoutMs: 8000 })
+  assert.equal(w.structuredContent.state, STATES.UNKNOWN, '没有终态必须是 UNKNOWN（发送结果未确认）')
+  assert.equal(w.structuredContent.error.code, ERRORS.UPSTREAM_UNKNOWN)
+  const f = await envA.server.callTool('modelgate_followup_task', { taskRef: taskRefA, task: '继续', idempotencyKey: 'idem-noterm-2' })
+  assert.equal(f.structuredContent.error.code, ERRORS.UPSTREAM_UNKNOWN, 'UNKNOWN 上禁止追派（必须先对账）')
+  const c = await envA.server.callTool('modelgate_cancel_task', { taskRef: taskRefA })
+  assert.equal(c.structuredContent.error.code, ERRORS.UPSTREAM_UNKNOWN, 'UNKNOWN 上不得假装取消成功')
+  assert.equal(noTerminal.hits.length, 1, '不得因为结果未知而重发')
+
+  // (b) 落盘记录里不得出现明文幂等键
+  const files = readdirSync(join(envA.stateDir, 'tasks')).filter((n) => n.endsWith('.json'))
+  assert.equal(files.length, 1)
+  const raw = readFileSync(join(envA.stateDir, 'tasks', files[0]), 'utf8')
+  assert.equal(raw.includes('idem-noterm-1'), false, '明文幂等键不得落盘（契约 §6.2）')
+
+  // (c) 重启后 ADMITTED/CREATED 标 FAILED 并允许新键追派（不再搁死）
+  const dir = mkdtempSync(join(tmpdir(), 'mg-mcp-stuck-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const store1 = createTaskStore({ dir: join(dir, 'tasks') })
+  const rec = store1.create({
+    taskRef: 'mgtask-00000000000000b2', ownerRef: 'mgowner-00000000000000ff', provider: 'opencodego', model: MODEL,
+    requestDigest: 'd2', taskBytes: 3, budgetMs: 1000,
+  })
+  store1.transition(rec.taskRef, rec.turns[0].turnId, STATES.ADMITTED)
+  const store2 = createTaskStore({ dir: join(dir, 'tasks') })
+  const touched = store2.reconcile()
+  assert.equal(touched.length, 1)
+  const turn = store2.mustGet(rec.taskRef).turns[0]
+  assert.equal(turn.state, STATES.FAILED)
+  assert.equal(turn.error.code, ERRORS.INTERRUPTED_BEFORE_DISPATCH)
+  assert.equal(store2.reconcile().length, 0, '对账必须幂等')
+  const appended = store2.appendTurn(rec.taskRef, { requestDigest: 'd3', taskBytes: 3, budgetMs: 1000, allowResultTruncation: false })
+  assert.equal(appended.rec.turns.length, 2, 'FAILED 之后必须能追派，不能搁死')
 })
 
 test('MCP 协议：initialize / tools/list / 未知方法 / 未知工具', async (t) => {

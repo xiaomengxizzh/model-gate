@@ -264,7 +264,9 @@ export function createGoExecutor(opts = {}) {
             if (budget.signal) { try { budget.signal.removeEventListener('abort', onAbort) } catch {} }
           }
           if (!acc.sawTerminal) {
-            throw new TurnError(ERRORS.UPSTREAM_ERROR, '上游流没有给出终态事件（不允许把 EOF 当成功）')
+            // 已经写入上游（2xx，可能已收到帧）但没有终态：任务结果**未知**。
+            // 不能记 FAILED（会诱使父端重发），也不能记成功；交给调用方标 UNKNOWN 去对账。
+            throw new TurnError(ERRORS.UPSTREAM_UNKNOWN, '上游流在给出终态前结束：发送结果未确认，禁止自动重发', { outcomeUnknown: true })
           }
           if (acc.terminalType === 'response.failed') {
             throw new TurnError(ERRORS.UPSTREAM_ERROR, '上游报告失败：' + JSON.stringify(acc.failed || {}))
@@ -285,7 +287,7 @@ export function createGoExecutor(opts = {}) {
         }
         const buf = await readAll(up.stream, MAX_STREAM_BYTES)
         let json
-        try { json = JSON.parse(buf.toString('utf8')) } catch { throw new TurnError(ERRORS.UPSTREAM_ERROR, '上游返回非 JSON 且非 SSE') }
+        try { json = JSON.parse(buf.toString('utf8')) } catch { throw new TurnError(ERRORS.UPSTREAM_PROTOCOL, '上游返回既不是 SSE 也不是 JSON：形状不可解析') }
         const collected = collectFromJson(json)
         usage = collected.usage || usage
         responseId = collected.responseId || responseId

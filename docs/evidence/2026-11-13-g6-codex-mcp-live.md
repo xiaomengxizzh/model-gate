@@ -73,6 +73,10 @@ E2E_OK | round1=MG-R1-E036FCBAAFEAF023 | round2=MG-R2-479B241A98DA1CC0 | taskRef
 - MCP 侧任务记录：单 taskRef `mgtask-be66411758f2ded8`，provider `opencodego`，model `deepseek-v4.1-flash`；
   两个 turn（delegate / followup）都是 `ACKNOWLEDGED`（父端读取过结果）；工具调用 2 次 / 6 次，失败 0 次；
   每 turn 各自有独立 `resultDigest`。
+- **父端回执写 `RESULT_READY`、而记录里是 `ACKNOWLEDGED` 的解释**：MCP 的结果投递是"读取即确认"——
+  `wait_task` 返回那一刻状态是 `RESULT_READY`（父端看到的就是这个值），同一次响应投递完成后服务端把它推进到
+  `ACKNOWLEDGED`（契约 T11）。两者不是矛盾，而是同一事实的前后两点；`resultDigest` 不含 `state`，
+  因此 ACK 不改变父端可用于复核的摘要。
 - **同一 session 追派**：两轮共享同一 `taskRef` 与同一 `sessionRef`（记录里只有一条 sessionRef）。
 - **无重复派发**：父端只有 4 次 MCP 调用（2 次 delegate-family + 2 次 wait），MCP 侧只有 2 个 turn，没有重复创建。
 

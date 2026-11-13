@@ -2,13 +2,6 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
-### Verified (real) —— G6
-
-- **真实链路已通过**：Codex CLI 0.167.0（用户自己的 ChatGPT 官方登录，父模型 `gpt-6-luna` 直连官方服务）通过本机 stdio MCP 调用 `modelgate_delegate_task` → `modelgate_wait_task` → `modelgate_followup_task` → `modelgate_wait_task`，两个回合均 `ACKNOWLEDGED`，子任务（`deepseek-v4.1-flash`，provider `opencodego`）真实执行本地文件工具并落盘，父端最终回执里的两个 `sha256` 与磁盘一致。
-- 运行参数：`--ephemeral`（不写会话文件）、`--ignore-user-config`（不加载/不修改 `config.toml`）、MCP 服务经 `-c` 命令行覆盖注入；未读取或转发 `auth.json`。
-- 父模型标识核验：CLI 显式 `-m gpt-6-luna` + `codex doctor --json` 解析结果为 `model=gpt-6-luna / model provider=openai` + `codex debug models` 目录存在该 slug；**限制**：`exec --json` 事件流不含 `model` 字段，已在证据文档记录该限制，未从会话文件反推。
-- 证据：[G6 真实链路](docs/evidence/2026-11-13-g6-codex-mcp-live.md)、[脱敏收据](docs/evidence/2026-11-13-g6-receipt.json)。
-
 ## [Unreleased] —— 2026-11-13 本地 MCP 委派（G2–G5）
 
 ### Added
@@ -17,7 +10,7 @@
 - **持久化任务状态机**：`CREATED→ADMITTED→DISPATCHED→RUNNING→RESULT_READY→ACKNOWLEDGED`，另有 `FAILED/CANCELLED/UNKNOWN`；`DISPATCHED` 在发起网络写入前落盘，进程重启把在途回合对账成 `UNKNOWN` 并**禁止重发**。幂等键只落哈希，同键同摘要回放、同键不同摘要冲突。
 - **本地受限工作区工具**：子模型只能调用 `read_file`/`list_dir`/`write_file`/`stat_path`，根目录由 `MG_MCP_WORKSPACE` 指定；绝对路径、`..` 与符号链接逃逸一律拒绝；引用路径在任务前后计算 `sha256` 作为真实改动证据。
 - **结果回执**：`resultText` + `toolCalls` + `artifacts[{sha256Before,sha256After,changed}]` + `usage` + `lossy` + `resultDigest`（不含 `state`，ACK 前后一致）。默认完整回执，只有 `allowResultTruncation=true` 才裁剪。
-- 回归 `scripts/test/offline/mcp-delegation.test.mjs`（11 用例）与 `scripts/test/offline/sse-lifecycle.test.mjs`（8 用例）；`npm test` 增至 79 套件。
+- 回归 `scripts/test/offline/mcp-delegation.test.mjs`（12 用例）与 `scripts/test/offline/sse-lifecycle.test.mjs`（8 用例）；`npm test` 增至 79 套件 / 807 通过。
 
 ### Security
 
@@ -25,6 +18,17 @@
 - `ownerRef`（配置目录 + OS 用户派生）做归属隔离，跨 owner 读写一律 `MCP_NOT_OWNER`；模型无法控制该值。
 - Go 凭据只出现在上游请求头，不返回给调用方、不落盘；上游 `opencodego_*` 内部码不外透。
 - SSE 生命周期独立回归覆盖 completed/failed 唯一终态、无终态 close、客户端断开、首字节前取消、整体 deadline、长首字节，并断言上游命中次数以证明无重复发送。
+- **独立 QA 审计后的三处收紧（同轮修复，均有回归）**：
+  1. 任务 JSON 不再落明文幂等键（原先 `turn.idempotencyKey` 会明文落盘），可追溯性只由 `idem.json` 的 `sha256(ownerRef:key)` 哈希索引承担；
+  2. 上游流在给出终态前结束 → 记 **`UNKNOWN`**（不是 `FAILED`）：结果未确认时落 FAILED 会诱使父端重发，正好违反不重复派发；`UNKNOWN` 上禁止追派/取消并返回 `MCP_UNKNOWN_OUTCOME`；
+  3. 重启对账把 `CREATED/ADMITTED` 标 `FAILED` + `MCP_INTERRUPTED_BEFORE_DISPATCH`（零网络写入），不再让排队中的任务永久搁死。
+
+### Verified (real) —— G6
+
+- **真实链路已通过**：Codex CLI 0.167.0（用户自己的 ChatGPT 官方登录，父模型 `gpt-6-luna` 直连官方服务）通过本机 stdio MCP 调用 `modelgate_delegate_task` → `modelgate_wait_task` → `modelgate_followup_task` → `modelgate_wait_task`，两个回合均 `ACKNOWLEDGED`，子任务（`deepseek-v4.1-flash`，provider `opencodego`）真实执行本地文件工具并落盘，父端最终回执里的两个 `sha256` 与磁盘一致。
+- 运行参数：`--ephemeral`（不写会话文件）、`--ignore-user-config`（不加载/不修改 `config.toml`）、MCP 服务经 `-c` 命令行覆盖注入；未读取或转发 `auth.json`。
+- 父模型标识核验：CLI 显式 `-m gpt-6-luna` + `codex doctor --json` 解析结果为 `model=gpt-6-luna / model provider=openai` + `codex debug models` 目录存在该 slug；**限制**：`exec --json` 事件流不含 `model` 字段，已在证据文档记录该限制，未从会话文件反推。
+- 证据：[G6 真实链路](docs/evidence/2026-11-13-g6-codex-mcp-live.md)、[脱敏收据](docs/evidence/2026-11-13-g6-receipt.json)。
 
 ### Docs
 
@@ -32,8 +36,9 @@
 
 ### Not verified
 
-- 真实 OpenCode Go 上游与真实 Codex CLI 父模型闭环（G6）未执行；**本段不表示真实上游已验收**。
-- Codex Desktop（G7）、GUI 与发布整合（G8）未执行；未 push、未开 PR、未合并。
+- **真实上游**：G6 已用真实 Codex 客户端 + 真实 OpenCode Go 跑通两轮（见上「Verified (real)」）；但**真实取消/超时/上游故障注入/进程崩溃恢复**未在真实上游执行，只有离线回归覆盖，不得据此宣称全部真实场景已验收。
+- **Codex Desktop（G7）**：未执行，需所有者在本机 GUI 会话独立验收（矩阵见 `docs/roadmap/2026-11-13-g7-desktop-acceptance-matrix.md`），不得由 CLI 结论推断。
+- **GUI 与发布整合（G8）**：只完成整合准备（`docs/roadmap/2026-11-13-g8-release-integration.md`）；未 push、未开 PR、未合并、未发布。
 
 ## [Unreleased] —— 2026-11-13 认证边界退役（G1）
 

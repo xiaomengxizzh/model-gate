@@ -13,7 +13,7 @@
 | G2 Go MCP 委派契约 | 完成（含对齐 delta） | [契约 v1](contracts/modelgate-mcp-delegation-v1.md)、[实现对齐记录](contracts/modelgate-mcp-delegation-v1-alignment.md)、[威胁模型](explanation/mcp-delegation-threat-model.md)、`docs/contracts/fixtures/mcp/v1/`（29 条拒绝负例） |
 | G3 MCP MVP | 完成 | `bin/mg-mcp.mjs` + `src/mcp/delegation-{contract,store,tools,executor,server}.js`；delegate/get/wait/cancel + 本地受限工具；证据：[G3/G4 证据](evidence/2026-11-13-mcp-delegation-g3-g4.md) |
 | G4 同 session 追派与恢复 | 完成（mock） | followup 复用同一 Go session；重启对账把在途回合标 `UNKNOWN` 且禁止重发；ACK 语义与 `resultDigest` 稳定 |
-| G5 安全与协议验收 | 完成（mock） | 拒绝矩阵 15 条 + 归属隔离 + 凭据/会话头隔离；SSE 终态/取消/超时独立回归 8 用例：[审计](evidence/2026-11-13-sse-lifecycle-audit.md) |
+| G5 安全与协议验收 | 完成（mock）+ 独立 QA 复核 | 拒绝矩阵 15 条 + 归属隔离 + 凭据/会话头隔离；SSE 终态/取消/超时独立回归 8 用例：[审计](evidence/2026-11-13-sse-lifecycle-audit.md)。独立 QA（[报告](evidence/2026-11-13-independent-qa.md)）提出的 3 个缺口已同轮修复并补回归（明文幂等键、无终态应记 UNKNOWN、重启 ADMITTED 搁死） |
 | G6 CLI 真实验收 | **完成（PASS real）** | 真实 Codex 0.167.0 + 父模型 `gpt-6-luna`（官方直连）+ 真实 OpenCode Go `deepseek-v4.1-flash`；两轮 `ACKNOWLEDGED`、父端最终回执含两个正确 sha256：[G6 证据](evidence/2026-11-13-g6-codex-mcp-live.md)、[脱敏收据](evidence/2026-11-13-g6-receipt.json) |
 | G7 Desktop | NOT_RUN | 需所有者在本机 GUI 会话按 [Desktop 验收矩阵](roadmap/2026-11-13-g7-desktop-acceptance-matrix.md) 独立执行；本轮不从 CLI 推断 |
 | G8 GUI 与发布整合 | 准备完成、未合并 | [发布整合方案](roadmap/2026-11-13-g8-release-integration.md)：整合形态为 fast-forward 语义，风险在审阅面；未 push/未 PR/未合并 |
@@ -23,7 +23,7 @@
 | 命令 | exit | 结果 |
 | --- | --- | --- |
 | `npm run check` | 0 | 全 `node --check` + UI 16/16 |
-| `npm test` | 0 | 79 套件通过 / 0 失败；806 通过 / 1 跳过（75.1s） |
+| `npm test` | 0 | 79 套件通过 / 0 失败；807 通过 / 1 跳过 |
 | `npm run docs:check` | 0 | PASS |
 | `node scripts/check-metadata.mjs` | 0 | PASS (39) |
 | `git diff --check` | 0 | 无空白错误 |

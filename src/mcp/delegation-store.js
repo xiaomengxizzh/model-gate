@@ -186,7 +186,6 @@ export function createTaskStore(opts = {}) {
         taskBytes: input.taskBytes,
         budgetMs: input.budgetMs,
         allowResultTruncation: input.allowResultTruncation === true,
-        idempotencyKey: input.idempotencyKey,
         admittedAt: null,
         dispatchedAt: null,
         runningAt: null,
@@ -219,7 +218,6 @@ export function createTaskStore(opts = {}) {
         taskBytes: input.taskBytes,
         budgetMs: input.budgetMs,
         allowResultTruncation: input.allowResultTruncation === true,
-        idempotencyKey: input.idempotencyKey,
         admittedAt: null,
         dispatchedAt: null,
         runningAt: null,
@@ -279,6 +277,23 @@ export function createTaskStore(opts = {}) {
       for (const rec of tasks.values()) {
         const turn = rec.turns[rec.turns.length - 1]
         if (!turn) continue
+        if (turn.state === STATES.CREATED || turn.state === STATES.ADMITTED) {
+          // 尚未发生网络写入：既不是成功也不是 UNKNOWN，标 FAILED 让父端可用新幂等键追派。
+          const at = nowIso(now())
+          const from = turn.state
+          Object.assign(turn, {
+            state: STATES.FAILED,
+            updatedAt: at,
+            finishedAt: at,
+            error: {
+              code: ERRORS.INTERRUPTED_BEFORE_DISPATCH,
+              message: '进程重启时回合处于 ' + from + '：尚未写入上游（零网络写入），已标记 FAILED；可用新的幂等键追派',
+            },
+          })
+          persist(rec)
+          touched.push({ taskRef: rec.taskRef, turnId: turn.turnId, from })
+          continue
+        }
         if (turn.state === STATES.DISPATCHED || turn.state === STATES.RUNNING) {
           const at = nowIso(now())
           Object.assign(turn, {

@@ -58,6 +58,19 @@ Codex CLI（用户自己的官方登录，GPT 父模型直连官方服务）
 10. **拒绝矩阵**：V2 密文键、凭据键、任意 URL、provider、model、未知字段、超长正文、坏幂等键、预算越界、绝对/父目录引用、引用内联正文。
 11. **无工具模式不虚构**：`MG_MCP_TOOLS=none` 时结果 `toolCallCount=0` 且 `lossy[].kind="no_workspace_tools"`。
 
+## 4.1 独立 QA 审计与修复（2026-11-13 同轮）
+
+独立 QA 子代理对已合并分支做只读审计（[报告](2026-11-13-independent-qa.md)），确认认证边界 PASS、G6 证据无夸大，
+并提出 3 个真实缺口；**同一轮已全部修复并补回归**：
+
+| # | 缺口 | 修复 | 回归用例 |
+| --- | --- | --- | --- |
+| 1 | `turn.idempotencyKey` 明文落盘（`idem.json` 已是哈希，但任务文件没有） | 删除该字段，明文键只存在于调用瞬间 | 断言任务 JSON 不含明文键 |
+| 2 | 上游流无终态被记 `FAILED`（会诱使父端重发） | 改记 `UNKNOWN` + `MCP_UNKNOWN_OUTCOME`，并禁止追派/取消 | 断言 `UNKNOWN`、追派/取消均被拒、上游只命中 1 次 |
+| 3 | 重启后 `ADMITTED/CREATED` 回合永久搁死 | 对账标 `FAILED` + `MCP_INTERRUPTED_BEFORE_DISPATCH`（零网络写入），允许新键追派 | 断言对账后状态、错误码、对账幂等、可追派 |
+
+另修正两处文档不一致：`MCP_UPSTREAM_PROTOCOL` 现在确有产生点；CHANGELOG 中 G6「已通过」与「未执行」的自相矛盾已消除。
+
 ## 5. 未验证 / 阻断
 
 | 项 | 状态 | 说明 |
