@@ -1,0 +1,283 @@
+{
+  "jsonrpc": "2.0",
+  "id": "fixture-tools-list-1",
+  "result": {
+    "tools": [
+      {
+        "name": "modelgate_delegate_task",
+        "title": "Delegate a code task to the OpenCode Go worker",
+        "description": "Create one external OpenCode Go worker task from explicit plaintext task text plus a declared workspace scope. Provider/model come from the server allowlist; tool arguments can never choose URL, host, provider, model or credentials. Idempotent on idempotencyKey. This is a tool-driven external worker delegation, NOT a native Codex spawn_agent child thread.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "task",
+            "idempotencyKey",
+            "workspace"
+          ],
+          "properties": {
+            "task": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{8,128}$"
+            },
+            "workspace": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "root"
+              ],
+              "properties": {
+                "root": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "refs": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "path",
+                      "mode"
+                    ],
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      "mode": {
+                        "enum": [
+                          "read",
+                          "write"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "permissionMode": {
+                  "enum": [
+                    "read_only",
+                    "read_write"
+                  ]
+                },
+                "toolPolicy": {
+                  "type": "array",
+                  "maxItems": 6,
+                  "items": {
+                    "enum": [
+                      "read_file",
+                      "list_dir",
+                      "search",
+                      "write_file",
+                      "exec"
+                    ]
+                  }
+                }
+              }
+            },
+            "reasoningEffort": {
+              "enum": [
+                "low",
+                "high",
+                "max"
+              ]
+            },
+            "budget": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "maxElapsedMs": {
+                  "type": "integer",
+                  "minimum": 1000,
+                  "maximum": 1800000
+                },
+                "maxToolCalls": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 200
+                }
+              }
+            },
+            "parentThreadId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            }
+          }
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "modelgate_get_task",
+        "title": "Read one delegated task state and result summary",
+        "description": "Return the persisted state and a bounded, redacted result summary for a taskRef owned by this connection's ownerRef. First delivery of a terminal record moves the task to ACKNOWLEDGED. Read-only and idempotent.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "taskRef"
+          ],
+          "properties": {
+            "taskRef": {
+              "type": "string",
+              "pattern": "^mgtask-[0-9a-f]{16}$"
+            },
+            "includeResult": {
+              "type": "boolean"
+            },
+            "maxResultBytes": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65536
+            }
+          }
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "modelgate_wait_task",
+        "title": "Wait a bounded window for a delegated task terminal state",
+        "description": "Block up to timeoutMs (0..60000) for a state change. A timeout window ending is NOT a task failure: the task state is returned unchanged with timedOut=true. Read-only and idempotent.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "taskRef"
+          ],
+          "properties": {
+            "taskRef": {
+              "type": "string",
+              "pattern": "^mgtask-[0-9a-f]{16}$"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 60000
+            },
+            "includeResult": {
+              "type": "boolean"
+            },
+            "maxResultBytes": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65536
+            }
+          }
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "modelgate_followup_task",
+        "title": "Send a follow-up turn to the same delegated task",
+        "description": "Append one follow-up turn to an existing taskRef, reusing the same OpenCode Go session and the workspace scope recorded at creation. Never creates a new task and never widens permissions. Idempotent on idempotencyKey within the followup namespace.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "taskRef",
+            "task",
+            "idempotencyKey"
+          ],
+          "properties": {
+            "taskRef": {
+              "type": "string",
+              "pattern": "^mgtask-[0-9a-f]{16}$"
+            },
+            "task": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{8,128}$"
+            },
+            "reasoningEffort": {
+              "enum": [
+                "low",
+                "high",
+                "max"
+              ]
+            },
+            "budget": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "maxElapsedMs": {
+                  "type": "integer",
+                  "minimum": 1000,
+                  "maximum": 1800000
+                },
+                "maxToolCalls": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 200
+                }
+              }
+            }
+          }
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "modelgate_cancel_task",
+        "title": "Cancel a running delegated task",
+        "description": "Request cancellation of a non-terminal task and report whether cancellation actually reached the upstream. Idempotent for already-cancelled tasks. An UNKNOWN task must be reconciled first, so cancellation reports MCP_UNKNOWN_OUTCOME instead of a false success.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "taskRef"
+          ],
+          "properties": {
+            "taskRef": {
+              "type": "string",
+              "pattern": "^mgtask-[0-9a-f]{16}$"
+            },
+            "reason": {
+              "enum": [
+                "user_request",
+                "parent_abort",
+                "timeout",
+                "other"
+              ]
+            }
+          }
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      }
+    ]
+  }
+}
