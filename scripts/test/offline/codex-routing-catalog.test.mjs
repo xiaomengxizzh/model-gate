@@ -70,6 +70,13 @@ test('聚合 slug：绑定 provider + 原模型名，providerModels/servingModel
   assert.equal(isCodexOfficialSlug(cfg, OFFICIAL_SLUG), true)
 })
 
+test('聚合 slug 保留原生 Responses 与 codex 投影策略', () => {
+  const cfg = cfgWith({ models: { 'vendor-chat': { provider: 'third', api: 'responses', codex: { plaintextTools: true, history: { agentMessage: 'project' } } } } })
+  const hit = createRouter(cfg).resolve(BINDING_SLUG)
+  assert.equal(hit.def.api, 'responses')
+  assert.deepEqual(hit.def.codex, { plaintextTools: true, history: { agentMessage: 'project' } })
+})
+
 test('聚合 slug 继承原模型能力声明（协议/思考强度/输出上限）', () => {
   const cfg = cfgWith({ models: { 'vendor-chat': { provider: 'third', api: 'openai', effortFormat: 'thinking', maxTokensMax: 4096 } } })
   const hit = createRouter(cfg).resolve(BINDING_SLUG)
@@ -252,7 +259,15 @@ test('端到端：目录注入后聚合 slug 上游名/回写，官方 slug 走 
     name: 'mg-codex-routing',
     config: {
       providers: { gateway: { baseUrl: third.base, apiKeyEnv: '' }, official: { baseUrl: official.base, apiKeyEnv: '' } },
-      models: { 'vendor-chat': { provider: 'gateway', capability: 'chat', maxContext: 128000 } },
+      models: {
+        'vendor-chat': {
+          provider: 'gateway', capability: 'chat', maxContext: 128000,
+          codex: {
+            capabilities: { shellType: 'unified_exec' },
+            evidence: { shellType: { source: 'offline loopback fixture', observedAt: new Date().toISOString() } },
+          },
+        },
+      },
       defaults: { provider: 'gateway', codexOfficialProvider: 'official', codexCatalogBasePath: basePath },
     },
   })
@@ -262,11 +277,16 @@ test('端到端：目录注入后聚合 slug 上游名/回写，官方 slug 走 
   assert.equal((await gw.post('/api/config/reload', {})).status, 200)
 
   // 1) 聚合 slug：上游收到绑定里的原模型名，响应 model 回写 slug
-  const chat = await gw.post('/v1/chat/completions', { model: slug, messages: [{ role: 'user', content: 'hi' }] }, { 'content-type': 'application/json' })
+  const chat = await gw.post('/v1/chat/completions', {
+    model: slug,
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [{ type: 'function', function: { name: 'fixture_tool', parameters: { type: 'object' } } }],
+  }, { 'content-type': 'application/json' })
   assert.equal(chat.status, 200)
   assert.equal(seen.length, 1)
   assert.equal(seen[0].url, '/v1/chat/completions')
   assert.equal(seen[0].body.model, 'vendor-chat', '上游模型名必须是 binding.model')
+  assert.equal(seen[0].body.tools[0].function.name, 'fixture_tool', '聚合 slug 使用原模型已声明的工具能力')
   const chatBody = await chat.json()
   assert.equal(chatBody.model, slug, '响应 model 必须回写为聚合 slug（rewriteModel 机制）')
 

@@ -112,3 +112,96 @@ test('原生 Responses 错误与预算：上游错误体透传；慢上游 → 5
   assert.equal((await slow.json()).error.type, 'request_timeout')
   assert.ok(Date.now() - t0 < 2500)
 })
+
+test('Codex 投影原生流等待延迟完成帧，并保持请求预算至流结束', { timeout: 30000 }, async (t) => {
+  const created = 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_up","status":"in_progress"}}\n\n'
+  const completed = 'event: response.completed\ndata: ' + JSON.stringify({ type: 'response.completed', response: RESP }) + '\n\n'
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    for await (const _ of req) { /* drain */ }
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.write(created)
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    res.end(completed)
+  })
+  const gw = await startGateway({
+    name: 'native-codex-projected',
+    config: {
+      providers: { mock: { baseUrl: upstream.base } },
+      models: { demo: { provider: 'mock', api: 'responses', codex: { plaintextTools: true } } },
+    },
+  })
+  t.after(async () => { await gw.stop(); await upstream.stop() })
+
+  const res = await gw.post('/v1/responses', { model: 'demo', input: 'hi', stream: true }, json())
+  assert.equal(res.status, 200)
+  const text = await res.text()
+  assert.match(text, /event: response\.created/)
+  assert.match(text, /event: response\.completed/)
+  assert.doesNotMatch(text, /event: response\.failed/)
+  assert.equal(upstream.hits.length, 1)
+  assert.equal(upstream.hits[0].aborted, false)
+})
+
+test('Codex 投影拒绝只有信封和密文的当前任务，零上游请求', { timeout: 30000 }, async (t) => {
+  const upstream = await startScriptedUpstream(async (req, res) => {
+    await readBody(req)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(RESP))
+  })
+  const gw = await startGateway({
+    name: 'native-codex-opaque',
+    config: {
+      providers: { mock: { baseUrl: upstream.base } },
+      models: { demo: { provider: 'mock', api: 'responses', codex: { plaintextTools: true } } },
+    },
+  })
+  t.after(async () => { await gw.stop(); await upstream.stop() })
+
+  const res = await gw.post('/v1/responses', {
+    model: 'demo',
+    stream: true,
+    input: [{
+      type: 'agent_message',
+      content: [
+        { type: 'input_text', text: 'Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n' },
+        { type: 'encrypted_content', encrypted_content: 'synthetic-opaque-task' },
+      ],
+    }],
+  }, json())
+  assert.equal(res.status, 400)
+  const body = await res.json()
+  assert.equal(body.error.code, 'opaque_agent_message')
+  assert.doesNotMatch(JSON.stringify(body), /synthetic-opaque-task/)
+  assert.equal(upstream.hits.length, 0)
+})
+
+test('Codex 投影原生流按下游是否已开流返回 504 或一次超时终态', { timeout: 30000 }, async (t) => {
+  const upstream = await startScriptedUpstream(async (req, res, hit) => {
+    await readBody(req)
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    if (hit.index === 0) res.flushHeaders()
+    else res.write('event: response.created\ndata: {"type":"response.created"}\n\n')
+  })
+  const gw = await startGateway({
+    name: 'native-codex-stream-timeout',
+    config: {
+      defaults: { timeout: { firstByteMs: 5000, idleMs: 5000, overallMs: 500 } },
+      providers: { mock: { baseUrl: upstream.base } },
+      models: { demo: { provider: 'mock', api: 'responses', codex: {} } },
+    },
+  })
+  t.after(async () => { await gw.stop(); await upstream.stop() })
+
+  const request = { model: 'demo', input: 'hi', stream: true }
+  const beforeStream = await gw.post('/v1/responses', request, json())
+  assert.equal(beforeStream.status, 504)
+  assert.equal((await beforeStream.json()).error.type, 'request_timeout')
+
+  const res = await gw.post('/v1/responses', request, json())
+  assert.equal(res.status, 200)
+  const text = await res.text()
+  assert.match(text, /event: response\.created/)
+  assert.equal((text.match(/event: response\.failed/g) || []).length, 1)
+  assert.match(text, /"code":"REQUEST_TIMEOUT"/)
+  assert.equal(upstream.hits.length, 2)
+})

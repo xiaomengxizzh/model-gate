@@ -65,6 +65,10 @@ export const CODEX_OVERRIDE_FIELDS = Object.freeze([
   'capabilities', 'evidence', 'baseInstructions',
 ])
 
+// Runtime-only members of models.<name>.codex. They are consumed by the native
+// Responses route and must not be projected into the client model catalog.
+const CODEX_RUNTIME_FIELDS = Object.freeze(['plaintextTools', 'history', 'namespace'])
+
 // P1 目录契约：第三方条目默认**不声明**未证实能力。以下能力只能经 codex.capabilities +
 // codex.evidence{source,observedAt} 显式声明；官方模板里的同类字段一律不复制。
 export const CODEX_CAPABILITY_FIELDS = Object.freeze({
@@ -485,7 +489,7 @@ function validateOverrideShape(name, override) {
   if (!isPlainObject(override)) {
     throw new CatalogError('invalid_override', 'models.' + name + '.codex 必须是对象')
   }
-  const unknown = Object.keys(override).filter(k => !CODEX_OVERRIDE_FIELDS.includes(k))
+  const unknown = Object.keys(override).filter(k => !CODEX_OVERRIDE_FIELDS.includes(k) && !CODEX_RUNTIME_FIELDS.includes(k))
   if (unknown.length) {
     throw new CatalogError('unknown_override_field',
       'models.' + name + '.codex 含未知字段：' + unknown.join(', ') + '（允许：' + CODEX_OVERRIDE_FIELDS.join(', ') + '）')

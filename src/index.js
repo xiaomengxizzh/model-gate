@@ -11,7 +11,7 @@ import { createLogger } from './logger.js'
 import { forward, upstreamUrl, probe, probeModel, probeChat, warm, probeEmbedding, probeRerank } from './request.js'
 import { adapterFor, cacheHitMiss, mapErrorEnvelope } from './format.js'
 import { isStreamResponse, writeUpstreamHeaders, relayStream, endInterruptedStream } from './sse.js'
-import { forwardChain, routeLimit, virtualQuotaExceeded, acquireProvider, initForwardLedger, authorizeSendTarget, scrubBody } from './forward.js'
+import { forwardChain, routeLimit, virtualQuotaExceeded, acquireProvider, initForwardLedger, authorizeSendTarget, scrubBody, buildHeaders } from './forward.js'
 import { isToolBearingBody } from './retry-policy.js'
 import { createBudget, abortedError } from './budget.js'
 import { responsesToChat, chatToResponse, LEGACY_BRIDGE_COMPAT, prepareCodexNativeRequest } from './responses.js'
@@ -1388,6 +1388,7 @@ function buildCodexRoute(state, hit, def, prov) {
   const base = defaultCodexCaps(official)
   const codex = Object.assign({}, base, declared || {})
   codex.history = Object.assign({}, base.history, (declared && declared.history) || {})
+  codex.official = official
   if (!codex.namespace) codex.namespace = 'collaboration'
   return { alias: hit.canonicalName, provider: def.provider, upstreamModel: target.servingName, api: 'responses', codex }
 }
@@ -1413,30 +1414,42 @@ function restoreCodexJsonBuffer(buf, route, plan) {
   if (restored.rejected) return { ok: false, rejected: restored.rejected }
   return { ok: true, json: restored.json, lossy: restored.lossy || [] }
 }
-function streamCodexResponse(state, budget, log, opts) {
+async function streamCodexResponse(state, budget, log, opts) {
   const { up, res, route, plan, model, modelName, pid, sg, prov } = opts
   const adapter = createCodexStreamAdapter(res, {
     plan, route, model, log,
+    softRestore: !(route && route.codex && route.codex.official === true),
     onUsage: (usage) => tallyResponsesUsage(state, modelName, pid, sg, usage),
   })
   const destroyUp = () => { try { up.stream.destroy() } catch { /* ignore */ } }
   const onAbort = () => destroyUp()
-  const onClose = () => destroyUp()
-  if (budget && budget.signal) {
-    if (budget.signal.aborted) onAbort()
-    else { try { budget.signal.addEventListener('abort', onAbort, { once: true }) } catch { /* ignore */ } }
+  if (budget.signal.aborted) onAbort()
+  else budget.signal.addEventListener('abort', onAbort, { once: true })
+  res.once('close', onAbort)
+  // The caller owns the request budget and provider permit until the relay settles.
+  try {
+    for await (const chunk of up.stream) {
+      await adapter.push(chunk)
+      if (adapter.terminal) break
+    }
+    await adapter.end()
+  } catch {
+    destroyUp()
+    if (!budget.cancelled()) {
+      const timedOut = budget.timedOut()
+      if (timedOut && !res.headersSent) throw abortedError('request_timeout')
+      await adapter.fail(timedOut ? 'request exceeded overall timeout' : 'upstream stream interrupted', { timeout: timedOut })
+    }
+  } finally {
+    budget.signal.removeEventListener('abort', onAbort)
+    res.removeListener('close', onAbort)
   }
-  try { res.once('close', onClose) } catch { /* ignore */ }
-  ;(async () => {
-    try { for await (const chunk of up.stream) await adapter.push(chunk); await adapter.end() }
-    catch { destroyUp(); await adapter.fail('upstream stream interrupted', {}) }
-    if (budget && budget.signal) { try { budget.signal.removeEventListener('abort', onAbort) } catch { /* ignore */ } }
-    try { res.removeListener('close', onClose) } catch { /* ignore */ }
+  if (!budget.expired()) {
     if (adapter.terminal === 'response.failed') {
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1
       if (prov) markFail(state, pid, prov.circuit)
     } else { markOk(state, pid); noteAffinity(state, modelName, pid) }
-  })()
+  }
   return { streamed: true }
 }
 function opaqueRejectionCode(opaque) {
@@ -1447,8 +1460,14 @@ function opaqueRejectionCode(opaque) {
 function checkThirdPartyOpaque(state, nProv, nDef, body) {
   if (!nProv || classifyTarget(nProv, state.cfg).kind === 'official') return null
   const opaque = detectOpaqueV2Task(body)
-  if (opaque.opaque) return { status: 400, code: opaqueRejectionCode(opaque), message: '第三方目标收到不可读密文：网关拒绝发送（不解密/不删除/不降级）' }
   const plaintext = !!(nDef && nDef.codex && nDef.codex.plaintextTools === true)
+  const projectPlaintext = !!(nDef && nDef.codex && nDef.codex.history && nDef.codex.history.agentMessage === 'project')
+  // Explicit plaintextTools + agentMessage=project is the supported projection mode:
+  // encrypted agent_message history is opaque, so its readable text parts are kept and
+  // the encrypted parts are dropped before the request reaches Go. This is not decryption.
+  if (opaque.opaque && !(plaintext && projectPlaintext)) {
+    return { status: 400, code: opaqueRejectionCode(opaque), message: '第三方目标收到不可读密文：网关拒绝发送（不解密/不删除/不降级）' }
+  }
   if (!plaintext && detectEncryptedToolSchema(body && body.tools)) return { status: 400, code: 'encrypted_tool_schema', message: '第三方目标含 encrypted:true 工具 schema，但未声明 plaintextTools=true' }
   return null
 }
@@ -1545,7 +1564,7 @@ async function proxyOfficialResponses(state, budget, log, opts) {
         markOk(state, pid); noteAffinity(state, modelName, pid)
         const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
         if (/text\/event-stream/i.test(ct)) {
-          if (codexRoute && codexPlan) return streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov })
+          if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov })
           writeUpstreamHeaders(res, up)
           await streamRawResponses(res, up.stream, budget)
           return { streamed: true }
@@ -1590,7 +1609,11 @@ async function proxyNativeResponses(state, budget, log, opts) {
     if (prov._def.apiKeyEnv && !prov.keyOk) { lastErr = new Error('provider ' + pid + ' 未配置 Key'); continue }
     const target = modelTarget(state.cfg, modelName, pid)
     const payload = Buffer.from(JSON.stringify(Object.assign({}, body, { model: target.servingName })))
-    const headers = videoJsonHeaders(state, prov, payload.length)
+    // Native third-party requests still need the provider protocol headers, including
+    // OpenCode Go's x-opencode-session; videoJsonHeaders only supplies media headers.
+    const headers = buildHeaders(req, prov, payload, state.cfg, 'responses', body, { identity: classifyTarget(prov, state.cfg), log })
+    headers['content-type'] = 'application/json'
+    headers['content-length'] = payload.length
     const gate = authorizeProxySend(state, prov, pid, upstreamPath, req, log)
     if (gate.denied) {
       log && log.warn('responses 目标发送授权被拒绝', gate.denied.code, pid)
@@ -1614,7 +1637,7 @@ async function proxyNativeResponses(state, budget, log, opts) {
         markOk(state, pid); noteAffinity(state, modelName, pid)
         const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
         if (/text\/event-stream/i.test(ct)) {
-          if (codexRoute && codexPlan) return streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov })
+          if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov })
           writeUpstreamHeaders(res, up)
           await streamRawResponses(res, up.stream, budget)
           return { streamed: true }
@@ -2249,6 +2272,11 @@ function makeHandler(state) {
             body = prep.body
             codexPlan = prep.plan
           }
+          // Third-party native upstreams already speak Responses. The request body is
+          // projected; the response adapter restores namespace identities when the
+          // upstream returns flattened calls. softRestore only applies to terminal
+          // metadata for third-party routes, so a completed stream is not turned into
+          // a synthetic STREAM_INTERRUPTED by an over-strict restore.
           const nout = await proxyNativeResponses(state, budget, log, { req, body, modelName: nHit.canonicalName, def: nDef, wantStream: !!body.stream, res, codexRoute, codexPlan })
           if (nout && nout.streamed) return
           res.writeHead(nout.status, { 'content-type': nout.contentType }); res.end(nout.buf); return

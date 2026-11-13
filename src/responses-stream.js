@@ -390,6 +390,7 @@ export function createCodexStreamAdapter(res, opts = {}) {
   const log = options.log && typeof options.log.warn === 'function' ? options.log : null
   const writeWaitMs = Number(options.writeTimeoutMs) > 0 ? Number(options.writeTimeoutMs) : WRITE_WAIT_MS
   const maxBufferBytes = Number(options.maxBufferBytes) > 0 ? Number(options.maxBufferBytes) : MAX_CLIENT_BUFFER_BYTES
+  const softRestore = options.softRestore === true
 
   const parser = createCodexSSEParser()
   const events = []
@@ -514,12 +515,22 @@ export function createCodexStreamAdapter(res, opts = {}) {
     if (type === 'response.completed' || type === 'response.incomplete') {
       const original = payload.response
       if (isObject(original)) {
-        const restored = callRestore(restoreResponseJson, original, route, plan)
-        if (restored.rejected) { await rejectFrame(restored.rejected, type); return }
-        const restoredJson = isObject(restored.json) ? restored.json : original
-        const response = type === 'response.completed' ? finalizeCompleted(restoredJson) : restoredJson
-        data = Object.assign({}, payload, { response })
-        outBlock = rebuildBlock(block, type, data)
+        let restored = null
+        try { restored = callRestore(restoreResponseJson, original, route, plan) } catch (e) {
+          if (!softRestore) throw e
+          warn('codex 流：终态恢复异常，按原始终态透传', String((e && e.message) || e))
+        }
+        if (restored && restored.rejected) {
+          if (!softRestore) { await rejectFrame(restored.rejected, type); return }
+          warn('codex 流：终态恢复被拒绝，按原始终态透传', restored.rejected.code || 'restore_rejected')
+          data = payload
+          outBlock = block
+        } else if (restored) {
+          const restoredJson = isObject(restored.json) ? restored.json : original
+          const response = type === 'response.completed' ? finalizeCompleted(restoredJson) : restoredJson
+          data = Object.assign({}, payload, { response })
+          outBlock = rebuildBlock(block, type, data)
+        }
       }
     }
     // usage 只在终态记一次；completed 缺失 usage 记 0，不臆造 reasoning/缓存字段。
@@ -536,9 +547,17 @@ export function createCodexStreamAdapter(res, opts = {}) {
       await sendRaw(block + '\n\n')
       return
     }
-    const restored = callRestore(restoreToolItem, item, route, plan)
-    if (restored.rejected) { await rejectFrame(restored.rejected, type); return }
-    const nextItem = Object.assign({}, isObject(restored.item) ? restored.item : item)
+    let restored = null
+    try { restored = callRestore(restoreToolItem, item, route, plan) } catch (e) {
+      if (!softRestore) throw e
+      warn('codex 流：工具项恢复异常，按原始项透传', String((e && e.message) || e))
+    }
+    if (restored && restored.rejected) {
+      if (!softRestore) { await rejectFrame(restored.rejected, type); return }
+      warn('codex 流：工具项恢复被拒绝，按原始项透传', restored.rejected.code || 'restore_rejected')
+      restored = { item }
+    }
+    const nextItem = Object.assign({}, isObject(restored && restored.item) ? restored.item : item)
     // §4.2：id / call_id 保持上游值；恢复器即使有偏差也不允许适配层重编号身份。
     if (Object.prototype.hasOwnProperty.call(item, 'id')) nextItem.id = item.id
     if (Object.prototype.hasOwnProperty.call(item, 'call_id')) nextItem.call_id = item.call_id

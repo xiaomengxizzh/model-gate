@@ -2,6 +2,26 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
+## 2026-11-13 原生 Codex 执行复核
+
+审计及本地补丁位于 `mg-codex-native` 工作树，基线 `9e037db`。新增大型安装/下载为无，历史提议仅供研究。项目主工作树仍为 `dev/gateway-audit-20261108`，本次只在原生实验工作树修改。
+
+| 场景 | 复核结果 |
+| --- | --- |
+| CC Switch 4.0.27 + Codex exec 0.167.0-alpha.3.2 | 已有真实回执。ChatGPT 套餐 `gpt-6-luna` 与 OpenCode Go 的 `deepseek-v4.1-flash` 在同一原生树，初派和同子追派均有子工具及产物。复算两个 SHA-256 一致。原生子会话记录显示两个任务项都是带密封片段的空正文信封，子代理通过可见的 `task_a.md` / `task_b.md` 等夹具自行定位任务。因此该回执证明共享工作区交接与原生执行，V2 任务正文直接送达仍待验。 |
+| ModelGate 原生 Responses | 修复后台流转发提前结束请求作用域的问题。等待 SSE 终态期间保留请求预算和并发槽位。实测 mock 的延迟完成帧正常通过，真实预算耗尽仍触发 504 或单个 `response.failed`。 |
+| V2 子任务正文 | 只有信封和密文时在发送前返回 `opaque_agent_message`，无 Go 请求。已有可读正文的投影保持。真实密封正文的直接跨供应商传输待验。 |
+| 聚合 slug 的 Chat 桥 | 修复使用 slug 查不到原模型声明的问题。候选筛选、费用估算和账本报价使用同一供应商绑定的原模型。 |
+| 真实 CLI + 隔离 mock | 通过 `unshare -Urn` 建立只含 loopback 的网络命名空间，使用现有 Codex 0.167.0 和合成 Key。同线程官方 → 第三方 Chat → 官方三轮、工具回填及密文拒绝通过 31/31。三轮切换未创建子代理。 |
+
+复跑验证。`npm test` 通过 76/76 套件（774 通过，1 个默认跳过的目录测试在隔离环境显式执行通过）。`npm run check`、`npm run docs:check`、`node scripts/check-metadata.mjs` 和 `git diff --check` 均通过。
+
+产品验收目标为 ModelGate 独立承载跨供应商路由与协议适配。主线程使用 ChatGPT 套餐，子模型为 OpenCode Go 的 `deepseek-v4.1-flash`，父子线程、工具、等待和追派由原版 Codex 执行。CC Switch 仅作实现对照。
+
+`scripts/test/codex-e2e.mjs --native-v2` 使用真实 Codex 0.167.0、ModelGate 和两个回环上游。父 mock 从已声明的协作工具返回可读的初派和追派，两个随机挑战分别只放在各自的消息中。子代理在空工作区以 `fork_turns=none` 启动，经 ModelGate Responses 投影收件，两次运行只读 Codex 工具并回传。使用合成 Key 验证父子上游认证隔离。隔离实跑 7/7，父 mock 5 次、子 mock 4 次，Codex 原生日志只有一个直接子线程且有两个独立 turn。第三方 mock 核对精确模型名 `deepseek-v4.1-flash`。父 mock 提供的可读标记是已证的 Codex 接口输入，真实 ChatGPT 后端是否会产生该形态仍待验证。
+
+用户已授权隔离 ModelGate 承载 GPT 套餐推理。真实 CLI 验收完成一次初派、一次同子追派。两份可读任务到达真实 Go，子工具两次执行，恢复同一父会话后收到了追派结果。首次父进程的 Code Mode 单元让出控制后没有观察到顶层收取，初派未形成父端文本回执。连续单进程应显式收取单元并等待同一子 ID 的完成消息，具体处理及复验标准见报告。连续单进程等待与 Desktop 待验。见 [真实验收与脱敏收据](evidence/2026-11-13-modelgate-native-live.md)。
+
 ## 2026-11-11 Codex 多供应商聚合（D1–D7 / E0–E9，独立分支）
 
 分支 `dev/codex-aggregation-20261111`（基线 `ec66b24` = Draft PR #5 head）。**未合并、未推送**；实现提交 `d373a06`，文档/证据 `031f477`/`cfdf2e2`，补丁 `2f607d2`/`58c470a`。
