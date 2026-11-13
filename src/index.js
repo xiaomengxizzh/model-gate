@@ -22,10 +22,11 @@ import { supportsMedia, parseMultipartField, replaceMultipartField, isMultipart,
 import { defaultVideoPaths, newVideoTask, upstreamTaskId, applyUpstreamStatus, clientTask, loadVideoTasks, saveVideoTasks, gcVideoTasks, findSubjectTask, videoInputHash, recoverInterruptedVideoTasks, validateVideoCreate, VIDEO_POLL_MIN_MS } from './videos.js'
 import { todayKey } from './shared.js'
 import { readNativeUsage, nativeUsageConfig } from './native-usage.js'
-import { classifyTarget, isLoopbackHost } from './codex/identity.js'
+import { classifyTarget } from './codex/identity.js'
 import { restoreResponseJson, detectOpaqueV2Task, detectEncryptedToolSchema } from './codex/interop.js'
-import { readSubscriptionCredential, isGatewaySubscriptionTarget, SubscriptionCredentialError } from './codex/local-subscription.js'
-import { isTargetAuthzError } from './codex/target-authz.js'
+// G1（2026-11-13）：codex/local-subscription.js 已删除。生产代码不读取 Codex 登录态，
+// 也不再向订阅后端发送本机 token；残留 gatewaySubscription 配置在请求入口 fail-closed。
+import { isTargetAuthzError, GATEWAY_SUBSCRIPTION_RETIRED_CODE, GATEWAY_SUBSCRIPTION_RETIRED_MESSAGE } from './codex/target-authz.js'
 import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
 import { createObservability, hashId } from './observability/events.js'
 import { buildCatalog } from './codex/catalog.js'
@@ -438,7 +439,10 @@ function buildStatus(state) {
     return {
       id, baseUrl: p.baseUrl, hasKey: !!pk.key,
       keySource: pk.source,
-      gatewaySubscription: !!(p.gatewaySubscription && p.gatewaySubscription.enabled === true),
+      // G1：订阅代理能力已不存在，gatewaySubscription 恒 false；残留旧配置另以
+      // gatewaySubscriptionRetired 暴露给诊断/面板提示迁移，不表示可用。
+      gatewaySubscription: false,
+      gatewaySubscriptionRetired: !!(p.gatewaySubscription && p.gatewaySubscription.enabled === true),
       apiKeyEnv: p.apiKeyEnv || null, pathPrefix: p.pathPrefix || '', api: p.api || 'openai', extraHeaders: p.extraHeaders || {}, proxy: p.proxy || '', circuit: p.circuit || null,
       st: {
         requests: o.requests, errors: o.errors, retries: o.retries, tokens: o.tokens,
@@ -1368,9 +1372,10 @@ function proxyDeniedResult (denied) {
   }
 }
 
-// —— E3 / D1-A：官方身份直连代理（F01 后只剩「网关自有 key」一条路） ——
+// —— E3 / D1-A：官方身份直连代理（F01 后只剩「网关自有 key」一条路；G1 移除订阅代理） ——
 // 只在 classifyTarget()==='official' 时使用。客户端官方凭据（OAuth / chatgpt-account-id）不再透传，
-// /backend-api/codex 也不再是允许路径：无网关自有 key 时 targetDeny 直接 fail-closed。
+// 订阅后端入口也不再是允许路径：无网关自有 key 时 targetDeny 直接 fail-closed。
+// 稳定错误码/迁移提示由 target-authz 单一导出（GATEWAY_SUBSCRIPTION_RETIRED_CODE/MESSAGE）。
 // 官方请求不重试（可能有工具/托管副作用），3xx 一律拒绝（不跟随重定向、不把凭据带到 Location）。
 // —— P09：Codex 原生 V2 能力与响应投影 ——
 function defaultCodexCaps(official) {
@@ -1480,68 +1485,42 @@ async function proxyOfficialResponses(state, budget, log, opts) {
     contentType: 'application/json; charset=utf-8',
     buf: Buffer.from(JSON.stringify({ error: { message, code, type: type || 'official_target_rejected' } })),
   })
-  const serverHost = (state.cfg.server && state.cfg.server.host) || '127.0.0.1'
   const singleShot = isToolBearingBody(body)
-  let localCredential = null
   let lastErr = null
   for (const pid of candidates) {
     if (!state.cfg.providers[pid]) continue
     const prov = buildProvider(state.cfg, pid)
     const pdef = prov._def || {}
     const identity = classifyTarget(prov, state.cfg)
-    const gatewaySubscription = !!(pdef.gatewaySubscription && pdef.gatewaySubscription.enabled === true)
-    if (gatewaySubscription) {
-      if (!isLoopbackHost(serverHost) || !isLoopbackPeer(req)) return jsonError(403, 'gateway_subscription_not_loopback', 'gatewaySubscription 只允许 loopback 监听与 loopback 客户端')
-      if (identity.kind !== 'official') return jsonError(403, 'gateway_subscription_target_not_allowed', 'gatewaySubscription 只允许官方目标')
+    // G1（2026-11-13）：本机 Codex 登录态订阅代理已退役。残留 enabled=true 必须 fail-closed：
+    // 稳定错误码 + 零上游请求，不得回落到 gateway key、第三方候选或任何其它凭据。
+    if (pdef.gatewaySubscription && pdef.gatewaySubscription.enabled === true) {
+      log && log.warn('gatewaySubscription 已退役，拒绝发送', 'provider=' + pid)
+      return jsonError(403, GATEWAY_SUBSCRIPTION_RETIRED_CODE, GATEWAY_SUBSCRIPTION_RETIRED_MESSAGE)
     }
     // 官方目标只允许官方候选：绝不因故障把官方请求递给第三方（身份串线）。
     if (identity.kind !== 'official') { lastErr = new Error('候选上游不是官方目标：' + pid); continue }
-    const upstreamPath = (typeof def.responsesPath === 'string' && def.responsesPath) || (typeof pdef.responsesPath === 'string' && pdef.responsesPath) || (gatewaySubscription ? '/backend-api/codex/responses' : '/v1/responses')
-    if (gatewaySubscription) {
-      if (!isGatewaySubscriptionTarget(identity, upstreamPath, state.cfg)) return jsonError(403, 'gateway_subscription_target_not_allowed', 'gatewaySubscription 只允许官方订阅入口')
-      if (!localCredential) try { localCredential = readSubscriptionCredential() } catch (error) {
-        if (error instanceof SubscriptionCredentialError || (error && error.code === 'subscription_credential_unavailable')) {
-          return jsonError(401, 'subscription_credential_unavailable', '本机 Codex 登录凭据不可用或已过期，请在 Codex 中重新登录')
-        }
-        throw error
-      }
-      log && log.info('gateway_subscription', 'provider=' + pid, 'target=' + identity.host + upstreamPath, 'credential=local_codex_auth')
-    } else {
-      const deny = targetDeny({ identity, provider: prov, cfg: state.cfg, path: upstreamPath, env: process.env })
-      if (deny) {
-        log && log.warn('官方目标被拒绝', deny.code, pid)
-        return jsonError(deny.status, deny.code, deny.message)
-      }
+    const upstreamPath = (typeof def.responsesPath === 'string' && def.responsesPath) || (typeof pdef.responsesPath === 'string' && pdef.responsesPath) || '/v1/responses'
+    const deny = targetDeny({ identity, provider: prov, cfg: state.cfg, path: upstreamPath, env: process.env })
+    if (deny) {
+      log && log.warn('官方目标被拒绝', deny.code, pid)
+      return jsonError(deny.status, deny.code, deny.message)
     }
     const target = modelTarget(state.cfg, modelName, pid)
     const payload = Buffer.from(JSON.stringify(Object.assign({}, body, { model: target.servingName })))
-    let headers
-    let dropped = []
-    if (gatewaySubscription) {
-      const plan = planTargetHeaders({ identity, provider: prov, cfg: state.cfg, incoming: req.headers })
-      dropped = plan.dropped
-      headers = Object.assign({}, plan.headers, {
-        'content-type': 'application/json',
-        'content-length': payload.length,
-        'accept-encoding': 'identity',
-        authorization: localCredential.authorization,
-      })
-      if (localCredential.accountId) headers['chatgpt-account-id'] = localCredential.accountId
-    } else {
-      if (!prov.apiKey) {
-        return jsonError(403, 'official_no_gateway_key', '官方目标未配置网关自有 key（客户端官方凭据透传已移除）')
-      }
-      const plan = planTargetHeaders({ identity, provider: prov, cfg: state.cfg, incoming: req.headers })
-      dropped = plan.dropped
-      headers = Object.assign({}, plan.headers, {
-        'content-type': 'application/json',
-        'content-length': payload.length,
-        'accept-encoding': 'identity',
-        authorization: 'Bearer ' + prov.apiKey,
-      })
+    if (!prov.apiKey) {
+      return jsonError(403, 'official_no_gateway_key', '官方目标未配置网关自有 key（客户端官方凭据透传已移除）')
     }
+    const plan = planTargetHeaders({ identity, provider: prov, cfg: state.cfg, incoming: req.headers })
+    const dropped = plan.dropped
+    const headers = Object.assign({}, plan.headers, {
+      'content-type': 'application/json',
+      'content-length': payload.length,
+      'accept-encoding': 'identity',
+      authorization: 'Bearer ' + prov.apiKey,
+    })
     if (dropped.length) log && log.info('官方目标丢弃头（仅名称）', dropped.slice(0, 20).join(','))
-    const gate = authorizeProxySend(state, prov, pid, upstreamPath, req, log, gatewaySubscription ? { gatewaySubscription: true } : undefined)
+    const gate = authorizeProxySend(state, prov, pid, upstreamPath, req, log)
     if (gate.denied) {
       log && log.warn('官方目标发送授权被拒绝', gate.denied.code, pid)
       return proxyDeniedResult(gate.denied)
@@ -2256,8 +2235,9 @@ function makeHandler(state) {
           if (nconv.rejected) { sendJson(res, 400, { error: { message: nconv.rejected.message, type: nconv.rejected.code || 'unsupported_parameter' } }); return }
           if ((nDef.capability || 'chat') !== 'chat') { sendJson(res, 400, { error: { message: '模型 ' + nHit.canonicalName + ' 的能力不是 chat，不能用于 /v1/responses', type: 'unsupported_model' } }); return }
           const nProv = state.cfg.providers[nDef.provider] ? buildProvider(state.cfg, nDef.provider) : null
-          if (nProv && nProv._def && nProv._def.gatewaySubscription && nProv._def.gatewaySubscription.enabled === true && classifyTarget(nProv, state.cfg).kind !== 'official') {
-            sendJson(res, 403, { error: { message: 'gatewaySubscription 只允许官方目标，拒绝非官方上游', code: 'gateway_subscription_target_not_allowed', type: 'official_target_rejected' } })
+          // G1：残留 gatewaySubscription 配置在任何目标身份下都必须 fail-closed（零上游、不降级）。
+          if (nProv && nProv._def && nProv._def.gatewaySubscription && nProv._def.gatewaySubscription.enabled === true) {
+            sendJson(res, 403, { error: { message: GATEWAY_SUBSCRIPTION_RETIRED_MESSAGE, code: GATEWAY_SUBSCRIPTION_RETIRED_CODE, type: 'official_target_rejected' } })
             return
           }
           const opaqueReject = checkThirdPartyOpaque(state, nProv, nDef, body)
@@ -2571,7 +2551,8 @@ export function start(opts = {}) {
     stats: { global: { requests:0, errors:0, retries:0, interrupts:0, tokens:0, latencySum:0, confirmed:0, lats: [], latTrend: [] }, byProvider: pids, byModel: {}, daily: {}, hourly: {} },
   }
   for (const [pid, p] of Object.entries(cfg.providers || {})) {
-    if (p && p.gatewaySubscription && p.gatewaySubscription.enabled === true) log.info('gateway_subscription configured', 'provider=' + pid, 'scope=loopback+official', 'credential=local_codex_auth')
+    // G1：旧配置可继续加载，但请求会 fail-closed；启动时明确提示迁移，避免误以为能力仍可用。
+    if (p && p.gatewaySubscription && p.gatewaySubscription.enabled === true) log.warn('gatewaySubscription 已退役：该 provider 的请求将返回 403 gateway_subscription_retired（零上游），请删除该配置并为官方目标配置自有 apiKeyEnv/面板 Key', 'provider=' + pid)
   }
   // P0-2：受控自管 Codex 配置根只在显式环境开关下登记（默认关闭）；失败保持关闭。
   setupCodexManagedRoot(state)

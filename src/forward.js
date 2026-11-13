@@ -20,6 +20,7 @@ import * as facts from './routing/facts.js'
 import {
   authorizeFinalTarget, assertSendTarget, isTargetAuthzError,
   TARGET_DOMAINS, REDIRECT_POLICY,
+  GATEWAY_SUBSCRIPTION_RETIRED_CODE, GATEWAY_SUBSCRIPTION_RETIRED_MESSAGE,
 } from './codex/target-authz.js'
 import { generationAuthzBinding } from './codex/catalog-generation.js'
 import { newHeaders as opencodeGoHeaders, isGoBinding } from './providers/opencode-go.js'
@@ -658,9 +659,10 @@ export function authorizeSendTarget({ cfg, provider, pid, path, req, opts, log, 
     }
     log && log.info('send authz generation=config-declared (unscoped)', 'provider=' + pid, 'domain=' + domain)
   }
-  // 配置声明官方直连（没有目录世代参与）：凭据模式按"网关自持 key"或"客户端官方凭据透传"处理。
-  // target-authz 的订阅模式只允许 /backend-api/codex 入口；Chat 直连的官方白名单头由 buildHeaders
-  // 的既有规则承载，但最终目标仍然必须通过 authorizeFinalTarget/assertSendTarget（P0-3 真身）。
+  // 配置声明官方直连（没有目录世代参与）：凭据只按"网关自持 key"处理（F01 / G1）。
+  // G1（2026-11-13）：本机 Codex 登录态订阅代理（gatewaySubscription）已退役，target-authz 不再有
+  // 对应凭据模式与订阅入口；官方直连的官方白名单头仍由 buildHeaders 承载，但最终目标必须通过
+  // authorizeFinalTarget/assertSendTarget（P0-3 真身）。
   const incoming = req && req.headers ? req.headers : {}
   const incomingAuth = Array.isArray(incoming.authorization) ? incoming.authorization[0] : incoming.authorization
   const configDeclaredOfficial = official && !scoped
@@ -680,7 +682,8 @@ export function authorizeSendTarget({ cfg, provider, pid, path, req, opts, log, 
       passthroughEnabled: opts && opts.passthroughEnabled != null
         ? opts.passthroughEnabled === true
         : officialPassthroughEnabled(),
-      gatewaySubscription: !!(opts && opts.gatewaySubscription === true),
+      // G1：opts.gatewaySubscription 已随本机登录态代理退役，保留参数只为兼容旧调用方签名；
+      // 即使仍传入也不进入授权 intent（旧声明由 target-authz 直接对外层调用方给出 retired deny）。
       ...(passthroughToken ? { providerKey: passthroughToken, credentialMode: 'provider-key' } : {}),
     },
   }
@@ -1129,6 +1132,24 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
     } else {
       routes.push({ model: null, providers: [cfg.defaults && cfg.defaults.provider].filter(Boolean) })
       if (!(cfg.defaults && cfg.defaults.provider)) return { kind: 'json', status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ error: { message: '\u672a\u6307\u5b9a model\uff0c\u4e14\u672a\u8bbe\u7f6e\u9ed8\u8ba4\u4e0a\u6e38\uff08\u8bf7\u5728\u9762\u677f\u300c\u9ed8\u8ba4\u4e0a\u6e38\u300d\u4e2d\u9009\u62e9\uff09', type: 'missing_model' } })) }
+    }
+  }
+  // G1（2026-11-13）：gatewaySubscription（本机 Codex 登录态反向代理）已退役。任何路由候选仍启用
+  // 该旧配置时，在获取并发/QPS、账本预留和所有上游发送之前 fail-closed：稳定 403 + 零上游，
+  // 且绝不悄悄降级到同链其它候选（包括 Chat 桥与官方/第三方普通转发）。
+  const retiredProvider = routes
+    .flatMap((r) => r.providers || [])
+    .find((pid) => {
+      const pc = cfg.providers && cfg.providers[pid]
+      return !!(pc && pc.gatewaySubscription && pc.gatewaySubscription.enabled === true)
+    })
+  if (retiredProvider) {
+    log && log.warn('gatewaySubscription 已退役，拒绝发送', 'provider=' + retiredProvider)
+    return {
+      kind: 'json',
+      status: 403,
+      contentType: 'application/json; charset=utf-8',
+      body: Buffer.from(JSON.stringify({ error: { message: GATEWAY_SUBSCRIPTION_RETIRED_MESSAGE, code: GATEWAY_SUBSCRIPTION_RETIRED_CODE, type: 'gateway_subscription_retired' } })),
     }
   }
   // E5：Codex 聚合路径启用决策器；其它请求 codex=null，下方所有 codex 分支短路，原有行为不变。

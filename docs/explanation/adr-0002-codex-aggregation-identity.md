@@ -1,6 +1,6 @@
 # ADR-0002：Codex 多供应商聚合身份与目录（D1-A / D2）
 
-- 状态：Accepted（2026-11-11，未合并草稿分支）；**F01 修订（2026-11-12）**：官方原生凭据透传与 `/backend-api/codex` 入口已移除，官方目标只保留 API Key 直连（见下决策 2/4 的删除线说明）
+- 状态：Accepted（2026-11-11，未合并草稿分支）；**F01 修订（2026-11-12）**：官方原生凭据透传与 `/backend-api/codex` 入口已移除，官方目标只保留 API Key 直连（见下决策 2/4 的删除线说明）；**G1 修订（2026-11-13）**：`gatewaySubscription`（网关读取本机 Codex 登录态并代理订阅后端）已从生产路径退役，残留配置与旧模式一律 fail-closed（见文末修订）
 - 决策来源：[D1–D7 执行计划](../roadmap/2026-11-10-codex-aggregation-d1-d7-execution-plan.md)（所有者锁定）
 - 实现证据：[E9 验收矩阵](../roadmap/2026-11-11-codex-aggregation-e9-acceptance.md)、[E3 同线程切换证据](../evidence/2026-11-11-e3-live-switching.md)
 
@@ -41,3 +41,12 @@ Codex 0.167 的会话绑定 provider：`/model` 只列当前 provider 的目录�
 - 若 Codex 取消 `openai_base_url` 或改为强制 per-thread provider（需重新评估 D1-A）。
 - 若上游提供原生 Responses 且能理解加密任务（重新评估 M2）。
 - 若官方政策明确禁止本地代理官方流量（回退为官方直连 + 第三方独立 provider）。
+
+## 修订：2026-11-13 G1 —— gatewaySubscription 退役
+
+- 背景：11 月 13 日实验分支的 `src/codex/local-subscription.js` 读取 `CODEX_HOME/auth.json` / `~/.codex/auth.json`，再由网关向 `chatgpt.com/backend-api/codex/responses` 发送本机 Codex token。这与 F01 的“不读取登录态、官方目标只认网关自有 key”结论冲突，也缺少公开 SIWC 文档授权（SIWC 要求应用使用自己经授权流程获得的 token，而不是读取另一个 Codex 安装目录的登录态）。
+- 决策：删除 `local-subscription.js` 与 `src/index.js` 的 `gatewaySubscription` 发送分支；`/backend-api/codex` 永不进入官方路径白名单；`src/codex/target-authz.js` 移除 `GATEWAY_SUBSCRIPTION` 凭据模式，只保留对旧调用方的 typed retired 识别。生产代码不读取、不复制、不刷新、不持久化 Codex 登录态，也不向订阅后端发送本机 token。
+- 行为（用户可观察）：配置仍可加载；残留 `providers.<id>.gatewaySubscription.enabled=true` 在官方原生 `/v1/responses`、第三方原生 `/v1/responses`、官方 Chat 桥三个入口都返回 403 `gateway_subscription_retired`，零上游请求、不重试、不换账号、不改投其它候选。启动时写一条退役告警。`/api/status` 的 `gatewaySubscription` 恒为 false，旧配置另以 `gatewaySubscriptionRetired` 暴露。
+- 迁移：官方目标配置网关自有 `apiKeyEnv`/面板 Key（与 F01 相同）；第三方子任务使用 OpenCode Go provider。用户自己的 Codex 客户端原生登录直连官方服务，不再经 ModelGate 反向代理。
+- 不变：决策 1/2/3/5/6 继续有效；官方自有 key 直连、客户端官方头零透传、V2 密文 fail-closed、P07 SIWC 合成预览默认关闭均未改变。
+- 证据：[2026-11-13 认证边界退役证据](../evidence/2026-11-13-auth-boundary-retirement.md)；静态扫描与三入口零上游回归见 `scripts/test/offline/native-boundary.test.mjs`、`scripts/test/offline/codex-p09-native-proxy.test.mjs`。
