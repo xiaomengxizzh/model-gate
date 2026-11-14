@@ -1,5 +1,7 @@
 # ModelGate｜所有者产品契约与禁止私自降级准则
 
+> **历史 V1（已由所有者明确更新部分范围）**：2026-11-14 用户批准 [现行 V2 范围](2026-11-14-owner-scope-v2.md)：只必达 OpenCode Go 的 `deepseek-v4.1-flash`，其他模型初探失败即停止；新增 Codex 自身原生压缩验收且不得自建压缩。本文件原文保留供审计，冲突之处以 V2 为准。
+
 > 版本：MG-PRODUCT-2026-11-14 / V1。所有者批准的目标（非“当前已完成能力”）。本契约适用于 ChatGPT、DeepSeek、Codex、所有 AI Agent 和未来开发者。**任何技术阻断都不能自动修改本契约。**
 >
 > 权威执行计划：[聚合模式完整实施计划](../roadmap/2026-11-14-aggregation-pseudocode-plan.md)；[Agent Team 启动提示词](../roadmap/2026-11-14-aggregation-agentteam-start.md)。历史的缩小范围方案与本契约冲突时，以本契约为准；历史技术证据仍可参考，但不具有修改需求的效力。
