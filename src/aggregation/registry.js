@@ -279,7 +279,8 @@ export function createRegistry(options = {}) {
       if (Object.keys(rest).length) localOut._removed = rest
       else delete localOut._removed
     }
-    const expected = fingerprint(paths)
+    // 优先用 loadConfig 产出的磁盘指纹（读盘与指纹同代）；注入式测试则现场取指纹。
+    const expected = cfg._disk || fingerprint(paths)
     let tx
     try {
       tx = beginWrite(paths, { expected, log })
