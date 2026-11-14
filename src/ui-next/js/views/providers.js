@@ -97,6 +97,11 @@ function headerActions(draft, rerender) {
     }))
   }
   out.push(h('button', {
+    class: 'btn', type: 'button', text: '聚合模式',
+    title: '进入聚合模式：一键配置 Codex Desktop（官方 + OpenCode 同会话）',
+    onclick: () => { location.hash = '#/aggregation' },
+  }))
+  out.push(h('button', {
     class: 'btn ' + (draft && draft.isDirty() ? '' : 'btn-primary'),
     type: 'button', disabled: !draft,
     onclick: () => { if (draft) openProviderDialog(draft, null, rerender) },
