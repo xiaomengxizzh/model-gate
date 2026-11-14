@@ -11,8 +11,9 @@ import * as models from './js/views/models.js'
 import * as clients from './js/views/clients.js'
 import * as observability from './js/views/observability.js'
 import * as settings from './js/views/settings.js'
+import * as aggregation from './js/views/aggregation.js'
 
-const views = { overview: dashboard, providers, models, clients, observability, settings }
+const views = { overview: dashboard, providers, models, clients, observability, settings, aggregation }
 let currentRoute = 'overview'
 let refreshing = false
 

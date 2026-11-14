@@ -4,6 +4,7 @@ export const ROUTES = [
   { id: 'providers', label: '上游供应商', title: '上游供应商' },
   { id: 'models', label: '模型与路由', title: '模型与路由' },
   { id: 'clients', label: '客户端接入', title: '客户端接入' },
+  { id: 'aggregation', label: '聚合模式', title: '聚合模式' },
   { id: 'observability', label: '监控与诊断', title: '监控与诊断' },
   { id: 'settings', label: '安全与设置', title: '安全与设置' },
 ]
