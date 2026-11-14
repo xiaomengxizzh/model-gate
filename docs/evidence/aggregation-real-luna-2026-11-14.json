@@ -1,0 +1,39 @@
+{
+  "MG-R001": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "未在真实 Desktop 执行一键接入/退出与重启一致性" },
+  "MG-R002": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "official-gpt-6-luna-real 半边已有请求级真实回执；codex-official-login-unchanged 只有运行期元数据未变，无登录/登出/切换测试，整行不升级" },
+  "MG-R003": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "真实 Console/Go 目录未对账" },
+  "MG-R004": { "status": "NOT_TESTED", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "原版 Desktop 选择器未实际操作" },
+  "MG-R005": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "原生子代理 BLOCKED：真实 CLI 父进程需可写 CODEX_HOME（禁止用所有者目录/禁止复制凭据）；该树也无 OpenCode Go 凭据" },
+  "MG-R006": { "status": "NOT_TESTED", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "依赖真实子线程；无活跃子线程，中断/恢复未执行" },
+  "MG-R007": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "未做空白安装与已有配置的真实 GUI 演练" },
+  "MG-R008": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "no-silent-fallback 已有真实 401 负向对照，但未配置候选回退，无回退只被弱证明；unsupported-tool / catalog 两例未在真实路径执行" },
+  "MG-R009": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "第二真实身份未创建（授权项）" },
+  "MG-R010": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "可丢弃实例演练未做" },
+  "MG-R011": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "本阶段新增一条真实回执，但其余阶段仍缺真实目标回执" },
+  "MG-R012": {
+    "status": "PASS_REAL",
+    "commitSha": "4feafe0e51dc02d48c45734df5b34e70d3679bd5",
+    "command": "curl --noproxy '*' -X POST http://127.0.0.1:19020/v1/responses -H 'content-type: application/json' -H 'accept: text/event-stream' -H 'originator: codex_cli_rs' -H 'version: 0.167.0' -H 'session_id: a5-scratch-3' -H 'openai-beta: responses=experimental' --data-binary @/tmp/mg-a5-real/req3.json",
+    "receipt": {
+      "traceId": "resp_0f57295c115b2992016af853993c7c87d0b0c2a1345ff40ad9",
+      "ts": "2026-11-14T12:27:04.231Z",
+      "host": "chatgpt.com",
+      "port": 443,
+      "method": "POST",
+      "path": "/backend-api/codex/responses",
+      "bytes": 309,
+      "model": "gpt-6-luna",
+      "httpStatus": 200,
+      "authDomain": "codex-subscription",
+      "accountHeaderPresent": true,
+      "auth": "REDACTED"
+    },
+    "cases": {
+      "codex-gpt-parent-only-luna": { "passed": true, "evidence": "3/3 HTTP 200, outbound body model=gpt-6-luna, response model=gpt-6-luna" },
+      "no-gpt-fallback": { "passed": true, "evidence": "3 requests all gpt-6-luna + 1 non-GPT negative control; no other GPT model, no substitution" }
+    },
+    "realTarget": true,
+    "passedAllOnRealTarget": true,
+    "source": "docs/evidence/aggregation-real-luna-2026-11-14.md"
+  }
+}
