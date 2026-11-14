@@ -15,6 +15,7 @@ import {
   UPSTREAM_MODEL_MISSING, TOOL_CALL_PAIRING, INVALID_CHAT_RESPONSE,
 } from '../../../src/codex/chat-compat.js'
 import { normalizeModelEntry } from '../../../src/aggregation/discovery.js'
+import { startGateway, startScriptedUpstream } from './harness.mjs'
 
 const FIXTURES = new URL('../fixtures/agg-chatcompat/', import.meta.url)
 const fixture = (name) => readFileSync(new URL(name, FIXTURES), 'utf8')
@@ -424,4 +425,79 @@ test('discovery 与协议选择一致：可路由的 chat 模型拿得到适配�
   const rejected = resolveUpstreamProtocol(anthropic)
   assert.equal(rejected.ok, false)
   assert.equal(rejected.code, UNSUPPORTED_PROTOCOL)
+})
+
+// ── 接线回归：/v1/responses 入口的按模型协议闸门 ────────────────────────────────
+// 此前只有模块与单测，没有接入请求路径：协议决定不做，anthropic-only 模型会被当成 chat 发出去。
+// 这里走真实 HTTP 入口（本地 mock 上游，不联网），证明三条分支互不混淆。
+test('Responses 入口协议闸门：chat→Chat 桥、responses→原生、anthropic→typed 400（不回落）', async (t) => {
+  const hits = []
+  const up = await startScriptedUpstream(async (req, res) => {
+    const chunks = []
+    for await (const c of req) chunks.push(c)
+    hits.push({ url: req.url || '', body: Buffer.concat(chunks).toString('utf8') })
+    res.setHeader('content-type', 'application/json')
+    if (String(req.url).endsWith('/responses')) {
+      res.end(JSON.stringify({
+        id: 'resp_1', object: 'response', status: 'completed', model: 'm',
+        output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }))
+      return
+    }
+    res.end(JSON.stringify({
+      id: 'c1', object: 'chat.completion',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }))
+  })
+  const gw = await startGateway({
+    config: {
+      providers: {
+        'p-chat': { baseUrl: up.base + '/v1', api: 'openai' },
+        'p-native': { baseUrl: up.base, api: 'openai' },
+        'p-anth': { baseUrl: up.base, api: 'anthropic' },
+      },
+      models: {
+        'm-chat': { provider: 'p-chat', api: 'openai' },
+        'm-native': { provider: 'p-native', api: 'responses' },
+        'm-anth': { provider: 'p-anth', api: 'anthropic' },
+      },
+    },
+  })
+  t.after(async () => { await gw.stop(); await up.stop() })
+  const input = [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }]
+
+  // 1) chat-completions → 既有 Chat 桥：上游收到的是翻译后的 chat 体，路径是 chat/completions
+  const chat = await gw.call('/v1/responses', { method: 'POST', body: { model: 'm-chat', input } })
+  assert.equal(chat.status, 200)
+  const chatHit = hits.at(-1)
+  assert.equal(chatHit.url, '/v1/chat/completions')
+  assert.match(chatHit.body, /"messages"/, '必须是 Chat 形状')
+  assert.doesNotMatch(chatHit.body, /"input"/, 'Responses 字段不得原样漏给 chat 上游')
+
+  // 2) responses → 原生路径：不翻译、不改路径
+  const native = await gw.call('/v1/responses', { method: 'POST', body: { model: 'm-native', input } })
+  assert.equal(native.status, 200)
+  assert.equal(hits.at(-1).url, '/v1/responses')
+  assert.match(hits.at(-1).body, /"input"/, '原生路径必须保留 Responses 体')
+
+  // 3) anthropic-messages → typed 400，且一个字节都不发上游
+  const before = hits.length
+  const refused = await gw.call('/v1/responses', { method: 'POST', body: { model: 'm-anth', input } })
+  assert.equal(refused.status, 400)
+  const err = (await refused.json()).error
+  assert.equal(err.code, 'unsupported_protocol')
+  assert.equal(err.type, 'unsupported_protocol')
+  assert.equal(err.protocol, ANTHROPIC_MESSAGES)
+  assert.match(err.message, /m-anth/, '错误必须点名模型')
+  assert.equal(hits.length, before, '不支持协议绝不能发出任何上游请求')
+
+  // 4) 闸门只作用于 Responses 入口：chat 入口对 anthropic 模型仍按既有 format.js 适配器走
+  const chatEntry = await gw.call('/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'm-anth', messages: [{ role: 'user', content: 'hi' }] },
+  })
+  assert.equal(chatEntry.status, 200)
+  assert.match(String(hits.at(-1).url), /\/v1\/messages$/, 'chat 入口继续用 chat 侧 anthropic 适配器')
 })

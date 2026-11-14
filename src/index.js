@@ -15,6 +15,7 @@ import { forwardChain, routeLimit, virtualQuotaExceeded, acquireProvider, initFo
 import { isToolBearingBody } from './retry-policy.js'
 import { createBudget, abortedError } from './budget.js'
 import { responsesToChat, chatToResponse, LEGACY_BRIDGE_COMPAT, prepareCodexNativeRequest } from './responses.js'
+import { resolveUpstreamProtocol, RESPONSES, UNSUPPORTED_PROTOCOL } from './codex/chat-compat.js'
 import { createResponsesStream, createCodexStreamAdapter } from './responses-stream.js'
 import { validateEmbeddingRequest, buildEmbeddingRequest, embeddingHeaders, normalizeEmbeddingResponse, supportsEmbeddings, MAX_EMBEDDING_INPUTS } from './embeddings.js'
 import { validateRerankRequest, buildRerankRequest, rerankHeaders, normalizeRerankResponse, supportsRerank } from './rerank.js'
@@ -2337,6 +2338,33 @@ function makeHandler(state) {
         let nHit = null
         try { nHit = state.router.resolve(body.model) } catch { nHit = null }
         const nDef = nHit && nHit.def
+        // MG-R008：按模型协议显式分派，禁止「猜协议」或静默回落。
+        //   responses            → 原生透传（不做 Chat 翻译）
+        //   chat-completions     → 既有 Chat 桥（responsesToChat 的四类拒绝仍在 responses.js 里）
+        //   anthropic/google     → typed 400 unsupported_protocol（本层没有对应翻译，绝不把它们
+        //                          当 chat 发出去，也不改成别的路径）
+        // 闸门只作用于 Responses 入口：普通 /v1/chat/completions 仍按 models.<名>.api 走 format.js
+        // 既有 chat 侧适配器，行为不变。
+        const nProto = (nDef && !nDef.isVirtualModel && !nDef.virtual)
+          ? resolveUpstreamProtocol({
+              publicId: nHit.canonicalName || body.model,
+              upstreamId: nDef.provider ? modelTarget(state.cfg, body.model, nDef.provider).servingName : '',
+              protocol: nDef.api,
+            })
+          : null
+        if (nProto && !nProto.ok) {
+          sendJson(res, 400, {
+            error: {
+              message: '模型 ' + (nHit.canonicalName || body.model) + ' 的上游协议 ' + nProto.protocol +
+                ' 没有 Responses 翻译层，拒绝按 Chat 桥发送：' + nProto.message,
+              code: UNSUPPORTED_PROTOCOL,
+              type: 'unsupported_protocol',
+              model: nHit.canonicalName || body.model,
+              protocol: nProto.protocol,
+            },
+          })
+          return
+        }
         // D1-A：解析到官方上游（内置 openai 身份，由 openai_base_url 指到网关）→ 官方透传代理。
         // 判定只认 codex/identity.classifyTarget（单一真源），不按 provider 名字猜。
         if (nDef && !nDef.isVirtualModel && !nDef.virtual && nDef.provider && state.cfg.providers[nDef.provider]) {
@@ -2359,7 +2387,7 @@ function makeHandler(state) {
             res.writeHead(noutOfficial.status, { 'content-type': noutOfficial.contentType }); res.end(noutOfficial.buf); return
           }
         }
-        if (nDef && !nDef.isVirtualModel && !nDef.virtual && nDef.api === 'responses') {
+        if (nProto && nProto.protocol === RESPONSES) {
           const nconv = responsesToChat(body, { mode: 'native' })
           if (nconv.rejected) { sendJson(res, 400, { error: { message: nconv.rejected.message, type: nconv.rejected.code || 'unsupported_parameter' } }); return }
           if ((nDef.capability || 'chat') !== 'chat') { sendJson(res, 400, { error: { message: '模型 ' + nHit.canonicalName + ' 的能力不是 chat，不能用于 /v1/responses', type: 'unsupported_model' } }); return }
