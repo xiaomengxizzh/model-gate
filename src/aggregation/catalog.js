@@ -195,6 +195,7 @@ export function createAggregatedCatalog(options = {}) {
     const diagnostics = []
     const unauthorized = []
     const missingContext = []
+    const notRoutable = []
     const snapshotMeta = []
     for (const provider of providers) {
       const entry = cacheStore.get(scope, provider.id)
@@ -215,6 +216,17 @@ export function createAggregatedCatalog(options = {}) {
           unauthorized.push({ providerId: provider.id, upstreamId: model.upstreamId, publicId: model.publicId })
           continue
         }
+        // 协议不支持的模型：留在快照里显式呈现，但绝不发布成可调用模型。
+        // 发布它们等于承诺本网关做不到的路由；直接丢弃则违反 MG-R003。两者都不允许。
+        if (model.routable === false) {
+          notRoutable.push({
+            providerId: provider.id,
+            upstreamId: model.upstreamId,
+            publicId: model.publicId,
+            protocol: model.protocol || 'unknown',
+          })
+          continue
+        }
         if (!Number.isInteger(model.contextWindow) || model.contextWindow <= 0) {
           missingContext.push({ providerId: provider.id, upstreamId: model.upstreamId, publicId: model.publicId })
           continue
@@ -232,6 +244,9 @@ export function createAggregatedCatalog(options = {}) {
         observedAt: snapshot.observedAt,
         endpointAssumed: snapshot.endpoint ? snapshot.endpoint.assumed === true : false,
         models: snapshot.models.length,
+        published: Object.keys(models).length,
+        notRoutable: snapshot.models.filter((m) => m.routable === false).length,
+        authorizationUnverified: snapshot.models.filter((m) => m.authBasis === 'unverified').length,
         emptyConfirmed: snapshot.emptyConfirmed === true,
       })
     }
@@ -245,6 +260,15 @@ export function createAggregatedCatalog(options = {}) {
     }
     for (const m of unauthorized) {
       diagnostics.push({ code: 'unauthorized_excluded', severity: 'info', message: '账户无权使用：存档但不发布为可调用模型', upstreamId: m.upstreamId, publicId: m.publicId, providerId: m.providerId })
+    }
+    if (notRoutable.length) {
+      diagnostics.push({
+        code: 'discovered_not_routable',
+        severity: 'warning',
+        message: '有 ' + notRoutable.length + ' 个模型已发现但协议不支持：保留在快照，不发布为可调用模型（不是静默丢弃）',
+        count: notRoutable.length,
+        items: notRoutable,
+      })
     }
     // 跨层公共 ID 预检（buildCatalog 也会判，但这里给出聚合层诊断）。
     const seen = new Map()
@@ -260,7 +284,7 @@ export function createAggregatedCatalog(options = {}) {
         seen.set(slug, { providerId: layer.providerId, upstreamId })
       }
     }
-    return { cfg, layers, diagnostics, unauthorized, missingContext, snapshotMeta }
+    return { cfg, layers, diagnostics, unauthorized, missingContext, notRoutable, snapshotMeta }
   }
 
   async function publish(scopeRef, opts = {}) {
@@ -376,9 +400,14 @@ export function createAggregatedCatalog(options = {}) {
       reconciliation: {
         discovered: collected.snapshotMeta.reduce((n, p) => n + p.models, 0),
         published: layered.catalog.models.length - base.models.length,
+        routable: layered.catalog.models.length - base.models.length,
         official: base.models.length,
         unauthorized: collected.unauthorized.length,
         missingContext: collected.missingContext.length,
+        // 已发现但不可路由：显式计数 + ID，绝不静默丢弃。
+        notRoutable: collected.notRoutable.length,
+        notRoutableIds: collected.notRoutable.map((m) => m.upstreamId),
+        authorizationUnverified: collected.snapshotMeta.reduce((n, p) => n + (p.authorizationUnverified || 0), 0),
         modelIds,
         providers: collected.snapshotMeta,
       },

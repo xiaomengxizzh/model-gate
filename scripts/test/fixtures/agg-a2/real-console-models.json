@@ -1,0 +1,125 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "fixture-openai-chat",
+      "object": "model",
+      "created": 1794659087,
+      "owned_by": "opencode",
+      "name": "Fixture OpenAI Chat",
+      "canonical_id": "vendor/fixture-openai-chat-1017",
+      "type": "chat",
+      "description": "Trimmed fixture entry (shape-accurate, not a real payload)",
+      "family": "fixture",
+      "open_weights": true,
+      "knowledge": "2025-05",
+      "release_date": "2025-10-17",
+      "last_updated": "2025-10-17",
+      "modalities": { "input": ["text"], "output": ["text"] },
+      "capabilities": {
+        "tools": { "supported": true },
+        "reasoning": { "supported": true },
+        "structured_output": true,
+        "temperature": true,
+        "system_updates": false,
+        "effort_updates": { "supported": true }
+      },
+      "limit": { "context": 128000, "input": 102400, "output": 32000 },
+      "cost": { "input": 1, "output": 2 },
+      "api": {
+        "chat-completions": {
+          "base_url": "https://opencode.ai/inference/openai/v1",
+          "sdk": { "aisdk": "@ai-sdk/openai-compatible" },
+          "compatibility": { "reasoning_field": "reasoning_content" }
+        }
+      }
+    },
+    {
+      "id": "fixture-openai-responses",
+      "object": "model",
+      "created": 1794659087,
+      "owned_by": "opencode",
+      "name": "Fixture Responses",
+      "canonical_id": "vendor/fixture-openai-responses-1017",
+      "type": "chat",
+      "description": "Trimmed fixture entry (shape-accurate, not a real payload)",
+      "family": "fixture",
+      "open_weights": false,
+      "release_date": "2025-10-17",
+      "last_updated": "2025-10-17",
+      "modalities": { "input": ["text"], "output": ["text"] },
+      "capabilities": {
+        "tools": { "supported": true },
+        "reasoning": { "supported": true },
+        "structured_output": { "supported": true },
+        "temperature": false,
+        "effort_updates": false
+      },
+      "limit": { "context": 400000, "input": 320000, "output": 32000 },
+      "api": { "responses": { "base_url": "https://opencode.ai/inference/openai/v1" } }
+    },
+    {
+      "id": "fixture-anthropic-messages",
+      "object": "model",
+      "created": 1794659087,
+      "owned_by": "opencode",
+      "name": "Fixture Anthropic Messages",
+      "canonical_id": "vendor/fixture-anthropic-messages-1017",
+      "type": "chat",
+      "description": "Trimmed fixture entry (shape-accurate, not a real payload)",
+      "family": "fixture",
+      "open_weights": false,
+      "release_date": "2025-10-17",
+      "last_updated": "2025-10-17",
+      "modalities": { "input": ["text"], "output": ["text"] },
+      "capabilities": {
+        "tools": { "supported": true },
+        "reasoning": { "supported": true },
+        "structured_output": true,
+        "temperature": true,
+        "effort_updates": { "supported": false }
+      },
+      "limit": { "context": 200000, "input": 160000, "output": 32000 },
+      "api": { "messages": { "base_url": "https://opencode.ai/inference/anthropic/v1" } }
+    },
+    {
+      "id": "fixture-google-generate",
+      "object": "model",
+      "created": 1794659087,
+      "owned_by": "opencode",
+      "name": "Fixture Google Generate",
+      "canonical_id": "vendor/fixture-google-generate-1017",
+      "type": "chat",
+      "description": "Trimmed fixture entry (shape-accurate, not a real payload)",
+      "family": "fixture",
+      "open_weights": false,
+      "release_date": "2025-10-17",
+      "last_updated": "2025-10-17",
+      "modalities": { "input": ["text"], "output": ["text"] },
+      "capabilities": {
+        "tools": { "supported": true },
+        "reasoning": { "supported": false },
+        "structured_output": true,
+        "temperature": true
+      },
+      "limit": { "context": 1048576, "input": 1048576, "output": 64000 },
+      "api": { "generate-content": { "base_url": "https://opencode.ai/inference/google/v1beta" } }
+    },
+    {
+      "id": "fixture-no-canonical",
+      "object": "model",
+      "created": 1794659087,
+      "owned_by": "opencode",
+      "name": "Fixture No Canonical",
+      "type": "chat",
+      "description": "Trimmed fixture entry without canonical_id",
+      "open_weights": false,
+      "release_date": "2025-10-17",
+      "last_updated": "2025-10-17",
+      "modalities": { "input": ["text"], "output": ["text"] },
+      "capabilities": { "tools": { "supported": false }, "temperature": true },
+      "limit": { "context": 1000000, "input": 1000000, "output": 32000 },
+      "api": { "chat-completions": { "base_url": "https://opencode.ai/inference/openai/v1" } }
+    }
+  ]
+}
