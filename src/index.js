@@ -25,7 +25,7 @@ import { readNativeUsage, nativeUsageConfig } from './native-usage.js'
 import { classifyTarget, isLoopbackHost } from './codex/identity.js'
 import { restoreResponseJson, detectOpaqueV2Task, detectEncryptedToolSchema } from './codex/interop.js'
 import { readSubscriptionCredential, isGatewaySubscriptionTarget, SubscriptionCredentialError } from './codex/local-subscription.js'
-import { isTargetAuthzError } from './codex/target-authz.js'
+import { isTargetAuthzError, resolveUpstream, assertResolvedUpstream, assertNoSubscriptionCredentialToThirdParty, authFailureReceipt } from './codex/target-authz.js'
 import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
 import { createObservability, hashId } from './observability/events.js'
 import { buildCatalog } from './codex/catalog.js'
@@ -33,6 +33,7 @@ import { generationRecordFromBuilt, toCatalogView } from './codex/catalog-genera
 import { microFromUsd } from './routing/facts.js'
 import { planTargetHeaders, targetDeny, legacyPassthroughRequested } from './codex/auth.js'
 import { handleCodexApi, isCodexApiPath } from './codex/api.js'
+import { handleAggregationApi, isAggregationApiPath } from './aggregation/api.js'
 import { registerConfigRoot, sha256Hex } from './codex/config.js'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
@@ -1472,6 +1473,44 @@ function checkThirdPartyOpaque(state, nProv, nDef, body) {
   return null
 }
 
+// 聚合模式是否真的在用：只有配置里登记了聚合 provider 才启用 A4 的授权收据二次校验。
+// 默认单操作员配置（没有任何 aggregation 记录）保持原有字节级行为不变。
+const AGG_PROVIDER_SCHEMA = 'modelgate.aggregation.provider/1'
+function aggregationModeActive(cfg) {
+  const providers = (cfg && cfg.providers) || {}
+  for (const entry of Object.values(providers)) {
+    if (entry && entry.aggregation && entry.aggregation.schema === AGG_PROVIDER_SCHEMA) return true
+  }
+  return false
+}
+
+// A4 收据在发送前的第二次判定：域/host/path/模型一次定型，实际 URL 必须与收据一致，
+// 订阅凭据绝不进入非订阅上游。只在聚合模式下运行；失败按 typed deny 返回，绝不静默降级。
+function verifyCodexAuthReceipt({ pid, modelName, target, identity, prov, upstreamPath, headers, cfg, gatewaySubscription, appPlan }) {
+  try {
+    const resolved = resolveUpstream({
+      providerId: pid,
+      model: modelName,
+      upstreamModel: target.servingName,
+      binding: {
+        identity: identity.kind,
+        host: identity.host || prov.baseUrl,
+        upstreamPath,
+        gatewaySubscription,
+        siwcApp: !!appPlan,
+        apiKey: !gatewaySubscription && !appPlan && !!prov.apiKey,
+        cfg,
+        env: process.env,
+      },
+    })
+    assertResolvedUpstream(resolved, upstreamUrl(prov, upstreamPath).href)
+    assertNoSubscriptionCredentialToThirdParty(headers, resolved.upstreamHost, { credentialSource: resolved.authDomain, cfg })
+    return { resolved }
+  } catch (error) {
+    return { denied: error }
+  }
+}
+
 async function proxyOfficialResponses(state, budget, log, opts) {
   const { req, body, modelName, def, res, codexRoute, codexPlan } = opts
   const candidates = [def.provider, ...(def.fallbacks || [])].filter(Boolean)
@@ -1482,6 +1521,7 @@ async function proxyOfficialResponses(state, budget, log, opts) {
   })
   const serverHost = (state.cfg.server && state.cfg.server.host) || '127.0.0.1'
   const singleShot = isToolBearingBody(body)
+  const receiptsOn = aggregationModeActive(state.cfg)
   let localCredential = null
   let lastErr = null
   for (const pid of candidates) {
@@ -1556,6 +1596,19 @@ async function proxyOfficialResponses(state, budget, log, opts) {
       })
     }
     if (dropped.length) log && log.info('官方目标丢弃头（仅名称）', dropped.slice(0, 20).join(','))
+    if (receiptsOn) {
+      const receipt = verifyCodexAuthReceipt({ pid, modelName, target, identity, prov, upstreamPath, headers, cfg: state.cfg, gatewaySubscription, appPlan })
+      if (receipt.denied) {
+        const e = receipt.denied
+        log && log.warn('聚合授权收据校验被拒绝', (e && e.code) || 'target_denied', pid)
+        return proxyDeniedResult({
+          status: (e && e.status) || 403,
+          code: (e && e.code) || 'target_denied',
+          message: '聚合授权收据校验失败：' + String((e && e.message) || e).slice(0, 300),
+          typed: true,
+        })
+      }
+    }
     const gate = authorizeProxySend(state, prov, pid, upstreamPath, req, log, gatewaySubscription ? { gatewaySubscription: true } : undefined)
     if (gate.denied) {
       log && log.warn('官方目标发送授权被拒绝', gate.denied.code, pid)
@@ -1594,6 +1647,10 @@ async function proxyOfficialResponses(state, budget, log, opts) {
       const ebuf = await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1
       markFail(state, pid, prov.circuit)
+      if (receiptsOn) {
+        const failure = authFailureReceipt(up.status)
+        if (failure) log && log.warn('授权失败终态', failure.code, 'provider=' + pid, '不重试/不换域/不改模型')
+      }
       return { status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: scrubBody(ebuf) }
     } catch (err) {
       if (err && err.aborted) throw err
@@ -1797,6 +1854,29 @@ function makeHandler(state) {
         // 入口已完成 Host/Origin/peer/显式管理员校验；isLocal=true 让模块侧不再重复用 socket 判来源
         // （allowRemote 场景下 peer 非回环，但入口已显式放行）。
         const out = await handleCodexApi({ method: req.method, url, path, cfg: state.cfg, log, req, res, rawBody, explicitAdmin: admin.explicitAdmin, adminSubject: admin.adminSubject, managedRoot: state.managedRoot === true, isLocal: true })
+        if (out) sendJson(res, out.status, out.body)
+        return
+      }
+
+      // 聚合模式管理面：/api/aggregation/*（ADR-0003 §5）。
+      // 与 /api/codex/* 同一顺序硬约束：Host/Origin 已全局校验 → 可信 peer → 显式管理员 → 读 body → 派发。
+      // 未设置 adminToken 时没有任何回环放行：一律 403 explicit_admin_required。
+      if (isAggregationApiPath(path)) {
+        if (!isLoopbackPeer(req) && !remoteManagementAllowed(state)) {
+          log && log.warn('aggregation admin denied', 'remote_forbidden', path)
+          sendCodexDenied(res, 403, 'remote_forbidden', '拒绝非本机来源的聚合管理请求：只有回环或显式 allowRemote 可用')
+          return
+        }
+        const admin = explicitAdminOf(req, state)
+        if (!admin) {
+          log && log.warn('aggregation admin denied', 'explicit_admin_required', path)
+          sendCodexDenied(res, 403, 'explicit_admin_required', '聚合管理接口要求显式管理员令牌（未设置/未携带/错误令牌一律拒绝）')
+          return
+        }
+        const rawBody = req.method === 'POST'
+          ? await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
+          : undefined
+        const out = await handleAggregationApi({ method: req.method, path, cfg: state.cfg, log, rawBody, explicitAdmin: admin.explicitAdmin, managedRoot: state.managedRoot === true, isLocal: true })
         if (out) sendJson(res, out.status, out.body)
         return
       }
