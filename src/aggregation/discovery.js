@@ -208,8 +208,11 @@ const DENY_WORDS = new Set(['none', 'disabled', 'denied', 'forbidden', 'unavaila
 
 // 上游 `api` 映射键 → 统一协议名。2026-11-14 实测：opencode 清单每个模型带
 // `api: { 'chat-completions'|'responses'|'messages'|'generate-content': { base_url } }`。
+// `openai` 是同一 surface 的另一种写法（chat-shaped base），必须与外显 chat-completions 同等对待：
+// 否则一个明确广告 OpenAI 兼容入口的模型会被误判成 unknown/routable:false。
 const PROTOCOL_BY_API_KEY = Object.freeze({
   'chat-completions': 'openai',
+  openai: 'openai',
   responses: 'responses',
   messages: 'anthropic-messages',
   'generate-content': 'google-generate-content',
