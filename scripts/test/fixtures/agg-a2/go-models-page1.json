@@ -1,0 +1,19 @@
+{
+  "data": [
+    {
+      "id": "deepseek-v4.1-flash",
+      "display_name": "DeepSeek V4.1 Flash",
+      "context_window": 128000
+    },
+    {
+      "id": "kimi-k2",
+      "display_name": "Kimi K2",
+      "context_window": 131072
+    }
+  ],
+  "page": 1,
+  "per_page": 2,
+  "next_page": 2,
+  "total": 4,
+  "has_next": true
+}
