@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 真实 Codex CLI 0.167.0 + ModelGate + 双回环 mock（opt-in）。
+// 真实 Codex CLI 0.167.0 + ModelGate + 双回环 mock（opt-in）；--native-v1 验证直接协作与公开预览请求形态。
 // 默认验证三轮模型切换，--native-v2 验证原生父子派发、工具结果与同子追派。
 import http from 'node:http'
 import { randomUUID } from 'node:crypto'
@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildCatalog, serializeCatalog } from '../../src/codex/catalog.js'
 import { startGateway } from './offline/harness.mjs'
+import { makeV1Parent } from './fixtures/codex/native-v1-parent.mjs'
 
 // 版本锁定：真实 CLI 只接受 0.167.0；版本不符时生命周期断言不可信，必须失败。
 const LOCKED_CODEX_VERSION = '0.167.0'
@@ -92,13 +93,16 @@ function checkManifest() {
 }
 
 const CODEX = process.env.CODEX_BIN || '/home/xiaomengxizi/.local/bin/codex'
-const SYNTHETIC_KEY = 'sk-synthetic-not-real'
+const SYNTHETIC_KEY = 'sk-synthetic-upstream-not-real'
 const SYNTHETIC_GO_KEY = 'sk-synthetic-go-not-real'
+const SYNTHETIC_CLIENT_KEY = 'sk-client-synthetic-not-real'
 const PRODUCT_DEFAULT_MAX_BODY = 32 * 1024 * 1024
 const FIXTURE_MAX_BODY = 1024 * 1024
 const OFFICIAL_SLUG = 'gpt-synthetic-official'
 const NATIVE_V2 = process.argv.includes('--native-v2')
-const THIRD_MODEL = NATIVE_V2 ? 'deepseek-v4.1-flash' : 'deepseek-mock'
+const NATIVE_V1 = process.argv.includes('--native-v1')
+const NATIVE_COLLABORATION = NATIVE_V1 || NATIVE_V2
+const THIRD_MODEL = NATIVE_COLLABORATION ? 'deepseek-v4.1-flash' : 'deepseek-mock'
 const TURN1 = 'TURN1_OK'
 const TURN2 = 'TURN2_OK'
 const TURN3 = 'TURN3_OK'
@@ -106,6 +110,7 @@ const TOOL_CALL_ID = 'call_turn1_pwd'
 
 function arg (name, dflt) { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : dflt }
 const codexBin = arg('--codex', CODEX)
+let nativeV1Parent = null
 const KEEP = process.argv.includes('--keep')
 const TASK_A = 'MG_A_' + randomUUID()
 const TASK_B = 'MG_B_' + randomUUID()
@@ -168,7 +173,6 @@ function sseToolCall (res, model, callId, toolArgs, spec = {}) {
     emit('response.completed', { type: 'response.completed', response: { id: 'r-' + Date.now(), object: 'response', status: 'completed', model, output: [completed], usage: { input_tokens: 8, output_tokens: 4, total_tokens: 12 } } })
   })
 }
-
 
 function lastUserText (input) {
   const users = (Array.isArray(input) ? input : []).filter((i) => i && i.type === 'message' && i.role === 'user')
@@ -236,6 +240,7 @@ async function startOfficialMock () {
     try { body = JSON.parse(raw.toString('utf8')) } catch {}
     const input = Array.isArray(body.input) ? body.input : []
     hits.push({ url: req.url, headers: req.headers, model: body.model, input, len: raw.length })
+    if (NATIVE_V1 && nativeV1Parent) return nativeV1Parent(res, body, state)
     if (NATIVE_V2) return nativeV2Parent(res, body, state)
     const text = lastUserText(input)
     state.lastUserTexts.push(text.slice(0, 60))
@@ -268,7 +273,7 @@ async function startThirdMock () {
     let body = {}
     try { body = JSON.parse(raw.toString('utf8')) } catch {}
     hits.push({ url: req.url, headers: req.headers, body, len: raw.length })
-    if (NATIVE_V2) {
+    if (NATIVE_COLLABORATION) {
       const input = Array.isArray(body.input) ? body.input : []
       const text = bodyTextOf(input)
       const marker = text.includes(TASK_B) ? TASK_B : text.includes(TASK_A) ? TASK_A : null
@@ -277,7 +282,7 @@ async function startThirdMock () {
       const output = input.find((item) => item.type === 'function_call_output' && item.call_id === toolCallId)
       if (!output) return sseToolCall(res, body.model, toolCallId, { cmd: "printf '%s\\n' " + marker })
       state.toolOutputs ||= new Set()
-      if (String(output.output).includes(marker)) state.toolOutputs.add(marker)
+      if (/Process exited with code 0/.test(String(output.output)) && String(output.output).includes(marker)) state.toolOutputs.add(marker)
       return sseText(res, body.model, state.toolOutputs.has(marker) ? 'CHILD_DONE_' + marker : 'CHILD_TOOL_RESULT_MISSING')
     }
     state.lastMessages = (body.messages || []).map((m) => ({ role: m && m.role, text: typeof (m && m.content) === 'string' ? m.content.slice(0, 160) : String(JSON.stringify(m && m.content)).slice(0, 160) }))
@@ -373,7 +378,9 @@ const codexHome = await mkdtemp(join(runtimeTmp, 'mg-e2e-cli-ch-'))
 const cwd = await mkdtemp(join(runtimeTmp, 'mg-e2e-cli-cwd-'))
 const work = await mkdtemp(join(runtimeTmp, 'mg-e2e-cli-work-'))
 const basePath = join(work, 'official-base.json')
-const parentCatalogRow = officialModel(NATIVE_V2 ? { multi_agent_version: 'v2' } : {})
+const parentCatalogRow = officialModel(NATIVE_V1
+  ? { supports_search_tool: false, supports_websockets: false, use_responses_lite: false }
+  : (NATIVE_V2 ? { multi_agent_version: 'v2' } : {}))
 const catalogPath = join(work, 'codex-catalog.json')
 await writeFile(basePath, JSON.stringify({ models: [parentCatalogRow] }), 'utf8')
 await writeFile(join(home, 'README-synthetic.txt'), 'synthetic home; no real credentials\n', 'utf8')
@@ -388,14 +395,14 @@ const gatewayConfig = {
     timeout: { firstByteMs: 60000, idleMs: 60000 },
   },
   providers: {
-    'codex-official': { baseUrl: 'http://localhost:' + official.port, codexIdentity: 'official', apiKeyEnv: 'MG_E2E_OFFICIAL_KEY' },
-    third: { baseUrl: 'http://127.0.0.1:' + third.port + '/v1', api: 'openai', ...(NATIVE_V2 ? { apiKeyEnv: 'MG_E2E_GO_KEY' } : {}) },
+    'codex-official': { baseUrl: 'http://localhost:' + official.port, codexIdentity: 'official', apiKeyEnv: 'MG_E2E_UPSTREAM_KEY' },
+    third: { baseUrl: 'http://127.0.0.1:' + third.port + '/v1', api: 'openai', ...(NATIVE_COLLABORATION ? { apiKeyEnv: 'MG_E2E_GO_KEY' } : {}) },
   },
   models: {
     [THIRD_MODEL]: {
-      provider: 'third', api: NATIVE_V2 ? 'responses' : 'openai', maxContext: 128000, effortOptions: ['low', 'medium', 'high'], reasoning: 'low',
+      provider: 'third', api: NATIVE_COLLABORATION ? 'responses' : 'openai', maxContext: 128000, effortOptions: ['low', 'medium', 'high'], reasoning: 'low',
       codex: {
-        ...(NATIVE_V2 ? { plaintextTools: true, history: { agentMessage: 'project' } } : {}),
+        ...(NATIVE_COLLABORATION ? { plaintextTools: true, history: { agentMessage: 'project' } } : {}),
         capabilities: { shellType: 'unified_exec', applyPatchToolType: 'freeform' },
         evidence: {
           shellType: { source: 'offline loopback fixture', observedAt: new Date().toISOString() },
@@ -410,7 +417,15 @@ const built = buildCatalog({ base: { models: [parentCatalogRow] }, config: gatew
 const aggregateSlug = Object.keys(built.meta.bindings || {})[0]
 await writeFile(catalogPath, serializeCatalog(built.catalog, { format: 'catalog-json' }), 'utf8')
 
-const gw = await startGateway({ name: 'm4e2e', env: { MG_E2E_OFFICIAL_KEY: SYNTHETIC_KEY, MG_E2E_GO_KEY: SYNTHETIC_GO_KEY }, config: gatewayConfig })
+if (NATIVE_V1) nativeV1Parent = makeV1Parent({
+  sseText,
+  sseToolCall,
+  getChildModel: () => aggregateSlug,
+  taskA: TASK_A,
+  taskB: TASK_B,
+})
+
+const gw = await startGateway({ name: 'm4e2e', env: { MG_E2E_UPSTREAM_KEY: SYNTHETIC_KEY, MG_E2E_GO_KEY: SYNTHETIC_GO_KEY, ...(NATIVE_V1 ? { MG_CLIENT_KEY: SYNTHETIC_CLIENT_KEY } : {}) }, config: gatewayConfig })
 
 const env = {
   HOME: home,
@@ -419,7 +434,7 @@ const env = {
   PATH: '/usr/bin:/bin',
   LANG: 'C.UTF-8',
   NO_COLOR: '1',
-  OPENAI_API_KEY: SYNTHETIC_KEY,
+  ...(NATIVE_V1 ? { MG_E2E_CLIENT_KEY: SYNTHETIC_CLIENT_KEY } : { OPENAI_API_KEY: SYNTHETIC_KEY }),
   // 只回环保证：任何试图出网的插件同步/更新都必须打到本机死端口，不允许真实外连。
   HTTP_PROXY: 'http://127.0.0.1:9',
   HTTPS_PROXY: 'http://127.0.0.1:9',
@@ -435,7 +450,11 @@ async function assertLockedVersion(env, cwd) {
 
 function baseArgs (model, prompt, thread) {
   const pluginOff = ['--disable', 'plugins', '--disable', 'remote_plugin', '--disable', 'plugin_discovery_prefetch']
-  const common = ['--json', '--skip-git-repo-check', '-c', 'sandbox_mode="read-only"', '-c', 'model_provider="openai"', '-c', 'openai_base_url="' + gw.base + '"', '-c', 'model_catalog_json="' + catalogPath + '"', '-c', 'model="' + model + '"']
+  const providerArgs = NATIVE_V1
+    ? ['-c', 'model_provider="modelgate"', '-c', 'model_providers.modelgate.name="ModelGate"', '-c', 'model_providers.modelgate.base_url="' + gw.base + '/v1"', '-c', 'model_providers.modelgate.env_key="MG_E2E_CLIENT_KEY"']
+    : ['-c', 'model_provider="openai"', '-c', 'openai_base_url="' + gw.base + '"']
+  const featureArgs = NATIVE_V1 ? ['-c', 'features.multi_agent=true', '-c', 'features.multi_agent_v2.enabled=false', '-c', 'web_search="disabled"'] : []
+  const common = ['--json', '--skip-git-repo-check', '-c', 'sandbox_mode="read-only"', ...featureArgs, ...providerArgs, '-c', 'model_catalog_json="' + catalogPath + '"', '-c', 'model="' + model + '"']
   return thread
     ? [...pluginOff, 'exec', 'resume', thread, ...common, prompt]
     : [...pluginOff, 'exec', ...common, prompt]
@@ -475,6 +494,83 @@ async function runNativeV2Fixture() {
   check('ModelGate 原生 V2：仅一个原生子线程，且同一子线程有两个独立 turn', children.length === 1 &&
     new Set(children[0].filter((event) => event.type === 'turn_context').map((event) => event.payload.turn_id)).size === 2)
   if (!official.state.receivedBoth) console.log('CLI fixture diagnostics:', result.out.slice(-2100), result.err.slice(-800))
+}
+
+async function runNativeV1Fixture () {
+  const args = baseArgs(OFFICIAL_SLUG, 'Use the native multi-agent V1 fixture; report both child receipts.', false)
+  const result = await runCodex(args, env, cwd, round1Strace, 90000)
+  const parentId = (result.out.match(/"type":"thread\.started","thread_id":"([0-9a-f-]{36})"/) || [])[1]
+  const state = official.state
+  const preview = state.preview || {}
+  const violations = [...(preview.violations || [])]
+  const requestKeys = [...(preview.requestKeys || [])].sort()
+  const toolTypes = [...(preview.toolTypes || [])].sort()
+  const childBRequest = third.hits.find(({ body }) => bodyTextOf(body.input || []).includes(TASK_A) && bodyTextOf(body.input || []).includes(TASK_B))
+  const childBInput = childBRequest?.body.input || []
+  const aHistoryItems = childBInput.filter((item) => bodyTextOf([item]).includes(TASK_A))
+  const childAToolId = 'call_tool_' + TASK_A
+  const childAToolCall = childBInput.some((item) => item.type === 'function_call' && item.call_id === childAToolId)
+  const childAToolOutput = childBInput.find((item) => item.type === 'function_call_output' && item.call_id === childAToolId)
+  const childAAssistant = childBInput.some((item) => item.type === 'message' && item.role === 'assistant' && bodyTextOf([item]).includes('CHILD_DONE_' + TASK_A))
+  const evidence = {
+    nativeTools: !!state.nativeTools,
+    childId: state.childId || null,
+    followedUp: !!state.followedUp,
+    receipts: { a: !!state.receipt_a, b: !!state.receipt_b },
+    previewViolations: violations,
+    requestKeys,
+    toolTypes,
+    secondTurnHistory: { itemTypes: aHistoryItems.map((item) => item.type), hasA: aHistoryItems.length > 0, hasToolCallA: childAToolCall, toolOutputAExit0: /Process exited with code 0/.test(String(childAToolOutput?.output || '')), assistantReceiptA: childAAssistant, hasB: !!childBRequest },
+    parentHits: official.hits.length,
+    childHits: third.hits.length,
+    childToolRounds: third.state.toolOutputs?.size || 0,
+  }
+  check('原生 V1：能力请求直接发布 multi_agent_v1 spawn/wait/send_input namespace',
+    state.nativeTools === true && violations.length === 0 && official.hits.length > 0 &&
+    official.hits.every((hit) => hit.url === '/v1/responses') && parentCatalogRow.supports_search_tool === false,
+    JSON.stringify(evidence))
+  check('原生 V1：请求保持官方订阅兼容边界且未带 SIWC 不支持字段', violations.length === 0, JSON.stringify(evidence))
+  check('原生 V1：初派与追派收据分别由同一 child id 完成',
+    /^[0-9a-f-]{36}$/i.test(state.childId || '') && state.followedUp === true && state.receipt_a === true && state.receipt_b === true && state.receivedBoth === true,
+    JSON.stringify(evidence))
+  check('原生 V1：两个 child Responses 任务和工具回填都命中第三方 mock',
+    [TASK_A, TASK_B].every((marker) => third.hits.some(({ body }) => bodyTextOf((body.input || []).filter((item) => item.type === 'message' && item.role === 'user')).includes(marker)) && third.state.toolOutputs?.has(marker)), JSON.stringify(evidence))
+  check('原生 V1：同一 child 的 B 请求保留 A 任务、工具调用、成功工具输出和 assistant 收据',
+    !!childBRequest && aHistoryItems.length > 0 && childAToolCall &&
+    /Process exited with code 0/.test(String(childAToolOutput?.output || '')) && String(childAToolOutput?.output || '').includes(TASK_A) && childAAssistant,
+    JSON.stringify(evidence))
+  check('原生 V1：父子请求只使用合成密钥并保持原模型名',
+    official.hits.every(({ headers }) => headers.authorization === 'Bearer ' + SYNTHETIC_KEY && !headers['chatgpt-account-id']) &&
+    third.hits.every(({ headers, body }) => headers.authorization === 'Bearer ' + SYNTHETIC_GO_KEY && !headers['chatgpt-account-id'] && body.model === THIRD_MODEL), JSON.stringify(evidence))
+  check('原生 V1：单进程包含最终第二收据并 exit 0',
+    result.code === 0 && result.out.includes('MODEL_GATE_NATIVE_V1_OK') && result.out.includes(TASK_B),
+    'code=' + result.code + ' stdout=' + result.out.slice(-900) + ' stderr=' + result.err.slice(-500))
+  const childCountBeforeResume = third.hits.length
+  const parentHitsBeforeResume = official.hits.length
+  if (result.code === 0 && parentId && state.receivedBoth) {
+    state.resumeExpectedHistory = true
+    const resume = await runCodex(baseArgs(OFFICIAL_SLUG, 'MODEL_GATE_NATIVE_V1_RESUME_PROBE', parentId), env, cwd, null, 45000)
+    const resumedParentId = (resume.out.match(/"type":"thread\.started","thread_id":"([0-9a-f-]{36})"/) || [])[1]
+    check('原生 V1：正常退出后同一 Custom Provider 恢复父线程和 A/B 历史，不再派发子任务',
+      resume.code === 0 && resumedParentId === parentId && state.resumeObserved === true &&
+      official.hits.length === parentHitsBeforeResume + 1 && third.hits.length === childCountBeforeResume &&
+      state.childId === evidence.childId && resume.out.includes('MODEL_GATE_NATIVE_V1_RESUME_OK'),
+      'code=' + resume.code + ' parent=' + resumedParentId + ' history=' + !!state.resumeObserved + ' childHits=' + third.hits.length + ' stdout=' + resume.out.slice(-500))
+  } else check('原生 V1：跳过恢复检查（初始父子回合未完成）', false)
+  const children = []
+  const sessions = join(codexHome, 'sessions')
+  if (existsSync(sessions)) {
+    for (const file of await readdir(sessions, { recursive: true })) {
+      if (!file.endsWith('.jsonl')) continue
+      const events = (await readFile(join(sessions, file), 'utf8')).trim().split('\n').map(JSON.parse)
+      const meta = events.find((event) => event.type === 'session_meta')?.payload
+      if (parentId && meta?.source?.subagent?.thread_spawn?.parent_thread_id === parentId) children.push(events)
+    }
+  }
+  check('原生 V1：Codex 原生日志仅有一个关联 child id，且包含两个 turn',
+    children.length === 1 && new Set(children[0].filter((event) => event.type === 'turn_context').map((event) => event.payload.turn_id)).size === 2,
+    'children=' + children.length + ' turns=' + (children[0]?.filter((event) => event.type === 'turn_context').length || 0))
+  if (result.code !== 0 || !state.receivedBoth) console.log('V1 diagnostics:', result.out.slice(-2200), result.err.slice(-800))
 }
 
 async function runSwitchingFixture() {
@@ -576,7 +672,8 @@ async function runSwitchingFixture() {
 
 try {
   await assertLockedVersion(env, cwd)
-  if (NATIVE_V2) await runNativeV2Fixture()
+  if (NATIVE_V1) await runNativeV1Fixture()
+  else if (NATIVE_V2) await runNativeV2Fixture()
   else {
     console.log('v2LifecycleManifest=' + JSON.stringify({ version: LOCKED_CODEX_VERSION, cases: V2_CASES.length, status: 'FIXTURE_PREPARED', execution: 'Q02' }))
     await runSwitchingFixture()
