@@ -1,5 +1,7 @@
 # 开发计划与任务状态
 
+> **2026-11-14 最新用户范围决议：** 以 [V2 产品契约](product/2026-11-14-owner-scope-v2.md) 与 [V2 直接执行计划](roadmap/2026-11-14-go-deepseek-native-compact-plan.md) 为现行标准：仅正式支持 Go 的 `deepseek-v4.1-flash`，原版 Codex Desktop 一键接入、套餐保留、原生子代理和 **Codex 原生压缩兼容** 仍必须实现；不做 ModelGate 独立压缩，不再推进全量 OpenCode 协议。旧 V1 矩阵/门禁为历史，执行 P00 须完成现行 V2 迁移。
+
 > **2026-11-14 产品优先级纠偏：** 本文以下历史状态与计划仍可作工程证据，但不再作为最终产品验收的唯一来源。所有者不可降级目标为 [MG-R001..MG-R012](product/2026-11-14-owner-product-contract.md)，直接执行 [2026-11-14 聚合伪代码计划](roadmap/2026-11-14-aggregation-pseudocode-plan.md) 并使用 [Agent Team 启动提示词](roadmap/2026-11-14-aggregation-agentteam-start.md)。旧阶段的 OFFLINE_RC、V1 11/11 Mock、CLI 或单一 DeepSeek 成功不等于“GUI 全量聚合 + 官方套餐 + 原生 Agent Team”正式验收，冲突之处以新契约为准。
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
