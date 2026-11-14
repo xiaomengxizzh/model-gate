@@ -16,7 +16,7 @@
 - `src/aggregation/registry.js`（新增，A2）：`listProviders()`、`getProvider(id)`、`addProvider(cfg)`、`removeProvider(id)`。持久化复用既有 gateway 配置与 `configVersion` CAS（`src/index.js` 保存路径：版本 +1、旧版本 409 并回传 `currentVersion`），写入走 `src/config-transaction.js` 的既有事务；**不得新建第二配置库、第二把锁或第二套版本号**。
 - `src/aggregation/discovery.js`（新增，A2）：`discover(provider, {signal, maxPages}) -> {snapshot, diagnostics}`；`sync(providerId) -> {snapshot, changed:{added,removed,updated}}`。失败必须返回 typed error（稳定 `code` + `diagnostics`）；**绝不返回 `ok:true` 的空快照**，因为空快照会被读成“该账户没有任何模型”。只有上游明确返回空授权目录时才允许 `snapshot.models=[]`，并必须在 `diagnostics` 标注空目录已被上游证实；否则记 `NOT_TESTED`/`BLOCKED`。
 - `src/aggregation/catalog.js`（新增，A2）：`publishAggregatedCatalog(scopeRef) -> {catalogRef, version, modelCount, diagnostics}`。必须经 `src/codex/catalog-generation.js` 生成世代（`buildGenerationRecord` / `persistAndSwapValidatedGeneration`）并经 `src/codex/catalog.js` 校验（`assertCatalog`、`assertZeroCollisions`）。**A2 不得另写一套 catalog ID 生成、指纹或落盘逻辑。**
-- `src/codex/desktop-integration.js`（新增，A3）：`detect()`、`preview()`、`activate({consentToken, expectedSha})`、`deactivate({expectedSha})`、`status()`。每次配置写必须走 `src/codex/config.js` 的事务语义：预览 → 二次快照（sha256+size+mtime）→ 备份 → 原子写 → 写后校验；`consentToken` 即确认令牌，`expectedSha` 即预览时冻结的 `before.sha256`，不一致即 409 中止。**绝不读写 `auth.json`。**
+- `src/codex/desktop-integration.js`（新增，A3）：`detect()`、`preview()`、`activate({consentToken, expectedSha})`、`deactivate({expectedSha})`、`status()`。每次配置写必须走 `src/codex/config.js` 的事务语义：预览 → 二次快照（sha256+size+mtime）→ 备份 → 原子写 → 写后校验；`consentToken` 即确认令牌，`expectedSha` 即预览时冻结的 `before.sha256`，不一致即 409 中止。**该模块只承担配置事务，不承担认证材料管理；认证材料的处理只按 §10「凭据处理协议」执行。**
 - 授权域（A4，扩展 `src/codex/target-authz.js`）：`AuthDomain = 'codex-subscription' | 'siwc-app' | 'api-key'`；`resolveUpstream(receipt)` 返回 typed receipt `{providerId, authDomain, upstreamHost, upstreamPath, model, upstreamModel}`；`assertNoSubscriptionCredentialToThirdParty(headers, upstreamHost)`。`codex-subscription` 只映射现存 `gatewaySubscription`（`/backend-api/codex` 入口），`api-key` 映射 `provider-key`，`siwc-app` 使用 `src/subscription/*` 的独立授权域；三者互不替代。
 - 原生协议（A1）：`src/codex/interop.js`、`src/responses.js`、`src/responses-stream.js`、`src/sse.js` 保持今日签名兼容；A1 确需改签名的，必须在其报告中单列理由、调用方清单与迁移方式，未经主代理确认不得改。
 
@@ -35,6 +35,7 @@
 3. SIWC 令牌永不当作 Codex backend 令牌使用；两者入口、audience、诊断码各自独立。
 4. 授权域之间无静默回退：`codex-subscription`、`siwc-app`、`api-key` 任一失败即失败，不透明换域。
 5. 诊断只携带稳定 code 与 host/path，绝不携带 token、cookie、authorization 值或 `auth.json` 内容。
+6. 认证材料只按 §10 处理；无论是否处理，都不得破坏或替换用户既有登录，不得静默更换授权方式。
 
 ## 5. HTTP 面
 
@@ -83,8 +84,31 @@
 - 不使用非 Luna 的 GPT 模型做真实测试；
 - 不修改 MG-R001..MG-R012 及其断言测试；
 - 未经所有者批准，不做付费/真实调用，不写用户真实 `~/.codex/config.toml`。
+- **凭据访问本身不是禁止事项**：为交付已授权能力所必需的认证材料读取与受控备份，在所有者明确授权范围内**允许**，并受 §10「凭据处理协议」约束。真正的禁止项是：把官方凭据发往第三方上游；记录、打印或提交令牌；破坏或替换用户既有登录；静默更换授权方式。
 
-## 10. 偏差记录
+> **2026-11-14 政策更正（取代此前的绝对禁令）**：本文修订前，§2 的 `desktop-integration` 条目以「绝不读写 `auth.json`」表达一刀切禁令，验收记录据此把原生子代理判为 `BLOCKED`。该绝对禁令自 **2026-11-14** 起由所有者指令取代，理由是**安全措施必须服务产品，不得自动成为禁止实现产品能力的理由**（例如“不复制、不触碰”）。从此边界是 §10 的处理规则，而不是“不得访问”本身。
+
+## 10. 凭据处理协议
+
+本条是认证材料唯一允许的处理方式：它约束“怎么碰”，不禁止“为交付能力而碰”。
+
+- **授权**：只在所有者的明确授权内处理认证材料。该次运行的证据必须记录：授权了什么、何时授权、由谁授权、授权范围（能力、模型、时间/次数上限）。没有记录的授权视为不存在，不得以“上次已经授权”推断本次。
+- **目的限制**：凭据只能为正在交付的那项能力读取；不得二次使用，不得进入分析/统计，不得上传到任何第三方。
+- **静态存放**：任何副本必须位于仓库之外，放在以 `umask 077` 创建的 `0700` 目录中，文件权限 `0600`；不得放在全局可读路径、构建产物或证据文档里。
+- **完整性**：处理前后各记录原件的 `sha256`、大小与 mtime；运行结束时原件必须逐字节一致。原件发生变化是**关键发现（critical finding）**，必须立即停止该次运行并报告，不得继续或淡化。
+- **副本内刷新允许**：CLI 在隔离副本内合法轮换令牌是允许的；变化只发生在副本中，且必须如实上报，不得隐藏，也不得把副本的变化说成原件未变。
+- **传输**：凭据只呈现给它自身的官方 origin，且只经网关既有的订阅路径（`gatewaySubscription`）；绝不发往第三方上游；绝不出现在 URL 或查询串中。
+- **日志**：令牌、authorization 值、账户标识与密钥材料不得出现在日志、诊断、错误消息、PR 正文或证据中。
+- **销毁**：运行结束时销毁所有副本；证据只保留哈希与元数据（大小、mtime、路径类别），不保留内容本身。
+- **失败**：协议无法满足时，该次运行记 `BLOCKED` 并给出精确原因；但“协议不方便”既不是宣布能力不可实现的理由，也不是把需求长期留在未测状态的理由。
+
+## 11. Responses → Chat Completions 翻译
+
+- 对只暴露 `chat/completions` 的聚合上游，允许把 Responses 请求翻译为 Chat Completions、再把结果翻译回 Responses。这是**被批准的适配机制**，不是静默降级。
+- 翻译必须**按模型显式声明**并可从模型记录看出；不得在运行时静默切换协议；无法翻译的特征必须显式失败，不得丢弃。
+- 只暴露 Anthropic `messages` 或 Google `generateContent` 原生协议的上游，需要各自的适配器；在适配器落地前，不得把它们发布为 chat 可用模型。
+
+## 12. 偏差记录
 
 1. `stableModelId(provider, model)` 实际生成 `mg-<provider>-<model>`，无 `kind` 参数；按字面实现 `mg-go-...` 会破坏已发布 `mg-opencodego-*`。本文按 §3 固定 `kind=go` 的段为 `opencodego`，未改 `catalog.js`。
 2. `catalog.js` 的模型字段是 Codex 目录形状（`slug`、`display_name`、`context_window` 等），与 §3 的聚合记录不同。§3 定义为聚合层记录，发布时投影为 `slug`/`display_name`/`context_window`；`context_window` 缺失时 fail-closed，不编造。
