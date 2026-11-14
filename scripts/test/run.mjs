@@ -35,6 +35,7 @@ export const SUITES = [
   'scripts/test/offline/agg-auth-receipt.test.mjs',
   'scripts/test/offline/agg-auth-resolve.test.mjs',
   'scripts/test/offline/agg-auth-subscription.test.mjs',
+  'scripts/test/offline/agg-chat-compat.test.mjs',
   'scripts/test/offline/agg-desktop-activate.test.mjs',
   'scripts/test/offline/agg-desktop-rollback.test.mjs',
   'scripts/test/offline/agg-desktop-ui.test.mjs',
