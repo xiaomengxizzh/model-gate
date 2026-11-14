@@ -41,6 +41,7 @@ export const SUITES = [
   'scripts/test/offline/agg-discovery-catalog.test.mjs',
   'scripts/test/offline/agg-discovery-console.test.mjs',
   'scripts/test/offline/agg-discovery-pagination.test.mjs',
+  'scripts/test/offline/agg-discovery-realshape.test.mjs',
   'scripts/test/offline/agg-discovery-sync.test.mjs',
   'scripts/test/offline/agg-native-capabilities.test.mjs',
   'scripts/test/offline/agg-native-interrupt.test.mjs',

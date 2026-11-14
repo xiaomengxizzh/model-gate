@@ -32,6 +32,8 @@ mg-tray.exe
 .tmp-cfgdir/
 # WorkBuddy 工作区记忆（不入库）
 .workbuddy/
+# 本地 agent 工作树（.agents/worktrees/*）：只在本机存在，绝不入库
+.agents/
 config/admin.token
 mg-tray.new.exe
 
