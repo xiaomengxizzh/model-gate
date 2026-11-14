@@ -10,6 +10,8 @@
 
 **明确非目标**：OpenCode Console 全量；20 条 Anthropic/Google 协议模型；所有 Go 模型；自建摘要/压缩算法。其他模型可进行一次无需新开发的有界初探，失败即 OPTIONAL_STOP。
 
+**优先验收映射**：MG-R003（唯一 DeepSeek 目标）、MG-R004（原版 Desktop 选模）、MG-R006（Codex 原生压缩及连续任务）、MG-R008（无静默模型/历史降级）、MG-R012（Codex 真实 GPT 仅 Luna）。其它 MG-R 编号继续按现行 V2 契约验收。
+
 **判定边界**：此前 CLI 真测 R005/R006 虽已取得真实原生 spawn/interrupt/resume 回执，但原生压缩发生 `unsupported_input_item`，故**V2 MG-R006 尚未完整通过**。V1 矩阵标出的 R006 `PASS_REAL` 仅为旧用例历史状态。此轮新门禁必须包含压缩实测；绝不删掉已有失败记录。
 
 ## 1. 执行顺序、Agent Team 与责任边界
