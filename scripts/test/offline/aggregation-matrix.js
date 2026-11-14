@@ -33,10 +33,13 @@ export const BASELINE_PATH = 'docs/evidence/aggregation-baseline-2026-11-14.md'
 export const MATRIX_PATH = 'docs/evidence/aggregation-acceptance-matrix.md'
 export const VERDICT_PATH = 'docs/evidence/aggregation-acceptance-verdict-2026-11-14.md'
 
-// 状态证据来源（顺序即「最新在前」，用于读取被测树 SHA）。
-// 只收录**当前状态**文档：基线/结论文档描述的是历史快照，不能拿来覆盖今天的状态。
+// 状态证据来源。[0] 为 Luna 真实验收，提供矩阵钉死的「被测树 SHA」（4feafe0e…）；
+// [1] 为 2026-11-14 原生父子代理验收（较新证据，其「取代」标记覆盖整合报告里的旧状态）；
+// 其后为整合报告与 P01 发现证据。只收录**当前状态**文档：基线/结论文档描述的是历史快照，
+// 不能拿来覆盖今天的状态。
 export const EVIDENCE_STATUS_DOCS = Object.freeze([
   'docs/evidence/aggregation-real-luna-2026-11-14.md',
+  'docs/evidence/aggregation-native-real-2026-11-14.md',
   'docs/evidence/aggregation-integration-2026-11-14.md',
   'docs/evidence/agg-p01-opencode-discovery-2026-11-14.md',
 ])
@@ -335,7 +338,7 @@ export function renderMarkdown({ contractText, planText, baselineText, matrix })
     '；多份证据对同一需求必须一致。旧轮次快照被新证据取代时，较新文档的依据必须显式写出 `取代 <旧状态> @ <旧文档路径>`，否则生成失败（禁止静默改口径）。')
   lines.push('- 状态口径：契约 §2 的五值（`NOT_TESTED` / `BLOCKED` / `FAIL` / `PASS_MOCK` / `PASS_REAL`）；`PASS_MOCK` 只用于**离线套件真正执行过**的行为，且每行都在「状态依据」里点名已登记的套件。')
   lines.push('- 历史基线：`' + BASELINE_PATH + '` §5（采集于 `' + matrix.baselineCommit + '`，sha256 `' + sha256(baselineText) + '`）只说明当时的起点，不是本表当前状态的来源。')
-  lines.push('- 当前门禁：`ready:false`（12 项中 1 项 `PASS_REAL`）。逐项原因见 `' + VERDICT_PATH + '`（该文件是当前结论，不是本矩阵的输入）。')
+  lines.push('- 当前门禁：`ready:false`（12 项中 ' + counts.PASS_REAL + ' 项 `PASS_REAL`）。逐项原因见 `' + VERDICT_PATH + '`（该文件是当前结论，不是本矩阵的输入）。')
   lines.push('')
   lines.push('## 1. 矩阵')
   lines.push('')

@@ -9,11 +9,17 @@
 
 被测树 `4feafe0e51dc02d48c45734df5b34e70d3679bd5` 的发布门禁为 **`ready:false` / `status:'BLOCKED'`**。
 
-- 12 项需求中 **1 项**取得真实目标上的 `PASS_REAL`：`MG-R012`（仅 GPT-6 Luna，请求级收据，
-  见 [真实 Luna 验收](aggregation-real-luna-2026-11-14.md)）。
-- 其余 11 项没有真实目标回执；门禁第一个失败项是 `MG-R001`，`reason: pass_mock_cannot_release`。
-- `PASS_MOCK` 不是通过，`NOT_TESTED` 不是通过，一项 `PASS_REAL` 也不构成发布条件。
+- 12 项需求中 **3 项**取得真实目标上的 `PASS_REAL`：`MG-R005`、`MG-R006`（真实原生父子代理与
+  中断/恢复，见 [真实原生验收](aggregation-native-real-2026-11-14.md)）、`MG-R012`（仅 GPT-6 Luna，
+  请求级收据，见 [真实 Luna 验收](aggregation-real-luna-2026-11-14.md)）。
+- 其余 9 项没有真实目标回执；门禁第一个失败项是 `MG-R001`，`reason: pass_mock_cannot_release`。
+- `PASS_MOCK` 不是通过，`NOT_TESTED` 不是通过，3 项 `PASS_REAL` 也不构成发布条件。
 - 即使把 `ownerApproval` 置为 `true`，门禁仍为 `ready:false`——所有者批准不能替代逐项真实证据。
+
+> **2026-11-14 收尾轮更新**：矩阵已按较新证据重新生成（`PASS_REAL` 3 / `PASS_MOCK` 7 /
+> `NOT_TESTED` 1（MG-R004）/ `FAIL` 0），门禁结论 **`ready:false` 不变**。本页 §2.1 的顶层输出是
+> 对 Luna 轮证据快照 `aggregation-real-luna-2026-11-14.json` 调用门禁的历史输出，保留为起点记录；
+> 当前逐项状态以 [验收矩阵](aggregation-acceptance-matrix.md) 为准。
 
 ## 1. 被测对象与环境
 
@@ -22,7 +28,7 @@
 | 提交（被测树） | `4feafe0e51dc02d48c45734df5b34e70d3679bd5`（`mg-codex-native`） |
 | Node / npm | `v24.22.2` / `11.19.1`，Ubuntu x86_64 |
 | 验收来源 | [产品契约](../product/2026-11-14-owner-product-contract.md) §1–§2；[执行计划](../roadmap/2026-11-14-aggregation-pseudocode-plan.md) §I |
-| 状态来源 | [真实 Luna 验收](aggregation-real-luna-2026-11-14.md)、[整合证据](aggregation-integration-2026-11-14.md) §8、[P01 发现证据](agg-p01-opencode-discovery-2026-11-14.md) §5 |
+| 状态来源 | [真实 Luna 验收](aggregation-real-luna-2026-11-14.md)、[真实原生验收](aggregation-native-real-2026-11-14.md)、[整合证据](aggregation-integration-2026-11-14.md) §8、[P01 发现证据](agg-p01-opencode-discovery-2026-11-14.md) §5 |
 | 证据记录 | [aggregation-real-luna-2026-11-14.json](aggregation-real-luna-2026-11-14.json) |
 | 性质 | 离线门禁 + 一条真实上游回执；未在 Desktop GUI 上执行任何用例 |
 
@@ -71,15 +77,16 @@ node scripts/test/offline/aggregation-gate.js \
 | MG-R011 | `PASS_MOCK` | `pass_mock_cannot_release` | 本阶段新增一条真实回执，其余阶段仍缺真实目标回执 | 每个阶段绑定 SHA + 命令 + 环境 + 脱敏回执 |
 | MG-R012 | `PASS_REAL` | `proven_on_real_target` | —（已通过） | 保持：仅 Luna、请求级核验、无自动回退 |
 
-> **2026-11-14 政策更正（不改变门禁状态）**：上表 MG-R005 的「禁止使用所有者目录、禁止复制凭据」是**当时生效的政策限制，不是技术限制**——场景因此没有运行，而不是不可实现。所有者已于 **2026-11-14** 解除该限制：认证材料可在明确、有界、可审计的授权下读取与备份（[接口 ADR](../architecture/2026-11-14-aggregation-interfaces.md) §10）。所以“禁止复制凭据”**不再是有效的阻塞理由**，MG-R005/MG-R006 原生场景**待重跑**；本轮没有重跑，两行状态与门禁 `ready:false` 均不变。
+> **2026-11-14 政策更正与重跑结果（保留历史事实）**：上表 MG-R005 的「禁止使用所有者目录、禁止复制凭据」是**当时生效的政策限制，不是技术限制**——场景因此没有运行，而不是不可实现。所有者已于 **2026-11-14** 解除该限制：认证材料可在明确、有界、可审计的授权下读取与备份（[接口 ADR](../architecture/2026-11-14-aggregation-interfaces.md) §10）。所以「禁止复制凭据」不再是有效的阻塞理由；MG-R005/MG-R006 原生场景待重跑、本轮没有重跑、两行状态与门禁 `ready:false` 均不变——**这是当时的历史事实，保留**。**该次重跑已于 2026-11-14 完成**，见 [真实原生验收](aggregation-native-real-2026-11-14.md)：MG-R005 / MG-R006 实测 `PASS_REAL`（含原生中断单一终态与同一子代理恢复）；矩阵随之重新生成，但门禁仍为 `ready:false`（R001 / R004 等仍非 `PASS_REAL`），上表逐项行保留为整合轮快照。
 
 ## 3. 为什么仍然不能发布
 
-1. 12 项里只有 1 项有真实目标回执；契约 §2 要求正式交付的每一项都具备 `PASS_REAL`。
+1. 12 项里只有 3 项有真实目标回执（MG-R005、MG-R006、MG-R012）；契约 §2 要求正式交付的每一项都具备 `PASS_REAL`。
 2. `PASS_MOCK` 只证明离线套件执行过相应行为，不能替代 Desktop/GUI/真实账户。
-3. 本阶段没有 Desktop GUI 运行、没有模型选择器观测、没有真实目录对账、没有原生父子线程，
-   因此 MG-R001/R003/R004/R005/R006/R007/R009/R010 的真实面全部缺席。
-4. 一项 `PASS_REAL` 不等于"聚合模式可用"；`MG-R012` 只约束"真实 GPT 测试只能用 Luna"这条边界。
+3. 本阶段仍没有 Desktop GUI 运行、没有模型选择器观测、没有真实目录对账、没有真实 `~/.codex` 激活演练，
+   因此 MG-R001/R002/R003/R004/R007/R008/R009/R010/R011 的真实面全部缺席；MG-R005 / MG-R006
+   虽已在 CLI 原生父子线程上取得 `PASS_REAL`，但不覆盖原版 Desktop GUI 与多身份场景。
+4. 3 项 `PASS_REAL` 不等于"聚合模式可用"；`MG-R012` 只约束"真实 GPT 测试只能用 Luna"这条边界。
 
 ## 4. 复现与有效期
 

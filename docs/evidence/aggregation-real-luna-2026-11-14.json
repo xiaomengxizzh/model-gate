@@ -1,9 +1,10 @@
 {
+  "_note": "本文件是 2026-11-14 Luna 轮的状态快照，保留历史事实。原生父子代理重跑已于 2026-11-14 完成，见 docs/evidence/aggregation-native-real-2026-11-14.md；当前状态以生成器重新生成的 docs/evidence/aggregation-acceptance-matrix.md 为准（PASS_REAL 3 / PASS_MOCK 7 / NOT_TESTED 1）。",
   "MG-R001": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "未在真实 Desktop 执行一键接入/退出与重启一致性" },
   "MG-R002": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "official-gpt-6-luna-real 半边已有请求级真实回执；codex-official-login-unchanged 只有运行期元数据未变，无登录/登出/切换测试，整行不升级" },
   "MG-R003": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "真实 Console/Go 目录未对账" },
   "MG-R004": { "status": "NOT_TESTED", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "原版 Desktop 选择器未实际操作" },
-  "MG-R005": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "原生子代理 BLOCKED：真实 CLI 父进程需可写 CODEX_HOME（禁止用所有者目录/禁止复制凭据）；该树也无 OpenCode Go 凭据。2026-11-14 政策更正：所有者已解除“禁止复制凭据”，该限制属当时政策而非技术限制，原生场景待重跑；状态不变" },
+  "MG-R005": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "原生子代理 BLOCKED：真实 CLI 父进程需可写 CODEX_HOME（禁止用所有者目录/禁止复制凭据）；该树也无 OpenCode Go 凭据。2026-11-14 政策更正：所有者已解除“禁止复制凭据”，该限制属当时政策而非技术限制；原生场景待重跑、状态不变——这是当时的历史事实，保留。重跑已于 2026-11-14 完成，见 docs/evidence/aggregation-native-real-2026-11-14.md（MG-R005/R006 实测 PASS_REAL）；当前状态以重新生成的验收矩阵为准" },
   "MG-R006": { "status": "NOT_TESTED", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "依赖真实子线程；无活跃子线程，中断/恢复未执行" },
   "MG-R007": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "未做空白安装与已有配置的真实 GUI 演练" },
   "MG-R008": { "status": "PASS_MOCK", "realTarget": false, "source": "docs/evidence/aggregation-integration-2026-11-14.md §8", "blocker": "no-silent-fallback 已有真实 401 负向对照，但未配置候选回退，无回退只被弱证明；unsupported-tool / catalog 两例未在真实路径执行" },

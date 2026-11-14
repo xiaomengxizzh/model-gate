@@ -176,13 +176,13 @@ A2 的 `activate`/`deactivate` handler 只会把结果包成 200、把 `DesktopE
 | MG-R005 | `PASS_MOCK` | 原生协议单元与生命周期离线测试通过（`agg-native-invariants.test.mjs`、`agg-native-capabilities.test.mjs`）；真实父子线程未验证 |
 | MG-R006 | `NOT_TESTED` | `interrupt` 用例 `NOT_ACCEPTED`；不能宣称保留中断终态 |
 | MG-R007 | `PASS_MOCK` | 预览/备份/原子写/回滚离线测试通过（`agg-desktop-activate.test.mjs`、`agg-desktop-rollback.test.mjs`）；未做空白安装与已有配置的真实 GUI 演练 |
-| MG-R008 | `PASS_MOCK` | 无静默降级反向用例离线通过（`agg-auth-leak.test.mjs`、`agg-native-invariants.test.mjs`、`agg-discovery-sync.test.mjs`）；真实产品路径未执行 |
+| MG-R008 | `PASS_MOCK` | 无静默降级反向用例离线通过（`agg-auth-leak.test.mjs`、`agg-native-invariants.test.mjs`、`agg-discovery-sync.test.mjs`）；窄证据：两条 no-silent-fallback 负向对照已有真实取证（错误模型 404 `unknown_model` 出站 0、错误凭据 401 `authentication_error` 出站恰好 1、无重试、无 GPT 替换，见 [真实原生验收](aggregation-native-real-2026-11-14.md)），但 unsupported-tool 与 catalog 两例仍非真实路径，整行保持 `PASS_MOCK` / partial，不得外推为整行真实通过 |
 | MG-R009 | `PASS_MOCK` | 默认关闭的租户原语与隔离用例通过（`agg-tenant-isolation.test.mjs`、`agg-discovery-catalog.test.mjs`）；第二真实身份未创建（授权项） |
 | MG-R010 | `PASS_MOCK` | 回滚与中断恢复离线用例通过（`agg-desktop-rollback.test.mjs`、`config-transaction.test.mjs`）；可丢弃实例演练未做 |
 | MG-R011 | `PASS_MOCK` | 本报告提供 SHA/命令/结果/模拟标签，且矩阵与门禁由离线套件自证（`aggregation-acceptance-matrix.test.mjs`、`aggregation-acceptance-audit.test.mjs`）；仍缺真实目标回执 |
 | MG-R012 | `PASS_REAL` | 请求级脱敏收据证明上游 `model=gpt-6-luna` 且无其他 GPT 模型/无自动回退（`4feafe0e51dc02d48c45734df5b34e70d3679bd5`，3/3 HTTP 200，见[真实 Luna 验收](aggregation-real-luna-2026-11-14.md)）；订阅域拒绝面的离线不变量由 `agg-auth-subscription.test.mjs` 覆盖 |
 
-> **2026-11-14 政策更正（不改变状态列）**：这次整合没有读写 `~/.codex/auth.json`，那是**当轮政策**的要求，不是技术限制。当时“不复制、不触碰认证材料”的一刀切规则在生效，因此原生父子线程场景没有运行；所有者已于 **2026-11-14** 解除该限制，认证材料可在明确、有界、可审计的授权下读取与备份（[接口 ADR](../architecture/2026-11-14-aggregation-interfaces.md) §10）。据此，MG-R005 / MG-R006 的原生场景是**待重跑**，不是不可实现；本表状态（`PASS_MOCK` / `NOT_TESTED`）不变，因为本轮没有重跑。
+> **2026-11-14 政策更正与重跑结果（保留历史事实）**：这次整合没有读写 `~/.codex/auth.json`，那是**当轮政策**的要求，不是技术限制。当时“不复制、不触碰认证材料”的一刀切规则在生效，因此原生父子线程场景没有运行；所有者已于 **2026-11-14** 解除该限制，认证材料可在明确、有界、可审计的授权下读取与备份（[接口 ADR](../architecture/2026-11-14-aggregation-interfaces.md) §10）。**该次重跑已于 2026-11-14 完成**：真实原生父子代理、原生中断与恢复取证见 [真实原生验收](aggregation-native-real-2026-11-14.md)（树 `67b9735`，MG-R005 / MG-R006 实测 `PASS_REAL`）。本表 §8 的 MG-R005 `PASS_MOCK` / MG-R006 `NOT_TESTED` 是整合轮快照，已被较新证据以「取代」标记显式覆盖；历史事实保留不删，当前状态以 [验收矩阵](aggregation-acceptance-matrix.md) 为准。门禁仍为 `ready:false`（R001 / R004 等仍非 `PASS_REAL`）。
 
 ## 9. 未做与边界
 
@@ -214,6 +214,7 @@ A2 的 `activate`/`deactivate` handler 只会把结果包成 200、把 `DesktopE
 | F5 | `PASS（本文件）`、`N/A` 不是合法状态词汇 | 证据文档手写状态列 | P01 改为 `PASS_MOCK` / `BLOCKED` 并补原因；生成器拒绝非五值词汇 | 同上（`invalid status` 反例） |
 | F6 | UI 说聚合接口未接线、要用户找接线补丁 | 文案停留在接线前 | `ebfb1d6`：说明真实原因（实例版本/未加载模块），渲染条件不变 | `agg-desktop-ui`（禁止过期文案回归） |
 
-当前状态分布（证据文档 → 矩阵）：`PASS_REAL` 1（MG-R012，`4feafe0` 上的请求级 Luna 回执）、
-`PASS_MOCK` 9、`NOT_TESTED` 2（MG-R004、MG-R006）。发布门禁仍为 `ready:false`：11 项没有真实目标回执，
-一项 `PASS_REAL` 不构成发布条件，也不替代其余需求。
+当前状态分布（证据文档 → 矩阵，2026-11-14 收尾轮重新生成后）：`PASS_REAL` 3（MG-R005、MG-R006 见
+[真实原生验收](aggregation-native-real-2026-11-14.md)，MG-R012 见 [真实 Luna 验收](aggregation-real-luna-2026-11-14.md)）、
+`PASS_MOCK` 7、`NOT_TESTED` 1（MG-R004）、`FAIL` 0、`BLOCKED` 0。发布门禁仍为 `ready:false`：R001 / R004 等
+仍缺真实目标回执，3 项 `PASS_REAL` 不构成发布条件，也不替代其余需求。

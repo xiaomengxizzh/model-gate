@@ -87,18 +87,19 @@ test('矩阵每行包含契约原文，状态与证据文档一致，门禁不�
   // 12 行数据 + 1 行表头 + 1 行分隔
   const rows = doc.split('\n').filter((l) => /^\| MG-R\d{3} \|/.test(l))
   assert.equal(rows.length, 12)
-  // 状态不是手写常量，而是逐行搬运证据文档：9 PASS_MOCK + 2 NOT_TESTED + 1 PASS_REAL（MG-R012）。
+  // 状态不是手写常量，而是逐行搬运证据文档：8 PASS_MOCK + 1 NOT_TESTED（MG-R004）+ 3 PASS_REAL（MG-R005/R006/R012）。
   for (const row of built.rows) {
     assert.ok(doc.includes('| ' + row.id + ' |'), 'missing matrix row ' + row.id)
     assert.ok(rows.some((l) => l.startsWith('| ' + row.id + ' |') && l.includes('| ' + row.status + ' @ `')), 'status drifted for ' + row.id)
     assert.ok(rows.some((l) => l.startsWith('| ' + row.id + ' |') && l.includes(row.statusBasis)), 'evidence basis missing for ' + row.id)
   }
-  assert.deepEqual(countByStatus(doc), { NOT_TESTED: 2, BLOCKED: 0, FAIL: 0, PASS_MOCK: 9, PASS_REAL: 1 })
+  assert.deepEqual(countByStatus(doc), { NOT_TESTED: 1, BLOCKED: 0, FAIL: 0, PASS_MOCK: 8, PASS_REAL: 3 })
   // PASS_REAL 只能是已有真实回执的需求，且必须钉住完整 SHA；不接受“多一行也算通过”的扩散。
   const realRows = rows.filter((l) => l.includes('PASS_REAL @ `'))
-  assert.equal(realRows.length, 1, 'exactly one requirement may be PASS_REAL')
-  assert.ok(realRows[0].startsWith('| MG-R012 |'), 'only MG-R012 has request-level Luna evidence')
-  assert.match(realRows[0], /[0-9a-f]{40}/, 'PASS_REAL row must pin a full 40-hex SHA')
+  assert.equal(realRows.length, 3, 'exactly three requirements may be PASS_REAL')
+  const realIds = realRows.map((l) => l.match(/^\|\s*(MG-R\d{3})/)[1]).sort()
+  assert.deepEqual(realIds, ['MG-R005', 'MG-R006', 'MG-R012'], 'PASS_REAL allowlist drifted')
+  for (const row of realRows) assert.match(row, /[0-9a-f]{40}/, 'PASS_REAL row must pin a full 40-hex SHA')
 })
 
 function countByStatus (doc) {

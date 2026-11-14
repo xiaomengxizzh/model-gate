@@ -93,3 +93,12 @@
 ## 7. 确认
 
 本收尾轮未读取、未打印、未提交任何凭据，未发起新 OAuth、未安装下载、未做 live probe；上一轮真实实跑 37/60 请求、14/40 分钟，且 26/26 GPT 请求均为 `gpt-6-luna`。原始脱敏证据（routes、event JSONL、rollouts、negatives）仅存于临时目录，不随仓库提交。所有者进程与端口 19030/19031 状态如上。
+
+## 8. 需求状态（原生验收增量）
+
+本表是 2026-11-14 原生父子代理实跑的状态增量，是验收矩阵的状态来源之一。其余需求状态见 [整合证据](aggregation-integration-2026-11-14.md) §8 与 [验收矩阵](aggregation-acceptance-matrix.md)。较新证据取代旧快照时按生成器要求写出 `取代 <OLD_STATUS> @ <OLD_DOC_PATH>`。
+
+| 需求 | 状态 | 依据 |
+| --- | --- | --- |
+| MG-R005 | `PASS_REAL` | 真实原生父子代理取证见本文件 §2 / §4（被测树 `67b97354ad28a3924607b35a663801f417f14b8e`）：真实 `codex exec` 父进程、原生 `collaboration__spawn_agent`、真实子 rollout 带 `parent_thread_id` 与 `thread_spawn depth:1`、原生 `exec_command` 回执；真实目标离线不变量由 `agg-native-invariants.test.mjs`、`agg-native-capabilities.test.mjs` 覆盖；取代 PASS_MOCK @ docs/evidence/aggregation-integration-2026-11-14.md |
+| MG-R006 | `PASS_REAL` | 真实同一子代理跨五个任务、原生中断收敛到单一 `interrupted` 终态、同一子代理恢复、上下文证明、无重复派单见本文件 §2 / §4（被测树 `67b97354ad28a3924607b35a663801f417f14b8e`）；中断/等待离线不变量由 `agg-native-interrupt.test.mjs`、`agg-native-wait.test.mjs` 覆盖；取代 NOT_TESTED @ docs/evidence/aggregation-integration-2026-11-14.md |
