@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { startGateway, startScriptedUpstream } from './harness.mjs'
+import { buildHeaders } from '../../../src/forward.js'
+import { entryOf, isGoBinding, newHeaders, SESSION_HEADER } from '../../../src/providers/opencode-go.js'
 
 // OpenCode Go 强制 x-opencode-session（缺失 → 400 MissingSessionID）。Codex 0.167 只发 session-id/thread-id，
 // 且这些官方头在第三方目标上会被剥掉，因此网关必须**派生**该头。
@@ -41,4 +43,21 @@ test('opencodego：同线程派生值稳定（会话亲和），跨进程/跨请
   const r3 = await call({})
   assert.equal(r3.status, 200)
   assert.match(String(hits[2].headers['x-opencode-session'] || ''), /^mg-[0-9a-f-]{36}$/, '无线索时给请求内独立 id')
+})
+
+// 头构造层回归：Desktop 现行位形是 baseUrl=/inference/go + pathPrefix=/openai（bin/mg-desktop.mjs），
+// 不含 /v1。该形状此前只有「provider 恰好命名为 opencodego」才算 Go 绑定；换名字后 chat 入口
+// 不再带 x-opencode-session（真实上游 400 MissingSessionID），responses 入口因走同一派生仍然正常。
+test('opencodego：/inference/go + pathPrefix=/openai 的 chat 与 responses 头一致（不按 provider id 猜）', () => {
+  const provider = { id: 'go-work', baseUrl: 'https://opencode.ai/inference/go', pathPrefix: '/openai', api: 'openai' }
+  assert.equal(entryOf(provider).ok, true, 'Desktop 位形必须被记为现行 Go 入口')
+  assert.equal(isGoBinding(provider), true, 'Go 绑定按 URL 形状识别，不依赖 provider id')
+
+  const req = { headers: { 'session-id': 'codex-thread-1' } }
+  const chat = buildHeaders(req, provider, Buffer.from('{}'), {}, 'openai', { model: 'x' }, {})
+  const native = buildHeaders(req, provider, Buffer.from('{}'), {}, 'responses', { model: 'x' }, {})
+  assert.match(String(chat[SESSION_HEADER] || ''), /^[A-Za-z0-9_-]{32}$/, 'chat 入口必须带派生会话头')
+  assert.equal(chat[SESSION_HEADER], native[SESSION_HEADER], '两条入口必须复用同一派生，不得各生成一个值')
+  assert.equal(chat[SESSION_HEADER], newHeaders({ req, provider, cfg: {} }).session.value, '复用既有 newHeaders 派生，不另造值')
+  assert.equal(chat['session-id'], undefined, '官方 session-id 仍不得原样外流')
 })

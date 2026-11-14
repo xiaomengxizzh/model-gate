@@ -73,6 +73,10 @@ export function entryOf(def) {
   // baseUrl 只到入口目录时，chat/responses 由协议决定，二者都合法；但必须标 ambiguous（诊断可见）。
   if (url.endsWith('/inference/go/openai/v1')) return { ok: true, entry: ENTRIES.CHAT, host, url, source: 'baseUrl', ambiguous: true }
   if (url.endsWith('/inference/go/v1')) return { ok: true, entry: ENTRIES.CHAT_V1, host, url, source: 'baseUrl', ambiguous: true }
+  // Desktop 现行位形：provider.baseUrl 到 /inference/go、pathPrefix=/openai（bin/mg-desktop.mjs）。
+  // 该目录不含版本段，发送层再拼 /v1/…；与 go-openai-v1 是同一绑定，必须按 URL 形状识别，
+  // 否则只有恰好叫 `opencodego` 的 provider 才算 Go 绑定，改个名字就丢掉 x-opencode-session。
+  if (url.endsWith('/inference/go/openai')) return { ok: true, entry: ENTRIES.CHAT, host, url, source: 'baseUrl', ambiguous: true, root: true }
   // 历史 live 脚本用的是 /inference/go 根，由发送层再拼 /v1/…（本树 CHANGELOG 2026-09 记录）。
   if (url.endsWith('/inference/go')) return { ok: true, entry: ENTRIES.CHAT_V1, host, url, source: 'baseUrl', ambiguous: true, root: true }
   if (url.includes('/zen/go/')) return { ok: true, entry: ENTRIES.LEGACY_ZEN, host, url, source: 'baseUrl' }
