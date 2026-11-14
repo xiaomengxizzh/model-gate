@@ -218,3 +218,22 @@ A2 的 `activate`/`deactivate` handler 只会把结果包成 200、把 `DesktopE
 [真实原生验收](aggregation-native-real-2026-11-14.md)，MG-R012 见 [真实 Luna 验收](aggregation-real-luna-2026-11-14.md)）、
 `PASS_MOCK` 7、`NOT_TESTED` 1（MG-R004）、`FAIL` 0、`BLOCKED` 0。发布门禁仍为 `ready:false`：R001 / R004 等
 仍缺真实目标回执，3 项 `PASS_REAL` 不构成发布条件，也不替代其余需求。
+
+## 11. Responses→Chat 翻译层与按模型协议闸门（本分支实际状态，2026-11-14 收尾轮）
+
+状态以代码为准，不把「递延」写成「未接线」：
+
+- 翻译层模块 `src/codex/chat-compat.js` 已随 `feat/agg-chat-compat` 合入（`1f963ad`），离线套件
+  `agg-chat-compat.test.mjs` 已登记进 `scripts/test/run.mjs`（全量 100 套件），单独运行 24 / 24 通过，
+  并已纳入 `package.json` 的 `check` 语法链。
+- **该模块已被运行时引用**：`src/index.js` 导入 `resolveUpstreamProtocol` / `RESPONSES` /
+  `UNSUPPORTED_PROTOCOL`；按模型协议闸门（chat / responses 显式路由、不支持协议显式失败）已在
+  `ec630f3` 落地。这是本分支的实际代码状态，不再标记为「未接线」或「递延」。
+- Go chat 入口的 `x-opencode-session` 头补齐已在 `46562bd` 落地（`src/request.js`）；此前真实
+  400 `MissingSessionID` 的修复已在本分支内。
+- **事实性结论（供所有者决策）**：`src/format.js` 已含 chat 侧 `anthropic` / `gemini` 适配器
+  （见该文件 `const anthropic`、`Gemini` 段）。因此当前 20 条不可路由模型是被**路由策略**挡住，
+  不是缺少翻译实现；是否开放 anthropic / google 路由是产品/策略决定，仍是**本轮未完成**事项。
+- **本轮仍未完成**：原版 Desktop GUI 与模型选择器的真实测试、真实 `~/.codex` 激活演练、外部中断
+  （Ctrl-C / app-server `turn/interrupt`）、Responses WebSocket、anthropic / google 路由决策、
+  第二真实身份。上述能力**不得**因翻译层已合入而被表述为「已上线验收」。
