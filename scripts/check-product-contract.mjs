@@ -52,13 +52,13 @@ ok(prompt.includes('不得擅自合并 main'), 'prompt must prohibit unauthorize
 const v2Scope = read('docs/product/2026-11-14-owner-scope-v2.md')
 const v2Plan = read('docs/roadmap/2026-11-14-go-deepseek-native-compact-plan.md')
 const v2Prompt = read('docs/roadmap/2026-11-14-go-deepseek-native-compact-start.md')
-const v2Rows = [...v2Scope.matchAll(/^\\|\\s*(MG-R\\d{3})\\s*\\|/gm)].map(x => x[1])
+const v2Rows = [...v2Scope.matchAll(/^\|\s*(MG-R\d{3})\s*\|/gm)].map(x => x[1])
 ok(JSON.stringify(v2Rows) === JSON.stringify(ids),
   'active V2 scope must list MG-R001..MG-R012 exactly once')
 for (const id of ids) {
-  ok(v2Plan.includes(id) || id !== 'MG-R006', 'active V2 plan omits compaction requirement ' + id)
+  if (['MG-R003','MG-R004','MG-R006','MG-R008','MG-R012'].includes(id)) ok(v2Plan.includes(id), 'active V2 plan omits ' + id)
 }
-for (const word of ['deepseek-v4.1-flash','Codex','原生压缩','不得自建压缩']) {
+for (const word of ['deepseek-v4.1-flash','Codex','原生压缩','不可自建压缩']) {
   ok(v2Scope.includes(word), 'active V2 scope missing ' + word)
 }
 for (const word of ['native compaction','compaction','gpt-6-luna','OPTIONAL_STOP']) {
