@@ -46,6 +46,7 @@ export const SUITES = [
   'scripts/test/offline/agg-native-interrupt.test.mjs',
   'scripts/test/offline/agg-native-invariants.test.mjs',
   'scripts/test/offline/agg-native-wait.test.mjs',
+  'scripts/test/offline/agg-runtime-reload.test.mjs',
   'scripts/test/offline/agg-tenant-isolation.test.mjs',
   'scripts/test/offline/aggregation-acceptance-audit.test.mjs',
   'scripts/test/offline/aggregation-acceptance-gate.test.mjs',

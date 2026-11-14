@@ -80,14 +80,27 @@ function syntheticRequest (method, path) {
   }
 }
 
-function buildDeps (cfg, log) {
+function buildDeps (cfg, log, reload) {
   const dir = configPaths().dir
-  const registry = createRegistry({ log })
+  const registry = createRegistry({ log, reload })
   const cacheStore = createFileSnapshotStore({ dir })
   const discovery = createDiscoveryEngine({ registry, cacheStore, cfg: cfg || {} })
   const catalog = createAggregatedCatalog({ registry, cacheStore, dir, readConfig: () => (cfg || {}) })
   const handlers = createAggregationHandlers({ registry, discovery, catalog, readConfig: () => (cfg || {}), activation: null })
   return { registry, discovery, catalog, handlers }
+}
+
+// 写成功后把磁盘上的新配置带回进程内存：复用入口注入的 reload（即 /api/config/reload 用的
+// 同一个 reloadConfig），绝不另建第二条重载路径。没有注入或重载失败时如实报告 needsRestart，
+// 不谎称已生效——聚合模式的收据闸门读的是内存 cfg，这里说谎等于让闸门继续用旧配置。
+function runtimeReload (ctx) {
+  if (typeof ctx.reload !== 'function') return { applied: false, needsRestart: true, reason: 'reload_unavailable' }
+  try {
+    ctx.reload()
+    return { applied: true, needsRestart: false, reason: null }
+  } catch (error) {
+    return { applied: false, needsRestart: true, reason: (error && error.code) || 'reload_failed' }
+  }
 }
 
 function snapshotOf (deps, providerId) {
@@ -371,7 +384,7 @@ export async function handleAggregationApi (ctx = {}) {
   const rest = path.slice(BASE.length)
   let deps
   try {
-    deps = buildDeps(ctx.cfg, ctx.log)
+    deps = buildDeps(ctx.cfg, ctx.log, ctx.reload)
   } catch (error) {
     return fail(503, (error && error.code) || 'aggregation_not_configured', (error && error.message) || '聚合模块未配置')
   }
@@ -395,7 +408,7 @@ export async function handleAggregationApi (ctx = {}) {
       })
       liftVersionConflict(out)
       if (out.status === 201 && out.body) {
-        return { status: 201, body: { ok: true, provider: out.body.provider, configVersion: out.body.configVersion } }
+        return { status: 201, body: { ok: true, provider: out.body.provider, configVersion: out.body.configVersion, reload: runtimeReload(ctx) } }
       }
       return out
     }
@@ -417,6 +430,9 @@ export async function handleAggregationApi (ctx = {}) {
           params: { id },
         })
         liftVersionConflict(out)
+        if (out && out.status === 200 && out.body && out.body.ok === true) {
+          return { status: 200, body: Object.assign({}, out.body, { reload: runtimeReload(ctx) }) }
+        }
         return out
       }
     }
@@ -474,14 +490,14 @@ export async function handleAggregationApi (ctx = {}) {
         consentToken: token,
         expectedSha: body && body.expectedSha !== undefined ? String(body.expectedSha) : undefined,
       }))
-      return { status: 200, body: Object.assign({ ok: true }, applied) }
+      return { status: 200, body: Object.assign({ ok: true }, applied, { reload: runtimeReload(ctx) }) }
     }
 
     if (rest === '/deactivate' && method === 'POST') {
       const out = await desktopDeactivate(Object.assign(desktopOpts(ctx.cfg), {
         expectedSha: body && body.expectedSha !== undefined ? String(body.expectedSha) : undefined,
       }))
-      return { status: 200, body: Object.assign({ ok: true }, out) }
+      return { status: 200, body: Object.assign({ ok: true }, out, { reload: runtimeReload(ctx) }) }
     }
 
     if (rest === '' || rest === '/') return fail(404, 'aggregation_route_unknown', '未知聚合路由：' + method + ' ' + path)

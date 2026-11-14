@@ -1476,7 +1476,7 @@ function checkThirdPartyOpaque(state, nProv, nDef, body) {
 // 聚合模式是否真的在用：只有配置里登记了聚合 provider 才启用 A4 的授权收据二次校验。
 // 默认单操作员配置（没有任何 aggregation 记录）保持原有字节级行为不变。
 const AGG_PROVIDER_SCHEMA = 'modelgate.aggregation.provider/1'
-function aggregationModeActive(cfg) {
+export function aggregationModeActive(cfg) {
   const providers = (cfg && cfg.providers) || {}
   for (const entry of Object.values(providers)) {
     if (entry && entry.aggregation && entry.aggregation.schema === AGG_PROVIDER_SCHEMA) return true
@@ -1882,7 +1882,7 @@ function makeHandler(state) {
         const rawBody = req.method === 'POST'
           ? await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
           : undefined
-        const out = await handleAggregationApi({ method: req.method, path, cfg: state.cfg, log, rawBody, explicitAdmin: admin.explicitAdmin, managedRoot: state.managedRoot === true, isLocal: true })
+        const out = await handleAggregationApi({ method: req.method, path, cfg: state.cfg, log, rawBody, explicitAdmin: admin.explicitAdmin, managedRoot: state.managedRoot === true, isLocal: true, reload: () => reloadConfig(state) })
         if (out) sendJson(res, out.status, out.body)
         return
       }
