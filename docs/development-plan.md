@@ -1,5 +1,7 @@
 # 开发计划与任务状态
 
+> **2026-11-14 产品优先级纠偏：** 本文以下历史状态与计划仍可作工程证据，但不再作为最终产品验收的唯一来源。所有者不可降级目标为 [MG-R001..MG-R012](product/2026-11-14-owner-product-contract.md)，直接执行 [2026-11-14 聚合伪代码计划](roadmap/2026-11-14-aggregation-pseudocode-plan.md) 并使用 [Agent Team 启动提示词](roadmap/2026-11-14-aggregation-agentteam-start.md)。旧阶段的 OFFLINE_RC、V1 11/11 Mock、CLI 或单一 DeepSeek 成功不等于“GUI 全量聚合 + 官方套餐 + 原生 Agent Team”正式验收，冲突之处以新契约为准。
+
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
 ## 2026-11-14 原生父子闭环与公开订阅路由

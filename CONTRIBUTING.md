@@ -1,5 +1,7 @@
 # 开发规范
 
+> **禁止需求降级：** 本项目以 [MG-R001..MG-R012 所有者产品契约](docs/product/2026-11-14-owner-product-contract.md) 为最终产品目标，以 [可执行伪代码总计划](docs/roadmap/2026-11-14-aggregation-pseudocode-plan.md) 为实施入口。执行者不能通过缩小验收范围、静默删模型、改为 MCP/非原生 Agent 或替换 GPT-6 Luna 来宣布完成。新开发 PR 需逐项链接 MG-R ID，独立验收绑定精确 commit SHA；最终产品 PASS 与单元测试 PASS 严格区分。
+
 新增大型安装/下载：无；历史提议仅供研究，不自动执行。任何依赖动作先遵守 [资源规则](RESOURCE_APPROVAL.md)。
 
 ## 选择任务
