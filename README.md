@@ -1,5 +1,7 @@
 # ModelGate（model-gateway）
 
+> **正式产品目标与交付口径（2026-11-14）：** [所有者不可降级产品契约](docs/product/2026-11-14-owner-product-contract.md) · [完整伪代码执行计划](docs/roadmap/2026-11-14-aggregation-pseudocode-plan.md) · [含主代理与 5 子代理的启动提示词](docs/roadmap/2026-11-14-aggregation-agentteam-start.md)。目标为 GUI 一键聚合、保留 ChatGPT 套餐、自动接入 OpenCode 用户可用全部模型、原版 Codex Desktop GUI 与完整原生 Agent Team。**现有能力/边界段落记录历史进度，不代表这些最终需求已通过。**
+
 本地 OpenAI 兼容模型网关，统一 Chat / Responses 转发、失败重试、多上游兜底、429 治理、SSE 续传和用量统计。Node.js >=24，运行时无第三方 npm 依赖；管理面板由同一进程提供。当前验收线只有 **Linux + Node 24**（见[运行时支持矩阵](#运行时支持矩阵)）。
 
 新一代控制台（候选版）位于 `/ui-next`，源代码在 `src/ui-next/`；旧管理台 `/` 与 `/admin` 保留，未经所有者批准不做默认入口替换。
