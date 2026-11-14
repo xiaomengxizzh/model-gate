@@ -295,6 +295,10 @@ const SSE_HEADERS = {
   'transfer-encoding': 'chunked',
 }
 const TERMINAL_TYPES = new Set(['response.completed', 'response.failed', 'response.incomplete'])
+// 客户端中断/取消的本地终态：不是上游帧，也绝不写进已断开的连接。
+// 与 'response.failed' 区分开，避免把"用户取消"记成"上游故障"（熔断/错误计数）。
+export const RESPONSE_CANCELED = 'response.canceled'
+export const CLIENT_CANCELED_CODE = 'CLIENT_CANCELED'
 
 // 契约 §4.2：终态事件判定（唯一真源，适配器与调用方共用）。
 export function isCodexTerminalEvent(type) {
@@ -395,6 +399,7 @@ export function createCodexStreamAdapter(res, opts = {}) {
   const parser = createCodexSSEParser()
   const events = []
   let terminal = null
+  let terminalCode = null
   let usage = null
   let usageReported = false
   let ended = false
@@ -536,6 +541,12 @@ export function createCodexStreamAdapter(res, opts = {}) {
     // usage 只在终态记一次；completed 缺失 usage 记 0，不臆造 reasoning/缓存字段。
     recordUsage(isObject(data.response) ? data.response.usage : null)
     terminal = type
+    if (type === 'response.completed') terminalCode = 'completed'
+    else if (type === 'response.incomplete') terminalCode = 'incomplete'
+    else {
+      const err = isObject(data.error) ? data.error : (isObject(data.response) && isObject(data.response.error) ? data.response.error : null)
+      terminalCode = err && typeof err.code === 'string' && err.code ? err.code : 'response_failed'
+    }
     events.push({ type, data })
     await sendRaw(outBlock + '\n\n')
   }
@@ -644,23 +655,62 @@ export function createCodexStreamAdapter(res, opts = {}) {
       error,
     }
     terminal = 'response.failed'
+    terminalCode = code
     recordUsage(null) // 断流也保证 usage 只回调一次（记 0，不臆造上游用量）
-    events.push({ type: 'response.failed', data, synthetic: true })
-    try {
-      await sendRaw('event: response.failed\ndata: ' + JSON.stringify(data) + '\n\n')
-    } catch (err) {
-      warn('codex 流：写失败帧时客户端不可写', String((err && (err.code || err.message)) || err))
+    // 客户端已断开/已 end：不写帧（不可达），但终态照样只记录一次。
+    const delivered = !!res && !res.destroyed && !res.writableEnded
+    events.push({ type: 'response.failed', data, synthetic: true, delivered })
+    if (delivered) {
+      try {
+        await sendRaw('event: response.failed\ndata: ' + JSON.stringify(data) + '\n\n')
+      } catch (err) {
+        warn('codex 流：写失败帧时客户端不可写', String((err && (err.code || err.message)) || err))
+      }
     }
     ended = true
     finishRes()
+  }
+
+  /**
+   * 客户端中断/取消（父代理按 Esc、连接被关闭、请求被 abort）：仍然必须落到**唯一**终态，
+   * 否则下游看不到任何终态、预算/槽位也无法按终态释放。取消不是上游故障：
+   * 这里记录本地终态 RESPONSE_CANCELED + CLIENT_CANCELED，不写 response.failed 帧，
+   * 避免把用户取消计入 provider 错误/熔断。
+   */
+  async function cancel(note) {
+    if (terminal) { finishRes(); return }
+    const message = String(note || 'client canceled before terminal state')
+    terminal = RESPONSE_CANCELED
+    terminalCode = CLIENT_CANCELED_CODE
+    ended = true
+    recordUsage(null)
+    events.push({
+      type: RESPONSE_CANCELED,
+      data: {
+        type: RESPONSE_CANCELED,
+        response: { id: responseId, object: 'response', created_at: createdAt, status: 'canceled', model, output: [], error: { code: CLIENT_CANCELED_CODE, message } },
+        error: { code: CLIENT_CANCELED_CODE, message },
+      },
+      synthetic: true,
+      delivered: false,
+    })
+    warn('codex 流：客户端中断，记录唯一取消终态', message)
+    finishRes()
+  }
+
+  // 客户端连接关闭且尚未终态 → 唯一取消终态（不写帧）。终态之后的 close 是正常收尾，不重复记录。
+  if (res && typeof res.on === 'function') {
+    try { res.on('close', () => { if (!terminal) { cancel('client closed before terminal state').catch(() => {}) } }) } catch {}
   }
 
   return {
     push,
     end,
     fail,
+    cancel,
     events,
     get terminal() { return terminal },
+    get terminalCode() { return terminalCode },
     get usage() { return usage },
     get droppedDoneFrames() { return droppedDone },
   }

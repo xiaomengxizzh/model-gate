@@ -36,12 +36,14 @@ import {
   collapseToolCallName,
   collapseResponseOutputItems,
   detectOpaqueV2Task,
+  detectOpaqueToolPayload,
   flattenAgentMessage,
   analyzeToolPairs,
   validateCodexResponsesEnvelope,
   buildToolPlan,
   projectOrderedHistory,
 } from './codex/interop.js'
+import { replayCodeMode, scanCodeMode } from './codex/native-cells.js'
 
 const EFFORT_NONE_ALIAS = new Set(['off', 'none', 'disabled', 'false'])
 const HANDLED_REQ_FIELDS = new Set([
@@ -72,6 +74,10 @@ export const UNSUPPORTED_ALLOWED_TOOLS = 'unsupported_allowed_tools'
 export const UNSUPPORTED_TOOL_CHOICE = 'unsupported_tool_choice'
 export const TOOL_PAIRING_INVALID = 'tool_pairing_invalid'
 export const OPAQUE_CONTINUATION_UNSUPPORTED = 'opaque_continuation_unsupported'
+// 原生路由：协作任务正文是密文（不可读）→ 不得当空任务转发给第三方上游。
+export const OPAQUE_COLLABORATION_TASK = 'opaque_collaboration_task'
+// Chat 桥：请求含 Code Mode 单元状态（cell_id）→ 桥无法保真，显式失败而不是静默降级。
+export const CODE_MODE_BRIDGE_UNSUPPORTED = 'code_mode_bridge_unsupported'
 
 // 文档化的可接受有损项（在两种模式下都只记 lossy，不阻断）：
 // metadata/user 不是语义内容；parallel_tool_calls/reasoning.summary 是尽力而为的约束/提示；
@@ -369,6 +375,27 @@ export function bridge(input, opts = {}) {
     }
   }
 
+  // Code Mode 单元状态（exec 让出的 cell_id + 顶层 wait 收取）是原生协作的核心握手机制：
+  // Chat 协议没有单元、没有 wait、也无法表达"同一 cell 恰好一个终态"。静默把它拍平成 tool_calls
+  // 会让父代理以为收取成功（MG-R008 禁止的静默降级），所以这里显式失败，有损模式也不放行。
+  const codeMode = scanCodeMode(req.input)
+  if (codeMode.events.length) {
+    const cellIds = [...new Set(codeMode.events.map((e) => e.cellId).filter(Boolean))]
+    return {
+      body: null,
+      lossy,
+      rejected: {
+        code: CODE_MODE_BRIDGE_UNSUPPORTED,
+        message: '请求含 Code Mode 单元状态（cell_id: ' + (cellIds.join(',') || '(缺失)') + '）；Chat 桥没有单元/wait 语义，无法保真，拒绝静默降级。请改用原生 Responses 上游。',
+      },
+      unsupported: [],
+      aliases: [],
+      pairing: null,
+      signals: codeMode.events.map((e) => ({ kind: e.kind, cellId: e.cellId || '', callId: e.callId || '' })),
+      mode,
+    }
+  }
+
   // call_id 配对诊断（M1-2）：孤儿 tool_output / 缺 call_id 的结果 / 重复 call_id 必须阻断发送，
   // 只记 lossy 会让工具结果错配到别的调用上。tool_call_without_output 不算致命（可能是待执行调用）。
   const pairing = analyzeToolPairs(req.input)
@@ -548,7 +575,9 @@ export function responsesToChat(input, opts = {}) {
  *   · 信封拒绝矩阵（store/background/previous_response_id/truncation/include）；
  *   · 本轮工具声明投影（collaboration namespace 扁平化、三消息工具去 encrypted 标记）；
  *   · 有序历史投影（agent_message 仅可证明明文才投影；reasoning/compaction/控制项按 route 策略）；
- *   · 工具 call_id 配对；非空 encrypted_function_args、未知密文、不可读 agent_message 在发送前拒绝。
+ *   · 工具 call_id 配对；非空 encrypted_function_args、未知密文、不可读 agent_message 在发送前拒绝；
+ *   · 协作任务正文为密文（projected input 里的协作工具 arguments/output）→ opaque_collaboration_task；
+ *   · Code Mode 单元（exec 让出 + 顶层 wait）→ 每 cell 唯一终态，未绑定/重复派单发送前拒绝。
  *
  * generation 边界：plan 只由**本请求**的 tools 构建，restore 也只接受本请求 plan；
  * 不缓存跨请求工具身份，不把上一代 namespace 映射用于下一代。
@@ -570,6 +599,23 @@ export function prepareCodexNativeRequest(body, route) {
     const history = projectOrderedHistory(body.input, route, planned.plan)
     for (const code of history.lossy || []) lossy.push(code)
     if (history.rejected) return fail(history.rejected)
+    // 密文任务：投影后仍带密文字段的协作工具 arguments/output = 不可读任务。
+    // 第三方原生上游没有密钥，转发过去只能被当成“空任务”回复——MG-R008 要求显式失败。
+    const opaqueTask = detectOpaqueToolPayload(history.input)
+    if (opaqueTask.opaque) {
+      const detail = opaqueTask.signals
+        .map((s) => s.toolName + '.' + s.fields.join('/'))
+        .filter((v, i, a) => a.indexOf(v) === i)
+        .join(', ')
+      return fail({
+        code: OPAQUE_COLLABORATION_TASK,
+        message: '协作任务正文不可读（密文：' + detail + '）。网关不解密、不删除、不伪造；拒绝把它当成空任务转发给第三方原生上游，请改用可证明明文的原生路径。',
+      })
+    }
+    // Code Mode 单元让出/收取：每个 cell 恰好一个终态；未绑定/终态后重复 wait 必须在发送前拒绝，
+    // 否则父代理要么原地挂起，要么被重复派单（真实停滞见 docs/evidence/2026-11-13-modelgate-native-live.md）。
+    const cells = replayCodeMode(history.input)
+    if (!cells.ok) return fail(cells.rejected)
     const projected = Object.assign({}, body)
     projected.input = history.input
     // OpenCode Go rejects portable-only top-level controls that are specific to the
@@ -583,7 +629,7 @@ export function prepareCodexNativeRequest(body, route) {
     else delete projected.tools
     if (planned.plan.toolChoice !== undefined) projected.tool_choice = planned.plan.toolChoice
     else delete projected.tool_choice
-    return { body: projected, plan: planned.plan, lossy, rejected: null }
+    return { body: projected, plan: planned.plan, lossy, rejected: null, nativeCells: cells.snapshot }
   } catch (e) {
     // 投影是纯函数；任何未预期异常都按发送前拒绝处理，绝不带着半投影 body 出网。
     const message = String((e && e.message) || e).slice(0, 200)

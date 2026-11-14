@@ -288,6 +288,62 @@ export function detectOpaqueV2Task(body) {
   return { opaque, readable: !opaque, signals }
 }
 
+// 原生路由（第三方 Responses 上游）上的协作工具：它们的 arguments/output 就是任务正文。
+const AGENT_TASK_TOOLS = new Set([
+  'spawn_agent', 'send_message', 'followup_task', 'send_input',
+  'wait_agent', 'interrupt_agent', 'close_agent', 'list_agents', 'resume_agent',
+])
+
+// 只收集"字段名"，不收集值：密文绝不出现在诊断/错误/日志里。
+function collectOpaqueKeys(value, out, depth) {
+  if (depth > 6 || value == null) return
+  if (Array.isArray(value)) { for (const v of value) collectOpaqueKeys(v, out, depth + 1); return }
+  if (!isPlainObject(value)) return
+  for (const key of Object.keys(value)) {
+    if (OPAQUE_FIELDS.includes(key) || key === 'encrypted_function_args' || key.startsWith('encrypted_')) { out.push(key); continue }
+    collectOpaqueKeys(value[key], out, depth + 1)
+  }
+}
+
+/**
+ * 原生路由的密文任务判定：协作工具的 arguments / output 里若出现密文字段，
+ * 该任务对第三方上游就是"不可读的空任务"——必须发送前拒绝，绝不当空任务转发。
+ * 只返回字段名与关联 ID；普通工具里恰好同名的业务字段不误判（工具名白名单）。
+ * 返回 { opaque, signals: [{ kind, toolName, callId, fields }] }
+ */
+export function detectOpaqueToolPayload(input) {
+  const signals = []
+  if (!Array.isArray(input)) return { opaque: false, signals }
+  const callNames = new Map()
+  for (const item of input) {
+    if (!isPlainObject(item)) continue
+    if ((item.type === 'function_call' || item.type === 'custom_tool_call') && typeof item.call_id === 'string' && item.call_id !== '') {
+      callNames.set(item.call_id, typeof item.name === 'string' ? item.name : '')
+    }
+  }
+  for (const item of input) {
+    if (!isPlainObject(item)) continue
+    if (item.type === 'function_call' || item.type === 'custom_tool_call') {
+      const toolName = typeof item.name === 'string' ? item.name : ''
+      if (!AGENT_TASK_TOOLS.has(toolName)) continue
+      const fields = []
+      const raw = item.arguments != null ? item.arguments : item.input
+      collectOpaqueKeys(parseJsonMaybe(typeof raw === 'string' ? raw : undefined), fields, 0)
+      if (fields.length) signals.push({ kind: 'tool_arguments', toolName, callId: typeof item.call_id === 'string' ? item.call_id : '', fields })
+      continue
+    }
+    if (item.type === 'function_call_output' || item.type === 'custom_tool_call_output') {
+      const callId = typeof item.call_id === 'string' ? item.call_id : ''
+      const toolName = callNames.get(callId) || ''
+      if (!AGENT_TASK_TOOLS.has(toolName)) continue
+      const fields = []
+      collectOpaqueKeys(parseJsonMaybe(typeof item.output === 'string' ? item.output : undefined), fields, 0)
+      if (fields.length) signals.push({ kind: 'tool_output', toolName, callId, fields })
+    }
+  }
+  return { opaque: signals.length > 0, signals }
+}
+
 /** 工具 schema 是否显式声明 encrypted:true（明文投影必须在发送前处理）。 */
 export function detectEncryptedToolSchema(tools) {
   let found = false
