@@ -1,5 +1,7 @@
 # ModelGate｜直接执行启动提示词（含主代理 + A1–A5 角色激活）
 
+> **历史 V1 角色启动词，已被所有者更新。** 不再直接启动本提示词；改用 [V2 启动提示词](2026-11-14-go-deepseek-native-compact-start.md) 与 [V2 范围](../product/2026-11-14-owner-scope-v2.md)。原始内容供审计保留。
+
 > 此文件不是讨论提纲，供具备原生 Agent Team 功能的 Codex/AI 执行器**直接复制启动**。仓库：https://github.com/xiaomengxizzh/model-gate ，工作基线：`mg-codex-native`（最初暂停报告 commit `4c5db53`，请以当前远端 HEAD 为准）；产品契约：https://github.com/xiaomengxizzh/model-gate/blob/mg-codex-native/docs/product/2026-11-14-owner-product-contract.md ；唯一实施计划：https://github.com/xiaomengxizzh/model-gate/blob/mg-codex-native/docs/roadmap/2026-11-14-aggregation-pseudocode-plan.md 。
 
 ## 复制以下正文给执行主代理
