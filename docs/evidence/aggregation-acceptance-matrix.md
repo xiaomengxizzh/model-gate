@@ -5,7 +5,7 @@
 
 - 被测树 SHA：`4feafe0e51dc02d48c45734df5b34e70d3679bd5`（来自 docs/evidence/aggregation-real-luna-2026-11-14.md 的「被测树 SHA」字段，生成器不再保存常量）
 - 契约来源：`docs/product/2026-11-14-owner-product-contract.md`（sha256 `e2068e6edbf76eee47db3c04556eb9ab60548556d6632f955af29269e74edc83`）
-- 用例映射来源：`docs/roadmap/2026-11-14-aggregation-pseudocode-plan.md` §I（sha256 `ed743d3c159cadcdeb704a4ecec6e626d5a6abc6e38c921e4dfafb590e892bc1`）
+- 用例映射来源：`docs/roadmap/2026-11-14-aggregation-pseudocode-plan.md` §I（sha256 `0f65aa3d18f1859e2b524714b46ab9129bcc5c3e9b0cd92e135669784cd64250`）
 - 状态来源：`docs/evidence/aggregation-real-luna-2026-11-14.md`（1 行）、`docs/evidence/aggregation-integration-2026-11-14.md`（12 行）、`docs/evidence/agg-p01-opencode-discovery-2026-11-14.md`（6 行）；多份证据对同一需求必须一致。旧轮次快照被新证据取代时，较新文档的依据必须显式写出 `取代 <旧状态> @ <旧文档路径>`，否则生成失败（禁止静默改口径）。
 - 状态口径：契约 §2 的五值（`NOT_TESTED` / `BLOCKED` / `FAIL` / `PASS_MOCK` / `PASS_REAL`）；`PASS_MOCK` 只用于**离线套件真正执行过**的行为，且每行都在「状态依据」里点名已登记的套件。
 - 历史基线：`docs/evidence/aggregation-baseline-2026-11-14.md` §5（采集于 `a9f32c976f5415adb898c31605b362b25d2ee6aa`，sha256 `d7fc53316e07760f77e4234adcaa1175519582ee68a4153673742daffa3f5878`）只说明当时的起点，不是本表当前状态的来源。
