@@ -1497,6 +1497,21 @@ async function proxyOfficialResponses(state, budget, log, opts) {
     // 官方目标只允许官方候选：绝不因故障把官方请求递给第三方（身份串线）。
     if (identity.kind !== 'official') { lastErr = new Error('候选上游不是官方目标：' + pid); continue }
     const upstreamPath = (typeof def.responsesPath === 'string' && def.responsesPath) || (typeof pdef.responsesPath === 'string' && pdef.responsesPath) || (gatewaySubscription ? '/backend-api/codex/responses' : '/v1/responses')
+    const appPlan = state.chatgptPlan && state.chatgptPlan.providerId === pid
+    if (appPlan) {
+      if (gatewaySubscription || !isLoopbackHost(serverHost) || !isLoopbackPeer(req) ||
+          upstreamUrl(prov, upstreamPath).href !== 'https://api.openai.com/v1/responses' ||
+          candidates.length !== 1) {
+        return jsonError(403, 'chatgpt_plan_target_denied', 'ChatGPT 应用授权只允许指定的本机入口与 OpenAI Responses 目标')
+      }
+      try {
+        prov.apiKey = await state.chatgptPlan.accessToken()
+        if (!prov.apiKey) throw new Error('missing grant')
+      } catch {
+        return jsonError(401, 'chatgpt_plan_sign_in_required', '请通过 ModelGate 连接有效的 ChatGPT 套餐授权')
+      }
+    }
+
     if (gatewaySubscription) {
       if (!isGatewaySubscriptionTarget(identity, upstreamPath, state.cfg)) return jsonError(403, 'gateway_subscription_target_not_allowed', 'gatewaySubscription 只允许官方订阅入口')
       if (!localCredential) try { localCredential = readSubscriptionCredential() } catch (error) {
@@ -1550,6 +1565,7 @@ async function proxyOfficialResponses(state, budget, log, opts) {
     try {
       release = await acquireProvider(state, pid, state.cfg, budget.signal)
       const up = await forward(prov, upstreamPath, 'POST', headers, payload, state.cfg.defaults || {}, log, { budget, signal: budget.signal, noRetry: true })
+      if (appPlan) log.info('chatgpt_plan_response', 'provider=' + pid, 'model=' + target.servingName, 'status=' + up.status)
       if (up.status >= 300 && up.status < 400) {
         try { await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true }) } catch {}
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1
@@ -1585,7 +1601,7 @@ async function proxyOfficialResponses(state, budget, log, opts) {
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1
       markFail(state, pid, prov.circuit)
       // 工具历史/已发状态：不得跨候选重放。
-      if (singleShot || (err && err.noReplay)) {
+      if (appPlan || singleShot || (err && err.noReplay)) {
         return jsonError(502, err && err.code ? err.code : 'no_replay', '上游失败且请求含工具历史/已发状态：终止而不换候选重放')
       }
     } finally { if (release) release() }
@@ -2551,6 +2567,7 @@ export function start(opts = {}) {
     cfg, log, router: createRouter(cfg),
     ledgerOptions,
     adapterFactory: opts.adapterFactory,
+    chatgptPlan: opts.chatgptPlan,
     adminToken: process.env.MG_ADMIN_TOKEN || (cfg.server && cfg.server.adminToken) || (cfg._keys && cfg._keys.__mg_admin) || '',
     paths: cfg._paths || configPaths(),
     // N06：运行时可观测收据（有界内存 ring；request/attempt/usage 三类事件，终态去重）。
@@ -2726,8 +2743,11 @@ export function start(opts = {}) {
     })()
     return closing
   }
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    const onBindError = (error) => reject(error)
+    if (opts.rejectBindFailure) server.once('error', onBindError)
     server.listen(port, host, () => {
+      server.off('error', onBindError)
       log.info('model-gateway 已启动: http://' + host + ':' + port + '  (健康检查 /healthz, 控制面板 /)')
       resolve({ cfg, log, server, router: state.router, st: state.st, state, close })
     })
