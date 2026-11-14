@@ -44,6 +44,7 @@ export const SUITES = [
   'scripts/test/offline/codex-interop.test.mjs',
   'scripts/test/offline/codex-official.test.mjs',
   'scripts/test/offline/codex-opencode-session.test.mjs',
+  'scripts/test/offline/codex-p09-native-proxy.test.mjs',
   'scripts/test/offline/codex-quota.test.mjs',
   'scripts/test/offline/codex-role-provider.test.mjs',
   'scripts/test/offline/codex-v2-responses.test.mjs',
