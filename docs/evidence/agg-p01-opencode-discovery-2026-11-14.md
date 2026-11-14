@@ -2,7 +2,7 @@
 
 - **角色**：A2 OpenCode Integration Architect
 - **分支 / worktree**：`feat/agg-a2-discovery` / `.agents/worktrees/agg-a2-discovery`
-- **绑定提交**：`3d68a80`（注册表 + Console 适配）、`b7027c1`（发现）、`cf14f7a`（目录 + 处理器 + 探针）、`47cca72`（离线用例）。本文件提交后其 SHA 由 `git log` 给出。
+- **绑定提交**：`3d68a80`（注册表 + Console 适配）、`b7027c1`（发现）、`cf14f7a`（目录 + 处理器 + 探针）、`47cca72`（离线用例）、`a5c7173`（注册表磁盘指纹修复）。本文件提交后其 SHA 由 `git log` 给出。
 - **需求口径**：`docs/product/2026-11-14-owner-product-contract.md`（MG-R003/R004/R008/R009/R011/R012）与 `docs/architecture/2026-11-14-aggregation-interfaces.md`（ADR-0003）。
 - **结论先行**：**MG-R003 仍为 `PASS_MOCK`，不是 `PASS_REAL`。** 真实 OpenCode Console/Go 的模型清单端点、JSON 形状与账户授权范围尚未由任何 live 调用核对；按任务约束，本轮**没有**向 `opencode.ai` 或任何上游发请求。
 
