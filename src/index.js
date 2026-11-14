@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
 import { gunzipSync, inflateSync, brotliDecompressSync, zstdDecompressSync } from 'node:zlib'
 import { isIP } from 'node:net'
-import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readKeysFresh, readLocalConfigStrict, isConfigUnreadable, modelTarget } from './router.js'
+import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readKeysFresh, readLocalConfigStrict, isConfigUnreadable, modelTarget, configInlineCredentialWarnings } from './router.js'
 import { beginWrite, recoverStore, TARGET_CONFIG, TARGET_KEYS } from './config-transaction.js'
 import { createLogger } from './logger.js'
 import { forward, upstreamUrl, probe, probeModel, probeChat, warm, probeEmbedding, probeRerank } from './request.js'
@@ -543,6 +543,12 @@ function pruneStateCapacity(state) {
 
 function reloadConfig(state) {
   state.cfg = loadConfig()
+  // MG-R008：内联 apiKey 不会被读取（Key 只来自 keys.local.json / apiKeyEnv）。接受却不使用
+  // 等于静默失败，因此每次加载配置都为每个受影响的 provider 留一条稳定 code 的告警——
+  // 只报 provider id 与字段名，绝不回显值。
+  for (const w of configInlineCredentialWarnings(state.cfg)) {
+    if (state.log) state.log.warn(w.code, 'provider=' + w.providerId, 'field=' + w.field, w.message)
+  }
   // D2：把 Codex 目录视图挂到配置上（只读派生，不进配置文件）。目录不可用时为 null，
   // 聚合/官方 slug 将解析为 unknown（fail-closed），普通第三方路由不受影响。
   state.cfg._codexCatalog = codexCatalogView(state.cfg)

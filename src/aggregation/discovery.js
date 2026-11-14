@@ -19,6 +19,7 @@
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { writeFileDurable } from '../config-transaction.js'
+import { inlineCredentialFields } from '../router.js'
 import { sha256Hex, stableModelId, stableStringify } from '../codex/catalog.js'
 import { entryOf as goEntryOf } from '../providers/opencode-go.js'
 import { entryOf as consoleEntryOf, resolveListUrl as consoleListUrl } from '../providers/opencode-console.js'
@@ -563,9 +564,20 @@ export function createDiscoveryEngine(options = {}) {
     if (endpoint.host && !isAllowedHost(endpoint.host, cfg) && !(opts.allowLoopback === true && isLoopback(endpoint.host))) {
       return failureResult('discovery_host_not_allowlisted', '模型清单 host 不在白名单：' + endpoint.host)
     }
+    // 内联 apiKey 永远不会被读取（Key 只来自 keys.local.json / apiKeyEnv）。配置里带了它，
+    // 就必须让操作者看到“这个字段被忽略”，否则上游静默未鉴权、只报 requires an API key。
+    const providerDef = (cfg && cfg.providers && cfg.providers[providerId]) || provider._def || {}
+    const inlineFields = inlineCredentialFields(providerDef)
+    const inlineDiag = inlineFields.length
+      ? diagnostic('inline_api_key_ignored',
+        'provider ' + providerId + ' 配置了内联凭据字段 `' + inlineFields[0] + '`，但该值不会被读取：'
+        + '请改用 keys.local.json 或 provider.apiKeyEnv（稳定 code：inline_api_key_ignored）',
+        { severity: 'warning', providerId, field: inlineFields[0] })
+      : null
     const credential = credentialFor(provider, opts)
     if (!credential && opts.allowAnonymous !== true) {
-      return failureResult('discovery_credential_missing', '没有可用凭据引用；拒绝把“未鉴权”当成“账户没有模型”', { retryable: false })
+      return failureResult('discovery_credential_missing', '没有可用凭据引用；拒绝把“未鉴权”当成“账户没有模型”',
+        { retryable: false, diagnostics: inlineDiag ? [inlineDiag] : [] })
     }
     if (!fetchImpl && !opts.fetchImpl) return failureResult('discovery_transport_missing', '没有可用的 fetch 实现')
     const doFetch = opts.fetchImpl || fetchImpl
@@ -575,6 +587,7 @@ export function createDiscoveryEngine(options = {}) {
     const cacheEntry = normalizeCache(opts.cache)
     const cacheFresh = cacheEntry && (startedAt - (cacheEntry.storedAt || 0)) <= maxAgeMs
     const diagnostics = [diagnostic('discovery_started', '开始发现', { providerId, scope, maxPages })]
+    if (inlineDiag) diagnostics.push(inlineDiag)
     if (endpoint.assumed) {
       diagnostics.push(diagnostic('endpoint_assumed', endpoint.warning || '模型清单端点是显式假设', { severity: 'warning', url: endpoint.url }))
       diagnostics.push(diagnostic('entry_assumption_unverified', '未复核厂商文档；live 前需所有者批准探针', { severity: 'warning' }))

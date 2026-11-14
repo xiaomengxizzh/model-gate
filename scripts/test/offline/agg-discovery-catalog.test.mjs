@@ -10,8 +10,9 @@ import {
 import { createDiscoveryEngine, createMemorySnapshotStore } from '../../../src/aggregation/discovery.js'
 import { createAggregationHandlers } from '../../../src/aggregation/handlers.js'
 import {
-  cacheEntry, consoleProvider, goProvider, makeRegistryStore, readFixture, snapshotOf, tempDir,
+  cacheEntry, consoleProvider, goProvider, jsonResponse, makeRegistryStore, readFixture, snapshotOf, tempDir,
 } from '../fixtures/agg-a2/helpers.mjs'
+import { configInlineCredentialWarnings, inlineCredentialFields, resolveKey } from '../../../src/router.js'
 
 const BASE = readFixture('base-catalog.json')
 
@@ -221,6 +222,89 @@ test('注册表：写入 gateway.local.json、版本 CAS、墓碑删除、拒绝
     assert.equal(local.configVersion, 3)
     assert.ok(!JSON.stringify(local).includes('sk-' + 'should-never-be-stored'))
   } finally { rmSync(store.dir, { recursive: true, force: true }) }
+})
+
+test('内联 Key：add 时拒绝并指明两条受支持通路，绝不回显值', () => {
+  const store = makeRegistryStore()
+  const secret = 'sk-inline-' + 'do-not-echo-123456'
+  try {
+    const registry = createRegistry({ paths: store.paths, readConfig: store.readConfig })
+    let error = null
+    try {
+      registry.addProvider({ kind: 'opencode-console', baseUrl: 'https://opencode.ai/console/v1', apiKey: secret })
+    } catch (e) { error = e }
+    assert.ok(error, '内联 Key 必须被拒绝')
+    assert.equal(error.code, 'provider_key_inline_forbidden')
+    assert.match(error.message, /keys\.local\.json/)
+    assert.match(error.message, /apiKeyEnv/)
+    assert.ok(!error.message.includes(secret), '错误信息不得包含 Key 值')
+    assert.ok(!error.message.includes(secret.slice(0, 8)), '错误信息不得包含 Key 前缀')
+    assert.deepEqual(Object.keys(store.readConfig().providers || {}), [], '拒绝后不得写入任何 provider')
+  } finally { rmSync(store.dir, { recursive: true, force: true }) }
+})
+
+test('已持久化的内联 Key：启动诊断 inline_api_key_ignored，只含 provider id 与字段名', () => {
+  const secret = 'sk-persisted-' + 'never-echo-9876'
+  const cfg = {
+    providers: {
+      console: { baseUrl: 'https://opencode.ai/zen/v1', apiKey: secret },
+      healthy: { baseUrl: 'https://opencode.ai/zen/v1', apiKeyEnv: 'SOME_ENV_NAME' },
+    },
+  }
+  const warnings = configInlineCredentialWarnings(cfg)
+  assert.equal(warnings.length, 1)
+  const w = warnings[0]
+  assert.equal(w.code, 'inline_api_key_ignored')
+  assert.equal(w.providerId, 'console')
+  assert.equal(w.field, 'apiKey')
+  assert.match(w.message, /keys\.local\.json/)
+  assert.match(w.message, /apiKeyEnv/)
+  const text = JSON.stringify(w)
+  assert.ok(!text.includes(secret), '诊断不得包含 Key 值')
+  assert.ok(!text.includes(secret.slice(0, 8)), '诊断不得包含 Key 前缀')
+  assert.deepEqual(inlineCredentialFields({ apiKey: '', api_key: null }), [])
+  assert.deepEqual(inlineCredentialFields({ apiKey: 'x' }), ['apiKey'])
+})
+
+test('两条受支持的 Key 通路仍解析；内联 Key 在发现诊断里显式出现', async () => {
+  const envName = 'TEST_AGG_INLINE_KEY_SRC'
+  const secret = 'sk-inline-' + 'ignored-abcdef'
+  process.env[envName] = 'env-key-value'
+  try {
+    const byEnv = { providers: { console: { baseUrl: 'https://opencode.ai/zen/v1', apiKeyEnv: envName } } }
+    assert.deepEqual(resolveKey(byEnv, byEnv.providers.console, 'console'), { key: 'env-key-value', source: 'env' })
+    const byStore = { _keys: { console: 'store-key-value' }, providers: { console: { baseUrl: 'https://opencode.ai/zen/v1' } } }
+    assert.deepEqual(resolveKey(byStore, byStore.providers.console, 'console'), { key: 'store-key-value', source: 'keys' })
+
+    // 只有内联 Key → 凭据确实缺失，但失败信息必须点名“内联字段被忽略”，而不是只说“requires an API key”。
+    const onlyInline = { providers: { console: { baseUrl: 'https://opencode.ai/zen/v1', apiKey: secret } } }
+    const engine1 = createDiscoveryEngine({
+      fetchImpl: async () => jsonResponse({ data: [] }),
+      cfg: onlyInline,
+      cacheStore: createMemorySnapshotStore(),
+      now: () => Date.parse('2026-11-14T00:00:00Z'),
+    })
+    const failed = await engine1.discover(consoleProvider({ apiKeyEnv: null, keyRef: 'none' }), { scope: 's1' })
+    assert.equal(failed.code, 'discovery_credential_missing')
+    const diag = failed.diagnostics.find((d) => d.code === 'inline_api_key_ignored')
+    assert.ok(diag, '缺失凭据时必须带 inline_api_key_ignored')
+    assert.equal(diag.providerId, 'console')
+    assert.equal(diag.field, 'apiKey')
+    assert.ok(!JSON.stringify(failed).includes(secret))
+
+    // 内联 Key 与有效 apiKeyEnv 并存：发现照常成功，但诊断仍然提示内联字段未被使用。
+    const both = { providers: { console: { baseUrl: 'https://opencode.ai/zen/v1', apiKey: secret, apiKeyEnv: envName } } }
+    const engine2 = createDiscoveryEngine({
+      fetchImpl: async () => jsonResponse({ data: [{ id: 'm1', limit: { context: 200000 } }] }),
+      cfg: both,
+      cacheStore: createMemorySnapshotStore(),
+      now: () => Date.parse('2026-11-14T00:00:00Z'),
+    })
+    const ok = await engine2.discover(consoleProvider({ apiKeyEnv: envName }), { scope: 's1' })
+    assert.equal(ok.ok, true)
+    assert.ok(ok.diagnostics.some((d) => d.code === 'inline_api_key_ignored'))
+    assert.ok(!JSON.stringify(ok).includes(secret))
+  } finally { delete process.env[envName] }
 })
 
 function fakeReq(options = {}) {

@@ -16,7 +16,7 @@
 // 同时导出 `createRegistry()` 供测试使用隔离目录。
 
 import { beginWrite, fingerprint, TARGET_CONFIG } from '../config-transaction.js'
-import { configPaths, loadConfig, readLocalConfigStrict } from '../router.js'
+import { configPaths, loadConfig, readLocalConfigStrict, INLINE_CREDENTIAL_FIELDS } from '../router.js'
 import { isOpencodeGoHost } from '../codex/identity.js'
 
 export const REGISTRY_SCHEMA = 'modelgate.aggregation.provider/1'
@@ -33,7 +33,8 @@ export const PROVIDER_SEGMENTS = Object.freeze({
 const PROVIDER_RUNTIME_FIELDS = Object.freeze(['hasKey', 'keySource', 'keyOk', 'st', 'probe'])
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 const ID_RE = /^[a-z][a-z0-9_-]{0,63}$/
-const SECRET_FIELDS = Object.freeze(['apiKey', 'apikey', 'api_key', 'key', 'token', 'secret', 'password', 'authorization'])
+// 内联凭据字段清单与 router 共用一份：注册表拒绝接受，启动诊断对已持久化的配置告警。
+const SECRET_FIELDS = INLINE_CREDENTIAL_FIELDS
 
 export class RegistryError extends Error {
   constructor(code, message, details = {}) {
@@ -104,8 +105,11 @@ export function normalizeProviderConfig(input, cfg = {}) {
   if (!isPlainObject(input)) reject('provider_invalid', 'addProvider 需要一个 provider 配置对象')
   for (const field of Object.keys(input)) {
     if (SECRET_FIELDS.includes(field) && input[field] != null && input[field] !== '') {
+      // 接受一个自己不会读取的字段 = 静默失败（上游会以未鉴权发送）。这里直接拒绝，
+      // 并把两条受支持的通路写清楚：keys.local.json，或 apiKeyEnv 指向的环境变量名。
       reject('provider_key_inline_forbidden',
-        '拒绝内联凭据字段 `' + field + '`：Key 只能经 apiKeyEnv（变量名）或 keys 库引用，绝不进入配置/目录/日志')
+        '拒绝内联凭据字段 `' + field + '`：该值不会被读取，也不允许写入配置/目录/日志。'
+        + '请改用 ① keys.local.json（config/keys.local.json，经面板/CLI 写入）或 ② provider.apiKeyEnv 指定环境变量名')
     }
   }
   const kind = lower(input.kind)
