@@ -32,6 +32,7 @@ export const SUITES = [
   'scripts/test/offline/admin-projection.test.mjs',
   'scripts/test/offline/admin-secrets.test.mjs',
   'scripts/test/offline/agg-auth-leak.test.mjs',
+  'scripts/test/offline/agg-auth-receipt.test.mjs',
   'scripts/test/offline/agg-auth-resolve.test.mjs',
   'scripts/test/offline/agg-auth-subscription.test.mjs',
   'scripts/test/offline/agg-desktop-activate.test.mjs',

@@ -1486,16 +1486,22 @@ function aggregationModeActive(cfg) {
 
 // A4 收据在发送前的第二次判定：域/host/path/模型一次定型，实际 URL 必须与收据一致，
 // 订阅凭据绝不进入非订阅上游。只在聚合模式下运行；失败按 typed deny 返回，绝不静默降级。
-function verifyCodexAuthReceipt({ pid, modelName, target, identity, prov, upstreamPath, headers, cfg, gatewaySubscription, appPlan }) {
+//
+// 收据里的 host/path 必须来自**真正要发出去的 URL**（upstreamUrl 已合成 pathPrefix、去掉
+// 重复的 /v1、保留端口），不能来自 identity.host（只有主机名）或 responsesPath（未含 prefix）：
+// 否则非默认端口会被当成 host 漂移、带 pathPrefix 的提供商会拼出第二份路径而恒被拒绝。
+// 这里只用一次 upstreamUrl 的结果，收据与发送目标同源。
+export function verifyCodexAuthReceipt({ pid, modelName, target, identity, prov, upstreamPath, headers, cfg, gatewaySubscription, appPlan }) {
   try {
+    const outbound = upstreamUrl(prov, upstreamPath)
     const resolved = resolveUpstream({
       providerId: pid,
       model: modelName,
       upstreamModel: target.servingName,
       binding: {
         identity: identity.kind,
-        host: identity.host || prov.baseUrl,
-        upstreamPath,
+        host: outbound.host,
+        upstreamPath: outbound.pathname,
         gatewaySubscription,
         siwcApp: !!appPlan,
         apiKey: !gatewaySubscription && !appPlan && !!prov.apiKey,
@@ -1503,7 +1509,7 @@ function verifyCodexAuthReceipt({ pid, modelName, target, identity, prov, upstre
         env: process.env,
       },
     })
-    assertResolvedUpstream(resolved, upstreamUrl(prov, upstreamPath).href)
+    assertResolvedUpstream(resolved, outbound.href)
     assertNoSubscriptionCredentialToThirdParty(headers, resolved.upstreamHost, { credentialSource: resolved.authDomain, cfg })
     return { resolved }
   } catch (error) {
