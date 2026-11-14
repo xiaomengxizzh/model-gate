@@ -20,11 +20,16 @@
 // 本模块不写日志、不抛含头值/密钥的消息；deny 只带 host/路径/拒绝码。
 
 import { createHmac } from 'node:crypto'
-import { classifyTarget, isLoopbackHost, isOfficialHost, IDENTITY_KINDS } from './identity.js'
+import { classifyTarget, isLoopbackHost, isOfficialHost, isAggregateModelId, IDENTITY_KINDS } from './identity.js'
 import {
   CREDENTIAL_HEADERS, OFFICIAL_ONLY_HEADERS, OFFICIAL_ONLY_PREFIXES,
   OFFICIAL_PATH_PREFIXES, planTargetHeaders, legacyPassthroughRequested,
+  isSubscriptionIdentityHeader,
 } from './auth.js'
+import {
+  GATEWAY_SUBSCRIPTION_HOSTS, SUBSCRIPTION_RESPONSES_PATH, isSubscriptionEntryPath,
+} from './local-subscription.js'
+import { SIWC_UPSTREAM_HOST, SIWC_RESPONSES_PATH, SIWC_AUTH_DOMAIN } from '../subscription/domain.js'
 
 export const TARGET_DOMAINS = Object.freeze({ OFFICIAL: 'official', THIRD_PARTY: 'thirdParty' })
 // F01：OFFICIAL_SUBSCRIPTION（客户端官方订阅凭据 / /backend-api/codex）已退役。
@@ -448,4 +453,345 @@ function providerToken(scope, binding) {
   const def = prov._def || {}
   if (typeof def.apiKey === 'string' && def.apiKey) return def.apiKey
   return ''
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// AGG-P02：授权域（AuthDomain）与上游解析收据
+//
+// 三个授权域互斥且互不替代（ADR-0003 §2、产品契约 MG-R002/MG-R008/R009）：
+//   codex-subscription —— 复用本机已有 Codex 登录态，入口 chatgpt.com/backend-api/codex（P09）
+//   siwc-app           —— Sign in with ChatGPT 的独立应用授权，入口 api.openai.com/v1/responses
+//   api-key            —— 网关自持上游 key
+//
+// resolveUpstream(receipt) 是**唯一**做域决策的地方：域、host、path、模型映射一次定型为冻结收据，
+// 之后的头构造、发送前校验、诊断投影都只消费这张收据，不再二次推断。
+// 本层不读凭据、不发请求、不写日志；deny 只带 host/路径/稳定 code，绝不带 token。
+// ————————————————————————————————————————————————————————————————————————————
+
+export const AUTH_DOMAINS = Object.freeze({
+  CODEX_SUBSCRIPTION: 'codex-subscription',
+  SIWC_APP: SIWC_AUTH_DOMAIN,
+  API_KEY: 'api-key',
+})
+const AUTH_DOMAIN_VALUES = Object.freeze(Object.values(AUTH_DOMAINS))
+const API_KEY_DEFAULT_PATH = '/v1/responses'
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+function normalizeIdentity(value) {
+  const kind = value && typeof value === 'object' ? value.kind : value
+  const v = String(kind == null ? '' : kind).trim().toLowerCase()
+  if (v === 'official') return TARGET_DOMAINS.OFFICIAL
+  if (v === 'thirdparty' || v === 'third-party' || v === 'third_party') return TARGET_DOMAINS.THIRD_PARTY
+  return IDENTITY_KINDS.UNKNOWN
+}
+
+// host 规范化：接受 host[:port]、baseUrl 或完整 URL；返回 { host, hostname } 或 null。
+function hostParts(value) {
+  const raw = String(value == null ? '' : value).trim()
+  if (!raw) return null
+  let url
+  try {
+    url = raw.includes('://') ? new URL(raw) : new URL('https://' + raw)
+  } catch { return null }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+  if (url.username || url.password) return null
+  const hostname = url.hostname.toLowerCase()
+  if (!hostname) return null
+  return { host: url.host.toLowerCase(), hostname, port: url.port }
+}
+
+function isSubscriptionHostName(hostname) {
+  return GATEWAY_SUBSCRIPTION_HOSTS.includes(hostname) || isLoopbackHost(hostname)
+}
+
+function assertSafeUpstreamPath(path) {
+  const p = String(path == null ? '' : path)
+  if (!p.startsWith('/')) throw deny('upstream_path_invalid', '上游路径必须以 / 开头')
+  if (p.includes('?')) throw deny('upstream_path_invalid', '上游路径不得包含查询串')
+  if (p.includes('#')) throw deny('upstream_path_invalid', '上游路径不得包含 fragment')
+  if (p.startsWith('//')) throw deny('target_path_not_allowed', '上游路径不得以 // 开头（协议相对）')
+  if (/(^|\/)\.\.(\/|$)/.test(p)) throw deny('target_path_traversal', '上游路径不得包含 .. 穿越段')
+  return p
+}
+
+function assertReceiptModelIds(model, upstreamModel, cfg) {
+  if (isAggregateModelId(upstreamModel, cfg)) {
+    throw deny('public_model_id_in_upstream', '上游模型 ID 不得使用聚合/公共 ID：' + upstreamModel + '（公共 ID 只用于本地目录与计费归属）')
+  }
+  if (upstreamModel.includes('?') || upstreamModel.includes('#')) {
+    throw deny('upstream_model_invalid', '上游模型 ID 不得包含查询串或 fragment')
+  }
+  return { model, upstreamModel }
+}
+
+// 解析收据 -> 冻结的上游收据。receipt:
+//   { providerId, model, upstreamModel,
+//     binding: { identity, host|baseUrl, upstreamPath?, gatewaySubscription?, siwcApp?, apiKey?,
+//                authDomain?, cfg? } }
+// 成功返回 { providerId, authDomain, upstreamHost, upstreamPath, model, upstreamModel, ... }（冻结）。
+// 失败抛 TargetAuthzError：code 稳定、status 401/403/400、deny=true，消息不含凭据。
+export function resolveUpstream(receipt) {
+  const r = receipt && typeof receipt === 'object' ? receipt : {}
+  const providerId = nonEmptyString(r.providerId) ? String(r.providerId).trim() : ''
+  if (!providerId) throw deny('receipt_provider_missing', '上游解析收据缺少 providerId', { status: 400 })
+  const model = nonEmptyString(r.model) ? String(r.model).trim() : ''
+  if (!model) throw deny('receipt_model_missing', '上游解析收据缺少公共模型 ID', { status: 400 })
+  const upstreamModel = nonEmptyString(r.upstreamModel) ? String(r.upstreamModel).trim() : ''
+  if (!upstreamModel) throw deny('receipt_upstream_model_missing', '上游解析收据缺少上游模型 ID（不得用公共 ID 代替）', { status: 400 })
+
+  const binding = r.binding && typeof r.binding === 'object' ? r.binding : {}
+  const cfg = binding.cfg && typeof binding.cfg === 'object' ? binding.cfg : {}
+  assertReceiptModelIds(model, upstreamModel, cfg)
+
+  const identity = normalizeIdentity(binding.identity)
+  if (identity === IDENTITY_KINDS.UNKNOWN) {
+    throw deny('target_identity_unknown', '上游目标身份无法确认（' + String(binding.identityReason || 'unknown') + '），已按 fail-closed 拒绝')
+  }
+
+  const enabled = Object.freeze({
+    [AUTH_DOMAINS.CODEX_SUBSCRIPTION]: binding.gatewaySubscription === true,
+    [AUTH_DOMAINS.SIWC_APP]: binding.siwcApp === true,
+    [AUTH_DOMAINS.API_KEY]: binding.apiKey === true,
+  })
+
+  // 第三方域只能走 api-key：订阅/SIWC 域在第三方声明即拒绝（绝不「借用」官方身份）。
+  if (identity === TARGET_DOMAINS.THIRD_PARTY) {
+    if (enabled[AUTH_DOMAINS.CODEX_SUBSCRIPTION] || enabled[AUTH_DOMAINS.SIWC_APP]) {
+      const which = enabled[AUTH_DOMAINS.CODEX_SUBSCRIPTION] ? AUTH_DOMAINS.CODEX_SUBSCRIPTION : AUTH_DOMAINS.SIWC_APP
+      throw deny('auth_domain_not_allowed_for_third_party', '第三方上游不得声明授权域 ' + which + '：订阅/SIWC 凭据绝不出现在非官方上游')
+    }
+  }
+
+  let authDomain
+  const declaredRaw = binding.authDomain
+  if (declaredRaw != null && declaredRaw !== '') {
+    const declared = String(declaredRaw).trim().toLowerCase()
+    if (!AUTH_DOMAIN_VALUES.includes(declared)) {
+      throw deny('auth_domain_invalid', '未知授权域声明：' + declared, { status: 400 })
+    }
+    if (identity === TARGET_DOMAINS.THIRD_PARTY) {
+      if (declared !== AUTH_DOMAINS.API_KEY) throw deny('auth_domain_not_allowed_for_third_party', '第三方上游只能声明 ' + AUTH_DOMAINS.API_KEY)
+    } else if (enabled[declared] !== true) {
+      throw deny('auth_domain_declared_unsupported', '声明的授权域缺少对应凭据声明：' + declared)
+    }
+    authDomain = declared
+  } else if (identity === TARGET_DOMAINS.THIRD_PARTY) {
+    // 第三方没有可用凭据时仍属 api-key 域（上游可回 401）：这是既有语义，不把「无凭据」当成另一个域。
+    authDomain = AUTH_DOMAINS.API_KEY
+  } else {
+    const candidates = AUTH_DOMAIN_VALUES.filter((d) => enabled[d] === true)
+    if (candidates.length === 0) {
+      throw deny('auth_state_unknown', '官方目标未声明任何授权域（codex-subscription / siwc-app / api-key），绝不按 API Key 处理')
+    }
+    if (candidates.length > 1) {
+      throw deny('auth_domain_ambiguous', '同一 provider 声明了多个授权域（' + candidates.join(', ') + '）：授权域互斥，请显式选择一个')
+    }
+    authDomain = candidates[0]
+  }
+
+  const hp = hostParts(binding.host != null ? binding.host : binding.baseUrl)
+  if (!hp) throw deny('upstream_host_missing', '解析收据缺少可解析的上游 host', { status: 400 })
+
+  let upstreamPath
+  if (authDomain === AUTH_DOMAINS.CODEX_SUBSCRIPTION) {
+    if (!isSubscriptionHostName(hp.hostname)) {
+      throw deny('codex_subscription_host_not_allowed', 'codex-subscription 只允许官方订阅 host：' + hp.hostname + '（允许 ' + GATEWAY_SUBSCRIPTION_HOSTS.join(', ') + '，本机 mock 可用 loopback）')
+    }
+    upstreamPath = binding.upstreamPath == null ? SUBSCRIPTION_RESPONSES_PATH : assertSafeUpstreamPath(binding.upstreamPath)
+    if (!isSubscriptionEntryPath(upstreamPath)) {
+      throw deny('codex_subscription_path_not_allowed', 'codex-subscription 只允许 /backend-api/codex 入口：' + upstreamPath)
+    }
+  } else if (authDomain === AUTH_DOMAINS.SIWC_APP) {
+    if (hp.hostname !== SIWC_UPSTREAM_HOST && !isLoopbackHost(hp.hostname)) {
+      throw deny('siwc_app_host_not_allowed', 'siwc-app 只允许 ' + SIWC_UPSTREAM_HOST + '：' + hp.hostname)
+    }
+    if (binding.upstreamPath != null && String(binding.upstreamPath) !== SIWC_RESPONSES_PATH) {
+      throw deny('siwc_app_path_not_allowed', 'siwc-app 只允许 ' + SIWC_RESPONSES_PATH + '：' + String(binding.upstreamPath))
+    }
+    upstreamPath = SIWC_RESPONSES_PATH
+  } else {
+    if (GATEWAY_SUBSCRIPTION_HOSTS.includes(hp.hostname)) {
+      throw deny('auth_domain_host_mismatch', '订阅 host 不接受 api-key 域：' + hp.hostname)
+    }
+    upstreamPath = assertSafeUpstreamPath(binding.upstreamPath == null ? API_KEY_DEFAULT_PATH : binding.upstreamPath)
+    if (identity === TARGET_DOMAINS.OFFICIAL) {
+      const allowed = OFFICIAL_PATH_PREFIXES.some((p) => upstreamPath === p || upstreamPath.startsWith(p.endsWith('/') ? p : p + '/'))
+      if (!allowed) throw deny('official_path_not_allowlisted', '官方目标路径不在白名单：' + upstreamPath)
+    }
+  }
+
+  const credentialPresent = authDomain === AUTH_DOMAINS.API_KEY ? enabled[AUTH_DOMAINS.API_KEY] : true
+  const credentialSource = authDomain === AUTH_DOMAINS.CODEX_SUBSCRIPTION ? 'codex-subscription'
+    : authDomain === AUTH_DOMAINS.SIWC_APP ? 'siwc-app'
+      : (enabled[AUTH_DOMAINS.API_KEY] ? 'provider-key' : 'none')
+
+  return Object.freeze({
+    providerId,
+    authDomain,
+    upstreamHost: hp.host,
+    upstreamPath,
+    model,
+    upstreamModel,
+    // 以下为实现附加字段（契约允许增加内部字段），不得用于替代上面的六个冻结字段。
+    identityKind: identity,
+    credentialSource,
+    credentialPresent,
+    redirect: REDIRECT_POLICY,
+  })
+}
+
+function assertResolvedShape(resolved) {
+  if (!resolved || typeof resolved !== 'object' || !AUTH_DOMAIN_VALUES.includes(resolved.authDomain) ||
+      !nonEmptyString(resolved.providerId) || !nonEmptyString(resolved.upstreamHost) ||
+      !nonEmptyString(resolved.upstreamPath) || !nonEmptyString(resolved.model) || !nonEmptyString(resolved.upstreamModel)) {
+    throw deny('authz_receipt_invalid', '上游收据无效（必须是 resolveUpstream 的产物）')
+  }
+  return resolved
+}
+
+// 发送前二次校验：实际 URL 必须与收据的 host/path 完全一致（scheme 只允许 https，loopback 可 http）。
+export function assertResolvedUpstream(resolved, urlUsed) {
+  const r = assertResolvedShape(resolved)
+  const actualKey = targetKeyOfUrl(urlUsed)
+  let url
+  try { url = new URL(actualKey) } catch { throw deny('send_target_not_absolute', '实际发送目标不是绝对 URL') }
+  const host = url.host.toLowerCase()
+  if (host !== r.upstreamHost) {
+    throw deny('send_target_drift', '实际发送 host 与收据不一致：authorized=' + r.upstreamHost + ' actual=' + host, {
+      expected: r.upstreamHost, actual: host,
+    })
+  }
+  if (url.pathname !== r.upstreamPath) {
+    throw deny('send_target_drift', '实际发送路径与收据不一致：authorized=' + r.upstreamPath + ' actual=' + url.pathname, {
+      expected: r.upstreamPath, actual: url.pathname,
+    })
+  }
+  if (url.search) throw deny('send_target_drift', '实际发送目标带查询串，与收据不一致：' + r.upstreamPath)
+  if (url.protocol !== 'https:' && !isLoopbackHost(url.hostname)) {
+    throw deny('send_target_scheme_not_allowed', '非 loopback 上游必须走 https：' + r.upstreamHost)
+  }
+  return r
+}
+
+// 订阅凭据绝不进入非订阅上游：头名层（chatgpt-*）+ 域标记层（authorization 来自订阅域）双重拦截。
+// loopback 只有在本调用已声明订阅域时才视为订阅目的地（离线 mock），api-key 域不享受该例外。
+export function assertNoSubscriptionCredentialToThirdParty(headers, upstreamHost, opts = {}) {
+  const h = headers && typeof headers === 'object' ? headers : {}
+  const hp = hostParts(upstreamHost)
+  if (!hp) throw deny('upstream_host_missing', '缺少可解析的上游 host', { status: 400 })
+  const subscriptionDomain = opts.credentialSource === AUTH_DOMAINS.CODEX_SUBSCRIPTION || opts.credentialSource === AUTH_DOMAINS.SIWC_APP
+  const official = isOfficialHost(hp.hostname, opts.cfg || {})
+  const destination = official || GATEWAY_SUBSCRIPTION_HOSTS.includes(hp.hostname) || (subscriptionDomain && isLoopbackHost(hp.hostname))
+  if (destination) return headers
+  for (const name of Object.keys(h)) {
+    if (isSubscriptionIdentityHeader(name)) {
+      throw deny('subscription_credential_to_third_party', '订阅身份头不得发往非订阅上游：' + name + ' → ' + hp.host, { header: name, host: hp.host })
+    }
+  }
+  if (subscriptionDomain && Object.prototype.hasOwnProperty.call(h, 'authorization')) {
+    throw deny('subscription_credential_to_third_party', '订阅域凭据不得发往非订阅上游：' + hp.host, { host: hp.host })
+  }
+  return headers
+}
+
+// 域内头不得混用：api-key 域不带订阅头；订阅域不带 provider key 头；siwc-app 不带账号头。
+export function assertDomainHeaderSeparation(resolved, headers) {
+  const r = assertResolvedShape(resolved)
+  const h = headers && typeof headers === 'object' ? headers : {}
+  const names = Object.keys(h).map((n) => String(n).toLowerCase())
+  const hasSubscriptionHeader = names.some(isSubscriptionIdentityHeader)
+  const hasProviderKeyHeader = names.includes('x-api-key') || names.includes('api-key')
+  if (r.authDomain === AUTH_DOMAINS.API_KEY) {
+    if (hasSubscriptionHeader) throw deny('credential_mixing', 'api-key 域出现订阅身份头：' + names.filter(isSubscriptionIdentityHeader).join(','))
+    return headers
+  }
+  if (hasProviderKeyHeader) throw deny('credential_mixing', r.authDomain + ' 域出现 provider key 头')
+  if (r.authDomain === AUTH_DOMAINS.SIWC_APP && hasSubscriptionHeader) {
+    throw deny('credential_mixing', 'siwc-app 域出现 Codex 订阅身份头：两者入口与 audience 各自独立')
+  }
+  return headers
+}
+
+// 按域从空白构造发往上游的头；凭据按域注入，绝不继承客户端原头。
+//   codex-subscription：只加 authorization + 可选 chatgpt-account-id（来自只读本机登录态）
+//   siwc-app          ：只加 Authorization: Bearer <SIWC access token>
+//   api-key           ：官方走白名单复制，第三方从空白构造（仅域派生会话头）
+export function buildDomainHeaders(resolved, opts = {}) {
+  const r = assertResolvedShape(resolved)
+  const incoming = opts.incoming && typeof opts.incoming === 'object' ? opts.incoming : {}
+  const cred = opts.credential && typeof opts.credential === 'object' ? opts.credential : {}
+  const target = { origin: 'https://' + r.upstreamHost }
+  const caller = {
+    incoming,
+    threadId: opts.threadId,
+    sessionHeader: opts.sessionHeader,
+    sessionSalt: opts.sessionSalt,
+  }
+  const headers = {}
+  if (r.authDomain === AUTH_DOMAINS.CODEX_SUBSCRIPTION) {
+    const base = buildAllowlistedHeaders(TARGET_DOMAINS.OFFICIAL, caller, { mode: CREDENTIAL_MODES.GATEWAY_SUBSCRIPTION, target })
+    if (!nonEmptyString(cred.authorization)) {
+      throw deny('subscription_credential_unavailable', 'codex-subscription 缺少本机登录凭据；请先在 Codex 中登录', { status: 401 })
+    }
+    Object.assign(headers, base)
+    headers.authorization = String(cred.authorization)
+    if (nonEmptyString(cred.accountId)) headers['chatgpt-account-id'] = String(cred.accountId)
+  } else if (r.authDomain === AUTH_DOMAINS.SIWC_APP) {
+    if (!nonEmptyString(opts.siwcToken)) {
+      throw deny('siwc_token_missing', 'siwc-app 缺少应用授权令牌；请完成 Sign in with ChatGPT', { status: 401 })
+    }
+    Object.assign(headers, buildAllowlistedHeaders(TARGET_DOMAINS.OFFICIAL, caller, {
+      mode: CREDENTIAL_MODES.PROVIDER_KEY, token: String(opts.siwcToken), target,
+    }))
+  } else {
+    const thirdParty = r.identityKind === TARGET_DOMAINS.THIRD_PARTY
+    if (!thirdParty && !nonEmptyString(cred.providerKey)) {
+      throw deny('official_credential_missing', '官方 api-key 域缺少网关自有 key', { status: 403 })
+    }
+    Object.assign(headers, buildAllowlistedHeaders(thirdParty ? TARGET_DOMAINS.THIRD_PARTY : TARGET_DOMAINS.OFFICIAL, caller, {
+      mode: nonEmptyString(cred.providerKey) ? CREDENTIAL_MODES.PROVIDER_KEY : CREDENTIAL_MODES.NONE,
+      token: nonEmptyString(cred.providerKey) ? String(cred.providerKey) : undefined,
+      target,
+    }))
+    // 第三方头从空白构造：官方/客户端 authorization 已经在上一步被丢弃，这里只注入本域 key。
+    if (thirdParty && nonEmptyString(cred.providerKey)) headers.authorization = 'Bearer ' + String(cred.providerKey)
+  }
+  headers['user-agent'] = 'model-gateway/0.1'
+  headers['accept-encoding'] = 'identity'
+  assertDomainHeaderSeparation(r, headers)
+  assertNoSubscriptionCredentialToThirdParty(headers, r.upstreamHost, { credentialSource: r.authDomain })
+  return Object.freeze(headers)
+}
+
+// 诊断投影：只含 provider/域/host/path/模型与「凭据是否存在」，绝不含 token/账号/文件内容。
+export function resolvedDiagnostic(resolved) {
+  const r = assertResolvedShape(resolved)
+  return Object.freeze({
+    providerId: r.providerId,
+    authDomain: r.authDomain,
+    upstreamHost: r.upstreamHost,
+    upstreamPath: r.upstreamPath,
+    model: r.model,
+    upstreamModel: r.upstreamModel,
+    credentialPresent: r.credentialPresent === true,
+  })
+}
+
+// 401/403 是终态：不得变成成功、不得重试到另一域、不得改写模型或状态码。
+// 接线卡必须原样使用本收据（见交付报告里的 src/index.js 补丁）。
+export function authFailureReceipt(status) {
+  const s = Number(status)
+  if (s !== 401 && s !== 403) return null
+  return Object.freeze({
+    status: s,
+    code: s === 401 ? 'upstream_unauthorized' : 'upstream_forbidden',
+    terminal: true,
+    retryable: false,
+    fallbackAllowed: false,
+    rewriteModel: false,
+    rewriteStatus: false,
+  })
 }
