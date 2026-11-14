@@ -97,6 +97,8 @@ jobs:
           echo "Node major $actual matches matrix entry; engines floor is enforced by scripts/check-metadata.mjs."
       - name: Syntax check
         run: npm run check
+      - name: Product contract consistency (not real acceptance; fail on accidental drift)
+        run: npm run contract:check
       - name: Isolated mock suites (local mock only, no upstream, no credentials)
         run: npm test
       - name: Documentation link check
