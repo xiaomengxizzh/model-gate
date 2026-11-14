@@ -134,7 +134,10 @@ function routeOfficialSubscription(request, sessionAuth) {
   // 真实 OAuth 认证、requires_openai_auth 及 desktop 请求具体表现必须实测。
   // 如果采用 SIWC：必须走对应公开推理端点、验证 audience/scopes 和动态注册；
   // 如果采用 Codex 登录透传：单独审计身份路径与实际支持边界。
-  // 不复制/落库原 Codex 登录文件；未知授权状态不能静默当成 API Key。
+  // 不存在所有者批准的“永不读取/永不复制/永不触碰 auth.json”禁令。
+  // 如确需访问/备份/迁移认证资料来实现一键聚合，应由用户明确授权，按最小范围、
+  // 加密存储、可撤销、审计脱敏、原始登录无损保留的方式实现；禁止未经授权外传。
+  // 未知授权状态不能静默当成 API Key。
   return dispatchOnlyAfterCorrectAuthDomainAndModelValidation(request, sessionAuth);
 }
 ```
@@ -149,7 +152,9 @@ function routeOfficialSubscription(request, sessionAuth) {
 // 目标：用户点击“聚合模式”后由 ModelGate 自动完成全部配置，不要求编辑 TOML。
 async function activateAggregationFromGui(choice) {
   const found = await detectInstalledCodexAndDesktopVersions();
-  const current = await readUserOwnedConfigWithoutReadingAuthJson();
+  const current = await readUserOwnedConfigWithAuthorizedCredentialHandling();
+  // 配置文件与授权文件分别管理；是否需要读取/备份 auth.json 由真实集成路径决定。
+  // 不可强制禁止必要的经授权访问，也不能未经用户同意复制或覆盖凭据。
   const preview = diffOnlyOwnedKeys(current, {
     model_provider: "modelgate", catalog: "autoManagedFullCatalog",
     default_subagent_model: choice.subAgentModel ?? undefined
