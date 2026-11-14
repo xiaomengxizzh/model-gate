@@ -268,6 +268,36 @@ function readUserEnv(name) {
   return value
 }
 
+// 内联凭据字段：**永远不会被读取**。Key 只有两个来源——keys.local.json 或 apiKeyEnv 指向的环境变量。
+// 列在这里是为了“拒绝接受一个不会使用的字段”（注册表 add 时）与“已存在配置的显式告警”（启动时）。
+// 绝不读取、回显、序列化这些字段的值；只报字段名与 provider id。
+export const INLINE_CREDENTIAL_FIELDS = Object.freeze([
+  'apiKey', 'apikey', 'api_key', 'key', 'token', 'secret', 'password', 'authorization',
+])
+
+export function inlineCredentialFields(def) {
+  if (!def || typeof def !== 'object') return []
+  return INLINE_CREDENTIAL_FIELDS.filter((f) => def[f] != null && def[f] !== '')
+}
+
+// 启动/热重载诊断：已持久化的配置里若带内联凭据，给出稳定 code 的警告（只含 provider id 与字段名）。
+export function configInlineCredentialWarnings(cfg) {
+  const providers = (cfg && cfg.providers) || {}
+  const out = []
+  for (const [id, def] of Object.entries(providers)) {
+    const fields = inlineCredentialFields(def)
+    if (!fields.length) continue
+    out.push({
+      code: 'inline_api_key_ignored',
+      providerId: String(id),
+      field: fields[0],
+      message: 'provider ' + String(id) + ' 配置了内联凭据字段 `' + fields[0] + '`，但该值不会被读取（上游将以未鉴权发送）：'
+        + '请改用 keys.local.json（config/keys.local.json，经面板/CLI 写入）或 provider.apiKeyEnv 指定环境变量名',
+    })
+  }
+  return out
+}
+
 export function resolveKey(cfg, def, id) {
   if (cfg._keys && cfg._keys[id]) return { key: cfg._keys[id], source: 'keys' }
   if (def.apiKeyEnv) {

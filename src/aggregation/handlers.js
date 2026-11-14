@@ -225,8 +225,10 @@ export function createAggregationHandlers(deps = {}) {
     const g = guardAggregation(req, Object.assign({ cfg: ctxCfg(ctx) }, ctx))
     if (g) return g
     try {
-      const current = catalog.readCurrent(scopeOf(ctx, body))
-      if (!current.catalog) return { status: 200, body: { ok: true, generation: 0, models: [], counts: null, published: false } }
+      const scope = scopeOf(ctx, body)
+      const notRoutable = notRoutableOf(scope)
+      const current = catalog.readCurrent(scope)
+      if (!current.catalog) return { status: 200, body: { ok: true, generation: 0, models: [], counts: null, published: false, notRoutable } }
       return {
         status: 200,
         body: {
@@ -236,9 +238,25 @@ export function createAggregationHandlers(deps = {}) {
           models: current.catalog.models,
           modelIds: current.catalog.models.map((m) => m.slug),
           bindings: current.bindings,
+          // 已发现但协议不支持、因此不可调用的模型：显式计数 + ID，绝不静默丢弃。
+          notRoutable,
         },
       }
     } catch (error) { return mapError(error) }
+  }
+
+  // 快照里“已发现但不可路由”的模型汇总：{ count, byProvider: { id: [upstreamId] } }。
+  function notRoutableOf(scope) {
+    const byProvider = {}
+    let count = 0
+    const providers = typeof registry.listProviders === 'function' ? registry.listProviders() : []
+    for (const p of providers) {
+      const cached = discovery.cacheStore ? discovery.cacheStore.get(scope, p.id) : null
+      const models = cached && cached.snapshot && Array.isArray(cached.snapshot.models) ? cached.snapshot.models : []
+      const ids = models.filter((m) => m.routable === false).map((m) => m.upstreamId)
+      if (ids.length) { byProvider[p.id] = ids; count += ids.length }
+    }
+    return { count, byProvider, note: '已发现但本网关协议不支持：保留在快照，不发布为可调用模型' }
   }
 
   // GET /api/aggregation/health
@@ -250,6 +268,8 @@ export function createAggregationHandlers(deps = {}) {
       const cached = discovery.cacheStore ? discovery.cacheStore.get(scope, p.id) : null
       const attempt = discovery.cacheStore && typeof discovery.cacheStore.lastAttempt === 'function'
         ? discovery.cacheStore.lastAttempt(scope, p.id) : null
+      const models = cached && cached.snapshot && Array.isArray(cached.snapshot.models) ? cached.snapshot.models : []
+      const notRoutable = models.filter((m) => m.routable === false)
       return {
         id: p.id,
         kind: p.kind,
@@ -257,6 +277,15 @@ export function createAggregationHandlers(deps = {}) {
         snapshotAt: cached && cached.snapshot ? cached.snapshot.observedAt : null,
         snapshotComplete: cached && cached.snapshot ? cached.snapshot.complete === true : false,
         models: cached && cached.snapshot ? cached.snapshot.models.length : 0,
+        routable: models.length - notRoutable.length,
+        // 授权依据计数：unverified 表示“清单不随凭据变化，无法证明账户授权”。
+        authorization: {
+          unverified: models.filter((m) => m.authBasis === 'unverified').length,
+          listed: models.filter((m) => m.authBasis === 'listed').length,
+          explicitAllowed: models.filter((m) => m.authBasis === 'explicit_allowed').length,
+          explicitDenied: models.filter((m) => m.authBasis === 'explicit_denied').length,
+        },
+        notRoutable: { count: notRoutable.length, ids: notRoutable.map((m) => m.upstreamId) },
         lastAttempt: attempt ? { at: attempt.at, completeness: attempt.completeness, code: attempt.code || null } : null,
       }
     })
@@ -273,6 +302,9 @@ export function createAggregationHandlers(deps = {}) {
         configVersion: currentVersion(ctx),
         providers,
         published,
+        // 顶层汇总，便于健康检查直接看出“发现了但用不了”的模型，而不是靠翻每个 provider。
+        notRoutable: notRoutableOf(scope),
+        authorizationUnverified: providers.reduce((n, p) => n + p.authorization.unverified, 0),
         checkedAt: new Date(now()).toISOString(),
       },
     }

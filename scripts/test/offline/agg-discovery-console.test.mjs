@@ -3,7 +3,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  PROVIDER_ID, ENTRIES, entryOf, resolveListUrl, validate, mapModel, mapEffort,
+  PROVIDER_ID, ENTRIES, DEFAULT_MODEL_LIST_URL, entryOf, resolveListUrl, validate, mapModel, mapEffort,
   capabilities, newHeaders, decodeError, encode,
 } from '../../../src/providers/opencode-console.js'
 
@@ -31,18 +31,24 @@ test('console 入口：登记的形状被识别，未知形状 fail-closed', () 
   assert.equal(entryOf({}).code, 'opencodeconsole_base_url_missing')
 })
 
-test('console 模型清单 URL 始终标记为假设', () => {
+test('console 模型清单 URL：默认走实测 zen 端点，显式覆盖优先', () => {
+  // 2026-11-14 live 探针：/console/v1/models 与 /console/openai/v1/models 返回 200 text/html（SPA），
+  // /zen/v1/models 才是 JSON 清单。默认端点因此固定为 zen；入口推导只保留给回环/自定义 host。
   const resolved = resolveListUrl({ baseUrl: CONSOLE })
   assert.equal(resolved.ok, true)
-  assert.equal(resolved.url, CONSOLE + '/models')
+  assert.equal(resolved.url, DEFAULT_MODEL_LIST_URL)
   assert.equal(resolved.assumed, true)
-  assert.equal(resolved.basis, 'console_entry_assumption')
+  assert.equal(resolved.basis, 'console_default_model_list')
 
   const zen = resolveListUrl({ baseUrl: ZEN })
-  assert.equal(zen.url, ZEN + '/models')
+  assert.equal(zen.url, DEFAULT_MODEL_LIST_URL)
 
   const explicit = resolveListUrl({ baseUrl: CONSOLE, modelListUrl: 'https://opencode.ai/console/v1/models' })
   assert.equal(explicit.basis, 'explicit_modelListUrl')
+
+  const loopback = resolveListUrl({ baseUrl: 'http://127.0.0.1:8080/console/v1' })
+  assert.equal(loopback.url, 'http://127.0.0.1:8080/console/v1/models')
+  assert.equal(loopback.basis, 'console_entry_assumption')
 
   const evil = resolveListUrl({ baseUrl: CONSOLE, modelListUrl: 'https://evil.example/models' })
   assert.equal(evil.ok, false)

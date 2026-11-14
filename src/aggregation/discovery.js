@@ -19,6 +19,7 @@
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { writeFileDurable } from '../config-transaction.js'
+import { inlineCredentialFields } from '../router.js'
 import { sha256Hex, stableModelId, stableStringify } from '../codex/catalog.js'
 import { entryOf as goEntryOf } from '../providers/opencode-go.js'
 import { entryOf as consoleEntryOf, resolveListUrl as consoleListUrl } from '../providers/opencode-console.js'
@@ -56,7 +57,7 @@ function diagnostic(code, message, extra = {}) {
 }
 
 function countsZero() {
-  return { discovered: 0, unique: 0, authorized: 0, unauthorized: 0, duplicates: 0, aliases: 0 }
+  return { discovered: 0, unique: 0, authorized: 0, unauthorized: 0, notRoutable: 0, authorizationUnverified: 0, duplicates: 0, aliases: 0 }
 }
 
 // 稳定指纹：不含 observedAt（否则每次同步都会把所有模型标成 updated）。
@@ -112,7 +113,7 @@ export function resolveListEndpoint(provider, cfg = {}) {
       assumed: true,
       basis: resolved.basis,
       entry: resolved.entry,
-      warning: 'Console 模型清单端点是显式假设：' + resolved.url,
+      warning: resolved.warning || ('Console 清单端点已实测；响应形状仍是假设：' + resolved.url),
     }
   }
   if (kind === 'opencode-go') return resolveGoListUrl(def)
@@ -205,6 +206,61 @@ function sameOrigin(a, b) {
 
 const DENY_WORDS = new Set(['none', 'disabled', 'denied', 'forbidden', 'unavailable', 'revoked'])
 
+// 上游 `api` 映射键 → 统一协议名。2026-11-14 实测：opencode 清单每个模型带
+// `api: { 'chat-completions'|'responses'|'messages'|'generate-content': { base_url } }`。
+const PROTOCOL_BY_API_KEY = Object.freeze({
+  'chat-completions': 'openai',
+  responses: 'responses',
+  messages: 'anthropic-messages',
+  'generate-content': 'google-generate-content',
+})
+
+// 本网关的 Console/Go 适配器只实现 openai（chat-completions）与 responses 两种协议；
+// 其它协议的模型可以“被发现”，但不能发布成可调用模型（否则就是过度承诺）。
+export const ROUTABLE_PROTOCOLS = Object.freeze(['openai', 'responses'])
+
+// `{supported:true}` 与裸布尔都算“已声明支持”。
+const declared = (v) => v === true || (isPlainObject(v) && v.supported === true)
+
+// 协议探测：优先按上游 api 键；未知形状返回 {protocol:null, routable:true}，
+// 保持旧 fixture（无 api 字段）的向后兼容——没有证据就不否定可路由性。
+function protocolOf(raw) {
+  const api = isPlainObject(raw.api) ? raw.api : null
+  if (!api) {
+    const explicit = typeof raw.protocol === 'string' ? raw.protocol.trim().toLowerCase() : ''
+    if (explicit) return { protocol: explicit, routable: ROUTABLE_PROTOCOLS.includes(explicit), apiBaseUrl: null }
+    return { protocol: null, routable: true, apiBaseUrl: null }
+  }
+  for (const [key, protocol] of Object.entries(PROTOCOL_BY_API_KEY)) {
+    const entry = api[key]
+    if (entry === undefined || entry === null) continue
+    const baseUrl = isPlainObject(entry) && typeof entry.base_url === 'string' ? entry.base_url : null
+    return { protocol, routable: ROUTABLE_PROTOCOLS.includes(protocol), apiBaseUrl: baseUrl, apiKey: key }
+  }
+  return { protocol: 'unknown', routable: false, apiBaseUrl: null }
+}
+
+// 上下文窗口：`limit.context`（单数 limit，实测真实形状）优先，其余别名作为回退。
+export function contextWindowOf(raw) {
+  if (!isPlainObject(raw)) return null
+  const candidates = [
+    isPlainObject(raw.limit) ? raw.limit.context : null,
+    raw.context_window_tokens,
+    raw.contextWindowTokens,
+    raw.context_window,
+    raw.contextWindow,
+    raw.context_length,
+    raw.contextLength,
+    raw.max_context_tokens,
+    isPlainObject(raw.limits) ? raw.limits.context : null,
+  ]
+  for (const c of candidates) {
+    const n = positiveInt(c)
+    if (n !== null) return n
+  }
+  return null
+}
+
 export function normalizeModelEntry(raw, context) {
   const issues = []
   if (typeof raw === 'string') raw = { id: raw }
@@ -214,7 +270,10 @@ export function normalizeModelEntry(raw, context) {
   const upstreamId = typeof upstreamIdRaw === 'string' ? upstreamIdRaw.trim() : ''
   if (!upstreamId) return { ok: false, issues: [diagnostic('model_id_missing', '模型条目缺少 id/model/slug')] }
   let authorized = true
-  let authBasis = 'listed'
+  // 授权依据：显式字段优先；否则由调用方决定“仅因出现在清单而视为可用”的基线——
+  // Console 的清单按授权过滤（实测 anon 86 / auth 50，auth ⊂ anon）→ `listed`；
+  // Go 的清单与是否携带凭据完全一致（30/30）→ `unverified`，不得声称已证明授权。
+  let authBasis = context.listedAuthBasis || 'listed'
   const access = lower(raw.access)
   const status = lower(raw.status)
   if (raw.authorized === false || raw.enabled === false || raw.allowed === false ||
@@ -225,29 +284,34 @@ export function normalizeModelEntry(raw, context) {
   } else if (raw.authorized === true) {
     authBasis = 'explicit_allowed'
   }
-  const contextWindow = positiveInt(
-    raw.context_window != null ? raw.context_window
-      : (raw.contextWindow != null ? raw.contextWindow
-        : (raw.context_length != null ? raw.context_length
-          : (raw.contextLength != null ? raw.contextLength
-            : (raw.max_context_tokens != null ? raw.max_context_tokens
-              : (isPlainObject(raw.limits) ? raw.limits.context : null))))))
+  const contextWindow = contextWindowOf(raw)
   const caps = isPlainObject(raw.capabilities) ? raw.capabilities : {}
   const capabilities = Object.freeze({
-    tools: raw.tools === true || raw.supports_tools === true || caps.tools === true,
-    supportsSearchTool: raw.supports_search_tool === true || raw.supportsSearchTool === true || caps.supportsSearchTool === true || caps.search === true,
-    supportsWebsockets: raw.supports_websockets === true || raw.supportsWebsockets === true || caps.supportsWebsockets === true || caps.websockets === true,
+    tools: declared(raw.tools) || declared(raw.supports_tools) || declared(caps.tools),
+    reasoning: declared(raw.reasoning) || declared(raw.supports_reasoning) || declared(raw.supportsReasoning) || declared(caps.reasoning),
+    structuredOutput: declared(raw.structured_output) || declared(raw.structuredOutput) || declared(caps.structured_output) || declared(caps.structuredOutput),
+    // `effort_updates` 表示上游会在同一会话内更新推理档位（真实形状为 {supported:boolean}）。
+    effortUpdates: declared(raw.effort_updates) || declared(raw.effortUpdates) || declared(caps.effort_updates) || declared(caps.effortUpdates),
+    supportsSearchTool: declared(raw.supports_search_tool) || declared(raw.supportsSearchTool) || declared(caps.supportsSearchTool) || declared(caps.search),
+    supportsWebsockets: declared(raw.supports_websockets) || declared(raw.supportsWebsockets) || declared(caps.supportsWebsockets) || declared(caps.websockets),
   })
   const displayName = (typeof raw.display_name === 'string' && raw.display_name.trim())
     || (typeof raw.displayName === 'string' && raw.displayName.trim())
     || (typeof raw.name === 'string' && raw.name.trim())
     || upstreamId
+  // 只有**显式别名**字段才能折叠模型。`canonical_id` 是厂商规范名（例如
+  // `deepseek/deepseek-v4.1-flash-1017`），不是本清单里的另一个模型 ID，绝不能当作 aliasOf：
+  // 一旦上游把某个 canonical_id 写成清单里已存在的 ID，就会把两个不同模型静默合并成一个。
   const aliasOf = (typeof raw.alias_of === 'string' && raw.alias_of.trim())
     || (typeof raw.aliasOf === 'string' && raw.aliasOf.trim())
     || (typeof raw.duplicate_of === 'string' && raw.duplicate_of.trim())
     || (typeof raw.duplicateOf === 'string' && raw.duplicateOf.trim())
-    || (typeof raw.canonical_id === 'string' && raw.canonical_id.trim())
     || null
+  const vendorCanonical = (typeof raw.canonical_id === 'string' && raw.canonical_id.trim())
+    || (typeof raw.canonicalId === 'string' && raw.canonicalId.trim())
+    || (typeof raw.vendorCanonical === 'string' && raw.vendorCanonical.trim())
+    || null
+  const routing = protocolOf(raw)
   const aliases = Array.isArray(raw.aliases) ? raw.aliases.filter((a) => typeof a === 'string' && a.trim()).map((a) => a.trim()) : []
   let publicId = null
   try {
@@ -269,6 +333,10 @@ export function normalizeModelEntry(raw, context) {
       authBasis,
       aliasOf,
       aliases,
+      vendorCanonical,
+      protocol: routing.protocol,
+      routable: routing.routable,
+      apiBaseUrl: routing.apiBaseUrl,
       evidence: { source: context.source, observedAt: context.observedAt },
     },
   }
@@ -313,9 +381,14 @@ function finalizeModels(entries, context, diagnostics) {
       authBasis: prev.authBasis === m.authBasis ? prev.authBasis : 'conflicting_duplicates',
       capabilities: Object.freeze({
         tools: prev.capabilities.tools || m.capabilities.tools,
+        reasoning: prev.capabilities.reasoning || m.capabilities.reasoning,
+        structuredOutput: prev.capabilities.structuredOutput || m.capabilities.structuredOutput,
+        effortUpdates: prev.capabilities.effortUpdates || m.capabilities.effortUpdates,
         supportsSearchTool: prev.capabilities.supportsSearchTool || m.capabilities.supportsSearchTool,
         supportsWebsockets: prev.capabilities.supportsWebsockets || m.capabilities.supportsWebsockets,
       }),
+      // 可路由性采用 AND：任何一条重复条目说不可路由，就不对外宣称可调用。
+      routable: prev.routable !== false && m.routable !== false,
       contextWindow: prev.contextWindow != null ? prev.contextWindow : m.contextWindow,
     }))
     if (prev.authorized !== m.authorized) {
@@ -332,6 +405,10 @@ function finalizeModels(entries, context, diagnostics) {
       unique: models.length,
       authorized: models.filter((m) => m.authorized).length,
       unauthorized: models.filter((m) => !m.authorized).length,
+      // 已发现但本网关协议不支持、因而不得发布为可调用模型的条目：显式计数，绝不静默丢弃。
+      notRoutable: models.filter((m) => m.routable === false).length,
+      // 授权未被上游证明（仅因出现在清单里）的条目数。
+      authorizationUnverified: models.filter((m) => m.authBasis === 'unverified').length,
       duplicates,
       aliases,
     },
@@ -487,9 +564,20 @@ export function createDiscoveryEngine(options = {}) {
     if (endpoint.host && !isAllowedHost(endpoint.host, cfg) && !(opts.allowLoopback === true && isLoopback(endpoint.host))) {
       return failureResult('discovery_host_not_allowlisted', '模型清单 host 不在白名单：' + endpoint.host)
     }
+    // 内联 apiKey 永远不会被读取（Key 只来自 keys.local.json / apiKeyEnv）。配置里带了它，
+    // 就必须让操作者看到“这个字段被忽略”，否则上游静默未鉴权、只报 requires an API key。
+    const providerDef = (cfg && cfg.providers && cfg.providers[providerId]) || provider._def || {}
+    const inlineFields = inlineCredentialFields(providerDef)
+    const inlineDiag = inlineFields.length
+      ? diagnostic('inline_api_key_ignored',
+        'provider ' + providerId + ' 配置了内联凭据字段 `' + inlineFields[0] + '`，但该值不会被读取：'
+        + '请改用 keys.local.json 或 provider.apiKeyEnv（稳定 code：inline_api_key_ignored）',
+        { severity: 'warning', providerId, field: inlineFields[0] })
+      : null
     const credential = credentialFor(provider, opts)
     if (!credential && opts.allowAnonymous !== true) {
-      return failureResult('discovery_credential_missing', '没有可用凭据引用；拒绝把“未鉴权”当成“账户没有模型”', { retryable: false })
+      return failureResult('discovery_credential_missing', '没有可用凭据引用；拒绝把“未鉴权”当成“账户没有模型”',
+        { retryable: false, diagnostics: inlineDiag ? [inlineDiag] : [] })
     }
     if (!fetchImpl && !opts.fetchImpl) return failureResult('discovery_transport_missing', '没有可用的 fetch 实现')
     const doFetch = opts.fetchImpl || fetchImpl
@@ -499,6 +587,7 @@ export function createDiscoveryEngine(options = {}) {
     const cacheEntry = normalizeCache(opts.cache)
     const cacheFresh = cacheEntry && (startedAt - (cacheEntry.storedAt || 0)) <= maxAgeMs
     const diagnostics = [diagnostic('discovery_started', '开始发现', { providerId, scope, maxPages })]
+    if (inlineDiag) diagnostics.push(inlineDiag)
     if (endpoint.assumed) {
       diagnostics.push(diagnostic('endpoint_assumed', endpoint.warning || '模型清单端点是显式假设', { severity: 'warning', url: endpoint.url }))
       diagnostics.push(diagnostic('entry_assumption_unverified', '未复核厂商文档；live 前需所有者批准探针', { severity: 'warning' }))
@@ -577,6 +666,17 @@ export function createDiscoveryEngine(options = {}) {
       if (pageNo === 1) {
         etag = headerOf(res, 'etag')
         lastModified = headerOf(res, 'last-modified')
+      }
+      // 200 + text/html 是一个真实陷阱：错误的端点会返回网页（SPA）而不是模型清单。
+      // 绝不要把 HTML 解析成“空目录”。
+      const contentType = lower(headerOf(res, 'content-type'))
+      if (contentType.includes('text/html') || contentType.includes('application/xhtml')) {
+        const message = '模型清单返回 HTML（content-type: ' + (contentType || '?') + '）：该端点很可能是网页而不是 API，拒绝解析'
+        if (pageNo === 1) {
+          return failureResult('discovery_response_invalid', message, { diagnostic: { page: pageNo, status, contentType } })
+        }
+        const state = buildSnapshotState({ provider, providerId, providerSegment, endpoint, scope, rawModels, diagnostics, observedAt, complete: false })
+        return partialResult(state, 'discovery_page_invalid', '第 ' + pageNo + ' 页返回 HTML；已取得的模型不代表全量', { diagnostic: { page: pageNo, status, contentType } })
       }
       let text
       try { text = await res.text() } catch (error) {
@@ -663,10 +763,14 @@ export function createDiscoveryEngine(options = {}) {
   function buildSnapshotState({ provider, providerId, providerSegment, endpoint, scope, rawModels, diagnostics, observedAt, complete, pages = [], etag = null, lastModified = null }) {
     const entryDiagnostics = []
     const entries = []
+    const providerKind = provider.kind || (provider.aggregation && provider.aggregation.kind) || null
+    // 授权基线：Console 清单按授权过滤 → listed；Go 清单与是否带凭据完全一致 → unverified。
+    const listedAuthBasis = providerKind === 'opencode-go' ? 'unverified' : 'listed'
     for (const raw of rawModels) {
       const normalized = normalizeModelEntry(raw, {
         providerId,
         providerSegment,
+        listedAuthBasis,
         source: 'model_list:' + endpoint.host + safePath(endpoint.url),
         observedAt,
       })
@@ -680,6 +784,23 @@ export function createDiscoveryEngine(options = {}) {
       diagnostics.push(diagnostic('authorization_inferred_from_listing',
         '有 ' + inferredAuth + ' 个模型仅因出现在账户清单而视为可用（authBasis=listed）；未看到逐模型授权字段',
         { severity: 'warning', count: inferredAuth }))
+    }
+    const unverifiedAuth = fin.models.filter((m) => m.authorized && m.authBasis === 'unverified').length
+    if (unverifiedAuth > 0) {
+      diagnostics.push(diagnostic('authorization_unverified_from_listing',
+        '有 ' + unverifiedAuth + ' 个模型出现在清单里，但该清单不随凭据变化（匿名/鉴权结果一致），无法证明账户授权：按未核实处理，不宣称已授权',
+        { severity: 'warning', count: unverifiedAuth, basis: 'unverified' }))
+    }
+    const notRoutable = fin.models.filter((m) => m.routable === false)
+    if (notRoutable.length > 0) {
+      diagnostics.push(diagnostic('discovered_not_routable',
+        '有 ' + notRoutable.length + ' 个模型已发现但其协议本网关不支持：保留在快照中，不发布为可调用模型',
+        {
+          severity: 'warning',
+          count: notRoutable.length,
+          protocols: [...new Set(notRoutable.map((m) => m.protocol || 'unknown'))].sort(),
+          upstreamIds: notRoutable.map((m) => m.upstreamId),
+        }))
     }
     for (const m of fin.models) {
       if (m.contextWindow == null) {
