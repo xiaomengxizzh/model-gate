@@ -50,6 +50,18 @@ export const OFFICIAL_HEADER_ALLOWLIST = Object.freeze([
 ])
 export const OFFICIAL_HEADER_ALLOW_PREFIXES = Object.freeze(['x-codex-', 'x-openai-internal-', 'openai-'])
 
+// 订阅身份专用头（AGG-P02）：ChatGPT 订阅凭据（本机 Codex 登录 / SIWC 应用授权）只能发给
+// codex-subscription 入口。任何第三方或 API Key 目标出现这些头名即视为凭据串域。
+// 名称清单与 OFFICIAL_ONLY_HEADERS 同源，不另存一份身份判定。
+export const SUBSCRIPTION_IDENTITY_HEADERS = Object.freeze(['chatgpt-account-id'])
+export const SUBSCRIPTION_IDENTITY_PREFIXES = Object.freeze(['chatgpt-'])
+
+export function isSubscriptionIdentityHeader(name) {
+  const n = LOWER(name)
+  if (!n) return false
+  return SUBSCRIPTION_IDENTITY_HEADERS.includes(n) || SUBSCRIPTION_IDENTITY_PREFIXES.some((p) => n.startsWith(p))
+}
+
 // E3 集成接口：官方直连路径可消费的头名清单。与 planTargetHeaders 使用**同一组常量**，
 // 不另存一份列表（避免清单漂移）。前缀项用于 x-codex-* / x-openai-internal-* / openai-* 家族。
 export const OFFICIAL_REQUEST_HEADER_NAMES = OFFICIAL_HEADER_ALLOWLIST
