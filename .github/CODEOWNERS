@@ -1,0 +1,9 @@
+# ModelGate owner-controlled paths. Effective only with owner-enabled branch protection
+# and required CODEOWNERS reviews. Merely adding this file does NOT activate protection.
+/docs/product/ @xiaomengxizzh
+/docs/roadmap/2026-11-14-aggregation-pseudocode-plan.md @xiaomengxizzh
+/docs/roadmap/2026-11-14-aggregation-agentteam-start.md @xiaomengxizzh
+/.github/CODEOWNERS @xiaomengxizzh
+/.github/workflows/ @xiaomengxizzh
+/scripts/check-product-contract.mjs @xiaomengxizzh
+/AGENTS.md @xiaomengxizzh
