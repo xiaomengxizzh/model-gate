@@ -113,3 +113,16 @@ test('共享入口：providers 与 clients 页只做增量链接，旧视图结�
   assert.match(clients, /export function render\s*\(\s*root, ctx = \{\}/, 'clients render 签名保持')
   assert.match(clients, /modelgate-client-export\/1/, 'clients 既有导出契约保持')
 })
+
+test('F6 回归：404 提示不得再声称后端未接线/需要主代理打补丁（路由已由 /api/aggregation/* 提供）', () => {
+  const src = readFileSync(VIEW, 'utf8')
+  // 曾经的过期文案：把已接线的路由说成 404 未接线，并让用户去找交付报告里的补丁。
+  assert.doesNotMatch(src, /尚未接线/, '不得再声称聚合接口尚未接线')
+  assert.doesNotMatch(src, /后端还没有把\s*\/api\/aggregation/, '不得再声称后端没有挂载聚合路由')
+  assert.doesNotMatch(src, /交付报告中的精确补丁/, '不得再让用户去找不存在的接线补丁')
+  // 404 仍然需要解释，但解释必须指向真实原因（版本/实例未加载模块）。
+  assert.match(src, /404/, '仍须说明 404 的含义')
+  assert.match(src, /版本较旧|升级到提供/, '必须给出可执行的版本/实例原因')
+  // 渲染条件不变：只有 routeMissing 时才显示该提示。
+  assert.match(src, /if \(AGG\.routeMissing\) root\.append\(routeNotice\(ctx\)\)/)
+})

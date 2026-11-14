@@ -5,7 +5,7 @@
 //  * 浏览器没有本地文件权限：所有读写都经同源管理 API（/api/aggregation/*），
 //    由服务端 src/codex/desktop-integration.js 执行"预览 → 确认 → 备份 → 原子写 → 验证"。
 //  * 只渲染真实响应；发现不完整/失败时明确说"不是 0 个模型"，绝不把部分列表当全量。
-//  * 409 冲突只展示三方差异，不覆盖用户改动；路由未接线时给出精确的整合说明，不假装成功。
+//  * 409 冲突只展示三方差异，不覆盖用户改动；接口返回 404 时提示版本/实例原因，不假装成功。
 import { h } from '../dom.js'
 import {
   pageHead, card, metric, tag, callout, empty, field, dialog, confirmDialog, toast, table, kvList,
@@ -179,8 +179,8 @@ function reload (ctx) {
 // —— 卡片 ——
 function routeNotice (ctx) {
   return callout('warn',
-    h('strong', { text: '聚合接口尚未接线（404）。' }),
-    ' 后端还没有把 /api/aggregation/* 挂到管理面。本视图不会伪造数据；接线需要主代理在 src/index.js 注册聚合 handler（见交付报告中的精确补丁）。',
+    h('strong', { text: '当前网关没有响应聚合接口（404）。' }),
+    ' 本视图的四个只读接口都返回了 404：通常是所连实例版本较旧，或聚合模块尚未随该实例启动。请确认 ModelGate 已升级到提供 /api/aggregation/* 的版本后重新探测；本视图不会伪造数据。',
     h('div', { class: 'toolbar', style: { marginTop: '8px' } },
       h('button', { class: 'btn btn-sm', type: 'button', text: '重新探测', onclick: () => reload(ctx) })))
 }
