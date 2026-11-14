@@ -2,6 +2,9 @@
 
 | 需要做什么 | 文档 |
 | --- | --- |
+| 查用户批准的不可降级产品目标、完整真实验收 | [ModelGate 产品契约 MG-R001..MG-R012](product/2026-11-14-owner-product-contract.md) |
+| 直接执行聚合模式开发（伪代码、模块、测试与 PR） | [2026-11-14 聚合完整执行计划](roadmap/2026-11-14-aggregation-pseudocode-plan.md) |
+| 激活主代理与最多 5 名专职子代理 | [Agent Team 直接执行启动提示词](roadmap/2026-11-14-aggregation-agentteam-start.md) |
 | 首次启动独立实例 | [教程](tutorials/local-start.md) |
 | 保留 Codex 原生套餐，同时接入其他订阅模型 | [Codex 多 provider 接入](how-to/codex-multi-provider.md) |
 | 测试与回归 | [测试指南](how-to/testing.md) |
