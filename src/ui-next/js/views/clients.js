@@ -696,6 +696,7 @@ export function render(root, ctx = {}) {
     eyebrow: 'CLIENTS / INTEGRATION',
     actions: [
       copyButton(url, '复制 Base URL'),
+      h('button', { class: 'btn', type: 'button', text: '聚合模式（Desktop）', title: '一键把官方与 OpenCode 模型接入原版 Codex Desktop', onclick: () => { location.hash = '#/aggregation' } }),
       h('button', { class: 'btn', type: 'button', text: '模型与路由', onclick: () => { location.hash = '#/models' } }),
       h('button', { class: 'btn', type: 'button', text: '导出客户端接入 JSON', onclick: () => { downloadJson('modelgate-client-export.json', buildClientExport()); toast('已导出客户端接入清单（仅客户端字段，无凭据）', 'success') } }),
       h('button', { class: 'btn', type: 'button', text: '监控与诊断', onclick: () => { location.hash = '#/observability' } }),
