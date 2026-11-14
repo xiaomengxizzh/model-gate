@@ -105,6 +105,24 @@ go = openai 19 / responses 5 / messages 5 / generate-content 1。
 > 这是 §3 假设 7/9/12 的验收口径；真实清单里有 20 条非 openai 协议，因此真实发布数是 61。
 > 两个数字都对，差别是协议门禁（「能发现」≠「能调用」）。
 
+### 5.1 20 条不可路由模型：逐条 `api` 键（2026-11-14，两次只读请求）
+
+只导出 `api` 的键与 `base_url` 路径，不含任何 Key 值或账户标识：
+
+| 来源 | 条数 | `api` 键（唯一一个） | 广告的 base URL 路径 |
+| --- | --- | --- | --- |
+| console | 9 | `messages` | `/inference/anthropic/v1` |
+| console | 5 | `generate-content` | `/inference/google/v1beta` |
+| go | 5 | `messages` | `/inference/go/anthropic/v1` |
+| go | 1 | `generate-content` | `/inference/go/google/v1beta` |
+
+分布：**有 openai 兼容条目 0 条；仅 anthropic 19 条；仅 google 6 条；无 0 条**。
+每个受影响模型的 `api` 对象只有一个键，不存在“同时也广告 openai入口”的隐式兼容路径。
+
+结论：`routable:false` **不是悲观分类**。这 20 条要走 Codex 的 Responses API，必须有
+Responses↔Messages / Responses↔generateContent 翻译层，属于独立功能；在翻译层落地前，
+“发现但不可调用”（计数 + ID 可见）是唯一诚实的中间态。
+
 ## 6. 探针本身的安全与边界
 
 - 只读：仅 `GET /models`，未调用 chat/completions、responses，未产生计费推理。
@@ -117,11 +135,11 @@ go = openai 19 / responses 5 / messages 5 / generate-content 1。
 
 | 需求 | 状态 | 依据 |
 | --- | --- | --- |
-| MG-R003 自动发现全部可用模型并同步 | **未签收（真实发现通过，同步不完整）** | 发现侧：80/80，无遗漏；发布侧：60 可路由已发布 + 20 明确标注不可路由。未达 `PASS_REAL` 的原因是 Go 授权无法证明，且 20 条模型本网关不能路由 |
+| MG-R003 自动发现全部可用模型并同步 | **PASS_MOCK**（真实发现已验证 80/80，端点与形状已实测；但 Go 授权无法证明、20 条非 openai 模型不可路由，故不得升为 PASS_REAL） | 发现侧 `agg-discovery-pagination.test.mjs`、`agg-discovery-catalog.test.mjs` 通过（新形状套件 12/12，见 §2，未登记故不在此引用）；真实调用见 §4/§5 |
 | MG-R004 GUI/Codex 使用聚合模型 | NOT_TESTED | A3/A5 范围 |
-| MG-R008 无静默降级 | **PASS（真实形状 + 模块级）** | 失败不返回空目录、200 HTML 显式拒绝、部分页=partial、无权/不可路由不发布但计数、缺上下文 fail-closed、溢出不裁剪 |
-| MG-R009 多用户隔离 | PASS_MOCK（快照/目录 scope） | 两个 scope 独立文件与世代；完整多身份隔离属 A4/A5 |
-| MG-R011 真实证据 | **部分 PASS_REAL** | 端点/形状/计数已是真实测量；但 MG-R003 本身仍未 `PASS_REAL` |
+| MG-R008 无静默降级 | **PASS_MOCK**（真实形状 + 模块级；GUI 反向验收属 A5） | 失败不返回空目录、200 HTML 显式拒绝、部分页=partial、无权/不可路由不发布但计数、缺上下文 fail-closed、溢出不裁剪；`agg-discovery-sync.test.mjs`、`agg-discovery-catalog.test.mjs` 覆盖；真实形状用例见 §2（未登记）；GUI 反向验收仍待 A5 |
+| MG-R009 多用户隔离 | PASS_MOCK（快照/目录 scope） | 两个 scope 独立快照文件与独立目录世代；`agg-discovery-catalog.test.mjs` 覆盖；完整多身份隔离属 A4/A5 |
+| MG-R011 真实证据 | **PASS_MOCK**（端点/形状/计数已是真实测量；整体回执仍非 PASS_REAL） | §3 的 13 条假设逐条给出实测结论与证据；`agg-discovery-pagination.test.mjs`、`agg-discovery-catalog.test.mjs` 自证矩阵口径；仍缺真实目标上的端到端回执 |
 | MG-R012 仅 GPT-6 Luna | BLOCKED | 本轮没有 GPT 调用，也无所有者授权的额度/时间窗 |
 
 `PASS_MOCK` 永不等于 `PASS_REAL`。要签收 MG-R003，还差两件事：
