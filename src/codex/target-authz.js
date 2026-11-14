@@ -488,19 +488,29 @@ function normalizeIdentity(value) {
   return IDENTITY_KINDS.UNKNOWN
 }
 
-// host 规范化：接受 host[:port]、baseUrl 或完整 URL；返回 { host, hostname } 或 null。
+// host 规范化：接受 host[:port]、baseUrl 或完整 URL；返回 { host, hostname } 或 { error }。
 function hostParts(value) {
   const raw = String(value == null ? '' : value).trim()
-  if (!raw) return null
+  if (!raw) return { error: 'missing' }
   let url
   try {
     url = raw.includes('://') ? new URL(raw) : new URL('https://' + raw)
-  } catch { return null }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
-  if (url.username || url.password) return null
+  } catch { return { error: 'invalid' } }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return { error: 'scheme' }
+  if (url.username || url.password) return { error: 'userinfo' }
   const hostname = url.hostname.toLowerCase()
-  if (!hostname) return null
+  if (!hostname) return { error: 'invalid' }
   return { host: url.host.toLowerCase(), hostname, port: url.port }
+}
+
+// 无法安全规范化的 host 一律 typed deny：userinfo/scheme 是越权面（403），缺字段是请求错误（400）。
+function requireHost(value) {
+  const hp = hostParts(value)
+  if (hp.error === 'userinfo') throw deny('target_userinfo_forbidden', '上游 host 不得包含 userinfo（@ 注入）')
+  if (hp.error === 'scheme') throw deny('target_scheme_not_allowed', '上游目标只允许 http(s)')
+  if (hp.error === 'missing') throw deny('upstream_host_missing', '解析收据缺少上游 host', { status: 400 })
+  if (hp.error) throw deny('upstream_host_invalid', '上游 host 无法解析', { status: 400 })
+  return hp
 }
 
 function isSubscriptionHostName(hostname) {
@@ -584,7 +594,14 @@ export function resolveUpstream(receipt) {
   } else {
     const candidates = AUTH_DOMAIN_VALUES.filter((d) => enabled[d] === true)
     if (candidates.length === 0) {
-      throw deny('auth_state_unknown', '官方目标未声明任何授权域（codex-subscription / siwc-app / api-key），绝不按 API Key 处理')
+      // F01 旧声明仍要给出「已退役」而不是含糊的缺凭据（保持既有对外 code）。
+      if (legacyPassthroughRequested(binding.env || {})) throw deny('official_passthrough_retired', RETIRED_CREDENTIAL_HINT)
+      if (binding.credentialMode === CREDENTIAL_MODES.OFFICIAL_SUBSCRIPTION || binding.officialSubscription === true) {
+        throw deny('credential_mode_retired', RETIRED_CREDENTIAL_HINT)
+      }
+      // 沿用既有对外 code（官方无 key 即无可用授权），但语义是「没有任何授权域」：
+      // reason 记录 ADR-0003 §4(2) 的未知授权状态，绝不按 API Key 处理。
+      throw deny('official_no_gateway_key', '官方目标未声明任何授权域（codex-subscription / siwc-app / api-key）：绝不按 API Key 处理', { reason: 'auth_state_unknown' })
     }
     if (candidates.length > 1) {
       throw deny('auth_domain_ambiguous', '同一 provider 声明了多个授权域（' + candidates.join(', ') + '）：授权域互斥，请显式选择一个')
@@ -592,8 +609,7 @@ export function resolveUpstream(receipt) {
     authDomain = candidates[0]
   }
 
-  const hp = hostParts(binding.host != null ? binding.host : binding.baseUrl)
-  if (!hp) throw deny('upstream_host_missing', '解析收据缺少可解析的上游 host', { status: 400 })
+  const hp = requireHost(binding.host != null ? binding.host : binding.baseUrl)
 
   let upstreamPath
   if (authDomain === AUTH_DOMAINS.CODEX_SUBSCRIPTION) {
@@ -680,8 +696,7 @@ export function assertResolvedUpstream(resolved, urlUsed) {
 // loopback 只有在本调用已声明订阅域时才视为订阅目的地（离线 mock），api-key 域不享受该例外。
 export function assertNoSubscriptionCredentialToThirdParty(headers, upstreamHost, opts = {}) {
   const h = headers && typeof headers === 'object' ? headers : {}
-  const hp = hostParts(upstreamHost)
-  if (!hp) throw deny('upstream_host_missing', '缺少可解析的上游 host', { status: 400 })
+  const hp = requireHost(upstreamHost)
   const subscriptionDomain = opts.credentialSource === AUTH_DOMAINS.CODEX_SUBSCRIPTION || opts.credentialSource === AUTH_DOMAINS.SIWC_APP
   const official = isOfficialHost(hp.hostname, opts.cfg || {})
   const destination = official || GATEWAY_SUBSCRIPTION_HOSTS.includes(hp.hostname) || (subscriptionDomain && isLoopbackHost(hp.hostname))

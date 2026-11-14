@@ -74,7 +74,9 @@ test('三个授权域各自解析到独立 host/path，收据冻结且含六个�
 
 test('未知授权状态是 typed error，绝不当作 API Key', () => {
   const e = denyOf(() => resolveUpstream(receipt({ binding: { identity: TARGET_DOMAINS.OFFICIAL, host: 'https://api.openai.com' } })))
-  assert.equal(e.code, 'auth_state_unknown')
+  // 对外沿用既有 code（官方无 key / 无授权域），reason 标明「未知授权状态」。
+  assert.equal(e.code, 'official_no_gateway_key')
+  assert.equal(e.reason, 'auth_state_unknown')
   assert.equal(e.status, 403)
   assert.match(e.message, /绝不按 API Key 处理/)
 
@@ -122,6 +124,10 @@ test('公共/聚合模型 ID 不得出现在上游；跨域 host 与路径漂移
 
   const keyOnSubscriptionHost = denyOf(() => resolveUpstream(receipt({ binding: { identity: TARGET_DOMAINS.OFFICIAL, host: 'https://chatgpt.com', apiKey: true } })))
   assert.equal(keyOnSubscriptionHost.code, 'auth_domain_host_mismatch')
+
+  const userinfo = denyOf(() => resolveUpstream(receipt({ binding: official({ host: 'https://user:pass@chatgpt.com' }) })))
+  assert.equal(userinfo.code, 'target_userinfo_forbidden')
+  assert.equal(userinfo.status, 403)
 
   const resolved = resolveUpstream(receipt())
   const driftHost = denyOf(() => assertResolvedUpstream(resolved, 'https://api.openai.com/backend-api/codex/responses'))
