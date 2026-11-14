@@ -36,6 +36,7 @@ export const VERDICT_PATH = 'docs/evidence/aggregation-acceptance-verdict-2026-1
 // 状态证据来源（顺序即「最新在前」，用于读取被测树 SHA）。
 // 只收录**当前状态**文档：基线/结论文档描述的是历史快照，不能拿来覆盖今天的状态。
 export const EVIDENCE_STATUS_DOCS = Object.freeze([
+  'docs/evidence/aggregation-real-luna-2026-11-14.md',
   'docs/evidence/aggregation-integration-2026-11-14.md',
   'docs/evidence/agg-p01-opencode-discovery-2026-11-14.md',
 ])
@@ -193,6 +194,12 @@ function assertCitedSuites(row) {
   }
 }
 
+// 较新文档是否显式声明取代了旧状态：`取代 <旧状态> @ <旧文档相对路径>`（路径逐字匹配）。
+export function supersedes(basis, oldStatus, oldDocPath) {
+  const escaped = String(oldDocPath).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp('取代\\s*' + oldStatus + '\\s*@\\s*' + escaped).test(String(basis))
+}
+
 function mergeEvidenceStatuses(docs) {
   const byId = new Map()
   for (const doc of docs) {
@@ -204,10 +211,23 @@ function mergeEvidenceStatuses(docs) {
           throw new Error(row.id + ' is ' + row.status + ' but cites no offline suite（' + row.docPath + '）：PASS_MOCK 只能用于离线套件真正执行过的行为')
         }
       }
+      // PASS_REAL 必须把结论钉到具体被测树：依据里出现完整 40 位 SHA，否则视为未绑定版本的声明。
+      if (row.status === 'PASS_REAL' && !/[0-9a-f]{40}/.test(row.basis)) {
+        throw new Error(row.id + ' is PASS_REAL but its basis does not pin a full 40-hex commit SHA（' + row.docPath + '）')
+      }
       const prev = byId.get(row.id)
       if (!prev) { byId.set(row.id, row); continue }
       if (prev.status !== row.status) {
-        throw new Error('证据文档互相矛盾：' + row.id + ' = ' + prev.status + ' @ ' + prev.docPath + ' vs ' + row.status + ' @ ' + row.docPath)
+        // 旧文档是某一轮的快照，可能被最新证据取代；但取代必须显式写在**较新**文档的依据里，
+        // 否则仍按"矩阵与报告各说一套"失败（禁止静默改口径）。
+        // 标记格式：`取代 <旧状态> @ <旧文档相对路径>`，路径逐字比对。
+        if (!supersedes(prev.basis, row.status, row.docPath)) {
+          throw new Error('证据文档互相矛盾：' + row.id + ' = ' + prev.status + ' @ ' + prev.docPath + ' vs ' + row.status + ' @ ' + row.docPath +
+            '（若确为最新证据取代旧快照，请在较新文档的依据里写明「取代 ' + row.status + ' @ ' + row.docPath + '」）')
+        }
+        // 显式取代：保留最新（prev），并把被取代的事实留在依据文本里供人工复核。
+        prev.superseded = [...(prev.superseded || []), { status: row.status, docPath: row.docPath }]
+        continue
       }
       // 同一状态：合并套件引用，保留首份依据（最新文档在前）。
       prev.suites = [...new Set([...prev.suites, ...row.suites])]
@@ -312,10 +332,10 @@ export function renderMarkdown({ contractText, planText, baselineText, matrix })
   lines.push('- 契约来源：`' + CONTRACT_PATH + '`（sha256 `' + sha256(contractText) + '`）')
   lines.push('- 用例映射来源：`' + PLAN_PATH + '` §I（sha256 `' + sha256(planText) + '`）')
   lines.push('- 状态来源：' + matrix.evidenceDocs.map((d) => '`' + d.docPath + '`（' + d.rowCount + ' 行）').join('、') +
-    '；多份证据对同一需求必须一致，冲突即生成失败。')
+    '；多份证据对同一需求必须一致。旧轮次快照被新证据取代时，较新文档的依据必须显式写出 `取代 <旧状态> @ <旧文档路径>`，否则生成失败（禁止静默改口径）。')
   lines.push('- 状态口径：契约 §2 的五值（`NOT_TESTED` / `BLOCKED` / `FAIL` / `PASS_MOCK` / `PASS_REAL`）；`PASS_MOCK` 只用于**离线套件真正执行过**的行为，且每行都在「状态依据」里点名已登记的套件。')
   lines.push('- 历史基线：`' + BASELINE_PATH + '` §5（采集于 `' + matrix.baselineCommit + '`，sha256 `' + sha256(baselineText) + '`）只说明当时的起点，不是本表当前状态的来源。')
-  lines.push('- 当前门禁：`ready:false`。逐项原因见 `' + VERDICT_PATH + '`（该文件是本矩阵的历史结论，不是本矩阵的输入）。')
+  lines.push('- 当前门禁：`ready:false`（12 项中 1 项 `PASS_REAL`）。逐项原因见 `' + VERDICT_PATH + '`（该文件是当前结论，不是本矩阵的输入）。')
   lines.push('')
   lines.push('## 1. 矩阵')
   lines.push('')

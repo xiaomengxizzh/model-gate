@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
   CASE_EVIDENCE, CONTRACT_PATH, MATRIX_PATH, REQUIREMENT_IDS, TESTED_TREE_SHA,
-  buildMatrix, generate, loadSources, parseEvidenceStatuses, parseTestedTreeSha, readMatrixFile,
+  buildMatrix, generate, loadSources, parseEvidenceStatuses, parseTestedTreeSha, readMatrixFile, supersedes,
 } from './aggregation-matrix.js'
 import { SUITES } from '../run.mjs'
 
@@ -87,14 +87,18 @@ test('矩阵每行包含契约原文，状态与证据文档一致，门禁不�
   // 12 行数据 + 1 行表头 + 1 行分隔
   const rows = doc.split('\n').filter((l) => /^\| MG-R\d{3} \|/.test(l))
   assert.equal(rows.length, 12)
-  // 状态不是手写常量，而是逐行搬运证据文档：9 PASS_MOCK + 2 NOT_TESTED + 1 BLOCKED，0 个 PASS_REAL。
+  // 状态不是手写常量，而是逐行搬运证据文档：9 PASS_MOCK + 2 NOT_TESTED + 1 PASS_REAL（MG-R012）。
   for (const row of built.rows) {
     assert.ok(doc.includes('| ' + row.id + ' |'), 'missing matrix row ' + row.id)
     assert.ok(rows.some((l) => l.startsWith('| ' + row.id + ' |') && l.includes('| ' + row.status + ' @ `')), 'status drifted for ' + row.id)
     assert.ok(rows.some((l) => l.startsWith('| ' + row.id + ' |') && l.includes(row.statusBasis)), 'evidence basis missing for ' + row.id)
   }
-  assert.deepEqual(countByStatus(doc), { NOT_TESTED: 2, BLOCKED: 1, FAIL: 0, PASS_MOCK: 9, PASS_REAL: 0 })
-  assert.equal(doc.includes('PASS_REAL @ `'), false)
+  assert.deepEqual(countByStatus(doc), { NOT_TESTED: 2, BLOCKED: 0, FAIL: 0, PASS_MOCK: 9, PASS_REAL: 1 })
+  // PASS_REAL 只能是已有真实回执的需求，且必须钉住完整 SHA；不接受“多一行也算通过”的扩散。
+  const realRows = rows.filter((l) => l.includes('PASS_REAL @ `'))
+  assert.equal(realRows.length, 1, 'exactly one requirement may be PASS_REAL')
+  assert.ok(realRows[0].startsWith('| MG-R012 |'), 'only MG-R012 has request-level Luna evidence')
+  assert.match(realRows[0], /[0-9a-f]{40}/, 'PASS_REAL row must pin a full 40-hex SHA')
 })
 
 function countByStatus (doc) {
@@ -118,8 +122,12 @@ test('状态来自证据文档（不是基线、不是常量），且多份证�
   assert.equal(docs.length >= 2, true, 'statuses must come from at least two evidence documents')
   for (const row of built.rows) {
     assert.ok(docs.some((d) => d.byId.get(row.id) === row.status), 'status for ' + row.id + ' is not present in any evidence doc')
-    const seen = docs.filter((d) => d.byId.has(row.id)).map((d) => d.byId.get(row.id))
-    assert.equal(new Set(seen).size, 1, 'evidence docs disagree on ' + row.id + ': ' + seen.join(','))
+    const seen = docs.filter((d) => d.byId.has(row.id)).map((d) => ({ docPath: d.docPath, status: d.byId.get(row.id) }))
+    for (const other of seen.filter((s) => s.status !== row.status)) {
+      // 旧轮次快照与当前状态不同时，必须由最新文档显式声明「取代 <旧状态> @ <旧文档路径>」。
+      assert.ok(supersedes(row.statusBasis, other.status, other.docPath),
+        'evidence docs disagree on ' + row.id + ' without an explicit supersede marker: ' + other.status + ' @ ' + other.docPath)
+    }
   }
   // PASS_MOCK 必须点名真实存在且已登记的离线套件（离线套件确实执行过该行为）。
   for (const row of built.rows.filter((r) => r.status === 'PASS_MOCK')) {
@@ -128,8 +136,13 @@ test('状态来自证据文档（不是基线、不是常量），且多份证�
       assert.ok(SUITES.includes('scripts/test/offline/' + name), row.id + ' cites unregistered suite ' + name)
     }
   }
-  for (const row of built.rows.filter((r) => r.status !== 'PASS_MOCK')) {
+  for (const row of built.rows.filter((r) => r.status !== 'PASS_MOCK' && r.status !== 'PASS_REAL')) {
     assert.deepEqual(row.statusSuites, [], row.id + ' is ' + row.status + ' but cites suites')
+  }
+  // PASS_REAL 的依据必须同时给出真实证据文档与完整 SHA；只有离线套件引用不足以支撑真实状态。
+  for (const row of built.rows.filter((r) => r.status === 'PASS_REAL')) {
+    assert.match(row.statusBasis, /[0-9a-f]{40}/, row.id + ' is PASS_REAL without a pinned SHA')
+    assert.match(row.statusBasis, /aggregation-real-luna-2026-11-14\.md|真实/, row.id + ' is PASS_REAL without a real-evidence reference')
   }
 })
 
@@ -162,6 +175,18 @@ test('证据文档互相矛盾即生成失败（禁止矩阵与报告各说一�
   const docB = { docPath: 'b.md', rows: [{ id: 'MG-R001', status: 'PASS_MOCK', basis: 'y（`agg-desktop-ui.test.mjs`）', suites: ['agg-desktop-ui.test.mjs'], docPath: 'b.md' }] }
   assert.throws(
     () => buildMatrix({ ...sources, evidence: [docA, docB] }),
+    /证据文档互相矛盾：MG-R001/,
+  )
+  // 旧轮次快照被取代是可以的，但较新文档必须显式写出「取代 <旧状态> @ <旧文档路径>」，否则仍失败。
+  const oldDoc = { docPath: 'old.md', rows: REQUIREMENT_IDS.map((id) => ({ id, status: 'NOT_TESTED', basis: '旧快照', suites: [], docPath: 'old.md' })) }
+  const newRows = (marker) => REQUIREMENT_IDS.map((id) => (id === 'MG-R001'
+    ? { id, status: 'PASS_MOCK', basis: '离线用例通过（`agg-desktop-ui.test.mjs`）；' + marker, suites: ['agg-desktop-ui.test.mjs'], docPath: 'new.md' }
+    : { id, status: 'NOT_TESTED', basis: '未执行', suites: [], docPath: 'new.md' }))
+  const superseded = buildMatrix({ ...sources, evidence: [{ docPath: 'new.md', rows: newRows('取代 NOT_TESTED @ old.md') }, oldDoc] })
+  assert.equal(superseded.rows.find((r) => r.id === 'MG-R001').status, 'PASS_MOCK')
+  // 标记里的旧文档路径写错 = 没有完成取代声明 = 仍然失败。
+  assert.throws(
+    () => buildMatrix({ ...sources, evidence: [{ docPath: 'new.md', rows: newRows('取代 NOT_TESTED @ other.md') }, oldDoc] }),
     /证据文档互相矛盾：MG-R001/,
   )
   // 没有证据来源时也不得生成矩阵（不能回落到硬编码状态）。

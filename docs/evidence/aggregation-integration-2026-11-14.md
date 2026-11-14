@@ -170,7 +170,7 @@ A2 的 `activate`/`deactivate` handler 只会把结果包成 200、把 `DesktopE
 | 需求 | 状态 | 依据 |
 | --- | --- | --- |
 | MG-R001 | `PASS_MOCK` | 一键接入/退出、428 预览、409 冲突、回滚均有离线测试（`agg-desktop-activate.test.mjs`、`agg-desktop-rollback.test.mjs`、`agg-desktop-ui.test.mjs`）；未在真实 Desktop 执行 |
-| MG-R002 | `PASS_MOCK` | 授权域与订阅收据离线测试通过（`agg-auth-resolve.test.mjs`、`agg-auth-subscription.test.mjs`、`agg-auth-receipt.test.mjs`、`codex-target-authz.test.mjs`）；真实登录身份/额度未验证 |
+| MG-R002 | `PASS_MOCK` | 授权域与订阅收据离线测试通过（`agg-auth-resolve.test.mjs`、`agg-auth-subscription.test.mjs`、`agg-auth-receipt.test.mjs`、`codex-target-authz.test.mjs`）。**部分真实证据已存在但不升级整行**：`official-gpt-6-luna-real` 半边已有请求级真实回执（[真实 Luna 验收](aggregation-real-luna-2026-11-14.md)），而 `codex-official-login-unchanged` 仅观测到运行期间元数据未变，没有登录/登出/切换测试，故整行仍按模拟证据计 |
 | MG-R003 | `PASS_MOCK` | 发现/分页/目录 fixtures 通过（`agg-discovery-console.test.mjs`、`agg-discovery-pagination.test.mjs`、`agg-discovery-sync.test.mjs`、`agg-discovery-catalog.test.mjs`）；真实 Console/Go 目录未对账 |
 | MG-R004 | `NOT_TESTED` | GUI 视图与接口已就绪；原版 Desktop 选择器未实际操作 |
 | MG-R005 | `PASS_MOCK` | 原生协议单元与生命周期离线测试通过（`agg-native-invariants.test.mjs`、`agg-native-capabilities.test.mjs`）；真实父子线程未验证 |
@@ -180,7 +180,7 @@ A2 的 `activate`/`deactivate` handler 只会把结果包成 200、把 `DesktopE
 | MG-R009 | `PASS_MOCK` | 默认关闭的租户原语与隔离用例通过（`agg-tenant-isolation.test.mjs`、`agg-discovery-catalog.test.mjs`）；第二真实身份未创建（授权项） |
 | MG-R010 | `PASS_MOCK` | 回滚与中断恢复离线用例通过（`agg-desktop-rollback.test.mjs`、`config-transaction.test.mjs`）；可丢弃实例演练未做 |
 | MG-R011 | `PASS_MOCK` | 本报告提供 SHA/命令/结果/模拟标签，且矩阵与门禁由离线套件自证（`aggregation-acceptance-matrix.test.mjs`、`aggregation-acceptance-audit.test.mjs`）；仍缺真实目标回执 |
-| MG-R012 | `BLOCKED` | 无所有者授权的 GPT-6 Luna 额度与时间窗；不代换模型 |
+| MG-R012 | `PASS_REAL` | 请求级脱敏收据证明上游 `model=gpt-6-luna` 且无其他 GPT 模型/无自动回退（`4feafe0e51dc02d48c45734df5b34e70d3679bd5`，3/3 HTTP 200，见[真实 Luna 验收](aggregation-real-luna-2026-11-14.md)）；订阅域拒绝面的离线不变量由 `agg-auth-subscription.test.mjs` 覆盖 |
 
 ## 9. 未做与边界
 
@@ -212,5 +212,6 @@ A2 的 `activate`/`deactivate` handler 只会把结果包成 200、把 `DesktopE
 | F5 | `PASS（本文件）`、`N/A` 不是合法状态词汇 | 证据文档手写状态列 | P01 改为 `PASS_MOCK` / `BLOCKED` 并补原因；生成器拒绝非五值词汇 | 同上（`invalid status` 反例） |
 | F6 | UI 说聚合接口未接线、要用户找接线补丁 | 文案停留在接线前 | `ebfb1d6`：说明真实原因（实例版本/未加载模块），渲染条件不变 | `agg-desktop-ui`（禁止过期文案回归） |
 
-当前状态分布（证据文档 → 矩阵）：`PASS_MOCK` 9、`NOT_TESTED` 2（MG-R004、MG-R006）、
-`BLOCKED` 1（MG-R012）、`PASS_REAL` 0。发布门禁仍为 `ready:false`：没有任何真实目标回执。
+当前状态分布（证据文档 → 矩阵）：`PASS_REAL` 1（MG-R012，`4feafe0` 上的请求级 Luna 回执）、
+`PASS_MOCK` 9、`NOT_TESTED` 2（MG-R004、MG-R006）。发布门禁仍为 `ready:false`：11 项没有真实目标回执，
+一项 `PASS_REAL` 不构成发布条件，也不替代其余需求。
