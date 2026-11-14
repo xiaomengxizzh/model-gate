@@ -1,5 +1,7 @@
 # model-gate｜AI 执行规则
 
+> **不可降级产品契约（最新执行优先）：** 执行前必须读取 [2026-11-14 所有者产品契约](docs/product/2026-11-14-owner-product-contract.md)、[聚合完整伪代码执行计划](docs/roadmap/2026-11-14-aggregation-pseudocode-plan.md) 与 [Agent Team 启动提示词](docs/roadmap/2026-11-14-aggregation-agentteam-start.md)。MG-R001..MG-R012 不得由 AI 自行修改；Codex 真实 GPT 测试只准 GPT-6 Luna，Agent Team 同时最多 5 个子代理。任何阻断必须保留原要求，不能使用 MCP、V1 缩水模式、CLI 单测冒充完整原版 Desktop 能力。真实付费测试、正式合并和发布仍需所有者授权。
+
 > **新增 2026-11-06 必经检查：任何依赖（无论大小）下载、安装或升级前，必须先检查真实本地宿主中已有的软件/版本、项目和共享缓存、跨项目重复副本以及重复下载风险；存在兼容依赖优先零下载复用。缺少宿主访问时写 UNKNOWN_LOCAL_STATE，不得自行下载。具体规则见 [RESOURCE_APPROVAL.md](RESOURCE_APPROVAL.md)。本地缺失也不意味着获得用户安装授权。**
 
 
