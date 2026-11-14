@@ -92,7 +92,16 @@ export function entryOf(def) {
   }
 }
 
-// 模型清单 URL：显式 modelListUrl 优先；否则按假设位形拼接。**始终** assumed。
+// 实测定论（2026-11-14，所有者批准的只读探针）：
+//   - `https://opencode.ai/zen/v1/models` → 200 application/json（真实清单）
+//   - `https://opencode.ai/console/v1/models`、`https://opencode.ai/console/openai/v1/models`
+//     → **200 text/html**（网页 SPA，不是 API）：按入口推导会得到一个“看起来成功”的 HTML 页面。
+// 因此 Console 的默认清单端点固定为 zen；只有操作者显式配置 modelListUrl，或目标是回环/自定义
+// 已登记 host（隔离测试）时，才按入口推导。
+export const DEFAULT_MODEL_LIST_URL = 'https://opencode.ai/zen/v1/models'
+
+// 模型清单 URL：显式 modelListUrl 优先；opencode.ai 上默认走实测的 zen 端点；
+// 回环/自定义 host 仍按入口推导（否则隔离测试无法指向本地假上游）。
 export function resolveListUrl(def) {
   const d = def || {}
   if (d.modelListUrl != null && d.modelListUrl !== '') {
@@ -105,10 +114,19 @@ export function resolveListUrl(def) {
     return { ok: true, url: String(d.modelListUrl), host, assumed: true, basis: 'explicit_modelListUrl' }
   }
   const entry = entryOf(d)
-  if (!entry.ok) return entry
-  const root = entry.entry.root ? entry.url + '/v1' : entry.url.replace(/\/(chat\/completions|responses)$/, '')
-  const url = root + '/models'
-  return { ok: true, url, host: entry.host, assumed: true, basis: 'console_entry_assumption', entry: entry.entry }
+  if (entry.ok && entry.host !== 'opencode.ai') {
+    const root = entry.entry.root ? entry.url + '/v1' : entry.url.replace(/\/(chat\/completions|responses)$/, '')
+    return { ok: true, url: root + '/models', host: entry.host, assumed: true, basis: 'console_entry_assumption', entry: entry.entry }
+  }
+  return {
+    ok: true,
+    url: DEFAULT_MODEL_LIST_URL,
+    host: hostOf(DEFAULT_MODEL_LIST_URL),
+    assumed: true,
+    basis: 'console_default_model_list',
+    entry: entry.ok ? entry.entry : null,
+    warning: 'Console 清单端点已实测为 ' + DEFAULT_MODEL_LIST_URL + '（2026-11-14 live 探针）；按入口推导的 /console/v1/models 返回 HTML',
+  }
 }
 
 // 版本/授权校验。opts: { cfg, grant, model, allowLoopback, now }
