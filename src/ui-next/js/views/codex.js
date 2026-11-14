@@ -32,7 +32,7 @@ export const RISK_NOTES = [
   '官方订阅是否允许经本地网关转发仍未核实：未获明确授权时保持官方直连，不改 openai_base_url。',
   'model_catalog_json 是"整体替换"语义：目录必须包含官方全量 + 第三方增量，缺字段客户端直接解析失败。',
   '写入不重启 Codex：配置在客户端下次启动或重载时生效；运行中的会话仍使用旧配置。',
-  'auth.json 永不读取、永不写入；回滚只用 config.toml.bak。',
+  '当前 config.toml 配置写入器不处理 auth.json；这不是网关永久禁止访问凭据。日后若需要由专门授权模块经用户同意安全管理凭据，应保证身份隔离与无损恢复。',
 ]
 
 // —— 探测 GET /api/codex/policy（同源管理 API，带内存令牌；失败即回落 export-only）——
@@ -107,7 +107,7 @@ export async function probeCodexPolicy (opts = {}) {
   return probeCache.inflight
 }
 
-// 字段所有权：modelgate = 受控写入；external = 只读保留；external-forbidden = 禁止出现/禁止触碰。
+// 当前 config.toml 配置写入器的字段所有权：modelgate = 受控写入；external = 只读保留；external-forbidden = 此写入器禁止操作。该标签不是整个产品对凭据的永久禁令。
 export const FIELD_OWNERS = [
   { path: 'model_provider', scope: '顶层', owner: 'modelgate', note: '必须是 "openai"（D1-A 内置身份）' },
   { path: 'openai_base_url', scope: '顶层', owner: 'modelgate', note: '指向 ModelGate 根地址；客户端自行追加 /v1/...' },
@@ -117,7 +117,7 @@ export const FIELD_OWNERS = [
   { path: '[model_providers.openai]', scope: '段', owner: 'external-forbidden', note: 'reserved built-in provider ID：不得写，写了客户端启动失败' },
   { path: '[mcp_servers.*]', scope: '段', owner: 'external', note: '只读保留，配置写入不修改' },
   { path: '[projects.*] / approval_policy / sandbox_mode', scope: '权限与信任', owner: 'external', note: '只读保留，配置写入不修改' },
-  { path: 'auth.json', scope: '文件', owner: 'external-forbidden', note: '官方凭据文件：永不读取、永不写入' },
+  { path: 'auth.json', scope: '文件', owner: 'external-forbidden', note: '仅本 config.toml 写入器不处理凭据；经用户授权的独立凭据模块可安全访问和管理' },
 ]
 
 export function ownerLabel (owner) {
@@ -147,7 +147,7 @@ export function codexIdentityTemplate (opts = {}) {
     '# 只写入下面这些字段；其余行（MCP / projects / 权限 / 未知字段 / 注释）必须原样保留。',
     '# 禁止写 [model_providers.openai]：Codex 把 openai 视为 reserved built-in provider ID，',
     '# 覆盖它会让客户端直接启动失败（0.167 实测）。改向只经 openai_base_url。',
-    '# 也不要写 auth.json：官方登录凭据由客户端自己管理。',
+    '# 此配置写入器不负责 auth.json；需要操作凭据时应使用经用户授权的独立安全模块。',
     'model_provider = "openai"',
     'openai_base_url = ' + tomlValue(base),
     'model = ' + tomlValue(model),
@@ -401,7 +401,7 @@ export function ownershipRows () {
   if (!rows.length) return FIELD_OWNERS
   rows.push({ path: '[mcp_servers.*]', scope: '段', owner: 'external', note: '只读保留，配置写入不修改' })
   rows.push({ path: '[projects.*] / approval_policy / sandbox_mode', scope: '权限与信任', owner: 'external', note: '只读保留，配置写入不修改' })
-  rows.push({ path: 'auth.json', scope: '文件', owner: 'external-forbidden', note: '官方凭据文件：永不读取、永不写入' })
+  rows.push({ path: 'auth.json', scope: '文件', owner: 'external-forbidden', note: '仅本 config.toml 写入器不处理凭据；经用户授权的独立凭据模块可安全访问和管理' })
   return rows
 }
 
