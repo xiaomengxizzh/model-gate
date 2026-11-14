@@ -1,0 +1,9 @@
+{
+  "models": [
+    {
+      "id": "no-context-model",
+      "display_name": "Model Without Context"
+    }
+  ],
+  "has_more": false
+}

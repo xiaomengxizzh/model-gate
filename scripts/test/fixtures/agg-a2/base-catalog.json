@@ -1,0 +1,33 @@
+{
+  "models": [
+    {
+      "slug": "gpt-test-sol",
+      "display_name": "GPT Test Sol",
+      "description": "Official fixture model (synthetic)",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        { "effort": "low", "description": "low reasoning" },
+        { "effort": "medium", "description": "medium reasoning" },
+        { "effort": "high", "description": "high reasoning" }
+      ],
+      "shell_type": "unified_exec",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 1,
+      "additional_speed_tiers": [],
+      "service_tiers": [],
+      "availability_nux": null,
+      "upgrade": null,
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "apply_patch_tool_type": "freeform",
+      "truncation_policy": { "mode": "tokens", "limit": 10000 },
+      "context_window": 200000,
+      "max_context_window": 400000,
+      "experimental_supported_tools": [],
+      "input_modalities": ["text"],
+      "base_instructions": "You are a synthetic fixture model used only by offline tests."
+    }
+  ]
+}
