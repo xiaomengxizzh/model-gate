@@ -1,0 +1,29 @@
+D2 版本化与回滚端到端（2026-11-11）
+====================================
+
+目标：验证目录生成器的 v1 → v2 → 回滚 prev 全链，而不是只测纯函数。
+环境：临时目录 + 合成 gateway 配置；官方基线来自 codex debug models 导出；不联网、不写正式配置。
+复现：CODEX_BIN=<path> node scripts/test/codex-catalog-rollback.mjs
+
+结果：7/7
+```text
+PASS  v1 生成成功且含 mg-third-alpha（13 模型）
+PASS  v2 含 mg-third-beta 且与 v1 内容不同（14 模型）
+PASS  版本历史至少 2 条
+PASS  status 报告当前版本
+PASS  回滚后内容与 v1 字节一致（sha256 相等）
+PASS  回滚后不再含 beta
+PASS  回滚产物可被 codex debug models 解析（13 模型）
+```
+
+## 说明
+
+- 回滚语义是**内容回滚**：把上一版目录写回输出文件，并更新状态指针；不是只改指针。
+- 生成器对未声明推理档位的第三方模型给出 `assumed_reasoning_levels` 警告（不阻断），
+  这与 D2「能力字段要有来源与置信度」一致——assumed 属于最低置信度，发布前应显式声明。
+- codex 校验仍然离线（debug models 加载本地文件），不产生任何上游请求。
+
+## 边界
+
+- 未做"回滚后运行中的 Codex 重新加载"验证（客户端重载属 E6/D5 范畴，NOT_RUN）。
+- 未覆盖多实例并发写入同一 state 目录的竞争（单写者假设）。

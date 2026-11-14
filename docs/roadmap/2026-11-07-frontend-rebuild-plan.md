@@ -114,4 +114,4 @@ src/ui-next/ 新建纯前端壳、主题、导航、状态容器、错误边界�
 
 ## 九、必读材料
 
-AGENTS.md、RESOURCE_APPROVAL.md、README.md、package.json、src/admin.html（仅行为审计，不复用）、src/index.js 里 /api/* 及 buildStatus/saveConfig/saveKeys、src/router.js、docs/phased-execution-plan.md、docs/roadmap/2026-11-07-gateway-platform-plan.md。启动提示词：docs/roadmap/2026-11-07-frontend-executor-prompt.md。
+AGENTS.md、RESOURCE_APPROVAL.md、README.md、package.json、src/admin.html（仅行为审计，不复用）、src/index.js 里 /api/* 及 buildStatus/saveConfig/saveKeys、src/router.js、docs/archive/2026-08/phased-execution-plan.md、docs/roadmap/2026-11-07-gateway-platform-plan.md。启动提示词：docs/roadmap/2026-11-07-frontend-executor-prompt.md。

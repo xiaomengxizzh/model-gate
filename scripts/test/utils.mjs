@@ -1,22 +1,38 @@
-// 测试共享工具
-export const GW = process.env.MG_GW || 'http://127.0.0.1:8787'
+// 测试共享工具（MG-004 后只保留断言/结果/SSE 解析；不再提供 snapshot/save 这类「读改写目标网关配置」的入口）
+// 门禁：npm test 白名单里的自包含套件直接运行；其余旧套件（现均为自建隔离实例）需显式 MG_ALLOW_LIVE_TESTS=1。
+// 它们不再读写目标网关配置，也不再需要 MG_GW / MG_CONFIG_DIR。
+import { basename } from 'node:path'
+
+const defaultSuites = new Set(['virtual-models.mjs', 'effort-normalize.mjs', 'upstream-side-4xx.mjs',
+  // Q01：circuit 经 E 隔离审计（自建 isolate 实例 + 回环 mock + 零宿主 env）后在默认回归中执行。
+  // affinity 未登记：它依赖「5xx 响应后换上游」的过期语义（与契约 §9.5 一次终态冲突），需先重写。
+  'circuit.mjs', 'affinity.mjs'])
+if (!defaultSuites.has(basename(process.argv[1] || '')) && process.env.MG_ALLOW_LIVE_TESTS !== '1') {
+  throw new Error('Legacy suites require MG_ALLOW_LIVE_TESTS=1（旧套件自建隔离网关实例，不再需要 MG_GW / MG_CONFIG_DIR）')
+}
+
 export const results = []
-export function check(name, ok, detail, skip) {
-  if (skip) { console.log('SKIP  ' + name + (detail ? ' :: ' + JSON.stringify(detail) : '')); return }
+
+// 断言记录。FAIL 不中断用例（便于一次看完全部失败），退出码由 finish() 统一给出。
+export function check(name, ok, detail) {
   results.push(!!ok)
   console.log((ok ? 'PASS' : 'FAIL') + '  ' + name + (detail ? ' :: ' + JSON.stringify(detail) : ''))
 }
-export const jpost = (path, body) => fetch(GW + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(async r => ({ s: r.status, d: await r.json().catch(() => ({})) }))
-export async function snapshot() {
-  const st = await (await fetch(GW + '/api/status')).json()
-  // circuit 必须原样带回：否则测试保存配置时会把手动配的熔断参数静默清成 null
-  const providers = {}; for (const p of st.providers || []) providers[p.id] = { baseUrl: p.baseUrl, apiKeyEnv: p.apiKeyEnv || '', pathPrefix: p.pathPrefix || '', extraHeaders: p.extraHeaders || {}, api: p.api || 'openai', proxy: p.proxy || '', circuit: p.circuit || null }
-  const models = {}; for (const m of st.models || []) models[m.name] = { provider: m.provider, alias: m.alias || [], fallbacks: m.fallbacks || [], maxConcurrent: m.maxConcurrent || 0 }
-  return { providers, models, defaults: st.defaults || {}, server: st.server || {} }
+
+export const count = () => {
+  const pass = results.filter(Boolean).length
+  const fail = results.filter(x => !x).length
+  return { pass, fail, total: pass + fail }
 }
-export async function save(p, m, d) { return jpost('/api/config/save', { providers: p, models: m, defaults: d }) }
-export const chat = (model, stream, extra) => fetch(GW + '/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, stream: !!stream, messages: [{ role: 'user', content: 'x' }], ...(extra || {}) }) })
-export const count = () => { const pass = results.filter(Boolean).length; const fail = results.filter((x) => !x).length; return { pass, fail, total: pass + fail } }
+
+// 每个旧套件收尾调用：打印子结果，失败时置非零退出码（退出码 0 才代表通过）。
+export function finish(label) {
+  const c = count()
+  console.log('  （' + (label || basename(process.argv[1] || 'suite')) + ' 子结果: ' + c.pass + '/' + c.total + '）')
+  if (c.fail) process.exitCode = 1
+  return c
+}
+
 export function streamDeltaText(text) {
   let o = ''
   for (const m of text.matchAll(/data:\s*([^\n]+)/g)) { const r = m[1].trim(); if (r === '[DONE]') continue; try { const j = JSON.parse(r); const c = j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content; if (typeof c === 'string') o += c } catch {} }

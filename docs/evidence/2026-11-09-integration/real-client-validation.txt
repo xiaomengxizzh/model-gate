@@ -1,0 +1,74 @@
+Real client + real upstream validation (2026-11-09, integration/modelgate-next)
+==================================================================================
+
+Environment: isolated gateway 127.0.0.1:8789, temporary MG_CONFIG_DIR,
+provider opencodego (OpenAI-compatible), model deepseek-v4.1-flash,
+key resolved at runtime from the user-level environment (keySource=env-registry;
+no key value was read, printed or copied). Codex CLI 0.167.0 was invoked via the
+vendor binary directly because the harness wrapper's nsfs/bwrap view cannot create
+user namespaces on this host; no skip-sandbox flag was used. Codex ran with
+--sandbox read-only, --ephemeral, --skip-git-repo-check.
+
+A) Codex CLI -> ModelGate -> real OpenCode Go (Chat bridge)
+   Command: codex exec ... -c model="deepseek-v4.1-flash"             -c model_provider="modelgate"             -c model_providers.modelgate.base_url="http://127.0.0.1:8789/v1"             -c model_providers.modelgate.wire_api="responses"             "Reply with exactly: MODELGATE_REAL_OK"
+   Result: EXIT 0
+   Output: MODELGATE_REAL_OK
+   Tokens: 9,084 (Codex reported)
+   Verdict: PASS (real client, real upstream, streamed Responses -> Chat bridge)
+
+B) Codex CLI -> ModelGate -> local mock (native Responses passthrough)
+   Command: same, model=native-responses-fixture, base_url=127.0.0.1:8788/v1
+   Result: EXIT 0; Output: native responses fixture; Tokens: 12
+   Verdict: PASS (wire-level native Responses SSE accepted by Codex)
+
+C) Codex CLI -> ModelGate -> local mock (Chat bridge)
+   Result: EXIT 0; Output: ModelGate fixture stream; Tokens: 18
+   Verdict: PASS
+
+D) DSH 0.2.2-rc.1 -> ModelGate -> real OpenCode Go (Responses)
+   Command: dsh mg-mock --patch <real-overlay.yml> "Reply with exactly: DSH_REAL_OK"
+   Overlay: api=openai-responses, baseURL=http://127.0.0.1:8789/v1,
+            model=deepseek-v4.1-flash, fake client key env (gateway client key off)
+   Result: EXIT 0; Output: DSH_REAL_OK
+   Verdict: PASS (real DSH, real upstream)
+
+E) DSH -> ModelGate -> local mock (Chat, Responses bridge, native Responses)
+   All three paths EXIT 0; outputs:
+   - ModelGate fixture stream (Chat)
+   - ModelGate fixture stream (Responses bridge)
+   - native responses fixture (native passthrough)
+   Verdict: PASS 3/3
+
+Gateway accounting for the three real calls (A + D + one retry/no-op):
+  requests=3, errors=0, tokenCount=18,809, p95=2,628 ms,
+  lastServing={model:"deepseek-v4.1-flash",provider:"opencodego"}.
+Cost: three minimal prompts; no large context, no long generation.
+
+NOT_RUN / blocked:
+- Real tool execution (shell/apply_patch) by Codex/DSH: the host still cannot create
+  unprivileged user namespaces for bubblewrap. Text/streaming is verified; actual
+  tool-call round trips are NOT_RUN in this environment. No --dangerously-bypass...
+  flag was used.
+- Codex Desktop: not launched; CLI evidence does not cover Desktop.
+- 429/5xx real fault injection: not performed.
+
+GitHub / PR (corrected):
+- gh CLI v2.46.0 at /home/xiaomengxizi/.local/bin/gh; logged in as xiaomengxizzh
+  with repo/workflow scopes via keyring (GH_TOKEN/GITHUB_TOKEN are not required).
+- Branch pushed: integration/modelgate-next.
+- Draft PR #5: https://github.com/xiaomengxizzh/model-gate/pull/5
+- PR #2: OPEN/DRAFT, head 9a0bfe3, base main, MERGEABLE.
+- PR #4: OPEN/DRAFT, head 35bed9b, base dev/gateway-audit-20261108, MERGEABLE.
+- Previous "no credentials / cannot push" statement was wrong: gh keyring auth works.
+  The earlier check only used PATH without ~/.local/bin.
+- GitHub never supported git push -o pull_request.create; that is GitLab. Draft PR
+  was created with gh pr create --draft, not a push option.
+
+MCP note:
+- Live ~/.workbuddy/mcp.json tool-gate command already points to
+  /home/xiaomengxizi/.local/share/nvm/versions/node/v24.22.2/bin/node.
+  v22.23.2 appears only in historical WorkBuddy session logs, not the live config.
+  The current session's tool-gate MCP client is disconnected and needs a client
+  restart; manual start with v24 lists 9 downstream servers including github.
+- Root filesystem is mounted read-only, so ~/.workbuddy cannot be edited from this
+  session; no change was made or needed.

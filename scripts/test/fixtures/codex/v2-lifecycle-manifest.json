@@ -1,0 +1,108 @@
+{
+  "schema": "mg.codex.v2-lifecycle-manifest/v1",
+  "codexVersion": "0.167.0",
+  "lockedAt": "2026-11-12",
+  "roleFixture": "scripts/test/fixtures/codex/roles/0.167.0-negative.toml",
+  "roleExpectation": "same-provider model override only; role model_provider must not change the provider (ADR-0003)",
+  "isolation": {
+    "required": "OS-level egress isolation (network namespace or host-level block)",
+    "current": "BLOCKED_ENV: bwrap/unshare unavailable; curated plugin sync risk cannot be excluded",
+    "executionOwner": "Q02",
+    "optInEnv": "MGR_E2E_NETWORK_ISOLATED=1",
+    "v2OptInEnv": "MG_CODEX_V2=1"
+  },
+  "cases": [
+    {
+      "id": "tool_nonce",
+      "status": "FIXTURE_PREPARED",
+      "requires": "Q02 + OS isolation",
+      "assert": "child runs a read-only tool and the nonce reaches the parent wait notification"
+    },
+    {
+      "id": "wait_agent",
+      "status": "FIXTURE_PREPARED",
+      "requires": "Q02 + OS isolation",
+      "assert": "wait_agent receives the native completion notification; no timeout before child final"
+    },
+    {
+      "id": "followup_task",
+      "status": "FIXTURE_PREPARED",
+      "requires": "Q02 + OS isolation",
+      "assert": "followup_task starts a new child turn and the new nonce returns to the parent"
+    },
+    {
+      "id": "send_message",
+      "status": "FIXTURE_PREPARED",
+      "requires": "Q02 + OS isolation",
+      "assert": "send_message is routed as a namespace collaboration tool with plaintext projection"
+    },
+    {
+      "id": "cancel",
+      "status": "FIXTURE_PREPARED",
+      "requires": "Q02 + OS isolation",
+      "assert": "cancel prevents further followup and yields a canceled terminal, not a fake success"
+    },
+    {
+      "id": "permission_deny",
+      "status": "FIXTURE_PREPARED",
+      "requires": "Q02 + OS isolation",
+      "assert": "denied tool permission is reported and no tool executes"
+    },
+    {
+      "id": "permission_allow",
+      "status": "FIXTURE_PREPARED",
+      "requires": "Q02 + OS isolation",
+      "assert": "allowed tool permission executes once with the expected nonce"
+    },
+    {
+      "id": "resume_cold",
+      "status": "FIXTURE_PREPARED",
+      "requires": "Q02 + OS isolation",
+      "assert": "resume returns the same root SID and reuses the existing child id/history"
+    },
+    {
+      "id": "fork_turns_none",
+      "status": "FIXTURE_PREPARED",
+      "requires": "Q02 + OS isolation",
+      "assert": "fork_turns=none child starts without parent history"
+    },
+    {
+      "id": "fork_turns_all",
+      "status": "FIXTURE_PREPARED",
+      "requires": "Q02 + OS isolation",
+      "assert": "fork_turns=all child receives the parent history in order"
+    },
+    {
+      "id": "concurrency_limit",
+      "status": "FIXTURE_PREPARED",
+      "requires": "Q02 + OS isolation",
+      "assert": "native concurrency limit rejects the over-limit spawn with a typed error"
+    },
+    {
+      "id": "parent_child_ids",
+      "status": "FIXTURE_PREPARED",
+      "requires": "Q02 + OS isolation",
+      "assert": "root/child ids are distinct and linked; no gateway-invented child"
+    },
+    {
+      "id": "zero_egress",
+      "status": "FIXTURE_PREPARED",
+      "requires": "Q02 + OS isolation",
+      "assert": "requests hit only loopback mocks; no external connect"
+    }
+  ],
+  "regressions": [
+    {
+      "id": "m2-3-round2-502-candidate-pool",
+      "status": "REGRESSION_DECLARED",
+      "historical": "After wiring, the local run reached 22/27 checks and round 2 returned 502 candidate pool empty; not accepted as PASS.",
+      "assert": "round 2 must not return 502; an empty candidate pool must produce a typed/readable diagnosis",
+      "reopen": "Q02 on a host with enforced egress isolation"
+    }
+  ],
+  "notes": [
+    "This manifest is declarative. It does not run Codex and does not claim PASS.",
+    "Real lifecycle execution belongs to Q02 and requires OS-level egress isolation; bwrap/unshare is unavailable here.",
+    "The role fixture is the P01 negative fixture: model_provider in a role is ignored, provider is inherited."
+  ]
+}

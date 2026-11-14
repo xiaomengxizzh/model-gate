@@ -1,0 +1,280 @@
+{
+  "needAuth": true,
+  "configVersion": 7,
+  "virtualModels": [
+    {
+      "name": "team-chat",
+      "directory": [
+        {
+          "model": "demo-chat",
+          "mode": "afterAll",
+          "providers": [
+            "demo-openai",
+            "demo-backup"
+          ]
+        },
+        {
+          "model": "demo-reasoner",
+          "mode": "onFail",
+          "providers": []
+        }
+      ],
+      "quota": 0,
+      "dailyQuota": 2000000,
+      "maxContext": 128000,
+      "maxConcurrent": 4,
+      "qps": 2,
+      "keySet": true,
+      "expiresAt": "2027-01-31T00:00:00.000Z",
+      "note": "fixture virtual entry",
+      "requests": 42,
+      "errors": 1,
+      "tokens": 1200345,
+      "today": 53210,
+      "hitRate": 62.5
+    }
+  ],
+  "server": {
+    "maxBodyBytes": 33554432,
+    "keyEncrypted": true,
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "startedAt": 1794193200000,
+  "uptimeMs": 86400000,
+  "counters": {
+    "requests": 212,
+    "errors": 3,
+    "retries": 5,
+    "interrupts": 1
+  },
+  "lastServing": {
+    "model": "demo-chat",
+    "provider": "demo-openai",
+    "at": 1794279600000
+  },
+  "global": {
+    "requests": 212,
+    "errors": 3,
+    "retries": 5,
+    "interrupts": 1,
+    "tokenCount": 2400690,
+    "todayTokens": 106420,
+    "avgMs": 812,
+    "p50": 640,
+    "p95": 1980,
+    "latTrend": [
+      {
+        "t": 1794276000000,
+        "v": 790
+      },
+      {
+        "t": 1794276300000,
+        "v": 815
+      }
+    ]
+  },
+  "cache": {
+    "trend": [
+      {
+        "t": 1794276000000,
+        "v": 58.3
+      },
+      {
+        "t": 1794276300000,
+        "v": 61.2
+      }
+    ],
+    "alert": null
+  },
+  "dialogues": [
+    {
+      "id": "fixture-session",
+      "named": true,
+      "requests": 12,
+      "tokens": 96000,
+      "hit": 60000,
+      "miss": 36000,
+      "hitRate": 62.5,
+      "startAt": 1794272400000,
+      "lastAt": 1794279600000
+    }
+  ],
+  "providers": [
+    {
+      "id": "demo-openai",
+      "baseUrl": "https://api.example.invalid/v1",
+      "hasKey": true,
+      "keySource": "keys",
+      "apiKeyEnv": "DEMO_OPENAI_API_KEY",
+      "pathPrefix": "",
+      "api": "openai",
+      "extraHeaders": {
+        "X-Demo-Route": "fixture-only"
+      },
+      "proxy": "",
+      "circuit": {
+        "maxFailures": 3,
+        "openDurationMs": 10000
+      },
+      "st": {
+        "requests": 180,
+        "errors": 2,
+        "retries": 4,
+        "tokens": 2100000,
+        "avgMs": 790,
+        "p50": 620,
+        "p95": 1900,
+        "state": "ok",
+        "openUntilMs": 0,
+        "probe": {
+          "at": 1794279300000,
+          "ok": true,
+          "code": 200,
+          "ms": 35,
+          "err": null
+        }
+      }
+    },
+    {
+      "id": "demo-backup",
+      "baseUrl": "https://backup.example.invalid",
+      "hasKey": true,
+      "keySource": "env",
+      "apiKeyEnv": "DEMO_BACKUP_API_KEY",
+      "pathPrefix": "/v1",
+      "api": "anthropic",
+      "extraHeaders": {},
+      "proxy": "http://proxy.example.invalid:8080",
+      "circuit": null,
+      "st": {
+        "requests": 32,
+        "errors": 1,
+        "retries": 1,
+        "tokens": 300345,
+        "avgMs": 940,
+        "p50": 800,
+        "p95": 2100,
+        "state": "half",
+        "openUntilMs": 12000,
+        "probe": null
+      }
+    }
+  ],
+  "models": [
+    {
+      "name": "demo-chat",
+      "provider": "demo-openai",
+      "alias": [
+        "demo"
+      ],
+      "fallbacks": [
+        "demo-backup"
+      ],
+      "maxConcurrent": 8,
+      "qps": 4,
+      "reasoning": "",
+      "effortOptions": [],
+      "effortFormat": "",
+      "dailyQuota": 1000000,
+      "quota": 0,
+      "maxContext": 128000,
+      "maxTokensMax": 8192,
+      "api": "",
+      "providerModels": {
+        "demo-openai": "vendor-chat-model"
+      },
+      "forceNoStream": false,
+      "probe": {
+        "at": 1794279300000,
+        "ok": true,
+        "code": 200,
+        "ms": 220,
+        "err": null
+      },
+      "requests": 150,
+      "errors": 1,
+      "tokens": 1800000,
+      "today": 82000,
+      "hitRate": 64.2,
+      "affinity": "demo-openai",
+      "avgMs": 760
+    },
+    {
+      "name": "demo-reasoner",
+      "provider": "demo-backup",
+      "alias": [],
+      "fallbacks": [],
+      "maxConcurrent": 2,
+      "qps": 1,
+      "reasoning": "medium",
+      "effortOptions": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "effortFormat": "reasoning_effort",
+      "dailyQuota": 0,
+      "quota": 500000,
+      "maxContext": 64000,
+      "maxTokensMax": 4096,
+      "api": "anthropic",
+      "providerModels": {
+        "demo-backup": "vendor-reasoner-model"
+      },
+      "forceNoStream": true,
+      "probe": null,
+      "requests": 30,
+      "errors": 1,
+      "tokens": 300345,
+      "today": 24420,
+      "hitRate": null,
+      "affinity": null,
+      "avgMs": null
+    }
+  ],
+  "defaults": {
+    "directory": [
+      {
+        "model": "demo-chat",
+        "providers": [
+          "demo-openai",
+          "demo-backup"
+        ],
+        "mode": "afterAll"
+      }
+    ],
+    "preheat": [],
+    "retry": {
+      "maxAttempts": 3,
+      "initialDelayMs": 500,
+      "maxDelayMs": 8000,
+      "jitter": 0.2
+    },
+    "timeout": {
+      "connectMs": 15000,
+      "firstByteMs": 90000,
+      "idleMs": 60000,
+      "overallMs": 0
+    },
+    "concurrency": {
+      "maxPerProvider": 8
+    },
+    "extraHeaders": {},
+    "proxy": "",
+    "proxyMode": "auto",
+    "clientKey": "********",
+    "provider": "demo-openai",
+    "model": "auto",
+    "affinityTtlMs": 300000,
+    "failbackProbe": {
+      "enabled": true,
+      "everyMs": 30000,
+      "successStreak": 2,
+      "system": "ping"
+    },
+    "x-fixture-extension": {
+      "enabled": true
+    }
+  }
+}

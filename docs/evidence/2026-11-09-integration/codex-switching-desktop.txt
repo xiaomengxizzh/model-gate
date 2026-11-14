@@ -1,0 +1,60 @@
+Codex provider-switching and Desktop verification (2026-11-10)
+================================================================
+
+Environment: Codex CLI 0.167.0 (vendor binary), ChatGPT Desktop 26.1103.32239,
+temp CODEX_HOME with two mock providers; no real upstream or auth files touched.
+
+1) In-session /model (interactive TUI)
+   - Started TUI with default provider native mock (model native-responses-fixture).
+   - /model picker listed only the active provider's catalog:
+     GPT-6.1-Sol, GPT-6-Astra, GPT-6-Sol, GPT-6-Luna, GPT-5.6-Sol,
+     GPT-6.1 Terra, GPT-5.6-Terra, GPT-5.6-Luna.
+   - The ModelGate-provided model (deepseek-fixture) was NOT listed.
+   - Verdict: /model is provider-scoped; it cannot switch to another model_provider.
+
+2) Resume a thread with a different provider
+   Command: codex exec resume <thread-id> --skip-git-repo-check             -c 'model_provider="modelgate"' -c 'model="deepseek-fixture"' "…"
+   Result: exit 1
+   Error: thread/resume failed: This chat uses native, but your current provider is
+          modelgate. Switch to native to continue.
+          (code -32600, type modelProviderMismatch,
+           modelProvider=native, currentModelProvider=modelgate)
+   Verdict: a thread is bound to its provider; resume/profile cannot switch it.
+   Correct usage: start a NEW thread with the other profile, or run two terminals.
+
+3) Codex Desktop provider behavior
+   - Installed: chatgpt 26.1103.32239; bundled Codex CLI 0.167.0.
+   - Desktop's app-server protocol supports an optional modelProvider on
+     thread/start, thread/resume and thread/fork.
+   - However, the Desktop bundle starts user threads with modelProvider:null
+     (default config provider) and its model-list request has no provider filter.
+   - There is no profile/provider picker in the Desktop UI; model selection is
+     scoped to the active provider, same as TUI.
+   - CODEX_HOME is honored by the Desktop process, so a separate instance/profile
+     is technically possible, but a second Desktop instance with a non-default
+     CODEX_HOME was NOT exercised end-to-end here.
+   Verdict for Desktop: one instance = one active provider. Native and ModelGate
+   models cannot be mixed in the same Desktop conversation. Use Codex CLI for the
+   ModelGate profile, or isolate a second Desktop instance via CODEX_HOME (not
+   verified as a supported UI workflow).
+
+4) Hosted tools (namespace / web_search)
+   - Native Responses path: offline wire test asserts web_search/namespace/function
+     tools are forwarded unchanged to the upstream /v1/responses.
+   - Chat bridge path: the same request drops web_search/namespace and keeps
+     function tools; logs record lossy. This is a protocol boundary, not a silent
+     success.
+   - /api/status now exposes hostedTools: "native" or "chat-bridge-lossy" per model.
+   - Full hosted tools require an upstream that natively implements Responses with
+     those tools; OpenCode's Chat API cannot provide them.
+
+5) Native/direct usage collection
+   - New read-only endpoint GET /api/native-usage?days=7, backed by
+     src/native-usage.js and defaults.nativeUsageDir / MG_NATIVE_USAGE_DIR.
+   - Only parses session_meta (provider), turn_context (model), token_count (usage);
+     message content is never read or returned.
+   - Disabled by default; enabled by setting the directory (for example
+     ~/.codex/sessions).
+   - Validated against synthetic fixtures (2 sessions, exact totals, no message
+     leak) and a read-only scan of the real local sessions directory
+     (39 files / 32 sessions / 389 ms, 0 parse errors; personal totals not published).

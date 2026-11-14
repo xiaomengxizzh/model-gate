@@ -1,0 +1,36 @@
+E7 迁移流程演练（隔离副本，2026-11-11）
+========================================
+
+目的：在**合成会话**上演练 D6 要求的"选择性迁移 + 备份 + 回滚"流程，验证流程本身可行；
+不动真实 `~/.codex/sessions`，产品写入接口仍显式 `not_authorized`。
+
+复现：node scripts/test/history-migration-drill.mjs
+
+场景：3 个合成会话（官方 / 第三方 / 含加密项的 v2），只选第三方会话迁移到 `openai + gpt-6-astra`。
+
+结果：11/11
+```text
+PASS  诊断到 3 个会话且无解析错误
+PASS  预演为只读（dryRun / authorized=false / writeSupported=false）
+PASS  只选中 1 个会话（含加密项的 v2 会话不在预演范围）
+PASS  预演记录的 sha256 与实际文件一致
+PASS  预演给出备份路径与 tmp+rename 写模式
+PASS  产品写入接口仍拒绝（not_authorized）
+PASS  备份文件与原始字节一致
+PASS  只有被选中的会话被修改
+PASS  未选中的两个会话字节未变
+PASS  迁移后诊断显示新 provider/model（openai / gpt-6-astra）
+PASS  回滚后三个会话与原始快照完全一致
+```
+
+## 演练暴露的流程要点
+
+1. 备份必须是**字节级复制**并记录 sha256（本演练用 `sha256(backup)===sha256(original)` 断言）。
+2. 写入必须是**临时文件 + rename**；中途失败可直接用备份覆盖恢复。
+3. 选择范围要按 sessionId/relPath 精确命中；含加密项的会话不应被默认纳入（本演练验证了预演只列出被选中的 1 个）。
+4. 迁移后必须重新诊断确认 provider/model 已变，再允许清理备份。
+
+## 边界 / NOT_RUN
+
+- 真实历史迁移：**NOT_RUN**。D6 要求逐条授权 + 隔离副本 + 回滚演练；本演练只覆盖流程。
+- 产品代码仍不提供写入路径（避免误用）；真实迁移需另行设计与授权。

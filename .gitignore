@@ -5,6 +5,16 @@ config/*.local.json
 *.local.json
 .env
 
+# 配置事务工件（F02）：journal / commit marker / 写锁 / 暂存目录，只在运行时存在，绝不入库
+config/.mg-txn/
+config/config-txn.json
+config/config-txn.commit.json
+config/config-txn.lock
+# 原子写临时文件（含旧 writeJsonAtomic 的 <文件>.<pid>.tmp 遗留形态）
+*.local.json.*.tmp
+*.local.json.*.json.tmp
+config-txn.*.tmp
+
 config/stats.json
 # 配置备份（.bak 及带时间戳后缀）不入库
 *.bak
@@ -22,5 +32,16 @@ mg-tray.exe
 .tmp-cfgdir/
 # WorkBuddy 工作区记忆（不入库）
 .workbuddy/
+# 本地 agent 工作树（.agents/worktrees/*）：只在本机存在，绝不入库
+.agents/
 config/admin.token
 mg-tray.new.exe
+
+# Process-local test leftovers and machine key material
+.tmp-test-*/
+# runner-selftest 的临时哨兵/危险夹具（正常路径自删；SIGKILL 残留时忽略，且显式清单不会执行未登记文件）
+scripts/test/offline/__mg-selftest-sentinel-*.test.mjs
+scripts/test/__mg-selftest-danger-*.mjs
+master.key
+*.pyc
+__pycache__/

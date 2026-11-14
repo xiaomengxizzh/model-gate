@@ -1,0 +1,107 @@
+# 离线检查：push / pull_request / 手动触发。资源门禁见 RESOURCE_APPROVAL.md：
+# 本 workflow 不安装依赖、不下载 Node 工具链、不拉模型或容器镜像，只使用 runner 既有的 node/npm。
+# 触发方式、Node 矩阵与命令集合由 scripts/check-metadata.mjs 强制核对；改这里要同步该脚本。
+#
+# 支持矩阵（N00，2026-11-12 实测收敛）：当前只有 **Linux + Node 24** 一条已验收线。
+# 本机实测 v24.22.2（Ubuntu 26.04 / x86_64）；没有 Node 18/20/22 runner，也不下载工具链，
+# 因此矩阵只保留 24。Node 18/20 属历史记录，不再作为当前支持（见 README 运行时支持矩阵）。
+# 选择器找不到预装 Node 24 时**显式报错**而不是悄悄跳过：跳过不是绿。
+name: Offline check (existing runtime only)
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: offline-check-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  offline:
+    name: offline / linux / node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 package.json engines.node（>=24）及 README「运行时支持矩阵」对齐。
+        # 矩阵必须与 engines 下限一致，由 scripts/check-metadata.mjs 强制核对；
+        # 只列**已实测**的大版本，不把未验证的 18/20/22 放回来。
+        node: ['24']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Runner version receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "runner_os=${RUNNER_OS} runner_arch=${RUNNER_ARCH} image=${ImageOS:-unknown}"
+          uname -srm
+          command -v node || true
+          node --version || true
+          command -v npm || true
+          npm --version || true
+          {
+            echo '### Runner version receipt'
+            echo ''
+            echo '| item | value |'
+            echo '| --- | --- |'
+            echo "| runner | ${RUNNER_OS} / ${RUNNER_ARCH} |"
+            echo "| kernel | $(uname -srm) |"
+            echo "| node | $(node --version 2>/dev/null || echo missing) |"
+            echo "| npm | $(npm --version 2>/dev/null || echo missing) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Select preinstalled Node ${{ matrix.node }} (no download)
+        shell: bash
+        env:
+          TARGET_NODE: ${{ matrix.node }}
+        run: |
+          set -euo pipefail
+          major_of() { "$1" --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/'; }
+          candidate=""
+          if command -v node >/dev/null 2>&1 && [ "$(major_of "$(command -v node)")" = "$TARGET_NODE" ]; then
+            candidate="$(command -v node)"
+          fi
+          if [ -z "$candidate" ] && [ -n "${RUNNER_TOOL_CACHE:-}" ] && [ -d "${RUNNER_TOOL_CACHE}/node" ]; then
+            # 兼容不同架构目录（x64/arm64）与 24.x 子目录；只选精确大版本。
+            for bin in "${RUNNER_TOOL_CACHE}"/node/"${TARGET_NODE}".*/*/bin/node "${RUNNER_TOOL_CACHE}"/node/"${TARGET_NODE}".*/bin/node; do
+              [ -x "$bin" ] || continue
+              if [ "$(major_of "$bin")" = "$TARGET_NODE" ]; then candidate="$bin"; break; fi
+            done
+          fi
+          if [ -z "$candidate" ]; then
+            echo "::error::runner image has no preinstalled Node ${TARGET_NODE}; this workflow never downloads toolchains (RESOURCE_APPROVAL.md). Use an image that ships it, or obtain explicit owner approval before adding a download step. 这是镜像/工具链事实，不是源码失败；禁止用跳过冒充通过。"
+            exit 1
+          fi
+          echo "using $candidate ($("$candidate" --version))"
+          echo "$(dirname "$candidate")" >> "$GITHUB_PATH"
+          if [ ! -x "$(dirname "$candidate")/npm" ]; then
+            echo "::error::npm not found next to $candidate; refusing to install it (resource gate)."
+            exit 1
+          fi
+      - name: Verify toolchain matches matrix entry
+        shell: bash
+        env:
+          TARGET_NODE: ${{ matrix.node }}
+        run: |
+          set -euo pipefail
+          command -v node
+          node --version
+          command -v npm
+          npm --version
+          actual="$(node -p 'process.versions.node.split(".")[0]')"
+          if [ "$actual" != "$TARGET_NODE" ]; then
+            echo "::error::expected Node ${TARGET_NODE} on PATH, got $(node --version)"
+            exit 1
+          fi
+          echo "Node major $actual matches matrix entry; engines floor is enforced by scripts/check-metadata.mjs."
+      - name: Syntax check
+        run: npm run check
+      - name: Product contract consistency (not real acceptance; fail on accidental drift)
+        run: npm run contract:check
+      - name: Isolated mock suites (local mock only, no upstream, no credentials)
+        run: npm test
+      - name: Documentation link check
+        run: npm run docs:check
+      - name: Release metadata consistency (version / LICENSE / CHANGELOG / matrix)
+        run: node scripts/check-metadata.mjs

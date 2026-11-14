@@ -1,0 +1,6 @@
+data: {"id":"chatcmpl-fixture-malformed","created":1763000000,"model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"role":"assistant","content":"ok so far"},"finish_reason":null}]}
+
+data: this-is-not-json
+
+data: {"choices":[{"index":0,"delta":{"content":"never reached"},"finish_reason":"stop"}]}
+

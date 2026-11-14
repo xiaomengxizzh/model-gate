@@ -1,0 +1,30 @@
+D2 远端目录验收：Codex 直接从网关 /v1/models 取目录（2026-11-11）
+=================================================================
+
+背景：早期错误形状（OpenAI list）会让客户端报 `failed to decode models response`，
+并直接导致 resume 失败。本项专门验证：**不配置 model_catalog_json**，只靠 `openai_base_url`，
+客户端从网关 `/v1/models?client_version=…` 取目录仍能正常工作。
+
+环境：Codex 0.167（临时 CODEX_HOME，无 model_catalog_json）→ 网关（catalog 路由）→ 本地官方 mock。
+复现：CODEX_BIN=<path> node scripts/test/codex-remote-catalog.mjs
+
+结果：4/4
+```text
+PASS  无 model_catalog_json 时一轮 exit 0
+PASS  未出现目录解码失败（failed to decode models response）
+PASS  文本回传（REMOTE_CATALOG_OK，usage 5/3/8）
+PASS  官方 mock 被命中（hits=1）
+```
+
+## 与本地目录路径的关系
+
+| 路径 | 状态 |
+| --- | --- |
+| 本地 `model_catalog_json`（整体替换） | 已验证（6/6 客户端加载、5/5 Desktop 二进制） |
+| 网关 `/v1/models` 远端目录 | 本轮验证（4/4） |
+| 两者同时配置 | 之前 config-driven 用例已覆盖（本地目录优先，远端请求仍合法） |
+
+## 边界
+
+- 只验证「客户端能解析并完成一轮」；模型选择器里是否显示全部 13 个模型需要 TUI 交互，未验证。
+- 未验证目录在会话中途变化（客户端缓存行为）。

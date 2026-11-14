@@ -1,0 +1,42 @@
+E6 客户端加载验证：真实 CODEX_HOME/config.toml（2026-11-11）
+==========================================================
+
+目标：不只验证 `-c` 覆盖，而是让 Codex 从真实 `config.toml` 加载 D1-A 配置与网关生成的目录。
+环境：临时 CODEX_HOME（mkdtemp）；无网络请求、无登录、不读真实 ~/.codex；Codex 0.167.0。
+复现：node scripts/test/codex-client-config.mjs
+
+写入的 config.toml 关键项：
+```toml
+model = "gpt-6-astra"
+model_provider = "openai"
+openai_base_url = "http://127.0.0.1:8787"
+model_catalog_json = "<temp>/catalog.json"
+approval_policy = "never"
+
+[features]
+multi_agent = true
+
+[mcp_servers.demo]
+command = "true"
+args = []
+```
+
+结果：6/6
+```text
+PASS  Codex 能加载 config.toml（debug models exit 0）
+PASS  目录可解析为 {models:[…]}（13 个模型）
+PASS  目录包含官方 slug（gpt-6-astra）
+PASS  目录包含第三方聚合 slug（mg-opencodego-deepseek-v4-1-flash）
+PASS  没有 [model_providers.openai] 冲突（否则 reserved built-in provider IDs 启动失败）
+PASS  features list 同样能加载配置
+```
+
+## 过程中发现的真实约束
+
+- `[permissions]` 不能写成 `mode = "safe"`：0.167 报 `invalid type: string "safe", expected struct PermissionProfileToml`。
+  因此 E6 的受控写入只允许**保留/透传**既有 permissions 段，绝不生成该段内容（`config.js` 已按此实现，`codex-config` 用例覆盖未知字段逐字保留）。
+
+## 边界
+
+- 未发真实请求（不验证上游连通）；真实 `~/.codex/config.toml` 写入与客户端重载仍 NOT_RUN。
+- 未覆盖 Desktop 的配置读取（其 app-server 线程参数是 `modelProvider:null`，见 2026-11-09 证据）。

@@ -1,0 +1,21 @@
+Reading additional input from stdin...
+OpenAI Codex v0.167.0
+--------
+workdir: /home/xiaomengxizi/ai/tmp/mg-codex-cwd
+model: deepseek-v4.1-flash
+provider: modelgate
+approval: never
+sandbox: read-only
+reasoning effort: none
+reasoning summaries: none
+session id: 01a1c013-6376-7991-aa9e-a4e17298fbe7
+--------
+user
+Reply with exactly: MODELGATE_REAL_OK
+warning: Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces.
+warning: Model metadata for `deepseek-v4.1-flash` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+codex
+MODELGATE_REAL_OK
+tokens used
+9,084
+MODELGATE_REAL_OK

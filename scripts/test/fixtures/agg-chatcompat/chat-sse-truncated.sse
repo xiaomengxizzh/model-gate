@@ -1,0 +1,4 @@
+data: {"id":"chatcmpl-fixture-truncated","created":1763000000,"model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"role":"assistant","content":"half a sen"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture-truncated","created":1763000000,"model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"content":"tence"},"finish_reason":null}]}
+

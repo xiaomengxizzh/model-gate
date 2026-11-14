@@ -4,15 +4,156 @@ export function isStreamResponse(res) {
   return STREAM_CT.test(ct)
 }
 
+// 上游响应头只按**安全白名单**透传（流式路径逐头转发，不能信任任意上游头）：
+//   · 只保留对 SSE/诊断确实有用、且对浏览器/调用方无副作用的标准头；
+//   · 任意 x-*（x-upstream-secret、x-powered-by 等）不再默认透传；需要新增诊断头必须显式入白名单；
+//   · retry-after 只在 429 透传；200/5xx 不继承上游的 retry-after；
+//   · hop-by-hop / 传输层由网关自己以 chunked 重发，绝不透传上游的 transfer-encoding/content-length。
+// 另保留 STRIP_OUT 作为纵深防御：即使未来白名单误加，危险头仍被挡掉。
+const STRIP_OUT = new Set([
+  'transfer-encoding', 'content-length', 'connection', 'keep-alive',
+  'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'upgrade',
+  'set-cookie', 'set-cookie2', 'location',
+  'content-security-policy', 'content-security-policy-report-only',
+  'x-frame-options', 'strict-transport-security', 'public-key-pins', 'expect-ct',
+])
+const FORWARD_SAFE_HEADERS = new Set([
+  'content-type', 'content-encoding', 'cache-control', 'expires', 'etag', 'last-modified',
+  'retry-after',
+  'x-request-id', 'request-id', 'openai-request-id', 'openai-processing-ms', 'openai-version',
+  'x-ratelimit-limit-requests', 'x-ratelimit-remaining-requests', 'x-ratelimit-reset-requests',
+  'x-ratelimit-limit-tokens', 'x-ratelimit-remaining-tokens', 'x-ratelimit-reset-tokens',
+])
 export function writeUpstreamHeaders(client, upstream, extra) {
+  const status = Number(upstream.statusCode) || 200
   const h = {}
   for (const [k, v] of Object.entries(upstream.headers)) {
-    const lk = k.toLowerCase()
-    if (lk === 'transfer-encoding' || lk === 'content-length' || lk === 'connection' || lk === 'keep-alive') continue
+    const lower = k.toLowerCase()
+    if (!FORWARD_SAFE_HEADERS.has(lower)) continue
+    if (STRIP_OUT.has(lower)) continue
+    if (lower === 'retry-after' && status !== 429) continue
     h[k] = v
   }
   h['transfer-encoding'] = 'chunked'
-  return client.writeHead(upstream.statusCode || 200, Object.assign(h, extra || {}))
+  return client.writeHead(status, Object.assign(h, extra || {}))
+}
+
+// ── SSE 背压（MG-002）──
+// 慢客户端此前会把所有上游 chunk 无界堆进 ServerResponse 缓冲（write() 返回 false 仍继续读上游），
+// 一个不读数据的客户端即可把网关内存打满。现在 write=false 就等待 drain（暂停读取上游），
+// 等待超过 WRITE_WAIT_MS 或未写出缓冲超过 MAX_CLIENT_BUFFER_BYTES 即中止并按 clientGone 处理
+//（不把慢客户端记成上游故障、不熔断）。
+const WRITE_WAIT_MS = 30000
+const MAX_CLIENT_BUFFER_BYTES = 8 * 1024 * 1024
+
+// ── SSE 帧解码（M1-2）──
+// 旧实现 buf += chunk.toString('utf8') + indexOf('\n\n') 有三个真实缺陷：
+//   ① UTF-8 多字节字符被 chunk 边界切开会乱码（StringDecoder/TextDecoder stream 才能正确拼接）；
+//   ② 只认 LF 空行，CRLF（\r\n\r\n）或 CR-only 的上游会整条流不产出事件；
+//   ③ 单帧/未闭合缓冲无上界，恶意或故障上游可用一个永不出现空行的超长行打爆内存。
+// 这里用流式 TextDecoder + 行终止符状态机（\r\n / \n / \r 混用均按 SSE 规范处理），
+// 并对单帧与待解析缓冲分别设上限；超限抛 code=SSE_FRAME_TOO_LARGE，调用方必须终止而不是续传。
+export const MAX_SSE_FRAME_BYTES = 1024 * 1024
+export const MAX_SSE_BUFFER_BYTES = 2 * 1024 * 1024
+
+export function sseFrameError(message, bytes) {
+  const e = new Error(message)
+  e.code = 'SSE_FRAME_TOO_LARGE'
+  e.bytes = Number(bytes) || 0
+  return e
+}
+
+function byteLength(s) { return Buffer.byteLength(String(s), 'utf8') }
+
+// 行终止符：\r\n（2） / \n（1） / \r（1）；数据不足以判定 CRLF 时返回 null（等下一 chunk）。
+function readLineEnd(s, i) {
+  if (i >= s.length) return null
+  const ch = s[i]
+  if (ch === '\n') return 1
+  if (ch !== '\r') return 0
+  if (i + 1 >= s.length) return null
+  return s[i + 1] === '\n' ? 2 : 1
+}
+
+// 找“空行”边界：连续两个行终止符。返回 { contentEnd, end }，不完整返回 null。
+function findFrameBoundary(s) {
+  let prevStart = -1
+  let prevEnd = -1
+  let i = 0
+  while (i < s.length) {
+    const len = readLineEnd(s, i)
+    if (len === null) return null
+    if (len === 0) { i += 1; continue }
+    if (prevEnd === i) return { contentEnd: prevStart, end: i + len }
+    prevStart = i
+    prevEnd = i + len
+    i = prevEnd
+  }
+  return null
+}
+
+/** 帧内行终止符统一为 \n（保留 Content 本身，不做 trim）。 */
+export function normalizeSseFrame(raw) {
+  return String(raw).replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+}
+
+/**
+ * 有界 SSE 帧解码器：push(chunk) -> string[]（每个元素一个完整事件帧，内部行以 \n 分隔）。
+ *  - chunk 可为 Buffer/Uint8Array/string；流式 UTF-8，多字节字符跨 chunk 不丢；
+ *  - \r\n、\n、\r 及其混用的空行都识别为帧边界；
+ *  - 单帧字节数 > maxFrameBytes 或待解析缓冲 > maxBufferBytes 抛 SSE_FRAME_TOO_LARGE；
+ *  - flush() 返回未闭合的尾部文本（不合成半截帧），用于调用方决定中断语义。
+ */
+export function createSSEFrameDecoder(opts = {}) {
+  const maxFrameBytes = Number(opts.maxFrameBytes) > 0 ? Number(opts.maxFrameBytes) : MAX_SSE_FRAME_BYTES
+  const maxBufferBytes = Number(opts.maxBufferBytes) > 0 ? Number(opts.maxBufferBytes) : MAX_SSE_BUFFER_BYTES
+  const decoder = new TextDecoder('utf-8')
+  let buf = ''
+  let failed = null
+  const fail = (message, bytes) => { failed = sseFrameError(message, bytes); return failed }
+
+  function push(chunk) {
+    if (failed) throw failed
+    let text
+    try {
+      text = typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true })
+    } catch (err) {
+      failed = err
+      throw err
+    }
+    buf += text
+    const frames = []
+    for (;;) {
+      const boundary = findFrameBoundary(buf)
+      if (!boundary) break
+      const raw = buf.slice(0, boundary.contentEnd)
+      buf = buf.slice(boundary.end)
+      const bytes = byteLength(raw)
+      if (bytes > maxFrameBytes) throw fail('SSE 单帧超过上限 ' + maxFrameBytes + ' 字节（实际 ' + bytes + '）', bytes)
+      frames.push(normalizeSseFrame(raw))
+    }
+    const buffered = byteLength(buf)
+    if (buffered > maxBufferBytes) throw fail('SSE 待解析缓冲超过上限 ' + maxBufferBytes + ' 字节（实际 ' + buffered + '）', buffered)
+    return frames
+  }
+
+  function flush() {
+    if (failed) throw failed
+    const tail = decoder.decode()
+    if (tail) buf += tail
+    const buffered = byteLength(buf)
+    if (buffered > maxBufferBytes) throw fail('SSE 待解析缓冲超过上限 ' + maxBufferBytes + ' 字节（实际 ' + buffered + '）', buffered)
+    const rest = buf
+    buf = ''
+    return rest
+  }
+
+  return {
+    push,
+    flush,
+    get bufferedBytes() { return byteLength(buf) },
+    get failed() { return failed },
+  }
 }
 
 function extractData(ev) {
@@ -36,7 +177,10 @@ function maybeRewriteModel(s, desired) {
 
 /**
  * OpenAI SSE 透传 + 断流自动续传；支持多协议（anthropic/gemini）流式重建为 OpenAI delta 事件。
- * opts: { idleMs, reconnect, maxReconnects, log, onTokens, protocol, extract }
+ * opts: { idleMs, reconnect, maxReconnects, log, onTokens, onUsage, protocol, extract, extractFinish,
+ *         rewriteModel, signal, budget, writeTimeoutMs, maxBufferBytes }
+ *   signal/budget：整体预算或客户端断开时中止（销毁上游、停止续传）；budget 优先用于区分收尾语义。
+ * 返回 { completed, contentSent, interrupted, reconnects, clientGone, timedOut }
  */
 export async function relayStream(client, firstUpstream, opts) {
   const idleMs = opts.idleMs || 30000
@@ -45,51 +189,136 @@ export async function relayStream(client, firstUpstream, opts) {
   const log = opts.log
   const protocol = opts.protocol || 'openai'
   const extract = opts.extract || extractOpenAIContent
+  const signal = opts.signal || null
+  const writeWaitMs = Number(opts.writeTimeoutMs) > 0 ? Number(opts.writeTimeoutMs) : WRITE_WAIT_MS
+  const maxBufferBytes = Number(opts.maxBufferBytes) > 0 ? Number(opts.maxBufferBytes) : MAX_CLIENT_BUFFER_BYTES
+  // 只有「预算耗尽」才算 timedOut；客户端断开由 clientGoneAt/signal 单独处理（契约 §3 不得混淆）
+  const budgetTimedOut = () => !!(opts.budget && opts.budget.timedOut())
+  let budgetHit = false
   let sent = ''
+  // 已发送内容的比对窗口上限：sent 用于断流续传时判断「上游是否重放了已发内容」，比对是从头做
+  // startsWith / 前缀切片，无法只保留尾部。超窗后放弃去重（置 sentOverflow）以避免超长流式响应
+  // 把内存吃光；代价仅是极端情况下续传可能重复一小段内容，绝不会丢内容。
+  const MAX_SENT_TRACK = 4 * 1024 * 1024
+  let sentOverflow = false
   let done = false
   let retries = 0
   let resolved = true
   let contentChars = 0
   let usageReported = false
   let lastUsage = null
+  let finishSent = false   // 非 openai 协议：finish_reason 是否已补发（message_delta 只应转一次）
   const clientGoneAt = { t: null }   // 下游客户端断线标记（何时检测到，null 表示仍在线）
   let curStream = firstUpstream      // 当前正读取的上游流（首次或续传之后）
   let gen = 0                        // 泵代数：每次换流递增，被换掉的旧泵醒来即静默退场（防旧 iterator 复活双写客户端）
   function destroyUpstream() { try { if (curStream && typeof curStream.destroy === 'function') curStream.destroy() } catch {} }
 
-  function sendRaw(txt) { if (!client.destroyed) client.write(txt) }
-  function sendDataJson(payload) { sendRaw('data: ' + JSON.stringify(payload) + '\n\n') }
-  function sendDelta(t) { if (typeof t === 'string' && t !== '') sendDataJson({ choices: [{ delta: { content: t } }] }) }
-  function sendDone() { sendRaw('data: [DONE]\n\n') }
-  function keepalive() { if (!client.destroyed) client.write(': mg-keepalive\n') }
+  function clientGoneError() { const e = new Error('client closed'); e.code = 'ECANCELED'; e.clientGone = true; return e }
+  function writeStalledError() { const e = new Error('client write stalled'); e.code = 'EWOULDBLOCK'; e.clientStalled = true; return e }
+  function budgetError() { const e = new Error('request budget exceeded'); e.code = 'ETIMEDOUT'; e.budget = true; return e }
+
+  // 等待下游 drain：同时响应 close/abort；超时则销毁客户端（按 clientGone 收尾）。
+  function waitDrain() {
+    return new Promise((resolve, reject) => {
+      let timer = null
+      const cleanup = () => {
+        if (timer) { clearTimeout(timer); timer = null }
+        if (drainWatchdog === onWatchdog) drainWatchdog = null
+        try { client.removeListener('drain', onDrain) } catch {}
+        try { client.removeListener('close', onClose) } catch {}
+        if (signal) { try { signal.removeEventListener('abort', onAbort) } catch {} }
+      }
+      const onDrain = () => { cleanup(); resolve() }
+      const onClose = () => { cleanup(); reject(clientGoneError()) }
+      // 背压等待期间仍需响应 noEventMs 看门狗：由 judgeDead() 通过 drainWatchdog 唤醒
+      const onWatchdog = () => { cleanup(); reject(Object.assign(new Error('no-data-event during drain'), { noEvent: true })) }
+      const onAbort = () => { cleanup(); reject(budgetTimedOut() ? budgetError() : clientGoneError()) }
+      timer = setTimeout(() => {
+        cleanup()
+        log && log.warn('client write stalled', 'writableLength=' + (typeof client.writableLength === 'number' ? client.writableLength : 0), 'waitedMs=' + writeWaitMs)
+        try { client.destroy() } catch { }
+        reject(writeStalledError())
+      }, writeWaitMs)
+      drainWatchdog = onWatchdog
+      try { client.once('drain', onDrain); client.once('close', onClose) } catch {}
+      if (signal) { try { signal.addEventListener('abort', onAbort, { once: true }) } catch {} }
+    })
+  }
+
+  // 写客户端（背压感知）：write 返回 false 就等待 drain；未写出缓冲超限或等待超时即中止。
+  // 调用者必须 await —— 这样 for-await 上游不会继续拉取 chunk，背压向上传。
+  async function sendRaw(txt) {
+    if (client.destroyed) throw clientGoneError()
+    if (budgetTimedOut()) throw budgetError()
+    const buffered = typeof client.writableLength === 'number' ? client.writableLength : 0
+    if (buffered > maxBufferBytes) { try { client.destroy() } catch {} ; throw writeStalledError() }
+    let ok = true
+    try { ok = client.write(txt) } catch { throw clientGoneError() }
+    if (ok === false) {
+      await waitDrain()
+      // write 之后才可能越过上限：drain 恢复后再核对一次，避免多缓冲一个 chunk
+      if ((typeof client.writableLength === 'number' ? client.writableLength : 0) > maxBufferBytes) { try { client.destroy() } catch {} ; throw writeStalledError() }
+    }
+  }
+  async function sendDataJson(payload) { await sendRaw('data: ' + JSON.stringify(payload) + '\n\n') }
+  async function sendDelta(t) { if (typeof t === 'string' && t !== '') await sendDataJson({ choices: [{ delta: { content: t } }] }) }
+  async function sendDone() { await sendRaw('data: [DONE]\n\n') }
+  async function keepalive() { if (!client.destroyed) await sendRaw(': mg-keepalive\n') }
 
   async function handleEvent(ev, dataStr) {
+    if (budgetTimedOut()) throw budgetError()
     if (dataStr !== '') { lastDataEventAt = Date.now(); armNoEv() } // 数据事件重置事件看门狗；注释/空事件不重置（半死流判据）
-    if (protocol === 'openai' && dataStr === '[DONE]') { sendRaw(ev + '\n\n'); done = true; return }
+    if (protocol === 'openai' && dataStr === '[DONE]') { await sendRaw(ev + '\n\n'); done = true; return }
     const ct = extract(dataStr)
-    if (phaseAsync === 'resume' && !resolved && ct !== '') {
+    if (phaseAsync === 'resume' && !resolved && ct !== '' && !sentOverflow) {
       acc += ct
+
+      if (acc.length > MAX_SENT_TRACK) { acc = acc.slice(acc.length - MAX_SENT_TRACK) }
       if (sent.startsWith(acc)) return
-      if (acc.length > sent.length && sent === acc.slice(0, sent.length)) { const extra = acc.slice(sent.length); sendDelta(extra); sent = acc; resolved = true; log && log.warn('sse 续传：跳过重放 ' + sent.length + ' 字符，续发 ' + extra.length); return }
-      sendDataJson({ choices: [{ delta: { content: acc } }] }); sent = acc; resolved = true; log && log.warn('sse 续传：上游重放内容偏移，可能存在少量重复'); return
+      if (acc.length > sent.length && sent === acc.slice(0, sent.length)) { const extra = acc.slice(sent.length); await sendDelta(extra); sent = acc; resolved = true; log && log.warn('sse 续传：跳过重放 ' + sent.length + ' 字符，续发 ' + extra.length); return }
+      await sendDataJson({ choices: [{ delta: { content: acc } }] }); sent = acc; resolved = true; log && log.warn('sse 续传：上游重放内容偏移，可能存在少量重复'); return
     }
     if (protocol === 'openai') {
       // 流末 usage（缓存命中）解析，仅首次上报，续传重播不重复计入
       if (opts.onUsage && !usageReported) { const u = maybeExtractUsage(dataStr); if (u) { usageReported = true; lastUsage = u; opts.onUsage(u) } }
       // 「名字没对上」加固：回写响应 model 为客户端请求名（含首个空 content 事件）
       const reb = maybeRewriteModel(dataStr, opts.rewriteModel)
-      sendRaw((reb != null ? 'data: ' + reb : ev) + '\n\n')
+      await sendRaw((reb != null ? 'data: ' + reb : ev) + '\n\n')
       sent += ct; contentChars += ct.length
+
+      if (sent.length > MAX_SENT_TRACK) { sent = ''; sentOverflow = true; log && log.warn('已发送内容超出续传比对窗口(' + MAX_SENT_TRACK + ' 字符)，后续断流不再做前缀去重') }
       return
     }
-    if (ct === '') return // 非 openai 空内容事件丢弃（不产生 delta）
-    sendDelta(ct)
+    if (ct === '') {
+      // 累积 usage：openai 协议的 usage 集中在一帧（上面的分支已上报），而 Anthropic 把它拆开——
+      // message_start 带 input_tokens、message_delta 带 output_tokens，**都没有** total_tokens。
+      // 不累积的话流式 token 记账只能退化成「内容字符数」，思考(thinking)开销完全丢失。
+      // 此处只累积、不上报（多次上报会让缓存命中统计翻倍），收尾时统一处理。
+      const u = maybeExtractUsage(dataStr)
+      if (u) lastUsage = Object.assign({}, lastUsage || {}, u)
+      // 非 openai 协议的空内容事件里可能藏着「结束原因」（Anthropic 的 message_delta.stop_reason：
+      // content 为空但带 stop_reason）。抽出来补一帧 OpenAI 风格的 finish_reason——
+      // 否则客户端只收到 [DONE] 而从不收到 finish_reason，部分 harness 会一直不结束 loading。
+      if (!finishSent && opts.extractFinish) {
+        const fr = opts.extractFinish(dataStr)
+        if (fr) { finishSent = true; await sendDataJson({ choices: [{ delta: {}, finish_reason: fr }] }) }
+      }
+      return // 非 openai 空内容事件丢弃（不产生 delta）
+    }
+    await sendDelta(ct)
+    // 内容与结束原因同帧（Gemini 常见：最后一段文本与 finishReason 在一个 chunk）：先发文本再补 finish 帧
+    if (!finishSent && opts.extractFinish) {
+      const fr = opts.extractFinish(dataStr)
+      if (fr) { finishSent = true; await sendDataJson({ choices: [{ delta: {}, finish_reason: fr }] }) }
+    }
     sent += ct; contentChars += ct.length
+
+    if (sent.length > MAX_SENT_TRACK) { sent = ''; sentOverflow = true; log && log.warn('已发送内容超出续传比对窗口(' + MAX_SENT_TRACK + ' 字符)，后续断流不再做前缀去重') }
   }
 
   let phaseAsync = 'first'
   let acc = ''
-  // —— 下游客户端断线处理：一旦 ''close'' 就标记 + 销毁上游流 + 停 idle 定时器，杜绝死等上游/连接泄漏/续传浪费 ——
+  // —— 下游客户端断线处理：一旦 'close' 就标记 + 销毁上游流 + 停 idle 定时器，杜绝死等上游/连接泄漏/续传浪费 ——
   let idleT = null
   const clearIdle = () => { if (idleT) { clearTimeout(idleT); idleT = null } }
   // 事件级看门狗：字节级 idle 只认「上游没字节」；上游若用 SSE 注释/垃圾字节续命却从不发 data 事件（半死流），
@@ -97,26 +326,42 @@ export async function relayStream(client, firstUpstream, opts) {
   // 本看门狗只在收到含 data: 的完整事件时重置，noEventMs（默认 idleMs 两倍）内无任何数据事件即判死。
   const noEventMs = opts.noEventMs != null ? opts.noEventMs : (idleMs ? idleMs * 2 : 0)
   let noEvT = null
+  let drainWatchdog = null   // 背压等待的看门狗唤醒钩子（noEventMs 判死时立即打断 drain 等待）
   let lastDataEventAt = Date.now()
   let pendReason = null   // 定时器判死原因；定时器只「判死+掐流」，由被掐断的泵在收尾/catch 里带内续传（不脱离 await 链，保证 onEnd 单一出口）
   const clearNoEv = () => { if (noEvT) { clearTimeout(noEvT); noEvT = null } }
-  const judgeDead = (reason) => { if (!done && clientGoneAt.t == null) { pendReason = reason; destroyUpstream() } }
+  const judgeDead = (reason) => {
+    if (done || clientGoneAt.t != null) return
+    pendReason = reason
+    destroyUpstream()
+    if (drainWatchdog) { const f = drainWatchdog; drainWatchdog = null; f() }
+  }
   const armNoEv = () => {
     clearNoEv()
     if (noEventMs) noEvT = setTimeout(() => judgeDead('no-data-event ' + Math.round((Date.now() - lastDataEventAt) / 1000) + 's'), noEventMs)
   }
-  const markGone = () => {
+  const markClientGone = (why) => {
     if (clientGoneAt.t != null) return
     clientGoneAt.t = Date.now()
     clearIdle(); clearNoEv()
     destroyUpstream()
-    log && log.warn('sse 下游客户端已断开，中止中继并销毁上游连接')
+    log && log.warn('sse 下游客户端已断开，中止中继并销毁上游连接' + (why ? '（' + why + '）' : ''))
   }
-  if (typeof client.on === 'function') { try { client.on('close', markGone); client.on('error', markGone) } catch {} }
+  const onClientClose = () => markClientGone('close')
+  const onClientError = () => markClientGone('error')
+  if (typeof client.on === 'function') { try { client.on('close', onClientClose); client.on('error', onClientError) } catch {} }
+  // 预算中止立即掐上游（不必等下一个 chunk 到达）：慢流/挂起流也能在预算内结束
+  const onBudgetAbort = () => {
+    if (budgetTimedOut()) { if (!done) { budgetHit = true; destroyUpstream() } }
+    else markClientGone('canceled')
+  }
+  if (signal) { try { if (signal.aborted) onBudgetAbort(); else signal.addEventListener('abort', onBudgetAbort, { once: true }) } catch {} }
 
   async function pump(stream) {
     const myGen = ++gen
-    let buf = ''
+    // 每个泵一个流式解码器：UTF-8 跨 chunk、CRLF、单帧/缓冲上界都在这里统一处理。
+    const decoder = createSSEFrameDecoder({ maxFrameBytes: opts.maxFrameBytes, maxBufferBytes: opts.maxBufferBytes })
+    let fatal = null
     const arm = () => { clearIdle(); if (idleMs) idleT = setTimeout(() => judgeDead('idle-timeout'), idleMs) }
     lastDataEventAt = Date.now(); armNoEv()
     arm()
@@ -124,28 +369,47 @@ export async function relayStream(client, firstUpstream, opts) {
       let pendingError = null
       stream.on && stream.on('error', (e) => { pendingError = e })
       for await (const chunk of stream) {
+        if (budgetTimedOut()) { budgetHit = true; stream.destroy && stream.destroy(); break }
         if (done || clientGoneAt.t != null || client.destroyed) { stream.destroy && stream.destroy(); break }
         clearIdle(); arm()
-        buf += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
-        let sep
-        while ((sep = buf.indexOf('\n\n')) !== -1) {
-          const ev = buf.slice(0, sep)
-          buf = buf.slice(sep + 2)
+        let events
+        try { events = decoder.push(chunk) } catch (e) {
+          if (e && e.code === 'SSE_FRAME_TOO_LARGE') {
+            // 有界拒绝：单帧/缓冲超限是上游协议故障，不续传（重放整个请求可能重复副作用），
+            // 直接销毁上游并让调用方以一次中断终态收尾。
+            fatal = e
+            pendReason = 'sse-frame-too-large'
+            log && log.warn('sse 帧超限，中止且不续传', 'bytes=' + (e.bytes || 0))
+            destroyUpstream()
+            break
+          }
+          throw e
+        }
+        for (const ev of events) {
           if (ev.trim() === '') continue
           await handleEvent(ev, extractData(ev))
           if (done) break
         }
-        if (done) break
-        keepalive()
+        if (done || fatal) break
+        await keepalive()
       }
       clearIdle(); clearNoEv()
       if (done || clientGoneAt.t != null) return
+      if (budgetHit || fatal) return
       if (myGen !== gen) { pendReason = null; return } // 已被更代（重连换流掐掉了本流）：续传链由现役泵负责
       const reason = pendReason; pendReason = null
       if (protocol === 'openai') return resume(reason || (pendingError ? ('error:' + (pendingError.code || pendingError.message)) : 'end')) // 必须 await/return 续传链：否则 main 在续传完成前就继续并 end() 掐断
-      else { sendDone(); done = true } // 非 openai 协议无 [DONE] 结束标记：上游流自然结束即正常完成
+      else { await sendDone(); done = true } // 非 openai 协议无 [DONE] 结束标记：上游流自然结束即正常完成
     } catch (e) {
       clearIdle(); clearNoEv()
+      if (e && e.budget) { budgetHit = true; destroyUpstream(); return }
+      if (e && (e.clientGone || e.clientStalled)) { markClientGone(e.clientStalled ? 'write stalled' : 'write failed'); return }
+      if (e && e.noEvent) {
+        const reason = pendReason; pendReason = null
+        if (done || clientGoneAt.t != null) return
+        if (myGen !== gen) return
+        return resume(reason || 'no-data-event')
+      }
       if (done || clientGoneAt.t != null) return
       if (myGen !== gen) { pendReason = null; return }
       const reason = pendReason; pendReason = null
@@ -154,14 +418,15 @@ export async function relayStream(client, firstUpstream, opts) {
   }
 
   async function resume(reason) {
-    if (done || clientGoneAt.t != null || client.destroyed || retries >= maxReconnects) return // 续传用尽：不在此收尾客户端——切/不切由调用方（模型链循环）决定
+    if (done || clientGoneAt.t != null || client.destroyed || budgetTimedOut() || retries >= maxReconnects) return // 续传用尽：不在此收尾客户端——切/不切由调用方（模型链循环）决定
     retries++
     clearIdle(); clearNoEv(); pendReason = null   // 重连窗口内停掉所有计时器：判死定时器不得在重连期间触发
     phaseAsync = 'resume'; resolved = false; acc = ''
     log && log.warn('sse 断流(' + reason + ')，第 ' + retries + '/' + maxReconnects + ' 次续传重连')
-    keepalive()
+    try { await keepalive() } catch (e) { if (e && e.budget) budgetHit = true; else markClientGone('keepalive failed'); return }
     let st
     try { st = await reconnect() } catch (e) { return resume('reconnect:' + (e.message || 'fail')) }
+    if (budgetTimedOut()) { budgetHit = true; try { st && st.destroy && st.destroy() } catch {} ; destroyUpstream(); return }
     if (!st || (st.statusCode !== undefined && st.statusCode >= 400)) return resume('reconnect-status:' + (st && st.statusCode))
     // 续传必须拿到真正的流式响应：上游若以 JSON/非 SSE 应答（如降级返回错误体），直接判续传失败，
     // 不再消耗时间去读垃圾字节——避免「断流后重连 2 次都拿到非流式体」白白耗尽续传额度
@@ -173,22 +438,29 @@ export async function relayStream(client, firstUpstream, opts) {
   }
 
   await pump(firstUpstream)
+  // 非 openai 协议：usage 已在流内累积完毕（openai 协议在 handleEvent 里即时上报过，靠 usageReported 去重）。
+  // 这里补一次缓存命中统计，否则 anthropic/gemini 流式下命中率与 token 记账全都是空的。
+  if (!usageReported && lastUsage && opts.onUsage) { usageReported = true; try { opts.onUsage(lastUsage) } catch {} }
   if (opts.onTokens) { try { opts.onTokens(contentChars, lastUsage) } catch {} }
-  if (opts.onEnd) { try { opts.onEnd({ interrupted: !done, reconnects: retries, clientGone: clientGoneAt.t != null }) } catch {} }
-  if (typeof client.removeListener === 'function') { try { client.removeListener('close', markGone); client.removeListener('error', markGone) } catch {} }
+  // 已完成流（收到 [DONE]）即使预算恰在终止帧写入时到期，也不得判为超时（否则会漏 markOk/亲和）
+  const timedOut = budgetHit && !done
+  if (opts.onEnd) { try { opts.onEnd({ interrupted: !done, reconnects: retries, clientGone: clientGoneAt.t != null, timedOut }) } catch {} }
+  if (typeof client.removeListener === 'function') { try { client.removeListener('close', onClientClose); client.removeListener('error', onClientError) } catch {} }
+  if (signal && onBudgetAbort) { try { signal.removeEventListener('abort', onBudgetAbort) } catch {} }
   // 正常完成或客户端已断：收尾连接。上游中断时保持客户端连接开启——
   // 切/不切由调用方（forward 模型链循环）决定：切则下一上游的流继续写同一连接，不切则调 endInterruptedStream 收尾
   if (!client.destroyed && (done || clientGoneAt.t != null)) try { client.end() } catch { }
   // 返回流结局：completed=正常结束；contentSent=是否已向客户端回传过正式回答内容（false 且中断 → 调用方可安全换上游/模型重发，无重复风险）
-  return { completed: done, contentSent: contentChars > 0, interrupted: !done, reconnects: retries, clientGone: clientGoneAt.t != null }
+  return { completed: done, contentSent: contentChars > 0, interrupted: !done, reconnects: retries, clientGone: clientGoneAt.t != null, timedOut }
 }
 
 // 流中断且调用方决定不切换时的收尾：发 OpenAI 兼容错误事件（客户端可感知，不再静默）+ [DONE] + end。
 // （relayStream 中断时保持客户端连接开启，切/不切由调用方决定——切则继续写流，不切则调用本函数收尾）
-export function endInterruptedStream(client, note, reconnects) {
+export function endInterruptedStream(client, note, reconnects, opts) {
   if (!client || client.destroyed || client.writableEnded) return
+  const o = opts || {}
   try {
-    client.write('data: ' + JSON.stringify({ error: { message: '上游流式响应中断：' + note + '，已重连 ' + (reconnects || 0) + ' 次仍失败', type: 'stream_interrupted', code: 'STREAM_INTERRUPTED' } }) + '\n\n')
+    client.write('data: ' + JSON.stringify({ error: { message: '上游流式响应中断：' + note + '，已重连 ' + (reconnects || 0) + ' 次仍失败', type: o.type || 'stream_interrupted', code: o.code || 'STREAM_INTERRUPTED' } }) + '\n\n')
     client.write('\n: [gateway] ' + note + '\n')
     client.write('data: [DONE]\n\n')
   } catch { try { client.destroy() } catch { } }

@@ -1,0 +1,154 @@
+{
+  "configVersion": 7,
+  "providers": {
+    "demo-openai": {
+      "baseUrl": "https://api.example.invalid/v1",
+      "apiKeyEnv": "DEMO_OPENAI_API_KEY",
+      "pathPrefix": "",
+      "api": "openai",
+      "extraHeaders": {
+        "X-Demo-Route": "fixture-only"
+      },
+      "proxy": "",
+      "circuit": {
+        "maxFailures": 3,
+        "openDurationMs": 10000
+      },
+      "_extra": {}
+    },
+    "demo-backup": {
+      "baseUrl": "https://backup.example.invalid",
+      "apiKeyEnv": "DEMO_BACKUP_API_KEY",
+      "pathPrefix": "/v1",
+      "api": "anthropic",
+      "extraHeaders": {},
+      "proxy": "http://proxy.example.invalid:8080",
+      "circuit": null,
+      "_extra": {
+        "vendorRateClass": "fixture-extra"
+      }
+    }
+  },
+  "models": {
+    "demo-chat": {
+      "provider": "demo-openai",
+      "alias": [
+        "demo"
+      ],
+      "fallbacks": [
+        "demo-backup"
+      ],
+      "maxConcurrent": 8,
+      "qps": 4,
+      "reasoning": "",
+      "effortOptions": [],
+      "effortFormat": "",
+      "dailyQuota": 1000000,
+      "quota": 0,
+      "maxContext": 128000,
+      "maxTokensMax": 8192,
+      "api": "",
+      "providerModels": {
+        "demo-openai": "vendor-chat-model"
+      },
+      "forceNoStream": false,
+      "_extra": {
+        "vendorCapability": "fixture-extra"
+      }
+    },
+    "demo-reasoner": {
+      "provider": "demo-backup",
+      "alias": [],
+      "fallbacks": [],
+      "maxConcurrent": 2,
+      "qps": 1,
+      "reasoning": "medium",
+      "effortOptions": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "effortFormat": "reasoning_effort",
+      "dailyQuota": 0,
+      "quota": 500000,
+      "maxContext": 64000,
+      "maxTokensMax": 4096,
+      "api": "anthropic",
+      "providerModels": {
+        "demo-backup": "vendor-reasoner-model"
+      },
+      "forceNoStream": true,
+      "_extra": {}
+    }
+  },
+  "virtualModels": [
+    {
+      "name": "team-chat",
+      "directory": [
+        {
+          "model": "demo-chat",
+          "mode": "afterAll",
+          "providers": [
+            "demo-openai",
+            "demo-backup"
+          ]
+        },
+        {
+          "model": "demo-reasoner",
+          "mode": "onFail",
+          "providers": []
+        }
+      ],
+      "quota": 0,
+      "dailyQuota": 2000000,
+      "maxContext": 128000,
+      "maxConcurrent": 4,
+      "qps": 2,
+      "expiresAt": "2027-01-31T00:00:00.000Z",
+      "note": "fixture virtual entry"
+    }
+  ],
+  "defaults": {
+    "provider": "demo-openai",
+    "model": "auto",
+    "directory": [
+      {
+        "model": "demo-chat",
+        "providers": [
+          "demo-openai",
+          "demo-backup"
+        ],
+        "mode": "afterAll"
+      }
+    ],
+    "retry": {
+      "maxAttempts": 3,
+      "initialDelayMs": 500,
+      "maxDelayMs": 8000,
+      "jitter": 0.2
+    },
+    "timeout": {
+      "connectMs": 15000,
+      "firstByteMs": 90000,
+      "idleMs": 60000,
+      "overallMs": 0
+    },
+    "concurrency": {
+      "maxPerProvider": 8
+    },
+    "extraHeaders": {},
+    "proxy": "",
+    "proxyMode": "auto",
+    "affinityTtlMs": 300000,
+    "failbackProbe": {
+      "enabled": true,
+      "everyMs": 30000,
+      "successStreak": 2,
+      "system": "ping"
+    },
+    "clientKey": "********",
+    "x-fixture-extension": {
+      "enabled": true
+    }
+  }
+}

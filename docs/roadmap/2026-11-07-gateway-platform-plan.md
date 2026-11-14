@@ -6,7 +6,7 @@
 
 将 ModelGate 建设为本地优先、以 API 为核心、多 Provider / 多模型 / 多 CLI 共用的可靠网关，稳定支持 Codex、DSH、其他 CLI 与用户自建工作台。职责集中于入口、协议、路由、鉴权、额度、弹性和可观测，不承担 UHR 的多智能体编排，也不下载或部署模型权重。长期运行不依赖 CC Switch。
 
-现有可复用：Node 18+ 原生 HTTP（package.json 无第三方依赖）；index.js 提供控制面和数据面；router.js 管理 provider/model/virtual model、Key 与配置；forward.js 完成路由链、限流、熔断、故障转移与记账；request.js 管理重试与 timeout；sse.js 处理 Chat SSE；format.js 进行 OpenAI Chat、Anthropic、Gemini 互转。既有 docs/phased-execution-plan.md 的 Phase 1 已落实部分能力，Phase 2 能力维度与 Embedding、Phase 3 多模态不能未经审计就当作完成。
+现有可复用：Node 18+ 原生 HTTP（package.json 无第三方依赖）；index.js 提供控制面和数据面；router.js 管理 provider/model/virtual model、Key 与配置；forward.js 完成路由链、限流、熔断、故障转移与记账；request.js 管理重试与 timeout；sse.js 处理 Chat SSE；format.js 进行 OpenAI Chat、Anthropic、Gemini 互转。既有 docs/archive/2026-08/phased-execution-plan.md 的 Phase 1 已落实部分能力，Phase 2 能力维度与 Embedding、Phase 3 多模态不能未经审计就当作完成。
 
 重点缺口：main 无原生 Responses；PR #2 的 Responses 适配为隔离实验，不支持完整治理，尚未经过真实 Codex CLI/桌面+OpenCode Go 验收。旧 Chat 入口的 429 可能被 request 重试与 forward 循环链放大。不同上游的模型推理路径、探活路径、reasoning、stream_options、会话头和 tool calling 不保证相同。旧测试依赖实际网关及配置，缺更强的离线模拟、wire contract 与故障证据。
 
@@ -24,7 +24,7 @@
 
 ## 阶段 G0：审计与冻结最小接口（先做）
 
-- 阅读 AGENTS.md、RESOURCE_APPROVAL.md、README.md、package.json、src/*、scripts/test、docs/phased-execution-plan.md、docs/project-context.md 与 PR #2 全部差异。
+- 阅读 AGENTS.md、RESOURCE_APPROVAL.md、README.md、package.json、src/*、scripts/test、docs/archive/2026-08/phased-execution-plan.md、docs/project-context.md 与 PR #2 全部差异。
 - 核对 main / PR #2 双方 SHA、旧面板真实使用的 API、配置并发版本、provider 与 virtual model 的权限语义、隐藏字段保留方式。
 - 建立管理面 API 合同文件 docs/contracts/management-api-v1.md（执行时创建），逐个列 GET/POST URL、鉴权、字段、默认值、状态码、409、敏感字段、契约 fixture 与兼容性承诺。前端轨道必须依此开发。
 - 建立协议兼容矩阵（Codex 桌面/CLI、DSH、OpenCode Go Chat/Responses、其他支持客户端）、功能缺口、失败请求样本的脱敏规范。
@@ -82,4 +82,4 @@
 
 ## 文档与参考
 
-必读：AGENTS.md、RESOURCE_APPROVAL.md、README.md、package.json、docs/phased-execution-plan.md、docs/project-context.md、src/index.js、src/router.js、src/forward.js、src/request.js、src/sse.js、src/format.js、scripts/test/，以及 Draft PR #2 的 docs/codex-opencode-go-adapter-20261107.md。前端计划：docs/roadmap/2026-11-07-frontend-rebuild-plan.md。上游源码： https://github.com/openai/codex 、 https://github.com/farion1231/cc-switch ，OpenCode/DSH 以实际使用版本再核验。 
+必读：AGENTS.md、RESOURCE_APPROVAL.md、README.md、package.json、docs/archive/2026-08/phased-execution-plan.md、docs/project-context.md、src/index.js、src/router.js、src/forward.js、src/request.js、src/sse.js、src/format.js、scripts/test/，以及 Draft PR #2 的 docs/codex-opencode-go-adapter-20261107.md。前端计划：docs/roadmap/2026-11-07-frontend-rebuild-plan.md。上游源码： https://github.com/openai/codex 、 https://github.com/farion1231/cc-switch ，OpenCode/DSH 以实际使用版本再核验。
