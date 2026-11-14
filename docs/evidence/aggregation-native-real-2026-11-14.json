@@ -1,0 +1,103 @@
+{
+  "_note": "Companion to docs/evidence/aggregation-native-real-2026-11-14.md. Records the completed real native parent/child acceptance run on tree 67b9735. Hashes/metadata only: no token, no authorization value, no account id, no credential file content, no absolute filesystem paths. matrixStatus below is the CURRENT generated matrix/gate status; nativeObservation is what the real evidence supports. Formal matrix/gate regeneration is a separate pending step (see the .md §4), not performed by this file.",
+  "document": "docs/evidence/aggregation-native-real-2026-11-14.md",
+  "testedTreeSha": "67b97354ad28a3924607b35a663801f417f14b8e",
+  "environment": {
+    "os": "linux-x86_64",
+    "node": "v24.22.2",
+    "codexCli": "0.167.0",
+    "gateway": "127.0.0.1:19030",
+    "negativeControlGateway": "127.0.0.1:19031",
+    "windowUtc": "2026-11-14T12:53:00Z/2026-11-14T13:07:00Z"
+  },
+  "budget": {
+    "upstreamRequests": 37,
+    "requestLimit": 60,
+    "wallClockMinutes": 14,
+    "minuteLimit": 40,
+    "gptRequests": 26,
+    "gptModel": "gpt-6-luna",
+    "otherGptModelsRequested": 0,
+    "goRequests": 9,
+    "goModel": "deepseek-v4.1-flash",
+    "negativeControlRequests": 1
+  },
+  "scenarios": {
+    "parentSpawn": "PASS_REAL",
+    "childIdentity": "PASS_REAL",
+    "nativeExecCommand": "PASS_REAL",
+    "secondTaskSameChild": "PASS_REAL",
+    "nativeInterrupt": "PASS_REAL",
+    "resumeSameChild": "PASS_REAL",
+    "contextProof": "PASS_REAL",
+    "noDuplicateDispatch": "PASS_REAL",
+    "negativeBadModel": "PASS_REAL",
+    "negativeBadKey": "PASS_REAL"
+  },
+  "scenarioDetails": {
+    "nativeInterrupt": "one turn_aborted reason=interrupted terminal at 13:02:55.879Z plus one in-flight ECANCELED; no task_complete",
+    "negativeBadModel": "404 unknown_model, outbound delta 0, no default-provider fallback",
+    "negativeBadKey": "401 authentication_error, exactly 1 outbound, no retry, no GPT substitution"
+  },
+  "honestFail": {
+    "status": "FAIL",
+    "summary": "128k child window + 153192 tokens triggered Codex compaction; gateway typed unsupported_input_item rejection",
+    "resolution": "observed 200k window removed the step",
+    "preserved": true
+  },
+  "credential": {
+    "sha256": "de7cc6e996e6bcef35041d489f5dac84b799de735851531d5a11f7f6a4a7fc11",
+    "sizeBytes": 3995,
+    "mtime": 1794046999,
+    "mode": "600",
+    "identicalBeforeAfter": true,
+    "isolatedCopySameHashNoRefresh": true,
+    "destroyedWithShred": true,
+    "tokenPrintedLoggedOrCommitted": false,
+    "newOAuth": false,
+    "tokenDestination": "chatgpt.com"
+  },
+  "paths": {
+    "gpt": "chatgpt.com/backend-api/codex/responses",
+    "child": "opencode.ai/inference/go/v1/responses",
+    "ownerGatewayUntouched": "127.0.0.1:18787",
+    "isolatedGatewaysClosed": ["127.0.0.1:19030", "127.0.0.1:19031"]
+  },
+  "unproven": [
+    "original Desktop GUI / model picker (CLI only)",
+    "external interrupt (Ctrl-C, app-server turn/interrupt); this run used native interrupt_agent",
+    "Responses WebSocket (gateway 404, CLI falls back to HTTPS)",
+    "only one Go model; no Console provider; no second identity",
+    "compaction_trigger for third-party native models is rejected (typed)"
+  ],
+  "requirements": {
+    "MG-R005": {
+      "matrixStatus": "PASS_MOCK",
+      "nativeObservation": "PASS_REAL",
+      "realTarget": true,
+      "supersedes": "取代 PASS_MOCK @ docs/evidence/aggregation-integration-2026-11-14.md",
+      "evidence": "real CLI parent, native spawn, real child rollout with parent_thread_id and thread_spawn depth:1, native exec_command"
+    },
+    "MG-R006": {
+      "matrixStatus": "NOT_TESTED",
+      "nativeObservation": "PASS_REAL",
+      "realTarget": true,
+      "supersedes": "取代 NOT_TESTED @ docs/evidence/aggregation-integration-2026-11-14.md",
+      "evidence": "same child across five tasks, native interrupt to one interrupted terminal, resume on same child, context proof, no duplicate dispatch"
+    },
+    "MG-R008": {
+      "matrixStatus": "PASS_MOCK",
+      "narrowEvidence": "PASS_REAL",
+      "caveat": "the two no-silent-fallback cases have real evidence; unsupported-tool and catalog cases are not real, so the full row stays PASS_MOCK/partial",
+      "supersedes": null
+    },
+    "MG-R012": {
+      "matrixStatus": "PASS_REAL",
+      "confirmed": "26/26 GPT requests were gpt-6-luna"
+    }
+  },
+  "gate": {
+    "expectedReady": false,
+    "reason": "MG-R001, MG-R004 and others are not PASS_REAL"
+  }
+}
