@@ -140,10 +140,10 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 
 头策略：
 - **第三方目标**：剥除 `authorization`、`chatgpt-account-id`、`openai-beta`、`version`、`originator`、`session-id`、`thread-id`、`x-client-request-id` 以及 `chatgpt-*` / `openai-*` / `x-codex-*` / `x-openai-*` 前缀头；`sec-websocket-*`、`upgrade`、`connection` 等帧层/逐跳头永不转发。无自有 key 时**不发** Authorization（宁可让上游 401，也不继承客户端官方 token）。确需放行个别非凭据头时用 `providers.<名>.forwardClientHeaders: ["thread-id"]` 显式声明（凭据类与帧层头即使列出也不放行）。
-- **官方目标**：只放行白名单（`accept`/`accept-encoding`/`content-type`/`user-agent`/`originator`/`version`/`session-id`/`thread-id`/`x-client-request-id`/`openai-beta` + `x-codex-*`/`x-openai-internal-*`/`openai-*` 前缀），其余丢弃并记头名。**凭据只有一条路**：
+- **官方目标**：只放行白名单（`accept`/`accept-encoding`/`content-type`/`user-agent`/`originator`/`version`/`session-id`/`thread-id`/`x-client-request-id`/`openai-beta` + `x-codex-*`/`x-openai-internal-*`/`openai-*` 前缀），其余丢弃并记头名。默认使用网关自有凭据：
   - **网关自有 key**（keys/apiKeyEnv）→ 注入 `Authorization: Bearer <自有 key>`；客户端带来的 `authorization` / `chatgpt-account-id` 一律丢弃（不在白名单内，且凭据类有独立守卫）。
-  - **客户端官方凭据透传已移除（F01）**：`/backend-api/codex` 订阅后端与 `MG_CODEX_OFFICIAL_PASSTHROUGH` 开关不再启用任何能力。官方目标没有自有 key 时：设置了旧开关 → 403 `official_passthrough_retired`（含迁移提示）；未设置 → 403 `official_no_gateway_key`。两种情况都**零上游请求**，也绝不改投第三方。网关不读取客户端登录态（`auth.json`/`CODEX_HOME` 从不访问）。
-- 官方目标还受 host/scheme/path 白名单约束：必须是 `https`（回环例外），路径前缀只剩 `/v1`（`/backend-api/codex` 已移除）；错误码 `official_target_insecure_scheme` / `official_host_not_allowlisted` / `official_path_not_allowlisted`。上游 3xx 一律按上游错误处理（502 `upstream_redirect_rejected`），**不跟随重定向**（不把凭据送到 Location），Location 目标零命中。
+  - **客户端官方凭据透传已移除（F01）**：`MG_CODEX_OFFICIAL_PASSTHROUGH` 开关不再启用任何能力。官方目标没有自有 key 时：设置了旧开关 → 403 `official_passthrough_retired`（含迁移提示）；未设置 → 403 `official_no_gateway_key`。两种情况都**零上游请求**，也绝不改投第三方。正式 API 路由不读取客户端登录态。下方 P09 是独立的、默认关闭的本机隔离实验。
+- 官方目标还受 host/scheme/path 白名单约束：必须是 `https`（回环例外），常规路径前缀为 `/v1`（P09 另有隔离实验路径）；错误码 `official_target_insecure_scheme` / `official_host_not_allowlisted` / `official_path_not_allowlisted`。上游 3xx 一律按上游错误处理（502 `upstream_redirect_rejected`），**不跟随重定向**（不把凭据送到 Location），Location 目标零命中。
 
 严格路由：`defaults.aggregatePrefixes`（默认 `mg-`、`mg/`）是**聚合保留 ID 前缀**。命中前缀但未在 `models` 显式声明（含别名）时，`/v1/*` 返回 404 `{type:"unknown_model", code:"unknown_model", available:[…]}` 且**零上游请求**，绝不回退 `defaults.provider`；已配置的聚合 ID 与非保留前缀的未知模型维持原行为（后者仍按 `defaults.provider` 兜底，旧接口兼容）。
 
@@ -157,6 +157,8 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 | `MG_CODEX_OFFICIAL_PASSTHROUGH` | **已退役（F01）**：客户端官方凭据透传已移除。保留该变量只会被判为旧配置并给出迁移提示，不启用任何能力（见下文环境变量表）。 |
 
 ### P09 单 provider 反向代理（gatewaySubscription）
+
+此段记录读取本机 Codex 登录态的隔离实验。正式应用接入 GPT 套餐的授权、端点与原生协作约束见 [订阅路由边界](../explanation/codex-subscription-routing.md)。
 
 让 Codex 只认 ModelGate 一个 provider（`openai_base_url` 指向本机网关），父线程官方 GPT 经网关反向代理，子线程 Go DeepSeek 走同一网关。**默认关闭**，新增键不复用 F01 已退役的 `MG_CODEX_OFFICIAL_PASSTHROUGH`：
 

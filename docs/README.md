@@ -4,6 +4,7 @@
 | --- | --- |
 | 首次启动独立实例 | [教程](tutorials/local-start.md) |
 | 保留 Codex 原生套餐，同时接入其他订阅模型 | [Codex 多 provider 接入](how-to/codex-multi-provider.md) |
+| Codex 原生父子代理与应用套餐授权 | [订阅路由边界](explanation/codex-subscription-routing.md) |
 | 测试与回归 | [测试指南](how-to/testing.md) |
 | 运行、配置、排错 | [运维指南](how-to/operations.md) |
 | 查询配置与环境变量 | [配置参考](reference/configuration.md) |

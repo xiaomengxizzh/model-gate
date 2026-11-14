@@ -2,7 +2,9 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
-## [Unreleased] —— 2026-11-12 收工闭环（`integration/modelgate-release`）
+## [Unreleased] —— 2026-11-12 收工闭环 (`integration/modelgate-release`)
+
+- 增加隔离的 Codex Desktop 启动入口 `bin/mg-desktop.mjs`，使用应用独立 ChatGPT 套餐授权和 OpenCode Go Key。套餐请求固定发往 OpenAI 公开 Responses API；真实桌面双上游验收以实际回执为准。
 
 > 本段记录从 A1 基线 `2a735fb` 起的新集成线：G0 冻结 + G1 后端/协议/控制面的定向移植与收紧。**CLI 原生门（Q03/Q04）与正式 GUI（U01–U07）未开始**，本段不表示发布就绪。
 
