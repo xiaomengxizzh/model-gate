@@ -39,6 +39,8 @@
 
 因此 R005 / R006 的跨供应商半边保持 `BLOCKED`，不以 mock 或替代模型冒充。`src/codex/native-capabilities.js:98` 声明了 `response.cancel` / `response.interrupted`，但本轮没有任何取消请求被真实发出，不能据此登记 `NOT_ACCEPTED`。
 
+> **2026-11-14 政策更正（不改变本轮状态）**：§2.1 第 1 条里的两处“本轮禁止”是**当轮的政策限制，不是技术限制**——当时“不复制、不触碰认证材料”的一刀切规则在生效，所以该场景没有运行。所有者已于 **2026-11-14** 解除该限制：`~/.codex/auth.json` 可在明确、有界、可审计的授权下读取与备份（见 [接口 ADR](../architecture/2026-11-14-aggregation-interfaces.md) §10「凭据处理协议」）。因此“禁止复制凭据”**不再是有效的阻塞理由**，MG-R005 / MG-R006 的原生场景属于**待重跑**，不是不可实现。本轮未重跑，状态不变。
+
 ## 3. 请求级取证
 
 模型 ID **不是**从配置意图推断的，而是从网关自身 socket 上实际写出的明文请求体读取的。观测方式：对**本轮自建的隔离实例**注入只读观测钩子（`NODE_OPTIONS=--require`，包装 `https.request` 的 `end/write`，只记录 host/path/method/字节数/`model`/头名，不修改请求）。

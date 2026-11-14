@@ -182,6 +182,8 @@ A2 的 `activate`/`deactivate` handler 只会把结果包成 200、把 `DesktopE
 | MG-R011 | `PASS_MOCK` | 本报告提供 SHA/命令/结果/模拟标签，且矩阵与门禁由离线套件自证（`aggregation-acceptance-matrix.test.mjs`、`aggregation-acceptance-audit.test.mjs`）；仍缺真实目标回执 |
 | MG-R012 | `PASS_REAL` | 请求级脱敏收据证明上游 `model=gpt-6-luna` 且无其他 GPT 模型/无自动回退（`4feafe0e51dc02d48c45734df5b34e70d3679bd5`，3/3 HTTP 200，见[真实 Luna 验收](aggregation-real-luna-2026-11-14.md)）；订阅域拒绝面的离线不变量由 `agg-auth-subscription.test.mjs` 覆盖 |
 
+> **2026-11-14 政策更正（不改变状态列）**：这次整合没有读写 `~/.codex/auth.json`，那是**当轮政策**的要求，不是技术限制。当时“不复制、不触碰认证材料”的一刀切规则在生效，因此原生父子线程场景没有运行；所有者已于 **2026-11-14** 解除该限制，认证材料可在明确、有界、可审计的授权下读取与备份（[接口 ADR](../architecture/2026-11-14-aggregation-interfaces.md) §10）。据此，MG-R005 / MG-R006 的原生场景是**待重跑**，不是不可实现；本表状态（`PASS_MOCK` / `NOT_TESTED`）不变，因为本轮没有重跑。
+
 ## 9. 未做与边界
 
 - 未 push、未开 PR、未合并 `main`、未打 tag、未发布。
