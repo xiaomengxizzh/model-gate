@@ -3,8 +3,16 @@
 // 目的：矩阵是“契约 → 人类可读的验收表”的确定性投影，而不是手写的第二份需求。
 //   - 需求行：从产品契约 MG-R001..MG-R012 的表格逐字提取（行为 + 必需实测验收）；
 //   - 用例列：从执行计划 §I 的 `const matrix = [...]` 解析（P06 冻结映射）；
-//   - 状态列：从基线证据 §5 解析（只搬运，不升级；本文不得产生任何 PASS）；
+//   - 状态列：从**证据文档**的状态表解析（整合报告 §8 + P01 §5），不再硬编码；
+//     多份证据对同一需求必须给出一致状态，冲突即生成失败（禁止矩阵与报告互相矛盾）；
+//   - 被测树 SHA：从证据文档的「被测树 SHA」字段解析，不再硬编码常量；
 //   - 证据列：A5 编写的 CASE_EVIDENCE（每个用例需要什么原始证据），缺一即生成失败。
+//
+// 诚实性硬约束（生成失败，而不是降级）：
+//   - 状态只允许契约 §2 的五值；`PASS(...)` / `N/A` 之类词汇一律拒绝；
+//   - `PASS_MOCK` 行必须在「依据」里点名至少一个**存在且已登记**的离线套件
+//     （`scripts/test/offline/*.test.mjs`），否则视为把未执行的用例写成通过；
+//   - 本文件永不产生 `PASS_REAL`：真实目标上的状态只能由真实回执与门禁上调。
 //
 // 用法：
 //   node scripts/test/offline/aggregation-matrix.js            # 打印到 stdout
@@ -13,9 +21,10 @@
 //
 // 零依赖、离线；只读仓库内文件。
 import { createHash } from 'node:crypto'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { SUITES } from '../run.mjs'
 
 export const ROOT = fileURLToPath(new URL('../../../', import.meta.url))
 export const CONTRACT_PATH = 'docs/product/2026-11-14-owner-product-contract.md'
@@ -24,8 +33,14 @@ export const BASELINE_PATH = 'docs/evidence/aggregation-baseline-2026-11-14.md'
 export const MATRIX_PATH = 'docs/evidence/aggregation-acceptance-matrix.md'
 export const VERDICT_PATH = 'docs/evidence/aggregation-acceptance-verdict-2026-11-14.md'
 
-// 被测树（A5 本轮实际检出的提交）。换 SHA 必须显式改这里并重新生成——旧证据不得复用。
-export const TESTED_TREE_SHA = '2f641a975a6345f086aca0d547ab5f0e2523a28c'
+// 状态证据来源（顺序即「最新在前」，用于读取被测树 SHA）。
+// 只收录**当前状态**文档：基线/结论文档描述的是历史快照，不能拿来覆盖今天的状态。
+export const EVIDENCE_STATUS_DOCS = Object.freeze([
+  'docs/evidence/aggregation-integration-2026-11-14.md',
+  'docs/evidence/agg-p01-opencode-discovery-2026-11-14.md',
+])
+
+export const STATUS_ORDER = Object.freeze(['NOT_TESTED', 'BLOCKED', 'FAIL', 'PASS_MOCK', 'PASS_REAL'])
 
 export const REQUIREMENT_IDS = Object.freeze(
   Array.from({ length: 12 }, (_, i) => 'MG-R' + String(i + 1).padStart(3, '0')),
@@ -95,6 +110,7 @@ export function parsePlanCases(text) {
   return rows
 }
 
+// 基线证据 §5：仍是门禁 gateForBaseline() 的输入，但**不再**是矩阵状态的来源。
 export function parseBaseline(text) {
   const start = text.indexOf('## 5.')
   const end = text.indexOf('## 6.')
@@ -115,6 +131,94 @@ export function parseBaseline(text) {
   return { commit, rows }
 }
 
+// 证据文档里的被测树 SHA（必须是完整 40 位）。缺字段即失败：不得回退到任何硬编码值。
+export function parseTestedTreeSha(text, docPath = '') {
+  const m = text.match(/被测树\s*SHA\**\s*[：:]\s*`([0-9a-f]{40})`/i)
+  if (!m) throw new Error('evidence doc ' + docPath + ' lacks a 40-hex 被测树 SHA field')
+  return m[1]
+}
+
+function cellsOf(line) {
+  const parts = line.split('|')
+  // 去掉首尾两个空片段（行以 | 开头/结尾）
+  return parts.slice(1, parts.length - 1).map((s) => s.trim())
+}
+
+// 证据文档的状态表：标题形如「## 8. MG-R 诚实状态（整合后）」「## 5. 需求状态」。
+// 返回 [{ id, status, basis, suites, docPath }]；词汇不在五值内直接失败（F5 的口径）。
+export function parseEvidenceStatuses(text, docPath = '') {
+  const lines = text.split('\n')
+  let start = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (/^##\s+\d+\.\s*(?:MG-R\s*)?(?:诚实状态|需求状态)/.test(lines[i])) { start = i; break }
+  }
+  if (start < 0) throw new Error('evidence doc ' + docPath + ' has no status section (## N. 诚实状态 / ## N. 需求状态)')
+  const rows = []
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]
+    if (/^##\s/.test(line)) break
+    if (!line.startsWith('|')) continue
+    const cells = cellsOf(line)
+    if (!cells.length || !/^MG-R\d{3}\b/.test(cells[0])) continue
+    if (cells.length < 3) throw new Error('evidence row in ' + docPath + ' has < 3 columns: ' + line)
+    const id = cells[0].match(/^MG-R\d{3}/)[0]
+    const rawStatus = cells[1].replace(/[`*]/g, '').trim()
+    const token = (rawStatus.match(/^[A-Z_]+/) || [''])[0]
+    if (!STATUS_ORDER.includes(token)) {
+      throw new Error('evidence doc ' + docPath + ' uses invalid status `' + rawStatus + '` for ' + id + '（只允许 ' + STATUS_ORDER.join('/') + '）')
+    }
+    const basis = cells.slice(2).join(' | ').trim()
+    rows.push({ id, status: token, basis, suites: citedSuites(basis), docPath })
+  }
+  if (!rows.length) throw new Error('evidence doc ' + docPath + ' status section has no MG-R rows')
+  return rows
+}
+
+// 「依据」里点名的离线套件：`xxx.test.mjs` 形式（不带目录的裸文件名）。
+function citedSuites(basis) {
+  return [...String(basis).matchAll(/`([a-z0-9][a-z0-9-]*\.test\.mjs)`/g)].map((m) => m[1])
+}
+
+function suitePath(name) { return 'scripts/test/offline/' + name }
+
+function assertCitedSuites(row) {
+  for (const name of row.suites) {
+    const rel = suitePath(name)
+    if (!existsSync(join(ROOT, rel))) {
+      throw new Error(row.id + ' cites a suite that does not exist: ' + rel + '（' + row.docPath + '）')
+    }
+    if (!SUITES.includes(rel)) {
+      throw new Error(row.id + ' cites a suite that is not registered in scripts/test/run.mjs: ' + rel)
+    }
+  }
+}
+
+function mergeEvidenceStatuses(docs) {
+  const byId = new Map()
+  for (const doc of docs) {
+    for (const row of doc.rows) {
+      if (!REQUIREMENT_IDS.includes(row.id)) throw new Error('evidence doc ' + doc.docPath + ' has unknown requirement ' + row.id)
+      assertCitedSuites(row)
+      if (row.status === 'PASS_MOCK' || row.status === 'PASS_REAL') {
+        if (!row.suites.length) {
+          throw new Error(row.id + ' is ' + row.status + ' but cites no offline suite（' + row.docPath + '）：PASS_MOCK 只能用于离线套件真正执行过的行为')
+        }
+      }
+      const prev = byId.get(row.id)
+      if (!prev) { byId.set(row.id, row); continue }
+      if (prev.status !== row.status) {
+        throw new Error('证据文档互相矛盾：' + row.id + ' = ' + prev.status + ' @ ' + prev.docPath + ' vs ' + row.status + ' @ ' + row.docPath)
+      }
+      // 同一状态：合并套件引用，保留首份依据（最新文档在前）。
+      prev.suites = [...new Set([...prev.suites, ...row.suites])]
+    }
+  }
+  for (const id of REQUIREMENT_IDS) {
+    if (!byId.has(id)) throw new Error('no evidence status for ' + id + ' in ' + docs.map((d) => d.docPath).join(', '))
+  }
+  return byId
+}
+
 export function loadSources() {
   const contractText = read(CONTRACT_PATH)
   const planText = read(PLAN_PATH)
@@ -122,11 +226,22 @@ export function loadSources() {
   const contract = parseContract(contractText)
   const planCases = parsePlanCases(planText)
   const baseline = parseBaseline(baselineText)
-  return { contractText, planText, baselineText, contract, planCases, baseline }
+  const evidence = EVIDENCE_STATUS_DOCS.map((docPath) => {
+    const text = read(docPath)
+    return { docPath, text, sha: safeSha(text, docPath), rows: parseEvidenceStatuses(text, docPath) }
+  })
+  return { contractText, planText, baselineText, contract, planCases, baseline, evidence }
 }
 
+function safeSha(text, docPath) {
+  try { return parseTestedTreeSha(text, docPath) } catch { return null }
+}
+
+// 被测树 SHA：来自证据文档，而不是常量。缺失即失败（宁可生成失败，也不复用旧 SHA）。
+export const TESTED_TREE_SHA = parseTestedTreeSha(read(EVIDENCE_STATUS_DOCS[0]), EVIDENCE_STATUS_DOCS[0])
+
 // 生成结构化矩阵。任何缺失/多余都在这里 fail-fast，避免“少一行就少一个需求”。
-export function buildMatrix({ contract, planCases, baseline }) {
+export function buildMatrix({ contract, planCases, baseline, evidence }) {
   const contractIds = contract.map((r) => r.id)
   if (JSON.stringify(contractIds) !== JSON.stringify(REQUIREMENT_IDS)) {
     throw new Error('contract rows must be exactly MG-R001..MG-R012 in order, got ' + contractIds.join(','))
@@ -135,8 +250,8 @@ export function buildMatrix({ contract, planCases, baseline }) {
   if (JSON.stringify(planIds) !== JSON.stringify(REQUIREMENT_IDS)) {
     throw new Error('plan §I must map MG-R001..MG-R012 in order, got ' + planIds.join(','))
   }
-  const statusById = new Map(baseline.rows.map((r) => [r.id, r]))
-  if (statusById.size !== 12) throw new Error('baseline §5 must list 12 requirements, got ' + statusById.size)
+  if (!Array.isArray(evidence) || !evidence.length) throw new Error('matrix statuses must be derived from evidence documents (none supplied)')
+  const statusById = mergeEvidenceStatuses(evidence)
 
   const caseIndex = {}
   const rows = contract.map((c) => {
@@ -152,8 +267,9 @@ export function buildMatrix({ contract, planCases, baseline }) {
       tests: planned,
       evidence: planned.map((t) => ({ case: t, requires: CASE_EVIDENCE[t] })),
       status: status.status,
-      baselineEvidence: status.evidence,
-      blocker: status.blocker,
+      statusBasis: status.basis,
+      statusSource: status.docPath,
+      statusSuites: status.suites,
     }
   })
 
@@ -161,15 +277,20 @@ export function buildMatrix({ contract, planCases, baseline }) {
   const extra = Object.keys(CASE_EVIDENCE).filter((k) => !allCases.includes(k))
   if (extra.length) throw new Error('CASE_EVIDENCE has entries the plan does not assign: ' + extra.join(','))
 
-  return { rows, caseIndex, baselineCommit: baseline.commit, contractSha256: sha256(JSON.stringify(contract)) }
+  return {
+    rows,
+    caseIndex,
+    baselineCommit: baseline && baseline.commit ? baseline.commit : '',
+    contractSha256: sha256(JSON.stringify(contract)),
+    testedTreeSha: TESTED_TREE_SHA,
+    evidenceDocs: evidence.map((e) => ({ docPath: e.docPath, sha: e.sha, rowCount: e.rows.length })),
+  }
 }
-
-const STATUS_ORDER = ['NOT_TESTED', 'BLOCKED', 'FAIL', 'PASS_MOCK', 'PASS_REAL']
 
 function countStatuses(rows) {
   const counts = Object.fromEntries(STATUS_ORDER.map((s) => [s, 0]))
   for (const row of rows) {
-    if (!(row.status in counts)) throw new Error('unknown status in baseline: ' + row.status)
+    if (!(row.status in counts)) throw new Error('unknown status: ' + row.status)
     counts[row.status]++
   }
   return counts
@@ -184,24 +305,26 @@ export function renderMarkdown({ contractText, planText, baselineText, matrix })
   const lines = []
   lines.push('# ModelGate 聚合模式独立验收矩阵（MG-R001..MG-R012）')
   lines.push('')
-  lines.push('> 本文件由 `node scripts/test/offline/aggregation-matrix.js --write` 从产品契约、执行计划 §I 与基线证据生成，**禁止手工编辑**。')
-  lines.push('> `scripts/test/offline/aggregation-acceptance-matrix.test.mjs` 在每次 `npm test` 中重新生成并逐字节比对；手工改动契约、计划或本文件任一方向都会失败。')
+  lines.push('> 本文件由 `node scripts/test/offline/aggregation-matrix.js --write` 从产品契约、执行计划 §I 与**证据文档的状态表**生成，**禁止手工编辑**。')
+  lines.push('> `scripts/test/offline/aggregation-acceptance-matrix.test.mjs` 在每次 `npm test` 中重新生成并逐字节比对；手工改动契约、计划、证据状态或本文件任一方向都会失败。')
   lines.push('')
-  lines.push('- 被测树 SHA：`' + TESTED_TREE_SHA + '`')
+  lines.push('- 被测树 SHA：`' + TESTED_TREE_SHA + '`（来自 ' + EVIDENCE_STATUS_DOCS[0] + ' 的「被测树 SHA」字段，生成器不再保存常量）')
   lines.push('- 契约来源：`' + CONTRACT_PATH + '`（sha256 `' + sha256(contractText) + '`）')
   lines.push('- 用例映射来源：`' + PLAN_PATH + '` §I（sha256 `' + sha256(planText) + '`）')
-  lines.push('- 状态来源：`' + BASELINE_PATH + '` §5，采集于 `' + matrix.baselineCommit + '`（sha256 `' + sha256(baselineText) + '`）；采集点之后到被测树的提交未改动 `src/**`，状态转移成立。')
-  lines.push('- 判定口径：契约 §2 的五值状态（`NOT_TESTED` / `BLOCKED` / `FAIL` / `PASS_MOCK` / `PASS_REAL`）；`PASS_MOCK` 永不等于 `PASS_REAL`；真实 Codex GPT 调用只能使用 `gpt-6-luna`。')
-  lines.push('- 当前门禁：`ready:false`。逐项原因见 `' + VERDICT_PATH + '`（该文件是本矩阵的证据结论，不是本矩阵的输入）。')
+  lines.push('- 状态来源：' + matrix.evidenceDocs.map((d) => '`' + d.docPath + '`（' + d.rowCount + ' 行）').join('、') +
+    '；多份证据对同一需求必须一致，冲突即生成失败。')
+  lines.push('- 状态口径：契约 §2 的五值（`NOT_TESTED` / `BLOCKED` / `FAIL` / `PASS_MOCK` / `PASS_REAL`）；`PASS_MOCK` 只用于**离线套件真正执行过**的行为，且每行都在「状态依据」里点名已登记的套件。')
+  lines.push('- 历史基线：`' + BASELINE_PATH + '` §5（采集于 `' + matrix.baselineCommit + '`，sha256 `' + sha256(baselineText) + '`）只说明当时的起点，不是本表当前状态的来源。')
+  lines.push('- 当前门禁：`ready:false`。逐项原因见 `' + VERDICT_PATH + '`（该文件是本矩阵的历史结论，不是本矩阵的输入）。')
   lines.push('')
   lines.push('## 1. 矩阵')
   lines.push('')
-  lines.push('| 需求 | 目标产品行为（契约原文） | 必需实测验收（契约原文） | 计划用例 ID | 每条用例所需证据 | 当前状态 @ `' + short + '` | 阻塞前置 |')
+  lines.push('| 需求 | 目标产品行为（契约原文） | 必需实测验收（契约原文） | 计划用例 ID | 每条用例所需证据 | 当前状态 @ `' + short + '` | 状态依据（证据原文） |')
   lines.push('| --- | --- | --- | --- | --- | --- | --- |')
   for (const row of matrix.rows) {
     const tests = row.tests.map((t) => '`' + t + '`').join('<br>')
     const evidence = row.evidence.map((e) => '**`' + e.case + '`**：' + e.requires).join('<br>')
-    lines.push('| ' + [row.id, row.behavior, row.realAcceptance, tests, evidence, row.status + ' @ `' + short + '`', row.blocker].join(' | ') + ' |')
+    lines.push('| ' + [row.id, row.behavior, row.realAcceptance, tests, evidence, row.status + ' @ `' + short + '`', row.statusBasis].join(' | ') + ' |')
   }
   lines.push('')
   lines.push('## 2. 汇总')
@@ -212,7 +335,7 @@ export function renderMarkdown({ contractText, planText, baselineText, matrix })
   lines.push('')
   lines.push('## 3. 不可判定即不可发布')
   lines.push('')
-  lines.push('- 本表只记录事实：状态列全部来自基线证据，本文件不产生任何 `PASS_REAL`。')
+  lines.push('- 本表只记录事实：状态列全部来自证据文档的状态表，本文件不产生任何 `PASS_REAL`。')
   lines.push('- 每条结论必须绑定 commit SHA + 可复制命令 + 脱敏回执（契约 §4）；代码或测试变化后旧证据不得复用。')
   lines.push('- 任何“已通过”声明若在本表无对应 `PASS_REAL` 行与回执，按未通过处理。')
   lines.push('')

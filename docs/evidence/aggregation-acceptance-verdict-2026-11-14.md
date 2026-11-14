@@ -1,5 +1,10 @@
 # ModelGate 聚合模式独立验收结论（基线 2026-11-14）
 
+> 范围说明：本文是 `2f641a9`（合并前基线）的**历史结论**，仍然有效但只覆盖该树。
+> 合并后的当前状态见 `aggregation-integration-2026-11-14.md` §8；矩阵
+> `aggregation-acceptance-matrix.md` 从该证据表生成，不再搬运本文的基线状态
+> （两者对同一需求的差异只反映实现已落地，`ready:false` 的发布结论未变）。
+
 ## 0. 结论
 
 被测树 `2f641a975a6345f086aca0d547ab5f0e2523a28c` 的发布门禁为 **`ready:false` / `status:'BLOCKED'`**。

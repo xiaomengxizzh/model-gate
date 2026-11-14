@@ -77,12 +77,12 @@ MG_AGG_LIVE_PROBE=1 node scripts/aggregation-probe.mjs --provider opencodego --m
 
 | 需求 | 状态 | 依据 |
 | --- | --- | --- |
-| MG-R003 自动发现全部可用模型并同步 | **PASS_MOCK** | 逻辑与失败分类由录制 fixture 证明；真实目录 ↔ GUI/Codex 双向对账 **BLOCKED**，待 §4 探针与 A3 GUI 验收 |
+| MG-R003 自动发现全部可用模型并同步 | **PASS_MOCK** | 逻辑与失败分类由录制 fixture 证明（`agg-discovery-console.test.mjs`、`agg-discovery-pagination.test.mjs`、`agg-discovery-sync.test.mjs`）；真实目录 ↔ GUI/Codex 双向对账 **BLOCKED**，待 §4 探针与 A3 GUI 验收 |
 | MG-R004 GUI/Codex 使用聚合模型 | NOT_TESTED | A3/A5 范围 |
-| MG-R008 无静默降级 | **PASS_MOCK**（模块级） | 失败不返回空目录、部分页=partial、无权模型不发布、缺上下文 fail-closed、溢出不裁剪；GUI 反向验收仍待 A5 |
-| MG-R009 多用户隔离 | **PASS_MOCK**（快照/目录 scope） | 两个 scope 独立文件与世代；完整多身份隔离属 A4/A5 |
-| MG-R011 真实证据 | PASS（本文件） | 绑定上述 SHA、命令与 pass/fail；明确 mock ≠ real |
-| MG-R012 仅 GPT-6 Luna | N/A | 本轮无任何 GPT 调用 |
+| MG-R008 无静默降级 | **PASS_MOCK**（模块级） | 失败不返回空目录、部分页=partial、无权模型不发布、缺上下文 fail-closed、溢出不裁剪（`agg-discovery-sync.test.mjs`、`agg-discovery-pagination.test.mjs`）；GUI 反向验收仍待 A5 |
+| MG-R009 多用户隔离 | **PASS_MOCK**（快照/目录 scope） | 两个 scope 独立文件与世代（`agg-discovery-catalog.test.mjs`）；完整多身份隔离属 A4/A5 |
+| MG-R011 真实证据 | **PASS_MOCK** | 绑定上述 SHA、命令与 pass/fail（`aggregation-acceptance-audit.test.mjs`）；这只是文档级证据，不是真实目标上的 `PASS_REAL`，明确 mock ≠ real |
+| MG-R012 仅 GPT-6 Luna | **BLOCKED** | 本轮没有任何 GPT 调用，也没有所有者授权的 Luna 额度/时间窗；不代换模型，保持 `BLOCKED` |
 
 `PASS_MOCK` 永不等于 `PASS_REAL`。在所有者批准 §4 探针并完成 A3 GUI 对账前，MG-R003 不得签收。
 

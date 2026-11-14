@@ -3,6 +3,7 @@
 - **整合分支**：`mg-codex-native`
 - **整合起点**：`2f641a975a6345f086aca0d547ab5f0e2523a28c`（五个工作包共同基线，工作树干净）
 - **整合者**：主代理（integration engineer）
+- **被测树 SHA**：`ebfb1d688cb9c293de438605c57fcb7acc1a6f23`（F2/F3、F4、F6 修复后的代码树；其后的证据回填提交只改文档与矩阵生成器/自测）
 - **性质**：离线整合与门禁证据。没有任何真实 Desktop / 真实 OAuth / 真实付费模型调用。
   `PASS_MOCK` 不等于 `PASS_REAL`；本报告不上调任何 MG-R 的真实验收状态。
 
@@ -31,12 +32,12 @@
 
 ## 2. 套件登记与门禁
 
-`scripts/test/run.mjs` 显式清单从 **77 → 96**，19 个新套件按字母序插入
+`scripts/test/run.mjs` 显式清单从 **77 → 96**（19 个聚合套件），整改后 **96 → 98**
+（新增 `agg-auth-receipt`、`agg-runtime-reload`），仍按字母序插入
 `admin-secrets` 与 `boundary` 之间（`agg-*` 在前，`aggregation-acceptance-*` 在后）。
 
-- `node scripts/test/run.mjs --list`：`96 suites (explicit manifest)`
-- `node scripts/test/run.mjs agg`：19/19 套件通过，162 passed / 0 failed / 1 skipped
-- 全量 `npm test`：96/96 套件通过，**944 passed / 0 failed / 2 skipped**
+- `node scripts/test/run.mjs --list`：`98 suites (explicit manifest)`
+- 全量 `npm test`：98/98 套件通过，**958 passed / 0 failed / 2 skipped**
 
 两个 skip 是声明式跳过，不是通过：
 
@@ -52,11 +53,15 @@
 
 ## 3. 最终门禁结果
 
+被测树 `ebfb1d6`（F2/F3、F4、F6 修复后的代码树）。证据回填提交只新增/修改
+`docs/evidence/*`、矩阵生成器与其自证套件，不改 `src/**`、不改其它套件；下表在同一内容的
+工作树上测得：
+
 | 命令 | 退出码 | 结果 |
 | --- | --- | --- |
 | `npm run check` | 0 | 语法检查全通过；`UI modules: 17/17 syntax OK` |
-| `npm test` | 0 | 96/96 套件；944 passed / 0 failed / 2 skipped；71.3s |
-| `npm run docs:check` | 0 | Documentation paths: PASS |
+| `npm test` | 0 | 98/98 套件；958 passed / 0 failed / 2 skipped；72.8s |
+| `npm run docs:check` | 0 | `Documentation paths: PASS (81 files, 317 links)` |
 | `node scripts/check-metadata.mjs` | 0 | `Metadata: PASS (39 checks)` |
 | `node scripts/check-product-contract.mjs` | 0 | 12 requirements / 7 stages / 5 roles 一致 |
 
@@ -68,7 +73,7 @@
 A2 的工厂签名是 `handler(req, body, ctx)`，返回 A2 自己的响应形状；A3 的 GUI 按 ADR-0003 §5
 写死了另一套形状。适配器**没有改 A2 模块，也没有改 A3 期望**，只在边界做投影：
 
-- `isAggregationApiPath` / `handleAggregationApi({method,path,cfg,log,rawBody,explicitAdmin,managedRoot,isLocal})`
+- `isAggregationApiPath` / `handleAggregationApi({method,path,cfg,log,rawBody,explicitAdmin,managedRoot,isLocal,reload})`
   按要求导出；非聚合路径返回 `null`。
 - 先鉴权后解析 body：`explicitAdmin !== true` → 403；`isLocal !== true` → 403；非法 JSON → 400。
 - `GET /health`：`desktop.status()` + `desktop.detect({disableExec:true})`，输出
@@ -81,6 +86,10 @@ A2 的工厂签名是 `handler(req, body, ctx)`，返回 A2 自己的响应形�
   `opencode-console|opencode-go` 与 `version`。适配器做别名映射（`console→console` 段，
   `go→opencodego` 段，保持已发布 ID），并把 `configVersion` 映射为 A2 的 `version`。
   自定义 ID 原样交给注册表，由注册表给 typed 错误，不静默改名。
+- 写成功后即时生效（F4）：入口注入 `ctx.reload`（与 `/api/config/reload` 同一个
+  `reloadConfig(state)`），适配器把它交给 `createRegistry` 的 `publish` 钩子，
+  并在响应里回 `reload:{applied,needsRestart,reason}`。没有注入或重载失败时如实返回
+  `needsRestart:true`，绝不谎称聚合模式已在内存中生效。
 - 版本冲突：A2 把 `currentVersion` 放在 `details` 里，适配器提升到顶层，满足 GUI 的
   `409 {code:'version_conflict', currentVersion}`。
 - `POST /providers/:id/sync`：A2 发现/同步后，适配器再调用 `publishAggregatedCatalog`。
@@ -115,6 +124,11 @@ A2 的 `activate`/`deactivate` handler 只会把结果包成 200、把 `DesktopE
   非订阅上游；401/403 记录终态收据且不重试/不换域。
 - 该收据闸门只在配置中存在 `modelgate.aggregation.provider/1` 记录时运行；默认单操作员
   配置不启用，既有 77 个套件在最终树上全部通过即为行为不变的证据。
+- 收据的 host/path 必须取**实际出站 URL**（`upstreamUrl(prov, upstreamPath)`）的
+  `host` 与 `pathname`：`identity.host` 只有主机名（丢端口），`responsesPath` 不含
+  `pathPrefix`，两者都会让合法请求被 `send_target_drift` 拒绝（F2/F3，见 §10）。
+- `/api/aggregation/*` 的 ctx 额外带 `reload: () => reloadConfig(state)`：这是
+  `/api/config/reload` 用的同一函数，聚合写操作复用它把新配置带回内存（F4）。
 
 ## 6. UI 注册
 
@@ -152,19 +166,22 @@ A2 的 `activate`/`deactivate` handler 只会把结果包成 200、把 `DesktopE
 
 ## 8. MG-R 诚实状态（整合后）
 
+状态词汇只用契约 §2 的五值。`PASS_MOCK` 行必须在「依据」里点名**真实存在且已登记**的离线套件
+（`scripts/test/offline/*.test.mjs`），验收矩阵生成器会逐个解析并拒绝不存在的引用。
+
 | 需求 | 状态 | 依据 |
 | --- | --- | --- |
-| MG-R001 | `PASS_MOCK` | 一键接入/退出、428 预览、409 冲突、回滚均有离线测试；未在真实 Desktop 执行 |
-| MG-R002 | `PASS_MOCK` | 授权域与订阅收据离线测试通过；真实登录身份/额度未验证 |
-| MG-R003 | `PASS_MOCK` | 发现/分页/目录 fixtures 通过；真实 Console/Go 目录未对账 |
+| MG-R001 | `PASS_MOCK` | 一键接入/退出、428 预览、409 冲突、回滚均有离线测试（`agg-desktop-activate.test.mjs`、`agg-desktop-rollback.test.mjs`、`agg-desktop-ui.test.mjs`）；未在真实 Desktop 执行 |
+| MG-R002 | `PASS_MOCK` | 授权域与订阅收据离线测试通过（`agg-auth-resolve.test.mjs`、`agg-auth-subscription.test.mjs`、`agg-auth-receipt.test.mjs`、`codex-target-authz.test.mjs`）；真实登录身份/额度未验证 |
+| MG-R003 | `PASS_MOCK` | 发现/分页/目录 fixtures 通过（`agg-discovery-console.test.mjs`、`agg-discovery-pagination.test.mjs`、`agg-discovery-sync.test.mjs`、`agg-discovery-catalog.test.mjs`）；真实 Console/Go 目录未对账 |
 | MG-R004 | `NOT_TESTED` | GUI 视图与接口已就绪；原版 Desktop 选择器未实际操作 |
-| MG-R005 | `PASS_MOCK` | 原生协议单元与生命周期离线测试通过；真实父子线程未验证 |
+| MG-R005 | `PASS_MOCK` | 原生协议单元与生命周期离线测试通过（`agg-native-invariants.test.mjs`、`agg-native-capabilities.test.mjs`）；真实父子线程未验证 |
 | MG-R006 | `NOT_TESTED` | `interrupt` 用例 `NOT_ACCEPTED`；不能宣称保留中断终态 |
-| MG-R007 | `PASS_MOCK` | 预览/备份/原子写/回滚离线测试通过；未做空白安装与已有配置的真实 GUI 演练 |
-| MG-R008 | `PASS_MOCK` | 无静默降级反向用例离线通过；真实产品路径未执行 |
-| MG-R009 | `PASS_MOCK` | 默认关闭的租户原语与隔离用例通过；第二真实身份未创建（授权项） |
-| MG-R010 | `PASS_MOCK` | 回滚与中断恢复离线用例通过；可丢弃实例演练未做 |
-| MG-R011 | `PASS_MOCK` | 本报告提供 SHA/命令/结果/模拟标签；仍缺真实目标回执 |
+| MG-R007 | `PASS_MOCK` | 预览/备份/原子写/回滚离线测试通过（`agg-desktop-activate.test.mjs`、`agg-desktop-rollback.test.mjs`）；未做空白安装与已有配置的真实 GUI 演练 |
+| MG-R008 | `PASS_MOCK` | 无静默降级反向用例离线通过（`agg-auth-leak.test.mjs`、`agg-native-invariants.test.mjs`、`agg-discovery-sync.test.mjs`）；真实产品路径未执行 |
+| MG-R009 | `PASS_MOCK` | 默认关闭的租户原语与隔离用例通过（`agg-tenant-isolation.test.mjs`、`agg-discovery-catalog.test.mjs`）；第二真实身份未创建（授权项） |
+| MG-R010 | `PASS_MOCK` | 回滚与中断恢复离线用例通过（`agg-desktop-rollback.test.mjs`、`config-transaction.test.mjs`）；可丢弃实例演练未做 |
+| MG-R011 | `PASS_MOCK` | 本报告提供 SHA/命令/结果/模拟标签，且矩阵与门禁由离线套件自证（`aggregation-acceptance-matrix.test.mjs`、`aggregation-acceptance-audit.test.mjs`）；仍缺真实目标回执 |
 | MG-R012 | `BLOCKED` | 无所有者授权的 GPT-6 Luna 额度与时间窗；不代换模型 |
 
 ## 9. 未做与边界
@@ -177,3 +194,25 @@ A2 的 `activate`/`deactivate` handler 只会把结果包成 200、把 `DesktopE
   （其 mtime 保持 `2026-11-14 12:59:20 +0800`）。
 - 未安装、未下载、未联网调用真实模型、未做真实 OAuth。
 - 未修改 `docs/product/*`、`docs/roadmap/*` 或 MG-R001..MG-R012 的任何措辞；未弱化任何测试。
+
+## 10. 独立验收缺陷整改（F1–F6）
+
+独立验证者复现的六个缺陷与本次修复（本地提交，未 push）：
+
+| 缺陷 | 提交 |
+| --- | --- |
+| F2 / F3 | `8a64cd83c3992e8eca6d437c0c71df99d7d8d694` |
+| F4 | `45116c55d0b7ba0b9f54f240567ecc4c45d2416c` |
+| F6 | `ebfb1d688cb9c293de438605c57fcb7acc1a6f23` |
+
+| 编号 | 缺陷（真实复现串） | 根因 | 修复 | 回归覆盖 |
+| --- | --- | --- | --- | --- |
+| F2 | `authorized=127.0.0.1 actual=127.0.0.1:18991` → `send_target_drift` | 收据用 `identity.host`（只有主机名），比对的是 `url.host`（含端口） | `8a64cd8`：收据从 `upstreamUrl(prov, path)` 的 host 取实际 authority | `agg-auth-receipt`（非默认端口 + 换 host / 换端口负例 + 端到端） |
+| F3 | `authorized=/v1/responses actual=/v1/v1/responses` → 拒绝 | 收据用 `responsesPath`，未合成 `provider.pathPrefix` | `8a64cd8`：同一 URL 的 `pathname` 作为收据路径 | `agg-auth-receipt`（`/inference/go` 前缀、`/v1` 重复前缀、真实不匹配仍拒绝） |
+| F4 | `POST /providers` 成功但 `aggregationModeActive(state.cfg)` 仍为 false | 适配器 `createRegistry({log})`，`publish: reload` 是空函数 | `45116c5`：入口注入 `/api/config/reload` 同一个 `reloadConfig`，写成功即重载；返回 `reload:{applied,needsRestart}` | `agg-runtime-reload`（false→true、true→false、未注入/失败时如实 `needsRestart:true`） |
+| F1 | 矩阵钉死 `2f641a9` 的 11 `NOT_TESTED` + 1 `BLOCKED`，与本报告 9 个 `PASS_MOCK` 矛盾 | 生成器硬编码 `TESTED_TREE_SHA` 且只读基线证据 | 生成器改为解析证据文档的「被测树 SHA」与状态表；两份证据冲突即生成失败，`PASS_MOCK` 必须点名已登记的离线套件 | `aggregation-acceptance-matrix`（状态来源、SHA 解析、冲突/非法词汇/缺套件均拒绝） |
+| F5 | `PASS（本文件）`、`N/A` 不是合法状态词汇 | 证据文档手写状态列 | P01 改为 `PASS_MOCK` / `BLOCKED` 并补原因；生成器拒绝非五值词汇 | 同上（`invalid status` 反例） |
+| F6 | UI 说聚合接口未接线、要用户找接线补丁 | 文案停留在接线前 | `ebfb1d6`：说明真实原因（实例版本/未加载模块），渲染条件不变 | `agg-desktop-ui`（禁止过期文案回归） |
+
+当前状态分布（证据文档 → 矩阵）：`PASS_MOCK` 9、`NOT_TESTED` 2（MG-R004、MG-R006）、
+`BLOCKED` 1（MG-R012）、`PASS_REAL` 0。发布门禁仍为 `ready:false`：没有任何真实目标回执。

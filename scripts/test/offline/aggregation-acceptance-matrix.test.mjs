@@ -10,8 +10,9 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
   CASE_EVIDENCE, CONTRACT_PATH, MATRIX_PATH, REQUIREMENT_IDS, TESTED_TREE_SHA,
-  buildMatrix, generate, loadSources, readMatrixFile,
+  buildMatrix, generate, loadSources, parseEvidenceStatuses, parseTestedTreeSha, readMatrixFile,
 } from './aggregation-matrix.js'
+import { SUITES } from '../run.mjs'
 
 const PINNED_CONTRACT_SHA = 'e2068e6edbf76eee47db3c04556eb9ab60548556d6632f955af29269e74edc83'
 
@@ -74,7 +75,7 @@ test('磁盘矩阵文件与生成器输出逐字节一致（禁止手改矩阵�
   assert.equal(readMatrixFile(), generate().markdown)
 })
 
-test('矩阵每行包含契约原文，状态与基线一致，门禁不是 ready', () => {
+test('矩阵每行包含契约原文，状态与证据文档一致，门禁不是 ready', () => {
   const doc = readMatrixFile()
   assert.match(doc, /^# ModelGate 聚合模式独立验收矩阵/m)
   assert.ok(doc.includes('`' + TESTED_TREE_SHA + '`'), 'matrix must pin the tested tree SHA')
@@ -86,19 +87,85 @@ test('矩阵每行包含契约原文，状态与基线一致，门禁不是 read
   // 12 行数据 + 1 行表头 + 1 行分隔
   const rows = doc.split('\n').filter((l) => /^\| MG-R\d{3} \|/.test(l))
   assert.equal(rows.length, 12)
-  // 状态只允许搬运基线事实：11 NOT_TESTED + 1 BLOCKED，0 个 PASS。
-  assert.equal((doc.match(/NOT_TESTED @ `/g) || []).length, 11)
-  assert.equal((doc.match(/BLOCKED @ `/g) || []).length, 1)
+  // 状态不是手写常量，而是逐行搬运证据文档：9 PASS_MOCK + 2 NOT_TESTED + 1 BLOCKED，0 个 PASS_REAL。
+  for (const row of built.rows) {
+    assert.ok(doc.includes('| ' + row.id + ' |'), 'missing matrix row ' + row.id)
+    assert.ok(rows.some((l) => l.startsWith('| ' + row.id + ' |') && l.includes('| ' + row.status + ' @ `')), 'status drifted for ' + row.id)
+    assert.ok(rows.some((l) => l.startsWith('| ' + row.id + ' |') && l.includes(row.statusBasis)), 'evidence basis missing for ' + row.id)
+  }
+  assert.deepEqual(countByStatus(doc), { NOT_TESTED: 2, BLOCKED: 1, FAIL: 0, PASS_MOCK: 9, PASS_REAL: 0 })
   assert.equal(doc.includes('PASS_REAL @ `'), false)
 })
 
-test('基线证据文件的每个状态都被搬运，没有凭空升级', () => {
-  const statusById = new Map(sources.baseline.rows.map((r) => [r.id, r.status]))
-  for (const row of built.rows) assert.equal(row.status, statusById.get(row.id))
-  assert.deepEqual(sources.baseline.rows.map((r) => r.status).sort(), [
-    'BLOCKED', 'NOT_TESTED', 'NOT_TESTED', 'NOT_TESTED', 'NOT_TESTED', 'NOT_TESTED', 'NOT_TESTED',
-    'NOT_TESTED', 'NOT_TESTED', 'NOT_TESTED', 'NOT_TESTED', 'NOT_TESTED',
-  ])
+function countByStatus (doc) {
+  const counts = { NOT_TESTED: 0, BLOCKED: 0, FAIL: 0, PASS_MOCK: 0, PASS_REAL: 0 }
+  for (const line of doc.split('\n')) {
+    if (!/^\| MG-R\d{3} \|/.test(line)) continue
+    for (const status of Object.keys(counts)) {
+      if (line.includes('| ' + status + ' @ `')) counts[status]++
+    }
+  }
+  return counts
+}
+
+test('状态来自证据文档（不是基线、不是常量），且多份证据互相一致', () => {
+  // 基线仍是 11 NOT_TESTED + 1 BLOCKED（历史起点）；矩阵必须反映整合后的证据状态，而不是照抄基线。
+  const baselineStatus = new Map(sources.baseline.rows.map((r) => [r.id, r.status]))
+  assert.equal(baselineStatus.get('MG-R001'), 'NOT_TESTED')
+  assert.equal(built.rows.find((r) => r.id === 'MG-R001').status, 'PASS_MOCK')
+
+  const docs = sources.evidence.map((e) => ({ docPath: e.docPath, byId: new Map(e.rows.map((r) => [r.id, r.status])) }))
+  assert.equal(docs.length >= 2, true, 'statuses must come from at least two evidence documents')
+  for (const row of built.rows) {
+    assert.ok(docs.some((d) => d.byId.get(row.id) === row.status), 'status for ' + row.id + ' is not present in any evidence doc')
+    const seen = docs.filter((d) => d.byId.has(row.id)).map((d) => d.byId.get(row.id))
+    assert.equal(new Set(seen).size, 1, 'evidence docs disagree on ' + row.id + ': ' + seen.join(','))
+  }
+  // PASS_MOCK 必须点名真实存在且已登记的离线套件（离线套件确实执行过该行为）。
+  for (const row of built.rows.filter((r) => r.status === 'PASS_MOCK')) {
+    assert.ok(row.statusSuites.length > 0, row.id + ' is PASS_MOCK without a cited offline suite')
+    for (const name of row.statusSuites) {
+      assert.ok(SUITES.includes('scripts/test/offline/' + name), row.id + ' cites unregistered suite ' + name)
+    }
+  }
+  for (const row of built.rows.filter((r) => r.status !== 'PASS_MOCK')) {
+    assert.deepEqual(row.statusSuites, [], row.id + ' is ' + row.status + ' but cites suites')
+  }
+})
+
+test('被测树 SHA 从证据文档解析：改常量无效，字段缺失/非法即失败', () => {
+  const integration = sources.evidence[0].text
+  assert.equal(parseTestedTreeSha(integration, 'integration'), TESTED_TREE_SHA)
+  assert.match(TESTED_TREE_SHA, /^[0-9a-f]{40}$/)
+  assert.equal(readMatrixFile().includes(TESTED_TREE_SHA), true)
+  assert.throws(() => parseTestedTreeSha(integration.replace(/被测树\s*SHA[^\n]*\n/, ''), 'integration'), /lacks a 40-hex 被测树 SHA/)
+  assert.throws(() => parseTestedTreeSha('**被测树 SHA**：`abc123`', 'x'), /40-hex/)
+})
+
+test('F5 口径：证据状态只允许五值；PASS(...)/N/A/未标注都会被生成器拒绝', () => {
+  const base = [
+    '## 5. 需求状态',
+    '',
+    '| 需求 | 状态 | 依据 |',
+    '| --- | --- | --- |',
+  ]
+  for (const bad of ['PASS（本文件）', 'N/A', 'passed', 'MOCK']) {
+    const text = base.concat(['| MG-R011 真实证据 | ' + bad + ' | 无 |']).join('\n')
+    assert.throws(() => parseEvidenceStatuses(text, 'x'), /invalid status/, 'must reject ' + bad)
+  }
+  const good = base.concat(['| MG-R011 真实证据 | **PASS_MOCK** | `aggregation-acceptance-audit.test.mjs` |']).join('\n')
+  assert.deepEqual(parseEvidenceStatuses(good, 'x').map((r) => r.status), ['PASS_MOCK'])
+})
+
+test('证据文档互相矛盾即生成失败（禁止矩阵与报告各说一套）', () => {
+  const docA = { docPath: 'a.md', rows: [{ id: 'MG-R001', status: 'NOT_TESTED', basis: 'x', suites: [], docPath: 'a.md' }] }
+  const docB = { docPath: 'b.md', rows: [{ id: 'MG-R001', status: 'PASS_MOCK', basis: 'y（`agg-desktop-ui.test.mjs`）', suites: ['agg-desktop-ui.test.mjs'], docPath: 'b.md' }] }
+  assert.throws(
+    () => buildMatrix({ ...sources, evidence: [docA, docB] }),
+    /证据文档互相矛盾：MG-R001/,
+  )
+  // 没有证据来源时也不得生成矩阵（不能回落到硬编码状态）。
+  assert.throws(() => buildMatrix({ ...sources, evidence: [] }), /derived from evidence documents/)
 })
 
 test('降级即失败：删需求行 / 删计划用例 / 契约少一条都不能生成矩阵', () => {
