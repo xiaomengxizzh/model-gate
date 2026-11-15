@@ -668,6 +668,24 @@ export function projectThirdPartyResponsesParams(body, prov) {
 
 // V2-08（A2 实测缺陷）：429 时按 models.*.fallbacks 换到**另一个授权域**的供应商 = 静默换供应商/套餐。
 // 同域 fallback 保留既有行为；只要后续存在跨域候选就按真实 429 返回。
+// R008 修复（A4 实测）：forward.js 对 429 以 MG_FB_RATE_LIMITED 抛出，导致 index.js 的
+// `up.status === 429` 跨域阻断永远走不到；异常落进候选 catch 后直接 continue → 真的换了授权域。
+// 因此必须在 catch 里拦截：存在跨授权域候选时按真实域返回 429，不换供应商/不换套餐。
+function crossDomainRateLimitedBody(prov) {
+  return Buffer.from(JSON.stringify({
+    error: {
+      code: 'cross_domain_fallback_blocked',
+      type: 'auth_domain_failure',
+      kind: 'rate_limited',
+      authDomain: providerAuthDomain(prov),
+      status: 429,
+      terminal: true,
+      fallbackAllowed: false,
+      message: '上游限流且存在跨授权域候选：按真实授权域返回，不换供应商/不换套餐',
+    },
+  }))
+}
+
 function crossDomainFallbackBlocked(state, candidates, pid, prov) {
   const idx = candidates.indexOf(pid)
   if (idx < 0) return false
@@ -1260,6 +1278,11 @@ async function handleMediaProxy(state, budget, log, opts) {
       return { status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: mapped }
     } catch (err) {
       if (err && err.aborted) throw err
+      if (err && (err.code === 'MG_FB_RATE_LIMITED' || Number(err.status) === 429) && crossDomainFallbackBlocked(state, candidates, pid, prov)) {
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        markFail(state, pid, prov.circuit)
+        return { status: 429, contentType: 'application/json; charset=utf-8', buf: crossDomainRateLimitedBody(prov) }
+      }
       lastErr = err
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1
       markFail(state, pid, prov.circuit)
@@ -1370,6 +1393,11 @@ async function createVideoTask(state, budget, log, opts) {
       return { ok: false, status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: mapped }
     } catch (err) {
       if (err && err.aborted) throw err
+      if (err && (err.code === 'MG_FB_RATE_LIMITED' || Number(err.status) === 429) && crossDomainFallbackBlocked(state, candidates, pid, prov)) {
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        markFail(state, pid, prov.circuit)
+        return { ok: false, status: 429, contentType: 'application/json; charset=utf-8', buf: crossDomainRateLimitedBody(prov) }
+      }
       lastErr = err
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1
       markFail(state, pid, prov.circuit)
@@ -1779,6 +1807,11 @@ async function proxyOfficialResponses(state, budget, log, opts) {
       return { status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: scrubBody(ebuf) }
     } catch (err) {
       if (err && err.aborted) throw err
+      if (err && (err.code === 'MG_FB_RATE_LIMITED' || Number(err.status) === 429) && crossDomainFallbackBlocked(state, candidates, pid, prov)) {
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        markFail(state, pid, prov.circuit)
+        return { status: 429, contentType: 'application/json; charset=utf-8', buf: crossDomainRateLimitedBody(prov) }
+      }
       lastErr = err
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1
       markFail(state, pid, prov.circuit)
@@ -1879,6 +1912,11 @@ async function proxyNativeResponses(state, budget, log, opts) {
       return { status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: mapped }
     } catch (err) {
       if (err && err.aborted) throw err
+      if (err && (err.code === 'MG_FB_RATE_LIMITED' || Number(err.status) === 429) && crossDomainFallbackBlocked(state, candidates, pid, prov)) {
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        markFail(state, pid, prov.circuit)
+        return { status: 429, contentType: 'application/json; charset=utf-8', buf: crossDomainRateLimitedBody(prov) }
+      }
       lastErr = err
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1
       markFail(state, pid, prov.circuit)
@@ -2261,6 +2299,11 @@ function makeHandler(state) {
             res.writeHead(up.status || 502, { 'content-type': 'application/json; charset=utf-8' }); res.end(mapped); return
           } catch (err) {
             if (err && err.aborted) throw err
+            if (err && (err.code === 'MG_FB_RATE_LIMITED' || Number(err.status) === 429) && crossDomainFallbackBlocked(state, candidates, pid, prov)) {
+              agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+              markFail(state, pid, prov.circuit)
+              res.writeHead(429, { 'content-type': 'application/json; charset=utf-8' }); res.end(crossDomainRateLimitedBody(prov)); return
+            }
             lastErr = err
             agg(state, pid, 'errors', 1); state.st.counters.errors += 1
             markFail(state, pid, prov.circuit)
@@ -2329,6 +2372,11 @@ function makeHandler(state) {
             res.writeHead(up.status || 502, { 'content-type': 'application/json; charset=utf-8' }); res.end(mapped); return
           } catch (err) {
             if (err && err.aborted) throw err
+            if (err && (err.code === 'MG_FB_RATE_LIMITED' || Number(err.status) === 429) && crossDomainFallbackBlocked(state, candidates, pid, prov)) {
+              agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+              markFail(state, pid, prov.circuit)
+              res.writeHead(429, { 'content-type': 'application/json; charset=utf-8' }); res.end(crossDomainRateLimitedBody(prov)); return
+            }
             rLastErr = err
             agg(state, pid, 'errors', 1); state.st.counters.errors += 1
             markFail(state, pid, prov.circuit)

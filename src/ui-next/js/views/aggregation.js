@@ -118,7 +118,10 @@ export function buildActivateRequest (preview, consent) {
 }
 
 export function describeThreeWay (conflict) {
-  const tw = conflict && conflict.detail && conflict.detail.threeWay ? conflict.detail.threeWay : null
+  // A3 真机发现：调用方传的是 ApiError（body 在 .data），旧实现只读 conflict.detail，
+  // 于是 409 弹窗永远显示"服务端未返回三方差异"。这里同时接受 ApiError 与原始 body。
+  const body = conflict && conflict.data && typeof conflict.data === 'object' ? conflict.data : conflict
+  const tw = body && body.detail && body.detail.threeWay ? body.detail.threeWay : null
   if (!tw) return { available: false, rows: [], summary: '服务端未返回三方差异；未做任何写入。' }
   const rows = Array.isArray(tw.oursVsTheirs) ? tw.oursVsTheirs.filter((r) => r.kind !== 'same') : []
   return {

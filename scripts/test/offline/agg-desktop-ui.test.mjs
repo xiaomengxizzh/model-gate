@@ -68,6 +68,10 @@ test('激活请求与冲突描述：只回传 consentToken + expectedSha，409 �
 
   const none = mod.describeThreeWay({ detail: {} })
   assert.equal(none.available, false)
+  // A3 真机回归：ApiError（body 在 .data）必须能取出三方差异，否则 409 弹窗永远说"未返回"。
+  const viaApiError = mod.describeThreeWay({ status: 409, data: { detail: { threeWay: { base: { sha256: 'd'.repeat(64) }, ours: { sha256: 'e'.repeat(64) }, theirs: { sha256: 'f'.repeat(64) }, oursVsTheirs: [{ kind: 'add', text: 'model = "gpt-4o"', redacted: false }] } } } })
+  assert.equal(viaApiError.available, true)
+  assert.equal(viaApiError.rows.length, 1)
   const described = mod.describeThreeWay({
     detail: {
       threeWay: {
