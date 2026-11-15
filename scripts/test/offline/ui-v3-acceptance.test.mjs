@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startGateway, root } from './harness.mjs'
 import * as product from '../../../src/ui-next/js/product-status.js'
+import { state as uiState, setProductPhase, productStatus, invalidateProductStatus } from '../../../src/ui-next/js/store.js'
 
 const ADMIN = 'a5-acceptance-admin-token'
 const AUTH = { authorization: 'Bearer ' + ADMIN }
@@ -316,6 +317,46 @@ test('UI-08: activate 无 consentToken 不写入（真实状态码 422/428 如�
   assert.deepEqual(leftovers, [], 'CODEX_HOME 必须保持空目录（没有 config/backup 残留）：' + leftovers.join(','))
 })
 
+// —— UI-05/UI-08：428 预览态必须能由状态层进入（Lead 9f7f524 放行 preview_pending 的独立验证） ——
+test('UI-05/UI-08: setProductPhase(preview_pending) 经状态层投影为 preview_pending（不得假成功）', (t) => {
+  const fixtureStatus = {
+    providers: [{ id: 'opencodego', hasKey: true, keySource: 'keys' }],
+    models: [{ name: 'mg-opencodego-deepseek-v4-1-flash' }],
+    official: { credential: 'detected', expiry: 'valid', reason: 'local_codex_chatgpt' },
+  }
+  const fixtureAggregation = {
+    health: { ok: true, mode: 'official', detect: { desktop: { found: true, version: '1' }, restart: { needed: false } } },
+    providers: { providers: [{ id: 'opencodego', kind: 'opencode-go', discoveryState: 'complete' }] },
+    models: { models: [{ publicId: 'mg-opencodego-deepseek-v4-1-flash', upstreamId: 'deepseek-v4.1-flash', authorized: true }] },
+    diagnostics: { diagnostics: [] },
+  }
+  const saved = { status: uiState.status, aggregation: uiState.aggregation, auth: uiState.auth }
+  t.after(() => {
+    uiState.status = saved.status
+    uiState.aggregation = saved.aggregation
+    uiState.auth = saved.auth
+    setProductPhase(null)
+    invalidateProductStatus('a5-acceptance-reset')
+  })
+  uiState.status = fixtureStatus
+  uiState.aggregation = fixtureAggregation
+  uiState.auth = { needAuth: false, startedAt: 0 }
+  invalidateProductStatus('a5-acceptance-preview')
+  const before = productStatus()
+  assert.notEqual(before.state, 'preview_pending', '未设置相位时不得自行声称等待确认')
+  // 合法相位：允许进入 428 预览态，主 CTA 必须是"确认配置变更"
+  setProductPhase('preview_pending')
+  const ps = productStatus()
+  assert.equal(ps.state, 'preview_pending')
+  assert.equal(ps.primary.id, 'review-preview')
+  assert.equal(ps.primary.label, '确认配置变更')
+  assert.notEqual(ps.overall.level, 'ready')
+  // 非法相位仍必须拒绝（白名单不是"任意字符串"）
+  assert.throws(() => setProductPhase('verified_by_wishful_thinking'), /unknown product phase/)
+  setProductPhase(null)
+  assert.notEqual(productStatus().state, 'preview_pending', '清除相位后必须退出预览态')
+})
+
 // —— UI-10：401/403 不返回敏感数据 ——
 test('UI-10: 401/403 响应无敏感数据、错误令牌不泄露状态', { timeout: 40000 }, async (t) => {
   const codexHome = await isolatedCodexHome(null)
@@ -391,8 +432,14 @@ test('UI-01: 首屏状态驱动 + 唯一主 CTA + 三条连接状态（A1 静态
   assert.match(indexHtml, /id="nav-advanced"/, '高级功能必须是可收起分组')
   assert.match(dash, /deriveProductStatus|productStatus/, '首屏必须消费统一投影')
   assert.match(appSrc, /setAttribute\(['"]aria-current['"],\s*['"]page['"]\)/, 'app.js 必须在运行时设置 aria-current="page"')
-  assert.doesNotMatch(indexHtml, /aria-current=/, '静态 HTML 不应预写运行时状态（职责分离）')
-  t.diagnostic('离线只验证静态/运行时职责分离；真实 aria-current 由 scripts/e2e/ui-v3-browser.mjs 的 UI-01-nav-current 在 Chrome 中断言（本文件不假装已验运行时）')
+  assert.match(appSrc, /removeAttribute\(['"]aria-current['"]\)/, 'app.js 必须在切换路由时移除旧 aria-current')
+  // 静态默认标记允许存在（A1 为默认路由预置，避免无 JS 时的 a11y 空档），但只允许标默认路由；
+  // 路由切换后的真实值由浏览器 UI-01-nav-current 断言（含 #/connections 往返）。
+  const staticCurrent = (indexHtml.match(/<button[^>]*>/g) || [])
+    .filter((tagHtml) => /aria-current="page"/.test(tagHtml))
+    .map((tagHtml) => (tagHtml.match(/data-route="([^"]+)"/) || [])[1])
+  assert.deepEqual(staticCurrent, ['overview'], '静态 HTML 只允许把默认路由标为 aria-current="page"：' + JSON.stringify(staticCurrent))
+  t.diagnostic('静态只校验"默认项预置 + 运行时更新/移除"职责；真实路由切换由 scripts/e2e/ui-v3-browser.mjs 的 UI-01-nav-current 在 Chrome 中断言（本文件不假装已验运行时）')
 })
 
 // —— UI-16 / UI-04 真实推理：本轮无付费授权 → BLOCKED ——
