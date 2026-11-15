@@ -585,6 +585,9 @@ export function classifyCodexInputItem(item) {
   if (type === 'reasoning') return 'reasoning'
   if (type === 'compaction') return 'compaction'
   if (type === 'context_compaction') return 'context_compaction'
+  // 真实 codex-cli 0.167.0-alpha.3.2 实测：远程压缩 v2 在**请求侧**发出 {type:"compaction_trigger"}，
+  // 并要求上游返回且仅返回一个 compaction 输出项；它不是历史密文，不能被当成未知项拒绝。
+  if (type === 'compaction_trigger') return 'compaction_trigger'
   if (type === 'function_call' || type === 'custom_tool_call') return 'tool_call'
   if (type === 'function_call_output' || type === 'custom_tool_call_output') return 'tool_output'
   if (CONTROL_ITEM_TYPES.has(type)) return 'control'
@@ -1016,6 +1019,16 @@ export function projectOrderedHistory(input, route, plan) {
         return { input: null, lossy, rejected: rejected('reasoning_unsupported', 'reasoning 不被该路由接受（reasoning=' + String(history.reasoning) + '）') }
       }
       continue
+    }
+    if (type === 'compaction_trigger') {
+      // 只有声明可承接远程压缩的路由才能收到该标记；本地压缩路径（codex-owned-local / unsupported）
+      // 出现它说明客户端实际走了远端压缩，本上游无法承接 → typed 拒绝，绝不静默丢弃。
+      if (nativeCompactionCapability(route) === 'codex-owned-remote') { out.push(clone(item)); continue }
+      return {
+        input: null, lossy,
+        rejected: rejected('native_compaction_route_not_ready',
+          'compaction_trigger 只允许发往声明 codex.nativeCompaction=codex-owned-remote 的路由；本地压缩路径不应出现该标记'),
+      }
     }
     if (type === 'compaction' || type === 'context_compaction') {
       const projected = projectCompactionItem(item, route, lossy)

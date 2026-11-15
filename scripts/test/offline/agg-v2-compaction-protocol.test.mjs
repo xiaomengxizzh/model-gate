@@ -70,8 +70,21 @@ function compactionRoute(patch = {}) {
 test('V2-04 分类：compaction / context_compaction 都显式识别，未知类型仍 fail-closed', () => {
   assert.equal(classifyCodexInputItem({ type: 'compaction' }), 'compaction')
   assert.equal(classifyCodexInputItem({ type: 'context_compaction' }), 'context_compaction')
-  assert.equal(classifyCodexInputItem({ type: 'compaction_trigger' }), 'unknown')
+  // 0.167.0-alpha.3.2 实测：远程压缩 v2 的请求侧标记必须显式识别，否则会把真实客户端请求判成未知项。
+  assert.equal(classifyCodexInputItem({ type: 'compaction_trigger' }), 'compaction_trigger')
   assert.equal(classifyCodexInputItem({ type: 'mystery' }), 'unknown')
+})
+
+test('V2-04 压缩触发标记：只有声明 codex-owned-remote 的路由可原样透传，其余 typed 拒绝', () => {
+  const trigger = { type: 'compaction_trigger' }
+  const remote = projectOrderedHistory([trigger], compactionRoute({ nativeCompaction: 'codex-owned-remote' }), null)
+  assert.equal(Boolean(remote.rejected), false)
+  assert.deepEqual(remote.input, [trigger])
+
+  for (const patch of [{}, { nativeCompaction: 'codex-owned-local' }, { nativeCompaction: 'unsupported' }]) {
+    const blocked = projectOrderedHistory([trigger], compactionRoute(patch), null)
+    assert.equal(blocked.rejected && blocked.rejected.code, 'native_compaction_route_not_ready', JSON.stringify(patch))
+  }
 })
 
 test('V2-04 不透明判定：compaction 恒为密文；context_compaction 只有带密文才算不透明', () => {

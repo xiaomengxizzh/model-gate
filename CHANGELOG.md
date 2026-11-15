@@ -8,6 +8,7 @@
 
 - **Go 单模型作用域**（A2）：`preset:'opencode-go'` + `v2Scope=go-single-model`；目录对 Go 只发布 `deepseek-v4.1-flash`，越界模型进 `outOfScope` 诊断，目标缺失 fail-closed；跨供应商 `fallbacks` 在目录层拒绝（`v2_cross_provider_fallback_forbidden`）；readiness/failurePolicy 提供 typed code。
 - **Desktop 一键聚合**（A3）：原版 Desktop 与捆绑 Codex 版本只从文件探测（不拉起 GUI）；重启判定改为只读 `/proc` 启动时间；退出聚合只撤销自有键并逐字节保留用户后改配置；provider 级 `remote_compaction="unsupported"` 声明（隔离 CODEX_HOME 由 0.167.0-alpha.3.2 serde 解析器实测枚举），内置 `openai` 身份被 Codex 保留为 reserved，故 managed provider 默认关闭。
+- **真实客户端压缩实测（回环上游，零额度）**：用原版 Desktop 捆绑的 `codex-cli 0.167.0-alpha.3.2` 在隔离 `CODEX_HOME` 下实测——声明 `remote_compaction="unsupported"` 时 Codex 走自己的本地压缩（`CONTEXT CHECKPOINT COMPACTION` 提示原样到达上游、压缩后追派成功）；声明 `"v2"` 时发 `{type:"compaction_trigger"}` 并要求上游返回 `compaction` 输出项。据此网关显式识别 `compaction_trigger`：仅 `codex-owned-remote` 路由透传，其余 `native_compaction_route_not_ready`。证据 `docs/evidence/aggregation-v2-native-compaction-real-client-2026-11-15.md`，回放回归 `agg-v2-real-client-compaction.test.mjs`。
 - **原生压缩归属声明**（A1）：`codex.nativeCompaction ∈ {codex-owned-local, codex-owned-remote, unsupported}` 与 `history.compaction:"preserve"`；密文压缩项仅在声明支持时原样透传，未声明/不匹配返回 typed 错误，`drop` 仍是显式有损路径；`context_compaction` 显式分类；目录支持 `auto_compact_token_limit` 且拒绝超过上下文窗口的取值。
 
 ### Fixed

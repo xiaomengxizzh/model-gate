@@ -57,6 +57,7 @@ export const SUITES = [
   'scripts/test/offline/agg-v2-go-catalog.test.mjs',
   'scripts/test/offline/agg-v2-go-routing.test.mjs',
   'scripts/test/offline/agg-v2-go-stream.test.mjs',
+  'scripts/test/offline/agg-v2-real-client-compaction.test.mjs',
   'scripts/test/offline/agg-v2-desktop-compaction.test.mjs',
   'scripts/test/offline/agg-v2-desktop-detect.test.mjs',
   'scripts/test/offline/agg-v2-desktop-restart.test.mjs',
