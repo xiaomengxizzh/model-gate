@@ -426,14 +426,53 @@ export function analyzeToolPairs(input) {
 //
 // 稳定拒绝码：invalid_envelope / unsupported_parameter / invalid_tools / tool_identity_conflict /
 //   tool_call_pairing / opaque_function_args / agent_message_unsupported / opaque_agent_message /
-//   reasoning_unsupported / unsupported_input_item / unsupported_control_item / input_too_large。
+//   reasoning_unsupported / unsupported_input_item / unsupported_control_item / input_too_large /
+//   native_compaction_route_not_ready / native_compaction_route_mismatch / native_compaction_item_malformed。
 // 稳定 lossy：include_dropped:<csv> / agent_message_projected / agent_message_metadata_dropped /
-//   reasoning_dropped / compaction_dropped / control_item_dropped:<type> / tool_choice_unmapped。
+//   reasoning_dropped / compaction_dropped / context_compaction_marker_dropped /
+//   control_item_dropped:<type> / tool_choice_unmapped。
+//
+// —— 原生压缩（V2-04）——
+// 压缩必须由 Codex 自己执行；网关只做协议保真、能力闸门与 typed 拒绝，绝不解密/摘要/截断/补造密文。
+// 本机 codex-cli 0.167.0（CLI）与 0.167.0-alpha.3.2（Desktop 捆绑）的二进制字符串与 app-server
+// v2 schema 显示两条原生路径：
+//   · 远程：provider capabilities.remote_compaction（类型 RemoteCompactionSupport）+ 实验特性
+//     remote_compaction_v2；上游返回 Responses item type:"compaction"（encrypted_content 必填），
+//     客户端把它写入 replacement_history 供后续回放（本机真实 rollout 可见 30–61KB 密文项）。
+//   · 本地：core/src/compact.rs 由客户端发 "CONTEXT CHECKPOINT COMPACTION" 提示并本地替换历史，
+//     只产生 type:"context_compaction" 标记（encrypted_content 可空），没有后端密文。
+// 因此：`history.compaction: 'preserve'` 只在路由显式声明 codex.nativeCompaction 时可用；
+// 密文项只允许声明 codex-owned-remote 的路由原样透传。缺失/不匹配一律 typed 拒绝，不静默丢弃。
 
 // 上限只约束"发送前投影"的规模；HTTP body 上限仍由 request 层负责。
 export const CODEX_MAX_INPUT_ITEMS = 10000
 export const CODEX_MAX_INPUT_BYTES = 8 * 1024 * 1024
 export const CODEX_CONTROL_ITEMS = Object.freeze(['configuration_update', 'additional_tools'])
+
+// 路由上的原生压缩归属声明（codex.nativeCompaction）：
+//   · codex-owned-remote：该上游自身支持 Responses 远程压缩，密文 compaction 项可原样回放；
+//   · codex-owned-local：该路由只能由 Codex 本地压缩（明文摘要 + context_compaction 标记）；
+//   · unsupported：显式声明不支持，收到压缩项即失败（便于配置自证）。
+// 未声明（null）等同“未证实”，不得透传密文。
+export const CODEX_NATIVE_COMPACTION_CAPABILITIES = Object.freeze([
+  'codex-owned-local',
+  'codex-owned-remote',
+  'unsupported',
+])
+
+export function nativeCompactionCapability(route) {
+  const value = codexOf(route).nativeCompaction
+  return CODEX_NATIVE_COMPACTION_CAPABILITIES.includes(value) ? value : null
+}
+
+// 下游无法解读、只能原样回放的上游密文压缩项：compaction 恒为密文；
+// context_compaction 只有在携带非空 encrypted_content 时才升级为不透明项。
+export function isOpaqueCompactionItem(item) {
+  if (!isPlainObject(item)) return false
+  if (item.type === 'compaction') return true
+  if (item.type !== 'context_compaction') return false
+  return typeof item.encrypted_content === 'string' && item.encrypted_content !== ''
+}
 const CONTROL_ITEM_TYPES = new Set(CODEX_CONTROL_ITEMS)
 const OPAQUE_INPUT_TYPES = new Set(['item_reference', 'continuation', 'opaque_continuation'])
 
@@ -545,6 +584,7 @@ export function classifyCodexInputItem(item) {
   if (type === 'agent_message') return 'agent_message'
   if (type === 'reasoning') return 'reasoning'
   if (type === 'compaction') return 'compaction'
+  if (type === 'context_compaction') return 'context_compaction'
   if (type === 'function_call' || type === 'custom_tool_call') return 'tool_call'
   if (type === 'function_call_output' || type === 'custom_tool_call_output') return 'tool_output'
   if (CONTROL_ITEM_TYPES.has(type)) return 'control'
@@ -884,6 +924,44 @@ function projectToolCall(item, plan) {
   return { item: out, entry: resolved.entry || null }
 }
 
+// 单个压缩项的路由决策：只做“原样透传 / 显式拒绝 / 显式丢弃并记 lossy”，
+// 绝不解密、改写字面量、补造 encrypted_content，也不以“已处理”冒充压缩成功。
+function projectCompactionItem(item, route, lossy) {
+  const mode = historyOf(route).compaction
+  const type = item.type
+  const opaque = isOpaqueCompactionItem(item)
+
+  if (mode === 'preserve') {
+    if (!opaque) {
+      // 本地压缩标记：没有下游密文，原样保留由上游裁决（上游不支持会显式报错，不会被网关吞掉）。
+      return { item: clone(item) }
+    }
+    if (type === 'compaction' && (typeof item.encrypted_content !== 'string' || item.encrypted_content === '')) {
+      return { rejected: rejected('native_compaction_item_malformed', 'compaction 项缺少非空 encrypted_content；网关不补造密文，也不把它降级成明文') }
+    }
+    const capability = nativeCompactionCapability(route)
+    if (capability === 'codex-owned-remote') return { item: clone(item) }
+    if (capability === 'codex-owned-local') {
+      return {
+        rejected: rejected('native_compaction_route_mismatch',
+          '路由声明 Codex 本地压缩（codex-owned-local），却收到上游密文压缩项：说明 Codex 实际走了远程压缩路径，不能把该密文转交本上游'),
+      }
+    }
+    return {
+      rejected: rejected('native_compaction_route_not_ready',
+        '压缩项是上游密文，但路由未声明可接受原生远程压缩（codex.nativeCompaction 缺失或 unsupported）：拒绝静默丢弃、拒绝伪成功'),
+    }
+  }
+  if (mode === 'drop') {
+    lossy.push(type === 'compaction' ? 'compaction_dropped' : 'context_compaction_marker_dropped')
+    return { item: null }
+  }
+  return {
+    rejected: rejected('unsupported_input_item',
+      'compaction 不被该路由接受（compaction=' + String(mode) + '）；需 Codex 本地压缩路径，或声明 codex.nativeCompaction=codex-owned-remote 后使用 compaction=preserve'),
+  }
+}
+
 export function projectOrderedHistory(input, route, plan) {
   const lossy = []
   const history = historyOf(route)
@@ -939,12 +1017,12 @@ export function projectOrderedHistory(input, route, plan) {
       }
       continue
     }
-    if (type === 'compaction') {
-      if (history.compaction === 'drop') {
-        lossy.push('compaction_dropped')
-        continue
-      }
-      return { input: null, lossy, rejected: rejected('unsupported_input_item', 'compaction 不被该路由接受（compaction=' + String(history.compaction) + '）') }
+    if (type === 'compaction' || type === 'context_compaction') {
+      const projected = projectCompactionItem(item, route, lossy)
+      if (projected.rejected) return { input: null, lossy, rejected: projected.rejected }
+      if (projected.item === null) continue
+      out.push(projected.item)
+      continue
     }
     if (type === 'function_call' || type === 'custom_tool_call') {
       const callId = item.call_id
