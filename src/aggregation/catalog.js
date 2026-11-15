@@ -21,6 +21,7 @@ import {
   recordVersion, resolveRollbackTarget, serializeCatalog,
 } from '../codex/catalog.js'
 import { generationRecordFromBuilt, persistAndSwapValidatedGeneration } from '../codex/catalog-generation.js'
+import { V2_TARGET_UPSTREAM_MODEL as V2_TARGET, v2ScopeOf } from '../providers/opencode-go.js'
 
 export const AGGREGATED_CATALOG_SCHEMA = 'modelgate.aggregation.catalog/1'
 export const DEFAULT_CATALOG_LIMITS = Object.freeze({ maxModels: 512, maxBytes: 2 * 1024 * 1024 })
@@ -196,6 +197,8 @@ export function createAggregatedCatalog(options = {}) {
     const unauthorized = []
     const missingContext = []
     const notRoutable = []
+    const outOfScope = []
+    const scopeMeta = []
     const snapshotMeta = []
     for (const provider of providers) {
       const entry = cacheStore.get(scope, provider.id)
@@ -211,7 +214,15 @@ export function createAggregatedCatalog(options = {}) {
           { providerId: provider.id, completeness: snapshot.completeness })
       }
       const models = {}
+      // V2 单模型作用域（所有者 2026-11-14 决议）：Go 只发布 deepseek-v4.1-flash。
+      // 越界模型**不是静默丢弃**：进 outOfScope 并生成诊断；profile 未启用时保持历史全量行为。
+      const goScope = v2ScopeOf(provider)
+      const scopeOut = []
       for (const model of snapshot.models) {
+        if (goScope.enforced && String(model.upstreamId) !== goScope.targetUpstreamModel) {
+          scopeOut.push({ providerId: provider.id, upstreamId: model.upstreamId, publicId: model.publicId || null })
+          continue
+        }
         if (!model.authorized) {
           unauthorized.push({ providerId: provider.id, upstreamId: model.upstreamId, publicId: model.publicId })
           continue
@@ -237,6 +248,34 @@ export function createAggregatedCatalog(options = {}) {
         }
         models[model.upstreamId] = projectionEntry(model, provider)
       }
+      // V2：目标模型必须存在，否则这一层没有可交付能力 → fail-closed（不发布空 Go 层冒充可用）。
+      const targetPublished = goScope.enforced && Object.prototype.hasOwnProperty.call(models, goScope.targetUpstreamModel)
+      if (goScope.enforced && !targetPublished) {
+        if (opts.allowMissingTarget !== true) {
+          throw new AggregatedCatalogError('v2_target_model_missing',
+            'Go 快照里没有 V2 目标模型 ' + goScope.targetUpstreamModel + '：拒绝发布一个没有目标模型的 Go 层（不静默改走其他模型）',
+            { providerId: provider.id, target: goScope.targetUpstreamModel, discovered: snapshot.models.length })
+        }
+        diagnostics.push({
+          code: 'v2_target_model_missing',
+          severity: 'warning',
+          message: 'Go 快照里没有 V2 目标模型：本层未发布任何可调用模型（未编造）',
+          providerId: provider.id,
+          target: goScope.targetUpstreamModel,
+        })
+      }
+      if (goScope.enforced) {
+        for (const m of scopeOut) outOfScope.push(m)
+        scopeMeta.push(Object.freeze({
+          providerId: provider.id,
+          kind: provider.kind,
+          profile: goScope.profile,
+          targetUpstreamModel: goScope.targetUpstreamModel,
+          targetPublicId: goScope.targetPublicId,
+          published: targetPublished ? [goScope.targetPublicId] : [],
+          outOfScope: scopeOut.map((m) => m.upstreamId),
+        }))
+      }
       layers.push({ providerId: provider.id, providerSegment: provider.providerSegment, name: provider.name, models, snapshot })
       snapshotMeta.push({
         providerId: provider.id,
@@ -261,6 +300,15 @@ export function createAggregatedCatalog(options = {}) {
     for (const m of unauthorized) {
       diagnostics.push({ code: 'unauthorized_excluded', severity: 'info', message: '账户无权使用：存档但不发布为可调用模型', upstreamId: m.upstreamId, publicId: m.publicId, providerId: m.providerId })
     }
+    if (outOfScope.length) {
+      diagnostics.push({
+        code: 'v2_scope_excluded',
+        severity: 'info',
+        message: 'V2 只交付 OpenCode Go 的 ' + V2_TARGET + '：其余 ' + outOfScope.length + ' 个已发现模型不发布为可调用模型（显式保留，不是静默丢弃）',
+        count: outOfScope.length,
+        items: outOfScope,
+      })
+    }
     if (notRoutable.length) {
       diagnostics.push({
         code: 'discovered_not_routable',
@@ -284,7 +332,7 @@ export function createAggregatedCatalog(options = {}) {
         seen.set(slug, { providerId: layer.providerId, upstreamId })
       }
     }
-    return { cfg, layers, diagnostics, unauthorized, missingContext, notRoutable, snapshotMeta }
+    return { cfg, layers, diagnostics, unauthorized, missingContext, notRoutable, outOfScope, scopeMeta, snapshotMeta }
   }
 
   async function publish(scopeRef, opts = {}) {
@@ -408,6 +456,15 @@ export function createAggregatedCatalog(options = {}) {
         notRoutable: collected.notRoutable.length,
         notRoutableIds: collected.notRoutable.map((m) => m.upstreamId),
         authorizationUnverified: collected.snapshotMeta.reduce((n, p) => n + (p.authorizationUnverified || 0), 0),
+        // V2 单模型作用域：哪些层启用了、发布了哪个公共 ID、显式排除了多少模型。
+        v2Scope: {
+          enforced: collected.scopeMeta.length > 0,
+          target: V2_TARGET,
+          publishedModelIds: collected.scopeMeta.flatMap((s) => s.published),
+          outOfScopeCount: collected.outOfScope.length,
+          outOfScopeIds: collected.outOfScope.map((m) => m.upstreamId),
+          providers: collected.scopeMeta,
+        },
         modelIds,
         providers: collected.snapshotMeta,
       },
