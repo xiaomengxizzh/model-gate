@@ -477,6 +477,16 @@ export function overallOf (ps) {
   }
 }
 
+// 错误来源合并：聚合错误优先（它决定 supported），否则状态请求错误（整页可恢复错误）。
+function effectiveErrorOf ({ aggError, statusError, aggUnsupported }) {
+  if (aggUnsupported) {
+    return { kind: 'unsupported', source: 'aggregation', status: aggError.status, code: aggError.code, message: aggError.message }
+  }
+  if (aggError && aggError.kind !== 'none') return Object.assign({ source: 'aggregation' }, aggError)
+  if (statusError && statusError.kind !== 'none') return Object.assign({ source: 'status' }, statusError)
+  return null
+}
+
 // 主入口：把一次只读快照投影成产品状态。
 // input = { authenticatedAdmin, loading, status, config, aggregation, aggregationError, phase, now }
 export function deriveProductStatus (input) {
@@ -487,6 +497,9 @@ export function deriveProductStatus (input) {
   const aggError = inp.aggregationError ? classifyAggregationError(inp.aggregationError) : classifyAggregationError(
     obj(aggregation) && obj(aggregation).error ? obj(aggregation).error : null,
   )
+  // 状态请求（/api/status）失败与聚合请求失败必须区分来源：前者整页进可恢复错误，
+  // 后者只影响聚合支持性判断。两者都不能被投影成"未连接"。
+  const statusError = inp.statusError ? classifyAggregationError(inp.statusError) : null
   const official = deriveOfficial(status)
   const go = deriveGo(status, aggregation ? Object.assign({}, aggregation, { error: inp.aggregationError || (aggregation && aggregation.error) || null }) : (inp.aggregationError ? { error: inp.aggregationError } : null))
   const codex = deriveCodex(aggregation ? Object.assign({}, aggregation, { error: inp.aggregationError || (aggregation && aggregation.error) || null }) : (inp.aggregationError ? { error: inp.aggregationError } : null))
@@ -497,7 +510,7 @@ export function deriveProductStatus (input) {
     authenticatedAdmin: inp.authenticatedAdmin !== false,
     loading: inp.loading === true,
     phase: str(inp.phase) || null,
-    error: aggError.kind === 'none' && !inp.aggregationError ? null : aggUnsupported ? { kind: 'unsupported', status: aggError.status, code: aggError.code, message: aggError.message } : aggError,
+    error: effectiveErrorOf({ aggError, statusError, aggUnsupported }),
     official,
     go,
     codex,

@@ -266,6 +266,28 @@ test('聚合模式未知不写成未启用', () => {
   assert.equal(missing.mode, 'official')
 })
 
+test('状态请求失败与聚合失败必须区分来源（都不得被读成“未连接”）', () => {
+  const statusFailed = deriveProductStatus({
+    authenticatedAdmin: true,
+    status: null,
+    statusError: { status: 500, message: 'boom' },
+    aggregation: snap(),
+  })
+  assert.equal(statusFailed.state, 'recoverable_error')
+  assert.equal(statusFailed.error.source, 'status')
+  assert.equal(statusFailed.primary.id, 'retry')
+
+  const aggregationFailed = deriveProductStatus({
+    authenticatedAdmin: true,
+    status: statusWith(),
+    aggregation: null,
+    aggregationError: { status: 404, data: { code: 'not_mounted' } },
+  })
+  assert.equal(aggregationFailed.state, 'read_only_unknown')
+  assert.equal(aggregationFailed.error.source, 'aggregation')
+  assert.equal(aggregationFailed.error.kind, 'unsupported')
+})
+
 test('每个状态都有一个可展示的主操作与总体结论', () => {
   const cases = [
     { authenticatedAdmin: false },

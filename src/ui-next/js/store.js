@@ -120,7 +120,7 @@ export function shouldRefresh(section, now = Date.now()) {
 
 function productInput(now = Date.now()) {
   const aggregation = state.aggregation || null
-  const aggregationError = (aggregation && aggregation.error) || productState.statusError || null
+  const aggregationError = (aggregation && aggregation.error) || null
   return {
     authenticatedAdmin: isAuthed(),
     loading: !state.status && !state.lastError && !productState.lastProductRefresh && !productState.statusError,
@@ -129,6 +129,8 @@ function productInput(now = Date.now()) {
     config: state.config,
     aggregation,
     aggregationError,
+    // 状态请求自身的失败单独上报，避免把来源混进"聚合不支持"判断。
+    statusError: productState.statusError || null,
     statusLoadedAt: state.loadedAt,
     now,
   }
@@ -143,6 +145,7 @@ function cacheKeyOf(input) {
     input.config,
     input.aggregation,
     input.aggregationError,
+    input.statusError,
     input.statusLoadedAt,
   ]
 }

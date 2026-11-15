@@ -7,7 +7,7 @@ import {
   invalidateProductStatus, onProductStatus,
 } from './js/store.js'
 import { ROUTES, routeFromHash, startRouter } from './js/router.js'
-import { toast, callout } from './js/components.js'
+import { toast, callout, closeDialog } from './js/components.js'
 import { dirtyDraft } from './js/config-draft.js'
 import * as dashboard from './js/views/dashboard.js'
 import * as connections from './js/views/connections.js'
@@ -106,6 +106,8 @@ export function clearControlPlaneDom() {
   const root = document.getElementById('view-root')
   if (root) clear(root)
   const dialogRoot = document.getElementById('dialog-root')
+  // 401/锁定清屏：先摘掉 dialog 的全局监听与焦点归还，再清空，避免 Escape 监听残留到下一次弹窗。
+  if (dialogRoot) { try { closeDialog() } catch { /* 无活动弹窗时忽略 */ } }
   if (dialogRoot) { clear(dialogRoot); dialogRoot.hidden = true }
   const chip = document.getElementById('dirty-top')
   if (chip && chip.remove) chip.remove()
