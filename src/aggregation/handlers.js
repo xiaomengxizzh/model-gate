@@ -20,6 +20,7 @@ import { isIP } from 'node:net'
 import { RegistryError } from './registry.js'
 import { DiscoveryError } from './discovery.js'
 import { AggregatedCatalogError } from './catalog.js'
+import { applyV2ModelScope, v2ScopeOf, V2_TARGET_PUBLIC_ID, V2_TARGET_UPSTREAM_MODEL } from '../providers/opencode-go.js'
 
 const LOOPBACK_NAMES = new Set(['localhost', '127.0.0.1', '::1'])
 const AGGREGATION_BASE = '/api/aggregation'
@@ -228,7 +229,8 @@ export function createAggregationHandlers(deps = {}) {
       const scope = scopeOf(ctx, body)
       const notRoutable = notRoutableOf(scope)
       const current = catalog.readCurrent(scope)
-      if (!current.catalog) return { status: 200, body: { ok: true, generation: 0, models: [], counts: null, published: false, notRoutable } }
+      const goScope = goScopeOf(scope)
+      if (!current.catalog) return { status: 200, body: { ok: true, generation: 0, models: [], counts: null, published: false, notRoutable, goScope } }
       return {
         status: 200,
         body: {
@@ -240,9 +242,41 @@ export function createAggregationHandlers(deps = {}) {
           bindings: current.bindings,
           // 已发现但协议不支持、因此不可调用的模型：显式计数 + ID，绝不静默丢弃。
           notRoutable,
+          // V2 单模型作用域：目标模型身份 + 越界清单。
+          goScope,
         },
       }
     } catch (error) { return mapError(error) }
+  }
+
+  // V2 单模型作用域视图（只读、不触发发现/发布）：GUI 与运维能直接看到
+  // 「Go 只发布哪 1 个模型、哪些已发现但不属于本轮交付」——绝不静默丢弃。
+  function goScopeOf(scope) {
+    const providers = typeof registry.listProviders === 'function' ? registry.listProviders() : []
+    const goProviders = providers.filter((p) => p && p.kind === 'opencode-go')
+    if (!goProviders.length) return null
+    const rows = goProviders.map((p) => {
+      const cached = discovery.cacheStore ? discovery.cacheStore.get(scope, p.id) : null
+      const models = cached && cached.snapshot && Array.isArray(cached.snapshot.models) ? cached.snapshot.models : []
+      const scopeOfProvider = v2ScopeOf(p)
+      const applied = applyV2ModelScope(models, p)
+      return {
+        providerId: p.id,
+        profile: scopeOfProvider.profile,
+        enforced: scopeOfProvider.enforced,
+        targetUpstreamModel: scopeOfProvider.targetUpstreamModel,
+        targetPublicId: scopeOfProvider.targetPublicId,
+        published: applied.published.map((m) => ({ publicId: m.publicId || null, upstreamId: m.upstreamId })),
+        targetPresent: applied.targetPresent,
+        outOfScope: applied.outOfScope,
+      }
+    })
+    return {
+      schema: 'modelgate.opencode-go.v2-scope/1',
+      target: { publicId: V2_TARGET_PUBLIC_ID, upstreamModel: V2_TARGET_UPSTREAM_MODEL },
+      note: 'V2 只交付 OpenCode Go 的 ' + V2_TARGET_UPSTREAM_MODEL + '：越界模型不发布为可调用模型，也不静默丢弃',
+      providers: rows,
+    }
   }
 
   // 快照里“已发现但不可路由”的模型汇总：{ count, byProvider: { id: [upstreamId] } }。
@@ -285,6 +319,19 @@ export function createAggregationHandlers(deps = {}) {
           explicitAllowed: models.filter((m) => m.authBasis === 'explicit_allowed').length,
           explicitDenied: models.filter((m) => m.authBasis === 'explicit_denied').length,
         },
+        // V2 单模型作用域（Go 才有）：当前 profile、目标模型是否已发布、越界模型数量。
+        v2Scope: p.kind === 'opencode-go' ? (() => {
+          const goScope = v2ScopeOf(p)
+          const applied = applyV2ModelScope(models, p)
+          return {
+            profile: goScope.profile,
+            enforced: goScope.enforced,
+            targetUpstreamModel: goScope.targetUpstreamModel,
+            targetPublicId: goScope.targetPublicId,
+            targetPresent: applied.targetPresent,
+            outOfScope: applied.outOfScope.length,
+          }
+        })() : null,
         notRoutable: { count: notRoutable.length, ids: notRoutable.map((m) => m.upstreamId) },
         lastAttempt: attempt ? { at: attempt.at, completeness: attempt.completeness, code: attempt.code || null } : null,
       }
