@@ -106,6 +106,7 @@
 | UI-04 / UI-06 / UI-07 / UI-16 真实 Go/GPT 与真实 Desktop 链路 | **BLOCKED_NO_PAID_MODEL_AUTH** | 本轮无付费调用授权；真实 GPT 只允许 `gpt-6-luna`、Go 只 `deepseek-v4.1-flash`，执行 0 次 |
 | UI-05 / UI-08 完整 428 → consent → 原子写 → 验证 | **BLOCKED（部分）** | 隔离实例无已发布聚合目录，实测 `422 invalid_desired`，未写 `config.toml`；风险/回滚路径仅被既有 `agg-desktop-activate/rollback` 套件覆盖 |
 | 旧版本网关（无 `/api/aggregation/*`）真机 | **BLOCKED_OLD_INSTANCE** | 本机无可用的旧实例二进制；404 形状与投影已离线覆盖 |
+| 推送分支/创建 PR | **BLOCKED_REMOTE_PUSH_NO_CREDENTIALS** | 本机无 GitHub 凭据与 `gh`；分支仅本地，所有者配置凭据后可推送 |
 | 读屏器/axe/WCAG 2.2 AA 实测 | **NOT_TESTED** | 未安装（且不授权安装）辅助技术；本轮只有规则、ARIA 结构断言与浏览器几何断言 |
 | PR #7 远端状态核对 | **BLOCKED_REMOTE_PR_STATE** | 本轮未联网核对 GitHub；本地 `main`（`6bc6441`）、`mg-codex-native`（`708cf5e`）未改动 |
 | A2 真实 `opencode.ai` 同步（真实目录发现） | **BLOCKED** | 需要真实 Go Key 授权；本轮只验证了 HTTP 契约与 mock |
@@ -113,7 +114,8 @@
 
 ## 8. 分支、PR 与所有者审批事项
 
-- 集成分支：`feat/modelgate-ux-v3`（工作树 `.agents/worktrees/dsh-21ec827a-8f7c`，本地；推送地址见交付说明）。
+- 集成分支：`feat/modelgate-ux-v3`（工作树 `.agents/worktrees/dsh-21ec827a-8f7c`，**仅本地**）。
+  - 推送尝试：`git push -u origin feat/modelgate-ux-v3` → **BLOCKED_REMOTE_PUSH_NO_CREDENTIALS**（`fatal: could not read Username for 'https://github.com'`；本机无 `gh`、无 git 凭据代理）。需要所有者在本机配置凭据后推送，或用其账号代为推送；本轮不绕过。
 - 子代理分支：`feat/ux-v3-a1-home`、`feat/ux-v3-a2-go`、`feat/ux-v3-a3-state`、`feat/ux-v3-a4-design`、`feat/ux-v3-a5-qa`（均已并入集成分支，保留以便复核）。
 - **未做**：合并 `main`、发版、把 PR #7 转 Ready、改写冻结证据/审批文件、改写历史 SHA。
 - 需要所有者决定/批准的事项：
