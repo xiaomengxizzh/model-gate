@@ -1,7 +1,9 @@
 # ModelGate V2｜发布裁决（2026-11-15 最终）
 
 > 冻结树：`51e78e0da66846de0b28d2904dc5216685fc5732`（`docs/evidence/v2-frozen-sha.txt`）。
-> **`npm run release:freeze` = PASS**：12 项 `PASS_REAL` 均绑定冻结树，冻结后仅文档改动。
+> **`npm run release:freeze` = FAIL（预期）**：回执已恢复为**真实采集树**（`1a527c6` 等）+ `codeEquivalentFreeze` 字段，
+> 门禁要求所有者/A5 对「代码等价冻结」「R006 四条 partial」「R009 双实例形态」三组事项显式批准后才放行。
+> 批准文件：`docs/evidence/v2-release-approvals.json`（空 = 未批准）。
 
 > **两个结论必须分开读**：门禁迁移（V2-00）**PASS**；产品发布**FAIL / 不可签收**。
 > 本文件是 Lead 对 A5 第五轮独立复核（`3dfd44a`）的登记，不替代 A5 原始证据，也不改变任何 `MG-R` 口径。
@@ -12,7 +14,7 @@
 | 维度 | 结论 | 依据 |
 | --- | --- | --- |
 | V2 门禁迁移（V2-00） | **PASS** | A5 第四轮复核：`gate:audit-diff --base main` 真实 PASS、空 diff fail-closed、`--replay` 不得放行、门禁模块/状态表哈希二次确认、`gate-weakened` 登记与单测 |
-| 产品发布 | **达到发布门槛，待所有者审批** | 12/12 `PASS_REAL`；`release:freeze` PASS；见 §3 |
+| 产品发布 | **仍未签收：待 3 组批准** | `release:freeze` 如实 FAIL：①代码等价冻结 `1a527c6→51e78e0`；②R006 四条 partial；③R009 双实例形态；见 §3 |
 
 ## 2. 本轮实测结果（被测树 `754a687e11ac8c891ea14bb2d6cc8830f10eb089`）
 
@@ -33,9 +35,13 @@
 1. **真实原生父生子已成立**：网关新增受限订阅承载（复用本机 Codex 登录 → `chatgpt.com/backend-api/codex`，仅显式 `gatewaySubscription` + loopback + 官方 host），真实 `gpt-6-luna` 父通过 `[agents.go_deepseek]` 派生真实 Go 子代理并执行工具；R002/R003/R005/R012 均已 `PASS_REAL`（绑 `754a687`）。
 2. **MG-R006 已 `PASS_REAL`（已关闭）**：`interrupt`（工具执行中 SIGINT，父/子 `turn_aborted:1`、工具未完成、`spawn_agent:1`）与 `no-duplicates`（2 个会话来回复用、无第三个子会话）真机成立；`resume` 后继续用同一子代理。
 3. **原版 Desktop GUI 已真机验收（R004 `PASS_REAL`）**：隔离实例窗口 + 选择器双方可见（截图/DOM）+ 官方 `gpt-6-luna` 与 Go 模型各一次真实请求；官方路径 403 已由 `0c867fd`（仅 app 模式注入 chatgptPlan）修复并复测通过。
-4. **12/12 `PASS_REAL` 已完成**：R001（控制台启停/重启/回滚）、R004（原版 GUI 双方选模）、R007（空白/已有/409）、R008（真实负向：零上游/401 typed/429 跨域阻断）、R009（双实例隔离；单实例多租户为已知 GAP）、R010（10 时点 SIGKILL + 逐字节回滚）、R011（冻结回执与矩阵一致）、R006（工具/同子/中断/恢复/去重 + 压缩三条沿用中间树证据，已在冻结复核文档注明）。
+4. **12/12 `PASS_REAL`（含 2 个显式口径）**：R001（控制台启停/重启/回滚）、R004（原版 GUI 双方选模）、R007（空白/已有/409）、R008（真实负向：零上游/401 typed/429 跨域阻断）、R009（双实例隔离；单实例多租户为已知 GAP）、R010（10 时点 SIGKILL + 逐字节回滚）、R011（冻结回执与矩阵一致）、R006（工具/同子/中断/恢复/去重 + 压缩三条沿用中间树证据，已在冻结复核文档注明）。
 5. **冻结流程**：`release:freeze` PASS；冻结后只允许 `docs/**` 改动，任何 `src/**` 或测试改动都会要求重新冻结。
-6. **已知边界/未做**：原版 GUI 的 SSE 原文未单独抓取（用客户端 rollout + 网关日志代替，需再授权 1 次可选）；单实例多租户未实现（实例级隔离已验收）；PR #7 仍 Draft，合并/发布仍需所有者批准。
+6. **待所有者/A5 批准（阻塞发布）**：
+   - `freeze-equivalence`：`1a527c6 → 51e78e0` 之间无 `src/**` 改动（已由脚本校验），需书面确认可按代码等价处理；
+   - `partial-case` × 4：R006 的 `native-compaction`/`post-compact-followup`/`context-proof`（冻结树未重新触发，沿用 `3116459`）与 `resume`（冻结树新建子代理、未复用同一 childId）；
+   - `requirement-form`：R009 以「双实例可复现安装隔离」作为验收形态，需所有者批准。
+7. **已知边界**：原版 GUI 的 SSE 原文未单独抓取（用客户端 rollout + 网关日志代替）；单实例多租户未实现；PR #7 仍 Draft，合并/发布仍需所有者批准。
 4. **结构性残余**：伪造 evidence 绑当前 HEAD + 布尔批准仍可过门禁；真实性由 A5 真实回执与所有者审批兜底。
 4. **结构性残余（不可由仓库脚本消除）**：伪造 evidence 绑当前 HEAD + 所有者布尔批准仍可过门禁；真实性只能由 A5 真实回执与所有者审批兜底。哈希钉死与 `gate-approvals.json` 都是“可见的二次确认”，不是防篡改金库。
 
