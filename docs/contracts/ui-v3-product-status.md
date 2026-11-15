@@ -108,7 +108,7 @@ refreshProduct(opts?: {reason?: string, force?: boolean}): Promise<ProductStatus
 invalidateProductStatus(reason?: string): void
 onProductStatus(fn): () => void                             // 每次新快照后调用（含 invalidate）
 aggregationState(): {health, providers, models, diagnostics, error, loadedAt, freshness} | null
-setProductPhase(phase: 'conflict'|'write_in_progress'|null): void
+setProductPhase(phase: 'conflict'|'write_in_progress'|'preview_pending'|null): void
 
 // api.js
 api.aggregationHealth() / aggregationProviders() / aggregationModels() / aggregationDiagnostics()
