@@ -179,7 +179,11 @@ export function auditCandidate({
   // `{ skip: <条件> }` 是平台/环境门控（例如非 Linux、无真实凭据），不是把通过当通过，不能误报。
   // 只拦**新增的整条跳过用例**：行首就是 `test.skip(`，或对象里写字面量 `skip: true`。
   // 运行期 `t.skip('root ...')` / `{ skip: <条件> }` 是环境门控，属于如实报告不适用，不是把通过当通过。
+  // 注释/说明文本里的 `test.skip(`、`skip: true` 不是"新增跳过用例"，必须先排除，
+  // 否则门禁自己的注释就会让 CI 变红（A5 在 d41da77 实测到的自注释误报）。
+  const isCommentOrString = (line) => /^\s*(?:\/\/|\*|\/\*)/.test(line) || /^\s*['"`]/.test(line)
   const skipAdded = testFiles.flatMap((f) => f.added
+    .filter((l) => !isCommentOrString(l))
     .filter((l) => /^\s*test\.skip\s*\(/.test(l) || /\bskip\s*:\s*true\b/.test(l))
     .map((l) => f.file))
   for (const file of skipAdded) add('skipped-as-passed', file, 'diff adds skip to a test; a skipped case cannot be counted passed')

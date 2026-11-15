@@ -271,3 +271,11 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 - CI 新增 `npm run gate:audit-diff`（diff vs base，取不到 base 即失败）；checkout `fetch-depth: 0`。
 - 已执行：`npm run gate:audit-diff --base main` PASS；`npm test` 114 套件 / 1104 用例 / 0 失败；`npm run check`、`check-metadata`、`contract:check`、`gate:v2` 全 PASS。
 - 仍存（结构性，不可用仓库脚本消除）：伪造 evidence 绑当前 HEAD + 所有者批准仍可过门禁——真实性由 A5 真实回执兜底；`routing-ledger` 跨进程并发用例在全量并发下偶发失败（单跑 3/3），登记为发布风险。
+
+### 门禁复核追加修复（A5 第二轮，d41da77 之后）
+
+- 修 `gate:audit-diff --base main` 的自注释误报：`skipped-as-passed` 跳过注释与纯字符串行；补"注释里含 `test.skip(`/`skip: true` 不误报"回归。
+- `audit-diff` 拒绝空变更集（base 解析到 HEAD 即 exit 1），并打印 finding 的 `subject` 便于定位。
+- `--replay` 语义收紧：输出 `replay:true` / `releaseEligible:false`，永不 `ready:true`（历史复算不再能伪装发布放行）。
+- 门禁模块整体 sha256 + V2 状态表逐行 sha256 双钉（等行数改写必须显式二次确认）。
+- 已执行：`npm test` 114 套件 / 1106 用例 / 0 失败；`npm run gate:audit-diff --base main` 在**提交后**的 HEAD 上重跑（见下一次状态记录）。

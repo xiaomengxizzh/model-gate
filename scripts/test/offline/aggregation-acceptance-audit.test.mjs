@@ -257,3 +257,17 @@ test('V2 状态证据属于受保护门禁定义：删行/删文件即 gate-weak
   assert.equal(gone.ok, false)
   assert.ok(gone.findings.some((f) => f.rule === 'gate-weakened'), JSON.stringify(gone.findings))
 })
+
+test('注释/说明文本里的 test.skip( 与 skip: true 不算新增跳过（A5 自注释误报回归）', () => {
+  const diff = [
+    'diff --git a/scripts/test/offline/aggregation-audit.js b/scripts/test/offline/aggregation-audit.js',
+    '--- a/scripts/test/offline/aggregation-audit.js',
+    '+++ b/scripts/test/offline/aggregation-audit.js',
+    '@@ -1,1 +1,3 @@',
+    ' // header',
+    '+// 只拦真正"把用例钉成跳过"的写法：`test.skip(` / `skip: true`。',
+    '+  // 行首就是 `test.skip(`，或对象里写字面量 `skip: true`。',
+  ].join('\n')
+  const out = auditCandidate({ diff })
+  assert.equal(out.ok, true, JSON.stringify(out.findings))
+})

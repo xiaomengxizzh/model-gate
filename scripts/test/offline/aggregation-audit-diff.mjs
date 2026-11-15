@@ -53,6 +53,12 @@ try {
   process.exit(1)
 }
 
+const headCommit = git(['rev-parse', 'HEAD']).trim()
+if (mergeBase === headCommit) {
+  console.error('audit-diff: FAIL (base resolves to HEAD: the change set is empty, so this PASS would be meaningless; pass the real base branch)')
+  process.exit(1)
+}
+
 const diff = git(['diff', '--no-color', '--unified=3', mergeBase + '...HEAD'])
 const result = auditCandidate({ diff })
 
@@ -60,7 +66,7 @@ console.log('audit-diff: base=' + base + ' merge-base=' + mergeBase.slice(0, 8) 
 if (result.ok) {
   console.log('audit-diff: PASS (no anti-downgrade findings)')
 } else {
-  for (const f of result.findings) console.log('audit-diff: FINDING ' + f.rule + ' @ ' + (f.file || f.where || 'diff') + ' — ' + f.detail)
+  for (const f of result.findings) console.log('audit-diff: FINDING ' + f.rule + ' @ ' + (f.subject || f.file || 'diff') + ' — ' + f.detail)
   console.error('audit-diff: FAIL (' + result.findings.length + ' findings; owner review required)')
   process.exitCode = 1
 }

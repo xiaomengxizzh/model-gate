@@ -13,6 +13,9 @@
 
 ### Security — 门禁反降级（A5 最终复核 N1/N2/N4/N5）
 
+> 追加修复（A5 复核 `d41da77` 后在 `gate:audit-diff` 上实测到自注释误报）：`skipped-as-passed` 排除注释/纯字符串行；`audit-diff` 拒绝空变更集（base 解析到 HEAD 即失败）并打印 finding 的 `subject`；`--replay` 结果显式带 `replay:true` + `releaseEligible:false` 且永不 `ready:true`；门禁模块整体与 V2 状态表逐行钉 sha256（等行数改写必须二次确认）。
+
+
 - 反降级审计新增 `gate-weakened` 并登记进 `AUDIT_RULE_IDS`：门禁文件净删行、删断言、删文件都被判为降级（不依赖 `src/**` 是否被改）；V2 状态证据纳入受保护门禁定义。
 - `requirement-reworded` 收敛为「删除/改写需求行」才触发：只追加解释或派生映射不误报；V2 矩阵/状态证据改由字节校验与 V2 套件守卫。
 - V2 门禁：带 `--evidence` 时若 `--sha` 不等于当前 HEAD，返回 `non_head_sha_requires_replay_flag`（历史复算必须显式 `--replay`），杜绝「旧树回执 + 当前口径」混用。

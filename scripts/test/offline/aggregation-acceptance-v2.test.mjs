@@ -184,19 +184,26 @@ test('历史迁移导出不得进入模型请求路径（非压缩/摘要路径�
   assert.match(api, /非压缩\/摘要路径/, '导出路由说明必须明确它不是压缩/摘要路径')
 })
 
-// A5 N1：门禁自证的**期望语义**被等行数改写（例如把 `missing.ready === false` 改成 `true`）
-// 不会触发 gate-weakened（它只看净删行）。所以这里把自证函数体钉成 sha256：
-// 任何语义改动都必须同时更新这个哈希，形成显式的第二次确认（两步修改可见、可审计）。
-const PINNED_SELFCHECK_SHA = 'a00708d557077e6c5054a1aaaba41a7cc75d90167ba27cdef0d5a1f7db4aaec3'
+// A5 N1 / N5-R：门禁自证的期望语义与状态表都可能被**等行数改写**（不触发 gate-weakened）。
+// 这里分别钉住「整个门禁模块」与「状态表逐行内容」的 sha256：
+// 任何语义改动都必须同时改这两个哈希，形成两次可见的修改，而不是悄悄换一个 true/false。
+const PINNED_GATE_MODULE_SHA = '18dfaa9e27cc31c89e99f3639346298c37269674b914333f2c3329811d182731'
+const PINNED_STATUS_TABLE_SHA = '6f29fa9e597a6fda69beac63857860c2d8faab76925f003f86c2ceb22305600b'
 
-test('门禁自证函数体钉死 sha256（等行数语义削弱必须显式二次确认）', () => {
+test('门禁模块整体钉死 sha256（等行数语义削弱必须显式二次确认）', () => {
   const src = readFileSync(new URL('scripts/test/offline/aggregation-gate-v2.js', ROOT), 'utf8')
-  const start = src.indexOf('export function assertNativeCompactionIsBlocking')
-  assert.ok(start >= 0, '门禁必须保留 assertNativeCompactionIsBlocking 自证')
-  const end = src.indexOf('\nconst entry =', start)
-  assert.ok(end > start, '无法界定自证函数体')
-  const body = src.slice(start, end)
-  const digest = createHash('sha256').update(body, 'utf8').digest('hex')
-  assert.equal(digest, PINNED_SELFCHECK_SHA,
-    '门禁自证函数体被改动：若是有意加强/重构，请更新 PINNED_SELFCHECK_SHA 并在提交说明里写清为什么；若是削弱，禁止合并')
+  const digest = createHash('sha256').update(src, 'utf8').digest('hex')
+  assert.equal(digest, PINNED_GATE_MODULE_SHA,
+    'V2 门禁模块被改动：若是有意加强/重构，请更新 PINNED_GATE_MODULE_SHA 并在提交说明里写清为什么；若是削弱，禁止合并')
+})
+
+test('V2 状态表逐行钉死 sha256（状态值等行数改写必须显式二次确认）', () => {
+  const doc = readFileSync(new URL(STATUS_PATH_V2, ROOT), 'utf8')
+  const a = doc.indexOf('## 2. 需求状态')
+  const b = doc.indexOf('## 3.')
+  assert.ok(a >= 0 && b > a, '状态表位置变化')
+  const table = doc.slice(a, b).split('\n').filter((l) => l.trim().startsWith('|') || l.startsWith('## ')).join('\n')
+  const digest = createHash('sha256').update(table, 'utf8').digest('hex')
+  assert.equal(digest, PINNED_STATUS_TABLE_SHA,
+    'V2 状态表内容被改动：状态升级/降级必须同时更新 PINNED_STATUS_TABLE_SHA 并在证据里写明来源')
 })
