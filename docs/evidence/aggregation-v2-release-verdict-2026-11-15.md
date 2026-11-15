@@ -1,4 +1,4 @@
-# ModelGate V2｜发布裁决（2026-11-15 最终更新，被测树 `4f5a35f`）
+# ModelGate V2｜发布裁决（2026-11-15 深夜更新，被测树 `754a687`）
 
 > **两个结论必须分开读**：门禁迁移（V2-00）**PASS**；产品发布**FAIL / 不可签收**。
 > 本文件是 Lead 对 A5 第五轮独立复核（`3dfd44a`）的登记，不替代 A5 原始证据，也不改变任何 `MG-R` 口径。
@@ -11,7 +11,7 @@
 | V2 门禁迁移（V2-00） | **PASS** | A5 第四轮复核：`gate:audit-diff --base main` 真实 PASS、空 diff fail-closed、`--replay` 不得放行、门禁模块/状态表哈希二次确认、`gate-weakened` 登记与单测 |
 | 产品发布 | **FAIL（不可签收）** | 见 §3 阻断清单（N04 已由所有者书面例外移出阻断） |
 
-## 2. 本轮实测结果（被测树 `4f5a35f15370f4ec4344d5a20936b1d00c102707`）
+## 2. 本轮实测结果（被测树 `754a687e11ac8c891ea14bb2d6cc8830f10eb089`）
 
 | 命令 | 结果 |
 | --- | --- |
@@ -27,10 +27,10 @@
 
 ## 3. 发布阻断（不得删除）
 
-1. **F01 与 V2 的产品冲突（首要阻断）**：同一 Codex 会话只有一个 `model_provider`；应用侧已把父模型 `gpt-6-luna` 指向 ModelGate，但网关对官方目标返回 `403 official_no_gateway_key`（F01 已退役客户端凭据透传）。因此「套餐父 + Go 子」在同一会话内不成立，真实父 spawn 子无法验收。三条出路需所有者裁决：网关自有 key / 受限恢复订阅凭据路径（仅 loopback + 官方目标） / Codex 按角色分 provider。
-2. **真实原生父生子未成立**：MG-R005 `native-child-thread-not-mcp`、MG-R006 `same-child-followup` / `interrupt` / `no-duplicates` 缺真实回执 → 两者整体 `FAIL`。
-3. **真实原版 Desktop GUI 选模/退出恢复未执行**（MG-R001/R004 real `BLOCKED`/`NOT_TESTED`），需 GUI 会话。
-4. **真实 GPT（仅 `gpt-6-luna`）在 `4f5a35f` 未复测**：本轮唯一探针被 F01 403 拒绝（零费用），MG-R012 保持旧树 `PASS_REAL`，门禁按 stale 阻断。
+1. **真实原生父生子已成立（已关闭）**：网关新增受限订阅承载（复用本机 Codex 登录 → `chatgpt.com/backend-api/codex`，仅显式 `gatewaySubscription` + loopback + 官方 host），真实 `gpt-6-luna` 父通过 `[agents.go_deepseek]` 派生真实 Go 子代理并执行工具；R002/R003/R005/R012 均已 `PASS_REAL`（绑 `754a687`）。
+2. **MG-R006 仍 `FAIL`**：`same-child-followup` 与 `post-compact-followup`/`context-proof` 已真实成立，但 `interrupt` 与 `no-duplicates` 未做真机用例。
+3. **原版 Desktop GUI 选模/启停/回滚未执行**（MG-R001/R004/R007 real `NOT_TESTED`/`BLOCKED`）：本轮为 CLI 驱动同一份产品配置，未打开 GUI、未做选择器操作。
+4. **结构性残余**：伪造 evidence 绑当前 HEAD + 布尔批准仍可过门禁；真实性由 A5 真实回执与所有者审批兜底。
 4. **结构性残余（不可由仓库脚本消除）**：伪造 evidence 绑当前 HEAD + 所有者布尔批准仍可过门禁；真实性只能由 A5 真实回执与所有者审批兜底。哈希钉死与 `gate-approvals.json` 都是“可见的二次确认”，不是防篡改金库。
 
 ## 4. 所有者已决定事项
