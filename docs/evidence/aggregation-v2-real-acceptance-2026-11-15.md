@@ -131,6 +131,8 @@ Go 推理：生成目录工具测试 1 次 + shell 变体 1 次 + workspace-writ
 
 ## 7. 追加实测（2026-11-15 12:50–13:15）：真实压缩后工具与记忆、父 GPT 阻断
 
+**绑定树**：`e8f02a0`（`buildCatalog` 工具声明修复）与 `4f5a35f`（状态/矩阵更新）。本节真机调用在 `e8f02a0` 的代码上完成，无未提交中间态；`4f5a35f` 仅改文档/测试。
+
 ### 7.1 用「真实能力值」生成目录（非夹具）
 
 `buildCatalog()` 生成：`context_window=1048576`、`auto_compact_token_limit=943718`（A1 从本机 OpenCode 目录快照取证）、`shell_type=unified_exec`、`apply_patch_tool_type=freeform`、无 `use_responses_lite`/`tool_mode`。

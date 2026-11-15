@@ -1,4 +1,4 @@
-# ModelGate V2｜发布裁决（2026-11-15 更新，被测树 `3dfd44a`）
+# ModelGate V2｜发布裁决（2026-11-15 最终更新，被测树 `4f5a35f`）
 
 > **两个结论必须分开读**：门禁迁移（V2-00）**PASS**；产品发布**FAIL / 不可签收**。
 > 本文件是 Lead 对 A5 第五轮独立复核（`3dfd44a`）的登记，不替代 A5 原始证据，也不改变任何 `MG-R` 口径。
@@ -11,27 +11,27 @@
 | V2 门禁迁移（V2-00） | **PASS** | A5 第四轮复核：`gate:audit-diff --base main` 真实 PASS、空 diff fail-closed、`--replay` 不得放行、门禁模块/状态表哈希二次确认、`gate-weakened` 登记与单测 |
 | 产品发布 | **FAIL（不可签收）** | 见 §3 阻断清单（N04 已由所有者书面例外移出阻断） |
 
-## 2. 本轮实测结果（被测树 `3dfd44aee948409825306cbbff067bbf4f23b2c4`）
+## 2. 本轮实测结果（被测树 `4f5a35f15370f4ec4344d5a20936b1d00c102707`）
 
 | 命令 | 结果 |
 | --- | --- |
 | `npm run check` | PASS（UI modules 17/17）|
-| `npm test` | 114 套件 / 1107 用例 / 0 失败 / 2 skipped |
+| `npm test` | 116 套件 / 1120 用例 / 0 失败 / 2 skipped |
 | `node scripts/check-metadata.mjs` | PASS（39 checks）|
 | `npm run docs:check` | PASS（92 文件）|
 | `npm run contract:check` | PASS |
 | `npm run gate:v2` | 9/9 自证 PASS |
 | `aggregation-matrix-v2.js --check` | PASS（byte-identical）|
-| `npm run gate:audit-diff --base main` | PASS（0 findings，422 files，非空 diff）|
+| `npm run gate:audit-diff --base main --all-commits` | PASS（0 未批准 findings；4 条历史改动见 `gate-approvals.json`）|
 | `npm run gate:v2:independent` | **12/12**（N04 已由所有者书面例外覆盖）|
 
 ## 3. 发布阻断（不得删除）
 
-1. **真实工具未执行（首要阻断）**：真机实测 Codex 对第三方 Go 模型不下发工具（`tools: None`），模型输出 `<|DSML| invoke …>` 文本、客户端不执行 → MG-R005 `native-tools` 与 MG-R006 `native-tool` / `post-compact-followup` / `context-proof` 不成立。网关直连 Go 的 `function_call` 翻译正常（探针已证）。修复方向：ModelGate 生成的 ModelInfo 需给出正确的工具能力/`tool_mode` 声明（A1 进行中）。
-2. **真实原版 Desktop GUI 选模/退出恢复未执行**（MG-R001/R004 real `BLOCKED`/`NOT_TESTED`），需 GUI 会话。
-3. **真实 GPT（仅 `gpt-6-luna`）在 `3dfd44a` 未复测**：本轮零 GPT 调用，MG-R012 保持旧树 `PASS_REAL`，门禁按 stale 阻断。
-4. **MG-R006 整体仍 `FAIL`**：压缩已观测（Codex 自己执行），但工具与压缩后上下文不成立。
-4. **结构性残余（不可由仓库脚本消除）**：伪造 evidence 绑当前 HEAD + 所有者布尔批准仍可过门禁；真实性只能由 A5 真实回执与所有者审批兜底。哈希钉死是“二次可见确认”，不是防篡改金库。
+1. **F01 与 V2 的产品冲突（首要阻断）**：同一 Codex 会话只有一个 `model_provider`；应用侧已把父模型 `gpt-6-luna` 指向 ModelGate，但网关对官方目标返回 `403 official_no_gateway_key`（F01 已退役客户端凭据透传）。因此「套餐父 + Go 子」在同一会话内不成立，真实父 spawn 子无法验收。三条出路需所有者裁决：网关自有 key / 受限恢复订阅凭据路径（仅 loopback + 官方目标） / Codex 按角色分 provider。
+2. **真实原生父生子未成立**：MG-R005 `native-child-thread-not-mcp`、MG-R006 `same-child-followup` / `interrupt` / `no-duplicates` 缺真实回执 → 两者整体 `FAIL`。
+3. **真实原版 Desktop GUI 选模/退出恢复未执行**（MG-R001/R004 real `BLOCKED`/`NOT_TESTED`），需 GUI 会话。
+4. **真实 GPT（仅 `gpt-6-luna`）在 `4f5a35f` 未复测**：本轮唯一探针被 F01 403 拒绝（零费用），MG-R012 保持旧树 `PASS_REAL`，门禁按 stale 阻断。
+4. **结构性残余（不可由仓库脚本消除）**：伪造 evidence 绑当前 HEAD + 所有者布尔批准仍可过门禁；真实性只能由 A5 真实回执与所有者审批兜底。哈希钉死与 `gate-approvals.json` 都是“可见的二次确认”，不是防篡改金库。
 
 ## 4. 所有者已决定事项
 

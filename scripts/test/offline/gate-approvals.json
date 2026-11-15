@@ -1,0 +1,30 @@
+[
+  {
+    "sha": "e88d25af",
+    "rule": "requirement-reworded",
+    "approver": "owner-scope migration (V2, 2026-11-14)",
+    "reason": "V2 范围迁移提交：V1 契约字节以历史副本保留（chore(history)），本提交来自远端既有历史，非本轮改动",
+    "at": "2026-11-14"
+  },
+  {
+    "sha": "06a709e2",
+    "rule": "gate-weakened",
+    "approver": "V2 scope guard fix (remote history)",
+    "reason": "远端既有提交：修正 V2 守卫正则，断言以更精确形式重写（非删除语义）",
+    "at": "2026-11-14"
+  },
+  {
+    "sha": "1ee698c5",
+    "rule": "gate-weakened",
+    "approver": "A5 round 6 verification",
+    "reason": "replay 语义与自注释误报修复：旧的自证代码块被替换为 replayNotRelease 结构，A5 复跑确认 --replay 不再 ready:true",
+    "at": "2026-11-15"
+  },
+  {
+    "sha": "4f5a35f1",
+    "rule": "gate-weakened",
+    "approver": "A5 round 6 explicit approval",
+    "reason": "R005/R006 同时 FAIL 后，独立套件从『首个阻断必须是 R006』改为『阻断行必须点名 R006』；A5 书面确认这是随状态更新、非放宽",
+    "at": "2026-11-15"
+  }
+]

@@ -294,7 +294,7 @@ test('native compaction 是发布必要条件：R006 PASS_REAL 必须含 native-
   }
 })
 
-test('V2 状态：R006 未真实通过时，V2 门禁必须 ready:false 且首个阻断为 MG-R006', () => {
+test('V2 状态：R006 未真实通过时，门禁必须 ready:false 且 R006 出现在阻断点名与 failedRequirements', () => {
   const status = read(STATUS_V2, 'V2 状态文档是当前门禁输入；缺失即 P00 未完成')
   const rows = parseStatusRows(status, STATUS_V2)
   const r006 = rows.find((r) => r.id === 'MG-R006')

@@ -18,9 +18,16 @@
 - **`projectThirdPartyResponsesParams()`**：对非官方 Responses 目标剔除 ChatGPT 专属参数 `reasoning.context`、`text.verbosity`、`include:reasoning.encrypted_content`（真机 400 实测），并写诊断；官方目标逐字节透传。回归 `agg-v2-third-party-params.test.mjs`。
 - **N04 所有者书面例外**：所有者批准保留 `history/export` 迁移导出（非压缩/摘要、不参与请求组装、原件不变、不得用于满足 MG-R006），边界写入 V2 契约。
 
+### Security — PR 内门禁弱化审计（A5 P1）
+
+- `gate:audit-diff` 新增 `--all-commits`：对 `base..HEAD` 每个提交的自身 diff 跑反降级审计，堵住"同一 PR 内新增门禁/测试文件后再弱化"的 main-based 盲区。CI 已改用该模式。
+- 新增 `scripts/test/offline/gate-approvals.json`：门禁文件的历史改动必须有书面批准记录（approver + reason + sha），审计输出 `APPROVED` 行；该清单本身纳入受保护门禁文件，删除即 `gate-weakened`。
+
 ### Known Issue — 真实工具未执行（阻断 MG-R005/R006）
 
-- 真机实测：Codex 对第三方 Go 模型**不下发工具定义**（请求体 `tools: None`，三种 catalog `tool_mode` 变体一致），模型因无工具而输出 `<|DSML| invoke …>` 文本，客户端不执行。网关直连 Go 的 `function_call` 翻译本身正常（探针返回结构化 `exec_command`）。定位下一步：ModelGate 生成目录需给出正确的 `tool_mode`/工具能力声明。
+- ~~真机实测：Codex 对第三方 Go 模型不下发工具定义~~ **已定位并修复（2026-11-15）**：根因是 `use_responses_lite:true`（完全无 tools）/`shell_type:disabled`（无 `exec_command`）/`tool_mode:"code_mode_only"`（只有 code-cell）——三者都是"抄官方 GPT 目录"带进来的字段。`buildCatalog()` 现对第三方 Responses 路由默认 `shell_type=unified_exec`、绝不写前两者、冲突 fail-closed。
+- **真机复测**：生成目录 + 真实 Go + `--sandbox workspace-write` → `exec_command` 真实执行（`marker-real.txt=TOOL_REAL_OK`、0 行 DSML）；压缩后同会话仍可执行工具并复述压缩前输出（`marker-b.txt=POST_COMPACT_MARKER`、`BASE_OK`）。
+- **当前首要阻断**：同一 Codex 会话只有一个 provider，父 `gpt-6-luna` 经网关被 F01 拒绝（`official_no_gateway_key`），故真实父 spawn 子未成立；需所有者裁决（网关自有 key / 受限恢复订阅路径 / Codex 角色级 provider）。
 
 ### Security — 门禁反降级（A5 最终复核 N1/N2/N4/N5）
 

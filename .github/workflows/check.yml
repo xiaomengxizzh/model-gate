@@ -108,7 +108,7 @@ jobs:
         run: |
           set -euo pipefail
           base="${GITHUB_BASE_REF:-main}"
-          node scripts/test/offline/aggregation-audit-diff.mjs --base "$base"
+          node scripts/test/offline/aggregation-audit-diff.mjs --base "$base" --all-commits
       - name: Isolated mock suites (local mock only, no upstream, no credentials)
         run: npm test
       - name: Documentation link check
