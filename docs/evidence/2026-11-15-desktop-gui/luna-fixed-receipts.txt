@@ -1,0 +1,23 @@
+# 修复后复测回执（树 fb986ee，隔离 /tmp/mg-desktop-gui-a3-fixed，端口 18875）
+# 来源：gateway/gateway-2026-11-15.log 与 stats.json；日志本身不含 token。
+
+## configure（MG_DESKTOP_SUBSCRIPTION_MODE=auto）
+{"codexHome":"...","guiHome":"...","gatewayHome":"...","port":18875,
+ "parentModel":"gpt-6-luna","childModel":"deepseek-v4.1-flash",
+ "alias":"mg-opencodego-deepseek-v4-1-flash",
+ "subscriptionMode":"local","subscriptionReason":"auto_local_login",
+ "subscriptionLocalAuthAvailable":true,"subscriptionLocalAuthReason":"local_codex_chatgpt"}
+# providers.chatgpt-plan = baseUrl https://chatgpt.com + gatewaySubscription.enabled=true
+
+## GUI 内官方 gpt-6-luna（产品默认 launch，无 workaround）
+[2026-11-15T06:19:20.467Z] [info]  gateway_subscription configured provider=chatgpt-plan scope=loopback+official credential=local_codex_auth
+[2026-11-15T06:19:58.079Z] [info]  gateway_subscription provider=chatgpt-plan target=chatgpt.com/backend-api/codex/responses credential=local_codex_auth
+[2026-11-15T06:19:58.080Z] [info]  官方目标丢弃头（仅名称） authorization,host,content-length
+[2026-11-15T06:19:58.081Z] [info]  send authz generation=config-declared (unscoped) provider=chatgpt-plan domain=official
+# 无 chatgpt_plan_target_denied（grep 0 次）
+# stats: requests=2, byModel.gpt-6-luna（订阅入口本地不计 token，请求次数已计）
+
+## GUI 回复（截图 06-luna-fixed-ok.png）
+Reply with exactly MG_GUI_LUNA_FIXED_OK
+ChatGPT 说：
+MG_GUI_LUNA_FIXED_OK          # 14:20，模型标签 6 Luna
