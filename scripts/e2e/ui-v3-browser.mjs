@@ -25,6 +25,7 @@ const arg = (name, dflt) => { const i = argv.indexOf('--' + name); return i > -1
 const CDP_PORT = Number(arg('cdp', process.env.A5_CDP_PORT || '9222'))
 const CDP = 'http://127.0.0.1:' + CDP_PORT
 const OUT_DIR = resolve(root, arg('out', 'docs/evidence/screenshots'))
+const SUFFIX = arg('suffix', '') // 例：--suffix -integrated（不覆盖基线截图）
 const NO_LAUNCH = argv.includes('--no-launch')
 const TOKEN = 'a5-browser-fixture-token'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -241,12 +242,27 @@ async function main () {
       + ' if (!toggle) return { found: false };'
       + ' const details = toggle.closest("details");'
       + ' const expanded = toggle.getAttribute("aria-expanded");'
-      + ' const collapsed = details ? details.open === false : expanded === "false";'
-      + ' const links = [...document.body.querySelectorAll("[data-route]")].filter((el) => /providers|models|clients|observability/.test(el.getAttribute("data-route") || ""));'
-      + ' const hiddenLinks = links.filter((el) => { const r = el.getBoundingClientRect(); return r.width === 0 || r.height === 0 }).length;'
-      + ' return { found: true, collapsed, expanded, details: !!details, advancedLinks: links.length, hiddenLinks };'
+      + ' const closed = details ? details.open === false : expanded === "false";'
+      + ' const links = [...document.body.querySelectorAll("[data-route]")].filter((el) => /providers|models|clients|aggregation|observability/.test(el.getAttribute("data-route") || ""));'
+      + ' const pixelVisible = links.filter((el) => {'
+      + '   const r = el.getBoundingClientRect(); if (r.width === 0 || r.height === 0) return false;'
+      + '   if (typeof el.checkVisibility === "function" && !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;'
+      + '   const x = Math.min(r.right - 2, r.left + r.width / 2); const y = r.top + r.height / 2;'
+      + '   if (y < 0 || y > innerHeight || x < 0 || x > innerWidth) return true;'
+      + '   const hit = document.elementFromPoint(x, y);'
+      + '   return !!(hit && (el === hit || el.contains(hit) || hit.closest("[data-route]") === el));'
+      + ' }).map((el) => el.dataset.route);'
+      + ' return { found: true, closed, expanded, details: !!details, advancedLinks: links.length, pixelVisible };'
       + '})()')
-    check('UI-01-advanced-collapsed', !!(advanced && advanced.found && advanced.collapsed), '高级分组：' + JSON.stringify(advanced))
+    check('UI-01-advanced-collapsed', !!(advanced && advanced.found && advanced.closed && (advanced.pixelVisible || []).length === 0), '高级分组（需真正像素不可见）：' + JSON.stringify(advanced))
+
+    // 运行时 aria-current（静态文件不写它，必须由 app.js 在运行时表达当前页）
+    const navCurrent = await ev("(() => {"
+      + " const raw = (location.hash || '#/overview').split('?')[0];"
+      + " const route = raw.indexOf('#/') === 0 ? raw.slice(2) : (raw || 'overview');"
+      + " const current = [...document.querySelectorAll('[data-route]')].filter((el) => el.getAttribute('aria-current') === 'page').map((el) => el.dataset.route);"
+      + " return { current, route }; })()")
+    check('UI-01-nav-current', !!(navCurrent && Array.isArray(navCurrent.current) && navCurrent.current.length === 1 && navCurrent.current[0] === navCurrent.route), '运行时 aria-current=' + JSON.stringify(navCurrent))
 
     // 不显示伪成功：无 Key 时不得出现这些结论
     const fake = ['准备就绪', '聚合模式已启用', '可用（已实测推理）', '所有已配置上游均可用'].filter((w) => (pageInfo.bodyText || '').includes(w))
@@ -267,7 +283,7 @@ async function main () {
       await ev('window.scrollTo(0, 0)')
       await sleep(250)
       const shot = await cdp.send('Page.captureScreenshot', { format: 'png' })
-      const file = join(OUT_DIR, 'ui-v3-' + vp.width + 'x' + vp.height + '.png')
+      const file = join(OUT_DIR, 'ui-v3-' + vp.width + 'x' + vp.height + SUFFIX + '.png')
       writeFileSync(file, Buffer.from(shot.result.data, 'base64'))
       report.screenshots.push(file)
       const rect = await ev('(() => {'
@@ -299,7 +315,7 @@ async function main () {
   const failed = report.checks.filter((c) => !c.ok)
   console.log('SUMMARY ' + JSON.stringify({ checks: report.checks.length, passed: report.checks.length - failed.length, failed: failed.map((c) => c.id), screenshots: report.screenshots, notes: report.notes }))
   if (failed.length) {
-    console.error('FAIL_UNTIL_INTEGRATION: ' + failed.length + ' 项产品断言未通过（A1/A4 未集成时属预期，见上）；未伪造通过。')
+    console.error('FAIL: ' + failed.length + ' 项产品断言未通过（可能是 A1/A3/A4 收尾未完成，也可能是真实回归）；未伪造通过。')
     process.exit(1)
   }
   process.exit(0)
