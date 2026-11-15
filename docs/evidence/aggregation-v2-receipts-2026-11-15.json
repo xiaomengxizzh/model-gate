@@ -19,7 +19,7 @@
       }
     },
     "note": "gateway subscription entry; auth.json mtime 2026-11-07 unchanged during run；冻结树复核 1a527c6（见 aggregation-v2-freeze-rerun-2026-11-15.md）；最终冻结树 51e78e0（发布门禁以 release:freeze 为准）",
-    "codeEquivalentFreeze": "51e78e0da66846de0b28d2904dc5216685fc5732"
+    "codeEquivalentFreeze": "12cf5d97a60f151af59c731e26b71245a50e5169"
   },
   "MG-R003": {
     "status": "PASS_REAL",
@@ -45,7 +45,7 @@
       }
     },
     "note": "HTTP 200, model echo, billing_source=go；冻结树复核 1a527c6（见 aggregation-v2-freeze-rerun-2026-11-15.md）；最终冻结树 51e78e0（发布门禁以 release:freeze 为准）",
-    "codeEquivalentFreeze": "51e78e0da66846de0b28d2904dc5216685fc5732"
+    "codeEquivalentFreeze": "12cf5d97a60f151af59c731e26b71245a50e5169"
   },
   "MG-R005": {
     "status": "PASS_REAL",
@@ -67,7 +67,7 @@
       }
     },
     "note": "parent gpt-6-luna -> child mg-opencodego-deepseek-v4-1-flash; two rollouts；冻结树复核 1a527c6（见 aggregation-v2-freeze-rerun-2026-11-15.md）；最终冻结树 51e78e0（发布门禁以 release:freeze 为准）",
-    "codeEquivalentFreeze": "51e78e0da66846de0b28d2904dc5216685fc5732"
+    "codeEquivalentFreeze": "12cf5d97a60f151af59c731e26b71245a50e5169"
   },
   "MG-R012": {
     "status": "PASS_REAL",
@@ -89,7 +89,7 @@
       }
     },
     "note": "all GPT calls were gpt-6-luna；冻结树复核 1a527c6（见 aggregation-v2-freeze-rerun-2026-11-15.md）；最终冻结树 51e78e0（发布门禁以 release:freeze 为准）",
-    "codeEquivalentFreeze": "51e78e0da66846de0b28d2904dc5216685fc5732"
+    "codeEquivalentFreeze": "12cf5d97a60f151af59c731e26b71245a50e5169"
   },
   "MG-R006": {
     "status": "PASS_REAL",
@@ -135,7 +135,7 @@
       }
     },
     "note": "冻结树复跑：native-tool/same-child-followup/interrupt/no-duplicates 成立；native-compaction/post-compact-followup/context-proof 冻结树未重新触发（沿用 3116459），resume 在冻结树新建子代理（未复用同一 childId）→ 4 条标 partial，需所有者豁免或重新触发",
-    "codeEquivalentFreeze": "51e78e0da66846de0b28d2904dc5216685fc5732",
+    "codeEquivalentFreeze": "12cf5d97a60f151af59c731e26b71245a50e5169",
     "partialCases": [
       "native-compaction",
       "post-compact-followup",
@@ -163,7 +163,7 @@
       }
     },
     "note": "原版桌面选择器双方可见；官方 gpt-6-luna 与 Go 模型各一次真实请求；历史 403 已修复（0c867fd）；冻结树复核 1a527c6（A3 冻结树证据）；最终冻结树 51e78e0（发布门禁以 release:freeze 为准）",
-    "codeEquivalentFreeze": "51e78e0da66846de0b28d2904dc5216685fc5732"
+    "codeEquivalentFreeze": "12cf5d97a60f151af59c731e26b71245a50e5169"
   },
   "MG-R001": {
     "status": "PASS_REAL",
@@ -189,7 +189,7 @@
       }
     },
     "note": "隔离实例；配置 sha 激活 7a87fc24… / 退出恢复 960e62f6…（cmp 一致）；零推理请求；冻结树复核 1a527c6（A3 冻结树证据）；最终冻结树 51e78e0（发布门禁以 release:freeze 为准）",
-    "codeEquivalentFreeze": "51e78e0da66846de0b28d2904dc5216685fc5732"
+    "codeEquivalentFreeze": "12cf5d97a60f151af59c731e26b71245a50e5169"
   },
   "MG-R007": {
     "status": "PASS_REAL",
@@ -211,7 +211,7 @@
       }
     },
     "note": "空白：零手工 TOML；已有：仅 owned 行变化、退出逐字节恢复；409 保留用户改动；冻结树复核 1a527c6（A3 冻结树证据）；最终冻结树 51e78e0（发布门禁以 release:freeze 为准）",
-    "codeEquivalentFreeze": "51e78e0da66846de0b28d2904dc5216685fc5732"
+    "codeEquivalentFreeze": "12cf5d97a60f151af59c731e26b71245a50e5169"
   },
   "MG-R008": {
     "status": "PASS_REAL",
@@ -245,7 +245,7 @@
       }
     },
     "note": "未知模型 404 零上游；失效 Go key 真实 401 typed；429 跨域两对照均阻断（修复后）；工具/压缩不静默丢弃由离线套件与真实回执共同覆盖；冻结树复核 1a527c6（见 aggregation-v2-freeze-rerun-2026-11-15.md）；最终冻结树 51e78e0（发布门禁以 release:freeze 为准）",
-    "codeEquivalentFreeze": "51e78e0da66846de0b28d2904dc5216685fc5732"
+    "codeEquivalentFreeze": "12cf5d97a60f151af59c731e26b71245a50e5169"
   },
   "MG-R009": {
     "status": "PASS_REAL",
@@ -271,7 +271,7 @@
       }
     },
     "note": "A 凭据打 B：7/7 401；控制组 B 自身 200；配置/统计/日志互不串；单实例多租户为已知 GAP（不计入本项）；冻结树复核 1a527c6（见 aggregation-v2-freeze-rerun-2026-11-15.md）；最终冻结树 51e78e0（发布门禁以 release:freeze 为准）",
-    "codeEquivalentFreeze": "51e78e0da66846de0b28d2904dc5216685fc5732",
+    "codeEquivalentFreeze": "12cf5d97a60f151af59c731e26b71245a50e5169",
     "conditionalOn": "owner-approval:two-instance-installation-isolation"
   },
   "MG-R010": {
@@ -298,12 +298,12 @@
       }
     },
     "note": "10 个时点 SIGKILL 配置从未半写；回滚逐字节一致；写后网关不可达自动回滚；409 保留用户改动；冻结树复核 1a527c6（见 aggregation-v2-freeze-rerun-2026-11-15.md）；最终冻结树 51e78e0（发布门禁以 release:freeze 为准）",
-    "codeEquivalentFreeze": "51e78e0da66846de0b28d2904dc5216685fc5732"
+    "codeEquivalentFreeze": "12cf5d97a60f151af59c731e26b71245a50e5169"
   },
   "MG-R011": {
     "status": "PASS_REAL",
     "commitSha": "51e78e0da66846de0b28d2904dc5216685fc5732",
-    "codeEquivalentFreeze": "51e78e0da66846de0b28d2904dc5216685fc5732",
+    "codeEquivalentFreeze": "12cf5d97a60f151af59c731e26b71245a50e5169",
     "command": "npm run release:freeze（回执与矩阵/裁决一致性）",
     "receipt": {
       "traceId": "r011-freeze-consistency-2026-11-15"
