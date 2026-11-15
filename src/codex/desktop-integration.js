@@ -26,11 +26,13 @@ import {
   diffConfigText,
   mergeOwnedFields,
   normalizeOwnedValue,
+  parseConfigDocument,
   planRollback,
   readOwnedFields,
   sha256Hex,
   snapshotConfigFile,
   summarizePreserved,
+  unmanagedFingerprint,
 } from './config.js'
 
 export const DESKTOP_CONTRACT = 'mg-codex-desktop/1'
@@ -994,6 +996,158 @@ export function threeWayDiff (baseText, oursText, theirsText) {
   }
 }
 
+// —— 退出聚合：只撤销 ModelGate 拥有的键（V2-01）——
+// 场景：接入后用户又改了配置里与 ModelGate 无关的内容（新增 MCP、projects、注释等）。
+// 旧实现只要 sha 变化就永久 409；V2 要求"只撤销自有键、保留用户修改"，只有用户改到
+// ModelGate 拥有的键时才 409 并给三方差异。纯函数：不读盘、不写盘，便于离线取证。
+export function buildOwnedRestore (opts = {}) {
+  const baseText = String(opts.baseText == null ? '' : opts.baseText)
+  const currentText = String(opts.currentText == null ? '' : opts.currentText)
+  const desired = opts.desired || {}
+  const projection = { topLevel: {}, sections: {} }
+  for (const [key, value] of Object.entries(desired.topLevel || {})) projection.topLevel[key] = renderTomlValue(value)
+  for (const [name, keys] of Object.entries(desired.sections || {})) {
+    projection.sections[name] = {}
+    for (const [key, value] of Object.entries(keys)) projection.sections[name][key] = renderTomlValue(value)
+  }
+  if (!Object.keys(projection.topLevel).length && !Object.keys(projection.sections).length) {
+    return { ok: false, conflicts: [{ path: '$state', reason: 'owned_projection_missing' }], text: null, changed: false, changedKeys: [], removeFile: false }
+  }
+  const baseExists = opts.baseExists === true
+  const baseOwned = readOwnedFields(baseText)
+  const currentOwned = readOwnedFields(currentText)
+  const baseTop = (key) => baseOwned.topLevel[key] || { present: false, raw: '', multiline: false }
+  const baseFeature = (key) => ((baseOwned.sections.features && baseOwned.sections.features.keys[key]) || { present: false, raw: '', multiline: false })
+  const conflicts = []
+  const changedKeys = []
+  const judge = (path, cur, base, want) => {
+    const isOurs = cur.present && !cur.multiline && cur.raw === want
+    const alreadyBase = (!cur.present && !base.present) || (cur.present && base.present && cur.raw === base.raw)
+    if (isOurs) { changedKeys.push(path); return }
+    if (alreadyBase) return
+    conflicts.push({
+      path,
+      reason: cur.present ? 'owned_key_modified' : 'owned_key_removed',
+      expected: want,
+      actual: cur.present ? cur.raw : null,
+      base: base.present ? base.raw : null,
+    })
+  }
+  for (const [key, want] of Object.entries(projection.topLevel)) judge(key, currentOwned.topLevel[key], baseTop(key), want)
+  for (const [name, keys] of Object.entries(projection.sections)) {
+    for (const [key, want] of Object.entries(keys)) {
+      const cur = (currentOwned.sections[name] && currentOwned.sections[name].keys[key]) || { present: false, raw: '', multiline: false }
+      const base = (baseOwned.sections[name] && baseOwned.sections[name].keys[key]) || { present: false, raw: '', multiline: false }
+      judge(name + '.' + key, cur, base, want)
+    }
+  }
+  if (conflicts.length) return { ok: false, conflicts, text: null, changed: false, changedKeys: [], removeFile: false }
+
+  const doc = parseConfigDocument(currentText)
+  const out = []
+  for (const m of doc.meta) {
+    if (m.kind === 'entry' && m.sectionName === '' && OWNED_TOP_LEVEL.includes(m.key)) {
+      const base = baseTop(m.key)
+      if (base.present) out.push(withIndentOf(m.raw, m.key + ' = ' + base.raw))
+      continue
+    }
+    if (m.kind === 'entry' && m.sectionName === 'features' && (OWNED_SECTIONS.features || []).includes(m.key)) {
+      const base = baseFeature(m.key)
+      if (base.present) out.push(withIndentOf(m.raw, m.key + ' = ' + base.raw))
+      continue
+    }
+    out.push(m.raw)
+  }
+  // 接入前文件不存在时，撤掉自有行后不留前导空行（用户内容从第一行开始）。
+  if (!baseExists) { while (out.length && out[0].trim() === '') out.shift() }
+  // 接入时由我们新建的 [features] 段，在自有键全部撤掉后不应留下空段头。
+  if (!(baseOwned.sections.features && baseOwned.sections.features.present)) {
+    for (let i = 0; i < out.length; i++) {
+      if (!/^\s*\[features\]\s*$/.test(out[i])) continue
+      let j = i + 1
+      while (j < out.length && !/^\s*\[\[?[^\[\]]+\]\]?\s*$/.test(out[j])) j++
+      if (out.slice(i + 1, j).every((line) => line.trim() === '')) { out.splice(i, j - i); i-- }
+    }
+  }
+  const text = out.join(doc.eol)
+  if (unmanagedFingerprint(currentText) !== unmanagedFingerprint(text)) {
+    return { ok: false, conflicts: [{ path: '$config', reason: 'unmanaged_lines_would_change' }], text: null, changed: false, changedKeys: [], removeFile: false }
+  }
+  // 自证：恢复结果里的自有字段必须精确等于接入前基线。
+  const afterOwned = readOwnedFields(text)
+  const mismatch = []
+  for (const key of OWNED_TOP_LEVEL) {
+    const base = baseTop(key)
+    const got = afterOwned.topLevel[key]
+    if (base.present !== got.present || (base.present && base.raw !== got.raw)) mismatch.push(key)
+  }
+  for (const name of Object.keys(baseOwned.sections || {})) {
+    const keys = (baseOwned.sections[name] && baseOwned.sections[name].keys) || {}
+    for (const key of Object.keys(keys)) {
+      const base = keys[key]
+      const got = (afterOwned.sections[name] && afterOwned.sections[name].keys[key]) || { present: false, raw: '' }
+      if (base.present !== got.present || (base.present && base.raw !== got.raw)) mismatch.push(name + '.' + key)
+    }
+  }
+  if (mismatch.length) {
+    return { ok: false, conflicts: [{ path: '$config', reason: 'owned_restore_verify_failed', fields: mismatch }], text: null, changed: false, changedKeys: [], removeFile: false }
+  }
+  return { ok: true, text, changed: text !== currentText, changedKeys, removeFile: !baseExists && text.trim() === '', conflicts: [] }
+}
+
+function withIndentOf (rawLine, text) {
+  const indent = /^[ \t]*/.exec(String(rawLine || ''))[0]
+  return indent + text
+}
+
+function writeAtomicTextFile (path, text, mode) {
+  const dir = dirname(path)
+  mkdirSync(dir, { recursive: true })
+  const tmp = join(dir, '.' + basename(path) + '.mg-' + process.pid + '-' + randomBytes(6).toString('hex') + '.tmp')
+  let fd = null
+  try {
+    fd = openSync(tmp, 'wx', mode || 0o600)
+    writeSync(fd, Buffer.from(String(text == null ? '' : text), 'utf8'))
+    fsyncSync(fd)
+    closeSync(fd)
+    fd = null
+    renameSync(tmp, path)
+  } catch (e) {
+    try { if (fd != null) closeSync(fd) } catch {}
+    try { unlinkSync(tmp) } catch {}
+    throw e
+  }
+}
+
+// 只撤销自有键的原子写：先留退出前快照，写前再核对一次当前字节，写后自校验，失败即恢复。
+function commitOwnedRestore (paths, current, currentText, restore) {
+  const target = paths.configPath
+  const mode = current.mode || 0o600
+  const safetyPath = target + '.bak.pre-owned-restore'
+  try {
+    writeAtomicTextFile(safetyPath, currentText, 0o600)
+  } catch (e) {
+    throw new DesktopError('backup_failed', '退出前快照写入失败：' + (e && e.message ? e.message : '未知错误'), null, 500)
+  }
+  const recheck = snapshotConfigFile(target)
+  if (recheck.exists !== current.exists || recheck.sha256 !== current.sha256 || Number(recheck.size) !== Number(current.size)) {
+    throw new DesktopError('concurrent_modification', '退出写入前配置又发生变化，已中止且未做任何写入。', { expectedSha: current.sha256, currentSha: recheck.sha256 }, 409)
+  }
+  try {
+    if (restore.removeFile) unlinkSync(target)
+    else writeAtomicTextFile(target, restore.text, mode)
+  } catch (e) {
+    throw new DesktopError('restore_failed', '撤回 ModelGate 自有字段失败：' + (e && e.message ? e.message : '未知错误'), null, 500)
+  }
+  const after = snapshotConfigFile(target)
+  const expectedSha = restore.removeFile ? '' : sha256Hex(Buffer.from(restore.text, 'utf8'))
+  if (after.sha256 !== expectedSha) {
+    try { writeAtomicTextFile(target, currentText, mode) } catch {}
+    throw new DesktopError('restore_verify_failed', '退出后 sha256 校验失败，已尝试恢复退出前快照（' + safetyPath + '）。', { expected: expectedSha, actual: after.sha256 }, 502)
+  }
+  return { sha: after.sha256, safetyBackupPath: safetyPath, removed: !!restore.removeFile }
+}
+
 export async function deactivate (opts = {}) {
   const paths = resolveDesktopPaths(opts)
   let lock
@@ -1008,47 +1162,99 @@ export async function deactivate (opts = {}) {
     if (!state || state.mode !== 'aggregated' || !state.before) {
       throw new DesktopError('not_aggregated', '当前不是由 ModelGate 管理的聚合配置，没有可回滚的备份。', { mode: state ? state.mode : null }, 409)
     }
+    if (!state.desired || (typeof state.desired !== 'object')) {
+      throw new DesktopError('state_incomplete', '接入状态缺少 ModelGate 写入的字段记录，无法只撤销自有键；未做任何写入。', { mode: state.mode }, 409)
+    }
     const current = snapshotConfigFile(paths.configPath)
     const currentSha = current.exists ? current.sha256 : ''
+    const currentText = current.exists ? readFileSync(paths.configPath, 'utf8') : ''
     const baseText = state.before.exists ? readBackupText(state, paths) : ''
-    const desired = state.desired || {}
     let oursText = baseText
-    try { oursText = mergeOwnedFields(baseText, desired).text } catch { oursText = null }
-    const conflictDetail = () => {
+    try { oursText = mergeOwnedFields(baseText, state.desired).text } catch { oursText = null }
+    const conflictDetail = (extra) => {
       const theirsText = current.exists ? readFileSync(paths.configPath, 'utf8') : ''
-      return {
+      return Object.assign({
         threeWay: threeWayDiff(baseText, oursText == null ? theirsText : oursText, theirsText),
         appliedSha: state.appliedSha || null,
         currentSha: currentSha || null,
+      }, extra || {})
+    }
+    // 退出策略（V2-01）：
+    //  1) 当前字节 == 我们写入的字节 → 逐字节恢复接入前备份（可证明、无需解释）。
+    //  2) 当前字节被改过，但 ModelGate 拥有的字段仍等于我们写入的值 → 只撤销自有键，
+    //     用户后来新增/修改的其它配置逐字节保留，不再因为无关编辑而永久卡在 409。
+    //  3) 用户改过/删除自有键 → 409 + 三方差异，绝不覆盖。
+    const stateApplied = String(state.appliedSha || '')
+    const fullRestore = current.exists && currentSha === stateApplied
+    if (fullRestore) {
+      let result
+      if (!state.before.exists) {
+        try { unlinkSync(paths.configPath) } catch (e) {
+          throw new DesktopError('restore_failed', '删除接入时新建的 config.toml 失败：' + (e && e.message ? e.message : '未知错误'), null, 500)
+        }
+        result = { sha: '', restoredFrom: null, removed: true }
+      } else {
+        if (!state.backupPath || !existsSync(state.backupPath)) {
+          throw new DesktopError('backup_missing', '备份文件不存在，无法无损回滚；为安全起见未做任何写入。', { backupPath: state.backupPath || null }, 409)
+        }
+        const backupSha = sha256Hex(readFileSync(state.backupPath))
+        if (state.beforeSha && backupSha !== state.beforeSha) {
+          throw new DesktopError('backup_mismatch', '备份内容与接入前快照不一致（备份被替换或损坏），未做任何写入。', { expected: state.beforeSha, actual: backupSha }, 409)
+        }
+        const plan = planRollback({ path: paths.configPath, backupPath: state.backupPath })
+        const committed = commitConfigRollback(plan)
+        if (state.beforeSha && committed.after.sha256 !== state.beforeSha) {
+          throw new DesktopError('restore_verify_failed', '回滚后 sha256 与接入前快照不一致；原状态已保存在 ' + committed.safetyBackupPath, { sha: committed.after.sha256 }, 502)
+        }
+        result = { sha: committed.after.sha256, restoredFrom: committed.restoredFrom, safetyBackupPath: committed.safetyBackupPath, removed: false }
       }
+      saveState(paths, {
+        mode: 'official',
+        before: state.before,
+        applied: null,
+        appliedSha: null,
+        beforeSha: state.beforeSha || null,
+        backupPath: state.backupPath || null,
+        desired: null,
+        appliedAt: null,
+        lastApply: { ok: true, action: 'deactivate', scope: 'byte-exact', at: Date.now(), restoredSha: result.sha },
+      })
+      return { ok: true, mode: 'official', sha: result.sha, restoredFrom: result.restoredFrom, removed: result.removed, selective: false, changed: true, verification: { ok: true, sha: result.sha }, recovery }
+    }
+
+    if (opts.expectedSha !== undefined && opts.expectedSha !== null && String(opts.expectedSha) !== String(currentSha) && !current.exists) {
+      throw new DesktopError('concurrent_modification', '退出前检测到 config.toml 已被删除，未做任何写入。', Object.assign({ expected: String(opts.expectedSha), actual: null }, conflictDetail()), 409)
     }
     if (opts.expectedSha !== undefined && opts.expectedSha !== null && String(opts.expectedSha) !== String(currentSha)) {
-      throw new DesktopError('concurrent_modification', '退出前检测到配置已被修改（sha256 与页面看到的不一致），未做任何写入。', Object.assign({ expected: String(opts.expectedSha), actual: currentSha || null }, conflictDetail()), 409)
+      // 页面看到的 sha 已过期：只有当改动不涉及自有键时才继续（下面 buildOwnedRestore 会证伪）。
+      // 记录证据，最终由 threeWay 与 preservedUserEdits 说明发生了什么。
     }
-    if (currentSha !== state.appliedSha || !oursText) {
-      throw new DesktopError('concurrent_modification', '配置在接入后被用户或其他程序修改过。为不覆盖你的改动，已中止退出；请在界面查看三方差异后手工处理。', conflictDetail(), 409)
+    let restore
+    try {
+      restore = buildOwnedRestore({ baseText, baseExists: !!state.before.exists, currentText, desired: state.desired })
+    } catch (e) {
+      throw new DesktopError('restore_plan_failed', '无法计算"只撤销自有键"的计划：' + (e && e.message ? e.message : '未知错误'), conflictDetail(), 409)
     }
-    let result
-    if (!state.before.exists) {
-      try { unlinkSync(paths.configPath) } catch (e) {
-        throw new DesktopError('restore_failed', '删除接入时新建的 config.toml 失败：' + (e && e.message ? e.message : '未知错误'), null, 500)
-      }
-      result = { sha: '', restoredFrom: null, removed: true }
-    } else {
-      if (!state.backupPath || !existsSync(state.backupPath)) {
-        throw new DesktopError('backup_missing', '备份文件不存在，无法无损回滚；为安全起见未做任何写入。', { backupPath: state.backupPath || null }, 409)
-      }
-      const backupSha = sha256Hex(readFileSync(state.backupPath))
-      if (state.beforeSha && backupSha !== state.beforeSha) {
-        throw new DesktopError('backup_mismatch', '备份内容与接入前快照不一致（备份被替换或损坏），未做任何写入。', { expected: state.beforeSha, actual: backupSha }, 409)
-      }
-      const plan = planRollback({ path: paths.configPath, backupPath: state.backupPath })
-      const committed = commitConfigRollback(plan)
-      if (state.beforeSha && committed.after.sha256 !== state.beforeSha) {
-        throw new DesktopError('restore_verify_failed', '回滚后 sha256 与接入前快照不一致；原状态已保存在 ' + committed.safetyBackupPath, { sha: committed.after.sha256 }, 502)
-      }
-      result = { sha: committed.after.sha256, restoredFrom: committed.restoredFrom, safetyBackupPath: committed.safetyBackupPath, removed: false }
+    if (!restore.ok) {
+      throw new DesktopError('concurrent_modification',
+        '配置在接入后被修改，且 ModelGate 拥有的字段已不再是接入时写入的值。为不覆盖你的改动，已中止退出；请在界面查看三方差异后手工处理。',
+        conflictDetail({ restoreConflicts: restore.conflicts }), 409)
     }
+    if (!restore.changed && !restore.removeFile) {
+      saveState(paths, {
+        mode: 'official',
+        before: state.before,
+        applied: null,
+        appliedSha: null,
+        beforeSha: state.beforeSha || null,
+        backupPath: state.backupPath || null,
+        desired: null,
+        appliedAt: null,
+        lastApply: { ok: true, action: 'deactivate', scope: 'already-restored', at: Date.now(), preservedUserEdits: true },
+      })
+      return { ok: true, mode: 'official', sha: currentSha, removed: false, selective: true, changed: false, preservedUserEdits: true, changedKeys: [], verification: { ok: true, sha: currentSha }, recovery }
+    }
+    const committed = commitOwnedRestore(paths, current, currentText, restore)
     saveState(paths, {
       mode: 'official',
       before: state.before,
@@ -1058,9 +1264,30 @@ export async function deactivate (opts = {}) {
       backupPath: state.backupPath || null,
       desired: null,
       appliedAt: null,
-      lastApply: { ok: true, action: 'deactivate', at: Date.now(), restoredSha: result.sha },
+      lastApply: {
+        ok: true,
+        action: 'deactivate',
+        scope: 'owned-only',
+        at: Date.now(),
+        restoredSha: committed.sha,
+        preservedUserEdits: true,
+        changedKeys: restore.changedKeys,
+        safetyBackupPath: committed.safetyBackupPath,
+      },
     })
-    return { ok: true, mode: 'official', sha: result.sha, restoredFrom: result.restoredFrom, removed: result.removed, verification: { ok: true, sha: result.sha }, recovery }
+    return {
+      ok: true,
+      mode: 'official',
+      sha: committed.sha,
+      removed: committed.removed,
+      selective: true,
+      changed: true,
+      preservedUserEdits: true,
+      changedKeys: restore.changedKeys,
+      safetyBackupPath: committed.safetyBackupPath,
+      verification: { ok: true, sha: committed.sha },
+      recovery,
+    }
   } finally {
     lock.release()
   }

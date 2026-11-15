@@ -2,6 +2,7 @@
 // 全部在 OS 临时目录：不读真实 HOME、不碰 ~/.codex、不联网、不执行 Desktop。
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, unlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -92,12 +93,37 @@ test('退出聚合：接入时新建的配置会被删除（恢复到“文件�
   assert.equal(status({ configPath: f.configPath }).mode, 'official')
 })
 
-test('退出聚合：外部修改 → 409 + 三方差异，绝不覆盖', async (t) => {
+test('退出聚合：无关的外部修改 → 只撤销自有键并逐字节保留用户改动（V2-01）', async (t) => {
   const f = await fixture(USER_CONFIG)
   t.after(f.cleanup)
   const activated = await activateFully(f)
   const edited = (await readFile(f.configPath, 'utf8')) +
     '\n[model_providers.leak]\nname = "x"\napi_key = "super-secret-value"\n'
+  await writeFile(f.configPath, edited)
+
+  const result = await deactivate({ configPath: f.configPath, expectedSha: activated.sha })
+  assert.equal(result.ok, true)
+  assert.equal(result.mode, 'official')
+  assert.equal(result.selective, true)
+  assert.equal(result.preservedUserEdits, true)
+  assert.ok(result.changedKeys.includes('model'))
+  assert.ok(result.changedKeys.includes('model_catalog_json'))
+  assert.ok(result.safetyBackupPath && existsSync(result.safetyBackupPath), '必须留下退出前安全快照')
+
+  const text = await readFile(f.configPath, 'utf8')
+  assert.match(text, /\[model_providers\.leak\]/, '用户新增的段必须保留')
+  assert.match(text, /api_key = "super-secret-value"/, '无关用户改动必须逐字节保留')
+  assert.match(text, /^model = "gpt-5"$/m, '自有字段恢复为接入前基线')
+  assert.equal(/model_catalog_json/.test(text), false, '接入时新增的自有字段必须撤掉')
+  assert.equal(/\[features\]/.test(text), false, '接入时新建且已空的 [features] 段头必须撤掉')
+  assert.equal(status({ configPath: f.configPath }).mode, 'official')
+})
+
+test('退出聚合：用户改动自有字段 → 409 + 三方差异，绝不覆盖', async (t) => {
+  const f = await fixture(USER_CONFIG)
+  t.after(f.cleanup)
+  const activated = await activateFully(f)
+  const edited = (await readFile(f.configPath, 'utf8')).replace(/^model = .*$/m, 'model = "gpt-4o"')
   await writeFile(f.configPath, edited)
 
   let conflict = null
@@ -112,8 +138,7 @@ test('退出聚合：外部修改 → 409 + 三方差异，绝不覆盖', async 
   assert.match(tw.base.sha256, /^[a-f0-9]{64}$/)
   assert.match(tw.theirs.sha256, /^[a-f0-9]{64}$/)
   assert.ok(tw.oursVsTheirs.some((r) => r.kind !== 'same'), '必须给出行级差异')
-  assert.equal(JSON.stringify(tw).includes('super-secret-value'), false, '差异不得回显敏感值')
-  assert.ok(tw.oursVsTheirs.some((r) => r.redacted === true), '敏感行必须标记 redacted')
+  assert.ok(Array.isArray(conflict.detail.restoreConflicts) && conflict.detail.restoreConflicts.some((c) => c.path === 'model'), '必须指出被改动的自有字段')
   assert.equal(await readFile(f.configPath, 'utf8'), edited, '冲突时不得写入')
   assert.equal(status({ configPath: f.configPath }).mode, 'aggregated', '状态保持聚合，等待人工处理')
 })
