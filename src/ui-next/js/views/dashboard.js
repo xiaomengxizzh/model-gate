@@ -1,11 +1,15 @@
-// Dashboard: real /api/status data only. No simulated metrics.
+// 首页（UX-01）：状态驱动的"下一步"，不渲染开发者仪表盘。
+//
+// 数据只来自 ProductStatus 投影（docs/contracts/ui-v3-product-status.md §2/§5）：
+//   * 正常集成由 A3 的 store.productStatus() 提供；也可由 ctx.product() 注入（测试/组合用）。
+//   * 拿不到投影时降级为"正在读取真实状态"，绝不把未知画成已连接/已启用/0 个模型。
+//   * 累计请求、错误、Token、P95、趋势、会话与上游分布已迁移到「监控与诊断」，本页只留一行入口。
 import { h } from '../dom.js'
-import { state, deriveWarnings } from '../store.js'
-import { fmtInt, fmtCompact, fmtMs, fmtPct, fmtAgo, fmtDuration, fmtTime, safeOrigin } from '../format.js'
-import { pageHead, card, metric, tag, statusTag, callout, empty, table, lineChart, barChart, kvList } from '../components.js'
+import * as store from '../store.js'
+import { pageHead, card, callout, tag } from '../components.js'
 
-// 未知计数绝不渲染为 0/null%：缺字段时给出显式“未知”。
-export function errorRateText(g) {
+// 旧套件（ui-state.test.mjs）依赖的错误率纯函数，保持原语义。
+export function errorRateText (g) {
   const requests = g ? Number(g.requests) : NaN
   if (!Number.isFinite(requests) || requests <= 0) return '未知（无请求计数）'
   const errors = Number(g.errors)
@@ -13,105 +17,306 @@ export function errorRateText(g) {
   return '错误率 ' + (errors / requests * 100).toFixed(1) + '%'
 }
 
-function healthSummary(s) {
-  const providers = Array.isArray(s.providers) ? s.providers : []
-  const open = providers.filter((p) => p.st && p.st.state === 'open').length
-  const degraded = providers.filter((p) => p.st && (p.st.state === 'half' || p.st.state === 'degraded')).length
-  const noKey = providers.filter((p) => !p.hasKey).length
-  if (!providers.length) return { label: '尚未配置上游', kind: 'warn', detail: '添加 Provider 后开始路由' }
-  if (open) return { label: '部分上游熔断', kind: 'bad', detail: open + ' 个上游被跳过，其余继续服务' }
-  if (degraded) return { label: '部分上游降级', kind: 'warn', detail: degraded + ' 个上游处于半开/降级' }
-  if (noKey) return { label: '凭据未就绪', kind: 'warn', detail: noKey + ' 个上游缺少 Key' }
-  return { label: '运行正常', kind: 'good', detail: '所有已配置上游均可用' }
+// 面向用户只出现"DeepSeek V4.1 Flash"，不要求理解公共/上游模型 ID（见 Lead 更正 1）。
+export const GO_MODEL_DISPLAY = 'DeepSeek V4.1 Flash'
+
+// 证据等级中文映射（契约 §2）：检测到 ≠ 已配置 ≠ 已实测；只有 runtime-verified 才是绿色。
+export const EVIDENCE_TAG_LABELS = Object.freeze({
+  detected: '已检测',
+  configured: '已配置',
+  'runtime-verified': '已实测',
+  'not-tested': '未实测',
+  unknown: '未知',
+})
+
+export const HOME_TECH_METRICS_ROUTE = '#/observability'
+
+const OVERALL_TAGS = Object.freeze({
+  ready: ['可正常使用', 'good'],
+  action: ['需要操作', 'warn'],
+  error: ['需要处理', 'bad'],
+  unknown: ['状态未知', 'muted'],
+  locked: ['已锁定', 'muted'],
+  loading: ['读取中', 'muted'],
+})
+
+function evidenceTag (level) {
+  const text = EVIDENCE_TAG_LABELS[String(level || '')] || EVIDENCE_TAG_LABELS.unknown
+  const kind = level === 'runtime-verified'
+    ? 'good'
+    : level === 'configured'
+      ? 'accent'
+      : level === 'detected'
+        ? 'info'
+        : 'muted'
+  return tag(text, kind)
 }
 
-export function render(root) {
-  const s = state.status || {}
-  const g = s.global || {}
-  const providers = Array.isArray(s.providers) ? s.providers : []
-  const models = Array.isArray(s.models) ? s.models : []
-  const virtualModels = Array.isArray(s.virtualModels) ? s.virtualModels : []
-  const health = healthSummary(s)
-  const warnings = deriveWarnings()
+function stateKind (key, item) {
+  const state = item && item.state
+  if (key === 'official') {
+    if (state === 'detected') return 'info'
+    if (state === 'blocked') return 'warn'
+    return 'muted'
+  }
+  if (key === 'go') {
+    if (state === 'verified') return 'good'
+    if (state === 'configured') return 'info'
+    if (state === 'error') return 'bad'
+    if (item && item.credentialPresent) return 'info'
+    return 'muted'
+  }
+  if (key === 'codex') {
+    if (!item || item.found !== true) return 'muted'
+    if (item.restartNeeded === true) return 'warn'
+    return 'info'
+  }
+  return 'muted'
+}
 
-  if (!state.config) {
-    root.append(callout('warn', h('strong', { text: '配置投影未知：' }), '尚未读取 /api/config；本页不会把缺失的额度、路由或目录显示为 0/正常。'))
+function officialDetail (official) {
+  if (official && typeof official.detail === 'string' && official.detail) return official.detail
+  return '没有取得登录探测结果；请刷新后重试。'
+}
+
+// Go 文案不复用 product.go.detail 中的"不显示为已验证/0 个模型"等否定句，避免歧义。
+function goDetail (go) {
+  const item = go || {}
+  const supported = item.supported !== false
+  if (item.state === 'verified') {
+    return '已完成一次命中 ' + GO_MODEL_DISPLAY + ' 的真实请求，可用于原版 Codex。'
+  }
+  if (item.state === 'error') {
+    return '已保存 Go 供应商，但最近一次同步失败。请更新 Key 或重试同步；失败不会当作成功。'
+  }
+  if (item.level === 'configured') {
+    return item.targetModelConfigured
+      ? 'Key 与目标模型 ' + GO_MODEL_DISPLAY + ' 均已保存；还没有真实推理证据。'
+      : 'Key 已保存；目标模型 ' + GO_MODEL_DISPLAY + ' 还没有配置到目录中，请继续完成接入。'
+  }
+  if (item.state === 'unknown' || !supported) {
+    return '当前实例没有聚合管理接口（404），无法判断 Go 连接状态；请确认 ModelGate 版本。'
+  }
+  if (item.label === '状态未知') {
+    return '聚合管理接口拒绝了本次读取（权限/来源），无法确认 Go 连接状态。'
+  }
+  if (!item.credentialPresent) {
+    return '还没有接入 OpenCode Go；填入 API Key 即可自动配置 ' + GO_MODEL_DISPLAY + '。'
+  }
+  if (item.targetModelConfigured) {
+    return '还没有取得 Go 的真实推理证据；请刷新或查看高级诊断。'
+  }
+  return '还没有配置 ' + GO_MODEL_DISPLAY + '；请继续完成接入。'
+}
+
+function codexDetail (codex) {
+  const item = codex || {}
+  if (!item.found) {
+    return item.detail || '没有检测到原版 Codex Desktop；请确认安装路径，或到高级诊断查看探测结果。'
+  }
+  if (item.restartNeeded === true) {
+    return '配置已保存，但客户端仍在用写入前启动的配置。请完全退出 Codex Desktop（不是只关窗口）再重新打开。'
+  }
+  if (item.restartNeeded === false) {
+    return '检测到客户端在写入后启动过，新配置已加载；请在模型选择器里核对官方模型与 ' + GO_MODEL_DISPLAY + '。'
+  }
+  return '检测到原版 Codex；没有取得重启判定，请按需完全退出并重新打开。'
+}
+
+function aggregationDetail (agg) {
+  const item = agg || {}
+  if (item.supported === false) {
+    return '当前实例没有聚合管理接口（404）；这是版本不兼容，不是聚合开关的问题。请确认 ModelGate 版本。'
+  }
+  if (item.mode === 'aggregated') {
+    const backup = item.backupAvailable === true
+      ? '已有可恢复备份。'
+      : item.backupAvailable === false
+        ? '未发现可恢复备份。'
+        : '备份状态未知。'
+    const restart = item.needsRestart === true ? '需要重新打开 Codex 后才生效。' : ''
+    return 'Codex 配置已指向 ModelGate；官方 GPT 与 ' + GO_MODEL_DISPLAY + ' 都通过原版 Codex 使用。' + backup + restart
+  }
+  if (item.mode === 'official') {
+    return '当前是原版 Codex 官方模式，未启用聚合；可随时在此继续接入。'
+  }
+  return '没有取得可识别的聚合模式；请刷新重试或查看高级诊断。'
+}
+
+function overallTag (overall) {
+  const preset = OVERALL_TAGS[overall && overall.level] || OVERALL_TAGS.unknown
+  return tag(preset[0], preset[1])
+}
+
+// ① 总体结论：label + detail + 结论标签。
+export function buildOverall (product) {
+  if (!product) {
+    return [callout('info',
+      h('strong', { text: '正在读取真实状态。' }),
+      ' 取得只读快照前，本页不给出任何连接成功结论。')]
+  }
+  const overall = product.overall || {}
+  return [h('section', {
+    class: 'card overall-card' + (overall.level ? ' is-' + overall.level : ''),
+    'data-overall': overall.level || 'unknown',
+  },
+  h('div', { class: 'card-body' },
+    h('div', { class: 'home-overall-top' },
+      h('p', { class: 'eyebrow', text: '总体状态' }),
+      overallTag(overall)),
+    h('h2', { class: 'home-overall-title', text: overall.label || '状态未知' }),
+    h('p', { class: 'home-overall-detail', text: overall.detail || '没有取得总体结论。' })))]
+}
+
+function statusRow ({ key, title, item, detail, level }) {
+  return h('div', { class: 'list-row home-status-row', 'data-status': key },
+    h('div', { class: 'grow' },
+      h('div', { class: 'primary' }, title),
+      h('div', { class: 'secondary', text: detail })),
+    h('div', { class: 'flex home-status-tags' },
+      tag((item && item.label) || '状态未知', stateKind(key, item)),
+      evidenceTag(level || (item && item.level))))
+}
+
+// ② 三条连接状态行：ChatGPT 套餐 / OpenCode Go / Codex Desktop，每行都带证据等级。
+export function buildStatusRows (product) {
+  if (!product) return []
+  const official = product.official || {}
+  const go = product.go || {}
+  const codex = product.codex || {}
+  return [
+    statusRow({
+      key: 'official',
+      title: 'ChatGPT 套餐',
+      item: official,
+      detail: officialDetail(official),
+      level: official.level,
+    }),
+    statusRow({
+      key: 'go',
+      title: [h('span', { text: 'OpenCode Go' }), h('span', { class: 'home-model-chip', text: GO_MODEL_DISPLAY })],
+      item: go,
+      detail: goDetail(go),
+      level: go.level,
+    }),
+    statusRow({
+      key: 'codex',
+      title: 'Codex Desktop',
+      item: codex,
+      detail: codexDetail(codex),
+      level: codex.detectionLevel || codex.level,
+    }),
+  ]
+}
+
+export function buildAggregationCard (product) {
+  const agg = (product && product.aggregation) || {}
+  const modeText = agg.mode === 'aggregated' ? '已启用聚合' : agg.mode === 'official' ? '官方模式' : '状态未知'
+  const modeKind = agg.mode === 'aggregated' ? 'good' : agg.mode === 'official' ? 'info' : 'muted'
+  return card('聚合模式', '只用用户能理解的方式描述当前模式与可恢复性。',
+    h('div', { class: 'list' },
+      h('div', { class: 'list-row', 'data-status': 'aggregation' },
+        h('div', { class: 'grow' },
+          h('div', { class: 'primary', text: agg.label || '状态未知' }),
+          h('div', { class: 'secondary', text: aggregationDetail(agg) })),
+        h('div', { class: 'flex' }, tag(modeText, modeKind)))))
+}
+
+function revealAuth () {
+  const overlay = document.getElementById('auth-overlay')
+  if (!overlay) return
+  overlay.hidden = false
+  const input = document.getElementById('admin-token')
+  if (input && typeof input.focus === 'function') setTimeout(() => input.focus(), 20)
+}
+
+function refreshProduct (ctx) {
+  if (ctx && typeof ctx.refreshProduct === 'function') {
+    Promise.resolve(ctx.refreshProduct()).catch(() => {})
+    return
+  }
+  if (typeof store.refreshProduct === 'function') {
+    Promise.resolve(store.refreshProduct({ reason: 'home-primary' })).catch(() => {})
+    return
+  }
+  const button = document.getElementById('refresh')
+  if (button && typeof button.click === 'function') { button.click(); return }
+  if (typeof location !== 'undefined' && location && typeof location.reload === 'function') location.reload()
+}
+
+function runAction (action, ctx) {
+  const kind = action && action.kind
+  if (kind === 'unlock') { revealAuth(); return }
+  if (kind === 'retry' || kind === 'reload') { refreshProduct(ctx); return }
+  if (kind === 'wait') return
+  if (action && action.route) location.hash = action.route
+}
+
+// ④ 唯一主 CTA + ⑤ 不抢主操作的次级入口。
+export function buildPrimaryAction (product, ctx = {}) {
+  const p = product || {}
+  const primary = p.primary || { id: 'wait', label: '正在读取状态…', kind: 'wait', detail: '' }
+  const button = h('button', {
+    class: 'btn btn-primary',
+    type: 'button',
+    'data-primary-cta': primary.id || 'primary',
+    text: primary.label,
+  })
+  if (primary.kind === 'wait') button.disabled = true
+  button.addEventListener('click', () => runAction(primary, ctx))
+  const secondary = Array.isArray(p.secondary) ? p.secondary : []
+  const secondaryButtons = secondary.map((action) => {
+    const b = h('button', {
+      class: 'btn btn-ghost',
+      type: 'button',
+      'data-secondary-cta': action.id || '',
+      text: action.label,
+    })
+    b.addEventListener('click', () => runAction(action, ctx))
+    return b
+  })
+  return [h('section', { class: 'home-cta', 'aria-label': '下一步操作' },
+    h('div', { class: 'home-cta-main' },
+      button,
+      primary.detail ? h('p', { class: 'home-cta-detail', text: primary.detail }) : null),
+    secondaryButtons.length ? h('div', { class: 'home-cta-secondary' }, secondaryButtons) : null)]
+}
+
+// 技术指标入口：一行指向监控与诊断，不在首页重复渲染长表。
+export function buildTechMetricsNote () {
+  return h('p', { class: 'home-tech-note' },
+    '技术指标已移至「', h('a', { href: HOME_TECH_METRICS_ROUTE, text: '监控与诊断' }), '」。')
+}
+
+function resolveProduct (ctx) {
+  if (ctx && typeof ctx.product === 'function') {
+    try { return ctx.product() || null } catch { return null }
+  }
+  if (ctx && ctx.product) return ctx.product
+  if (store && typeof store.productStatus === 'function') {
+    try { return store.productStatus() || null } catch { return null }
+  }
+  if (store && store.state && store.state.product) return store.state.product
+  return null
+}
+
+export function render (root, ctx = {}) {
+  const product = resolveProduct(ctx)
+  const loading = !product || product.state === 'loading'
+  const locked = !!(product && product.state === 'locked')
+
+  root.append(pageHead('一切模型，尽在掌控。', '先确认三项连接状态；本页只保留结论和下一步，技术指标在「监控与诊断」。', {
+    eyebrow: 'MODELGATE / 首页',
+  }))
+  root.append(...buildOverall(product))
+
+  if (product && !loading && !locked) {
+    root.append(card('连接状态', '证据等级来自只读快照：检测到不等于已实测。', h('div', { class: 'list' }, buildStatusRows(product))))
+    root.append(buildAggregationCard(product))
+    root.append(...buildPrimaryAction(product, ctx))
+  } else if (product) {
+    root.append(...buildPrimaryAction(product, ctx))
   }
 
-  root.append(pageHead('一切模型，尽在掌控。', '本地优先的模型网关控制面：查看真实请求指标、上游健康、路由结果与需要关注的配置问题。', {
-    eyebrow: 'GATEWAY / OVERVIEW',
-    actions: [
-      h('button', { class: 'btn', type: 'button', text: '查看监控与诊断', onclick: () => { location.hash = '#/observability' } }),
-      h('button', { class: 'btn btn-primary', type: 'button', text: '管理上游供应商', onclick: () => { location.hash = '#/providers' } }),
-    ],
-  }))
-
-  root.append(h('section', { class: 'hero' },
-    h('div', null,
-      h('div', { class: 'hero-badge' }, h('span', { class: 'pulse is-' + (health.kind === 'good' ? 'good' : health.kind === 'bad' ? 'bad' : 'warn') }), h('span', { text: health.label })),
-      h('h2', { text: 'ModelGate · 本地控制面' }),
-      h('p', { text: health.detail + ' · 配置版本 ' + (s.configVersion ?? '—') + ' · 已运行 ' + fmtDuration(s.uptimeMs) })),
-    h('div', { class: 'text-right' },
-      h('div', { class: 'mono', style: { fontSize: '12px', color: '#cfe9e4' }, text: safeOrigin(location.origin) }),
-      h('div', { style: { marginTop: '8px', fontSize: '11px', color: '#9fc3c6' }, text: providers.length + ' 个上游 · ' + models.length + ' 个真实模型 · ' + virtualModels.length + ' 个虚拟入口' }))))
-
-  root.append(h('div', { class: 'grid grid-4' },
-    metric('累计请求', fmtInt(g.requests), '数据来自进程内真实计数', 'probe'),
-    metric('错误请求', fmtInt(g.errors), errorRateText(g), 'warn'),
-    metric('累计 Token', fmtCompact(g.tokenCount), '来自上游 usage 的真实累计', 'plus'),
-    metric('P95 延迟', fmtMs(g.p95), '按已确认完成的请求样本', 'refresh')))
-
-  const trendCard = card('请求延迟趋势', '最近的真实延迟采样，单位毫秒',
-    g.latTrend && g.latTrend.length ? lineChart(g.latTrend, { label: '最近请求延迟趋势', format: fmtMs }) : empty('暂无延迟趋势', '网关尚未累积足够的完成请求样本。'))
-  const healthCard = card('上游健康', '状态来自网关熔断器与真实请求结果', providers.length
-    ? h('div', { class: 'list' }, providers.slice(0, 8).map((p) => h('div', { class: 'list-row' },
-      h('div', { class: 'grow' },
-        h('div', { class: 'primary', text: p.id }),
-        h('div', { class: 'secondary', text: (p.api || 'openai') + ' · ' + fmtInt(p.st?.requests) + ' 请求 · ' + fmtInt(p.st?.errors) + ' 错误 · ' + fmtMs(p.st?.p95) })),
-      h('div', { class: 'flex' },
-        !p.hasKey ? tag('缺 Key', 'warn') : null,
-        statusTag(p.st?.state && p.st.state !== 'ok' ? p.st.state : 'ok')))))
-    : empty('尚未配置上游', '在「上游供应商」添加 Provider 后，这里会显示健康状态。'))
-
-  root.append(h('div', { class: 'grid grid-main' }, trendCard, healthCard))
-
-  const lastServing = s.lastServing
-  const dialogues = Array.isArray(s.dialogues) ? s.dialogues : []
-  const routeCard = card('最近路由', '最后一次真实完成的模型路由与会话', h('div', null,
-    lastServing ? h('div', { class: 'callout is-good' }, h('span', { class: 'callout-icon', text: '✓' }), h('div', null, h('strong', { text: lastServing.model || '—' }), ' → ', h('span', { class: 'mono', text: lastServing.provider || '—' }), ' · ', h('span', { class: 'muted', text: fmtAgo(lastServing.at) }))) : callout('info', '还没有完成过模型请求。发起第一个请求后，这里会出现真实路由结果。'),
-    dialogues.length ? table([
-      { label: '会话', render: (d) => h('span', { class: 'mono', text: d.named || d.id || '匿名' }) },
-      { label: '请求', className: 'num', render: (d) => fmtInt(d.requests) },
-      { label: 'Token', className: 'num', render: (d) => fmtCompact(d.tokens) },
-      { label: '命中率', className: 'num', render: (d) => d.hitRate == null ? '—' : fmtPct(d.hitRate) },
-      { label: '最近', render: (d) => h('span', { class: 'muted', text: fmtAgo(d.lastAt) }) },
-    ], dialogues.slice(0, 6), { emptyTitle: '暂无会话记录' }) : null))
-
-  const noticeCard = card('需要关注', '仅根据当前真实状态推导，不触发探活', h('div', null,
-    warnings.length ? h('div', { class: 'list' }, warnings.slice(0, 6).map((w) => h('div', { class: 'list-row' }, h('div', { class: 'grow' }, h('div', { class: 'primary', text: w.title }), h('div', { class: 'secondary', text: w.detail })), tag(w.kind === 'danger' ? '需处理' : '注意', w.kind === 'danger' ? 'bad' : 'warn')))) : callout('good', '当前没有从状态快照中发现需要处理的配置或运行异常。'),
-    s.cache && s.cache.alert ? callout('warn', h('strong', { text: '缓存提醒：' }), s.cache.alert.msg || '命中率发生变化') : null))
-
-  root.append(h('div', { class: 'grid grid-main' }, routeCard, noticeCard))
-
-  const providerRows = providers.map((p) => ({ id: p.id, requests: p.st?.requests || 0, errors: p.st?.errors || 0 }))
-  const requestCard = card('上游请求分布', '按 Provider 的真实累计请求量', providers.length
-    ? h('div', null,
-      h('div', { class: 'list' }, providers.map((p) => {
-        const req = Number(p.st?.requests) || 0
-        const err = Number(p.st?.errors) || 0
-        const rate = req ? err / req * 100 : 0
-        return h('div', { class: 'list-row' },
-          h('div', { class: 'grow' }, h('div', { class: 'primary', text: p.id }), h('div', { class: 'secondary', text: fmtInt(req) + ' 请求 / ' + fmtInt(err) + ' 错误' })),
-          tag(fmtPct(rate), rate > 20 ? 'bad' : rate > 5 ? 'warn' : 'good'))
-      })))
-    : empty('暂无可统计的上游'))
-  const infoCard = card('实例信息', '来自 /api/status', kvList([
-    ['绑定', (s.server?.host || '—') + ':' + (s.server?.port || '—')],
-    ['配置版本', String(s.configVersion ?? '—')],
-    ['管理令牌', state.auth.needAuth ? '已启用' : '未启用（仅本机可管理）'],
-    ['Key 加密', s.server?.keyEncrypted ? '已启用' : '未确认'],
-    ['启动时间', fmtTime(s.startedAt)],
-    ['最近刷新', fmtAgo(state.loadedAt)],
-  ]))
-  root.append(h('div', { class: 'grid grid-main' }, requestCard, infoCard))
+  root.append(buildTechMetricsNote())
 }
