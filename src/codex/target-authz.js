@@ -927,6 +927,38 @@ export function authFailureOfResolved(resolved, status, opts = {}) {
   return classifyAuthDomainFailure(status, Object.assign({}, opts, { authDomain: r.authDomain }))
 }
 
+/**
+ * 接线卡的一行式终态信封：命中授权域终态时返回可直接下发的响应，
+ * 未命中返回 null（调用方继续走既有的模型级拒绝/换候选逻辑）。
+ *
+ * 用途（A4/V2-03）：上游 401/402/403 与配额型 429 必须**按真实域**返回给客户端，
+ * 而不是被兜底链吞成 502 all_providers_failed、更不是换到另一个候选/套餐继续发。
+ * 信封只含稳定 code / 域名 / 类别，不含上游正文、token、账号 id。
+ */
+export function authFailureResponse(status, opts = {}) {
+  const receipt = authFailureReceipt(status, opts)
+  if (!receipt) return null
+  const domain = receipt.authDomain || 'unknown'
+  const body = {
+    error: {
+      code: receipt.code,
+      type: 'auth_domain_failure',
+      kind: receipt.kind,
+      authDomain: receipt.authDomain,
+      status: receipt.status,
+      terminal: true,
+      fallbackAllowed: false,
+      message: '上游授权失败（' + domain + '）：' + receipt.kind + '；按真实授权域返回，不换路由/不换套餐/不改模型',
+    },
+  }
+  return Object.freeze({
+    handled: true,
+    status: receipt.status,
+    contentType: 'application/json; charset=utf-8',
+    buf: Buffer.from(JSON.stringify(body)),
+  })
+}
+
 // —— 请求身份收据：host + path + model 三者必须与收据完全一致 ——
 // 上游模型名漂移（例如把公共/聚合 ID、别名或另一个模型名发出去）与 host/path 漂移同等严重：
 // 它会让「计费/能力/压缩路径」全部落在未授权目标上，因此单独给稳定 code。

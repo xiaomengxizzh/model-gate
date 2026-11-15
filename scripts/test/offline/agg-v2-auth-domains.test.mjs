@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import {
   AUTH_DOMAINS, AUTH_FAILURE_KINDS, TARGET_DOMAINS,
   resolveUpstream, assertResolvedUpstream, assertResolvedModel, verifyRequestIdentity,
-  classifyAuthDomainFailure, authFailureReceipt, authFailureOfResolved,
+  classifyAuthDomainFailure, authFailureReceipt, authFailureOfResolved, authFailureResponse,
   resolvedDiagnostic, isTargetAuthzError,
 } from '../../../src/codex/target-authz.js'
 
@@ -206,4 +206,29 @@ test('三个授权域的收据互不借用：域名/host/path/模型各自独立
   const crossModel = denyOf(() => verifyRequestIdentity(SUB, { urlUsed: 'https://chatgpt.com/backend-api/codex/responses', model: 'deepseek-v4.1-flash' }))
   assert.equal(crossModel.code, 'send_model_drift')
   assert.doesNotThrow(() => verifyRequestIdentity(SUB, { urlUsed: 'https://chatgpt.com/backend-api/codex/responses', model: 'gpt-6-luna' }))
+})
+
+test('一行式终态信封：授权域失败按真实域返回，未被吞成 all_providers_failed', () => {
+  for (const [status, code] of [[401, 'upstream_unauthorized'], [402, 'upstream_quota_exhausted'], [403, 'upstream_forbidden']]) {
+    const envelope = authFailureResponse(status, { authDomain: AUTH_DOMAINS.API_KEY })
+    assert.equal(envelope.handled, true)
+    assert.equal(envelope.status, status, '必须保留上游真实状态码')
+    assert.equal(envelope.contentType, 'application/json; charset=utf-8')
+    const parsed = JSON.parse(envelope.buf.toString('utf8'))
+    assert.equal(parsed.error.code, code)
+    assert.equal(parsed.error.type, 'auth_domain_failure')
+    assert.equal(parsed.error.authDomain, AUTH_DOMAINS.API_KEY)
+    assert.equal(parsed.error.terminal, true)
+    assert.equal(parsed.error.fallbackAllowed, false)
+    assert.equal(Object.isFrozen(envelope), true)
+    for (const secret of [PROVIDER_KEY, SUBSCRIPTION_TOKEN, 'Bearer']) {
+      assert.equal(envelope.buf.toString('utf8').includes(secret), false, '信封不得含凭据：' + secret)
+    }
+  }
+  // 配额型 429 同样是终态；速率型 429 交给既有的 Retry-After 通道（返回 null，不抢）。
+  assert.equal(authFailureResponse(429, { authDomain: AUTH_DOMAINS.API_KEY, bodyText: 'quota exceeded' }).status, 429)
+  assert.equal(authFailureResponse(429, { authDomain: AUTH_DOMAINS.API_KEY, bodyText: 'rate limit reached' }), null)
+  assert.equal(authFailureResponse(200, { authDomain: AUTH_DOMAINS.API_KEY }), null)
+  assert.equal(authFailureResponse(500, { authDomain: AUTH_DOMAINS.API_KEY }), null)
+  assert.equal(authFailureResponse(404, { authDomain: AUTH_DOMAINS.API_KEY }), null, '模型不可用仍走模型级通道')
 })
