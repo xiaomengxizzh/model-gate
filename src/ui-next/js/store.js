@@ -84,6 +84,29 @@ function isVisible(section) {
   return false
 }
 
+// —— 鉴权前置门（UX-04 R2）——
+// 在 /api/auth 返回、且必要令牌就位之前，绝不发起管理面读取：
+// 否则首屏会先打 /api/status（401）和 /api/aggregation/*（explicitAdmin 403），
+// 控制台噪声会掩盖真实错误（A5 浏览器 UI-13 验收）。
+let authGatePending = false
+
+// app 在接线最早期调用：/api/auth 尚未 resolve。
+export function markAuthPending() {
+  authGatePending = true
+}
+
+// 测试与显式解锁路径使用；loadAuth 成功时也会自动解除。
+export function markAuthResolved() {
+  authGatePending = false
+}
+
+export function canReadControlPlane() {
+  if (authGatePending) return false
+  if (!state.auth) return false
+  if (state.auth.needAuth === true && !hasToken()) return false
+  return true
+}
+
 function isAuthed() {
   if (!state.auth) return false
   return state.auth.needAuth === false || hasToken()
@@ -113,6 +136,7 @@ export function freshnessOf(section, now = Date.now()) {
 // 仅当 section 当前可见且超出 freshness 预算时才需要刷新。
 export function shouldRefresh(section, now = Date.now()) {
   if (section !== 'product' && section !== 'aggregation') return false
+  if (!canReadControlPlane()) return false
   if (!isVisible(section)) return false
   if (productState.stale) return true
   return freshnessOf(section, now).stale
@@ -206,7 +230,8 @@ export function invalidateProductStatus(reason) {
 
 export function setProductPhase(phase) {
   const next = phase == null ? null : String(phase)
-  if (next !== null && next !== 'conflict' && next !== 'write_in_progress') {
+  // 允许的写相位：冲突、写入中、等待授权确认（428 预览态由投影进入 preview_pending）。
+  if (next !== null && next !== 'conflict' && next !== 'write_in_progress' && next !== 'preview_pending') {
     throw new Error('unknown product phase: ' + phase)
   }
   productState.phase = next
@@ -347,6 +372,8 @@ function startProductRefresh(opts) {
 export function refreshProduct(opts = {}) {
   const section = opts.section === 'aggregation' ? 'aggregation' : 'product'
   const force = opts.force === true
+  // 鉴权未确定或缺令牌：不发起任何 /api/status 或 /api/aggregation/* 读取（含 force）。
+  if (!canReadControlPlane()) return Promise.resolve(state.product)
   if (productState.inFlight && !force) return productState.inFlight
   if (!force) {
     if (!isVisible(section)) return Promise.resolve(productStatus())
@@ -365,10 +392,13 @@ export function refreshAggregation(opts = {}) {
 }
 
 export async function loadAuth() {
+  // resolve 之前一律视为未确定：管理面读取保持关闭。
+  authGatePending = true
   setPhase('auth', 'loading')
   try {
     const data = await api.auth()
     state.auth = { needAuth: !!data.needAuth, startedAt: Number(data.startedAt) || 0 }
+    authGatePending = false
     setPhase('auth', 'ready')
     return state.auth
   } catch (e) {
@@ -378,6 +408,7 @@ export async function loadAuth() {
 }
 
 export async function loadStatus(opts = {}) {
+  if (!canReadControlPlane()) return state.status
   if (!opts.silent) setPhase('status', 'loading')
   try {
     const status = await api.status()
@@ -399,6 +430,7 @@ export async function loadStatus(opts = {}) {
 }
 
 export async function loadConfig() {
+  if (!canReadControlPlane()) return state.config
   setPhase('config', 'loading')
   try {
     const config = await api.config()
@@ -416,6 +448,7 @@ export async function loadConfig() {
 }
 
 export async function loadAll() {
+  if (!canReadControlPlane()) return { status: state.status, config: state.config }
   state.loading = true
   setPhase('status', 'loading')
   setPhase('config', 'loading')

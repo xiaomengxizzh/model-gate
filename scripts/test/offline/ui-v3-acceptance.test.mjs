@@ -33,6 +33,8 @@ async function isolatedCodexHome (authJson) {
   return dir
 }
 
+function b64url (obj) { return Buffer.from(JSON.stringify(obj)).toString('base64url') }
+
 function walkAssets (dir, prefix = '') {
   const out = []
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -136,8 +138,9 @@ test('UI-02: /api/status.official detected/missing 且不回显任何凭据', { 
   assert.equal(detected.official.authMode, 'chatgpt')
   assert.equal(detected.official.source, 'local_codex_auth_probe')
   assert.ok(detected.official.checkedAt)
-  // 允许字段白名单：官方投影不得夹带账号/凭据
-  assert.deepEqual(Object.keys(detected.official).sort(), ['authMode', 'checkedAt', 'credential', 'level', 'reason', 'source'])
+  // 允许字段白名单：官方投影不得夹带账号/凭据；expiry 是只读有效期校验（与转发链同源）
+  assert.deepEqual(Object.keys(detected.official).sort(), ['authMode', 'checkedAt', 'credential', 'expiry', 'level', 'reason', 'source'])
+  assert.equal(detected.official.expiry, 'valid', '非 JWT 但可转发时应为 expiry=valid')
   for (const secret of ['fixture-access-a5-must-not-leak', 'fixture-refresh-a5-must-not-leak', 'fixture-account-a5', 'fixture-a5@example.invalid']) {
     assert.equal(detectedRaw.includes(secret), false, 'official 投影不得包含 ' + secret)
   }
@@ -147,11 +150,29 @@ test('UI-02: /api/status.official detected/missing 且不回显任何凭据', { 
   const missing = await (await gw2.get('/api/status', AUTH)).json()
   assert.equal(missing.official.credential, 'missing')
   assert.equal(missing.official.reason, 'auth_file_missing')
+  assert.equal(missing.official.expiry, 'unknown', '未检测到登录时 expiry 必须是 unknown（不得冒充 valid/expired）')
+  assert.equal(missing.official.level, 'unknown', 'missing 不是 detected 级证据')
   const viewMissing = product.deriveOfficial(missing)
   assert.equal(viewMissing.state, 'missing')
   assert.equal(viewMissing.label, '待登录')
   assert.equal(product.deriveOfficial(detected).state, 'detected')
   assert.equal(product.deriveOfficial(detected).level, 'detected')
+
+  // 过期 access_token：只读 expiry 校验必须与转发链同源（F-6），不得显示"已检测到登录"
+  const expiredJwt = b64url({ alg: 'none' }) + '.' + b64url({ exp: Math.floor(Date.now() / 1000) - 3600 }) + '.sig'
+  const expiredHome = await isolatedCodexHome({ auth_mode: 'chatgpt', tokens: { access_token: expiredJwt, refresh_token: 'r' }, last_refresh: '2026-11-01T00:00:00Z' })
+  const gw3 = await startGateway({ name: 'a5-ui02-expired', env: { MG_ADMIN_TOKEN: ADMIN, CODEX_HOME: expiredHome } })
+  t.after(async () => { await gw3.stop(); await rm(expiredHome, { recursive: true, force: true }) })
+  const expiredRes = await gw3.get('/api/status', AUTH)
+  const expiredRaw = await expiredRes.text()
+  const expired = JSON.parse(expiredRaw)
+  assert.equal(expired.official.credential, 'detected', '文件层面仍是 detected（另有 expiry 表达不可用）')
+  assert.equal(expired.official.expiry, 'expired', '过期令牌必须 expiry=expired')
+  const viewExpired = product.deriveOfficial(expired)
+  assert.equal(viewExpired.state, 'blocked')
+  assert.equal(viewExpired.label, '登录已过期')
+  assert.equal(viewExpired.reason, 'access_token_expired')
+  assert.equal(expiredRaw.includes(expiredJwt), false, '过期令牌也不得回显')
 
   // 目标模型 ID 的容错：集成 Lead 90ac729 后是 mg- 公共 ID；基线是斜杠写法。两者都必须被认作目标。
   assert.equal(product.GO_TARGET_MODEL, 'deepseek-v4.1-flash')
@@ -164,52 +185,64 @@ test('UI-02: /api/status.official detected/missing 且不回显任何凭据', { 
   }
 })
 
-// —— UI-03：Go 单字段 preset 通道（A2 未集成 → 断言真实拒绝，记 BLOCKED_UNTIL_A2） ——
-test('UI-03: POST /api/aggregation/providers 的 preset 通道与内联 Key 拒绝（真实响应）', { timeout: 40000 }, async (t) => {
+// —— UI-03：Go 单字段 preset 通道（A2 已集成：只交 preset，URI/ID/env 由服务端预设提供） ——
+test('UI-03: {preset:opencode-go} 真实 201、内联 Key 拒绝、重复注册 409 provider_exists', { timeout: 40000 }, async (t) => {
   const codexHome = await isolatedCodexHome(null)
   const gw = await startGateway({ name: 'a5-ui03', env: { MG_ADMIN_TOKEN: ADMIN, CODEX_HOME: codexHome } })
   t.after(async () => { await gw.stop(); await rm(codexHome, { recursive: true, force: true }) })
 
   const before = await (await gw.get('/api/aggregation/providers', AUTH)).json()
   assert.deepEqual(before.providers, [])
-  const baselineVersion = (await (await gw.get('/api/status', AUTH)).json()).configVersion
+  assert.equal((await (await gw.get('/api/status', AUTH)).json()).configVersion, 0)
 
-  // 单字段向导依赖 {preset:'opencode-go'}；A2 未把 preset 透传到 registry 时应显式失败。
-  const presetRes = await gw.post('/api/aggregation/providers', { preset: 'opencode-go' }, AUTH)
-  const presetBody = await presetRes.json()
-  if (presetRes.status === 201) {
-    assert.equal(presetBody.ok, true)
-    assert.equal(presetBody.provider.id, 'opencodego')
-    t.diagnostic('A2 preset 通道已集成：201 ' + presetBody.provider.baseUrl)
-  } else {
-    assert.equal(presetRes.status, 400, 'preset 未集成时必须是可解释的 4xx，实际 ' + presetRes.status)
-    assert.equal(presetBody.code, 'provider_kind_unknown')
-    assert.equal((await (await gw.get('/api/aggregation/providers', AUTH)).json()).providers.length, 0, '失败不得写入 provider')
-    assert.equal((await (await gw.get('/api/status', AUTH)).json()).configVersion, baselineVersion, '失败不得推进 configVersion')
-    t.diagnostic('BLOCKED_UNTIL_A2: preset 透传未集成，当前真实响应 400 provider_kind_unknown（未写入）')
-  }
-
-  // 内联 apiKey 必须被拒绝（Key 只能走 POST /api/keys）
+  // 1) 内联 apiKey 必须先被拒绝（Key 只能走 POST /api/keys；该拒绝先于"已存在"检查）
   const inlineRes = await gw.post('/api/aggregation/providers', {
-    id: 'opencodego', kind: 'opencode-go', baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'sk-inline-a5-must-not-leak',
+    preset: 'opencode-go', apiKey: 'sk-inline-a5-must-not-leak',
   }, AUTH)
   assert.equal(inlineRes.status, 400)
   const inlineBody = await inlineRes.json()
   assert.equal(inlineBody.code, 'provider_key_inline_forbidden')
   assert.doesNotMatch(JSON.stringify(inlineBody), /sk-inline-a5-must-not-leak/)
+  assert.equal((await (await gw.get('/api/aggregation/providers', AUTH)).json()).providers.length, 0, '失败不得写入 provider')
 
-  // 显式两步注册（当前真实可用路径）——证明后端通道存在，不冒充单字段向导
-  const addRes = await gw.post('/api/aggregation/providers', {
-    id: 'opencodego', kind: 'opencode-go', baseUrl: 'http://127.0.0.1:1/v1',
-  }, AUTH)
-  assert.equal(addRes.status, 201)
-  const added = await addRes.json()
-  assert.equal(added.provider.id, 'opencodego')
-  assert.equal(added.provider.kind, 'opencode-go')
+  // 2) 单字段 preset：用户不提供 id/baseUrl/apiKeyEnv，服务端预设补齐
+  const presetRes = await gw.post('/api/aggregation/providers', { preset: 'opencode-go' }, AUTH)
+  assert.equal(presetRes.status, 201, 'A2 已集成时 preset 必须 201（失败则读 body.code 定位）')
+  const presetBody = await presetRes.json()
+  assert.equal(presetBody.ok, true)
+  assert.equal(presetBody.provider.id, 'opencodego')
+  assert.equal(presetBody.provider.kind, 'opencode-go')
+  assert.equal(presetBody.provider.baseUrl, 'https://opencode.ai/inference/go/openai/v1', 'baseUrl 必须来自服务端预设，不是用户输入')
+  assert.equal(presetBody.provider.v2Scope, 'go-single-model')
+  assert.equal(presetBody.configVersion, 1)
+  assert.equal(presetBody.reload && presetBody.reload.applied, true)
+
+  // 3) 未同步的目录状态必须是 unknown/null，不能是 0 个模型
   const list = await (await gw.get('/api/aggregation/providers', AUTH)).json()
   assert.deepEqual(list.providers.map((p) => p.id), ['opencodego'])
-  assert.equal(list.providers[0].discoveryState, 'unknown', '未同步必须 unknown，不能是 0 个模型')
+  assert.equal(list.providers[0].discoveryState, 'unknown')
   assert.equal(list.providers[0].modelCount, null)
+
+  // 4) 重复注册同一 provider：真实语义是 409 provider_exists（不是覆盖、也不是 version_conflict）。
+  //    这是本轮修复 UI-03 断言的真实原因：上一版测试在 preset 201 之后又 POST 了一次同 ID 的显式配置。
+  const dupRes = await gw.post('/api/aggregation/providers', {
+    id: 'opencodego', kind: 'opencode-go', baseUrl: 'http://127.0.0.1:1/v1',
+  }, AUTH)
+  assert.equal(dupRes.status, 409)
+  const dupBody = await dupRes.json()
+  assert.equal(dupBody.code, 'provider_exists')
+  assert.notEqual(dupBody.code, 'version_conflict')
+  const afterDup = await (await gw.get('/api/aggregation/providers', AUTH)).json()
+  assert.equal(afterDup.providers.length, 1, '重复注册不得产生第二条记录')
+  assert.equal(afterDup.providers[0].baseUrl, 'https://opencode.ai/inference/go/openai/v1', '重复注册不得覆盖既有 baseUrl')
+
+  // 版本竞争的真实 409 另行区分（带过期 version 才触发 version_conflict）
+  const staleRes = await gw.post('/api/aggregation/providers', {
+    id: 'opencodego', kind: 'opencode-go', baseUrl: 'http://127.0.0.1:1/v1', version: 0,
+  }, AUTH)
+  assert.equal(staleRes.status, 409)
+  assert.equal((await staleRes.json()).code, 'version_conflict')
+  t.diagnostic('真实原因：preset 201 已创建 opencodego，重复注册 → 409 provider_exists（非版本冲突）；带过期 version → 409 version_conflict')
 })
 
 // —— UI-05：写虚构 Key 后状态回执 hasKey=true 且响应/配置不回显 Key ——
@@ -340,18 +373,26 @@ test('UI-15: index.html/styles.css 已有移动断点与 focus-visible（视觉�
 })
 
 // —— UI-01：首屏状态驱动（A1 集成后自动生效，否则如实 BLOCKED） ——
-test('UI-01: 首屏状态驱动 + 唯一主 CTA + 三条连接状态（A1）', async (t) => {
+test('UI-01: 首屏状态驱动 + 唯一主 CTA + 三条连接状态（A1 静态职责）', async (t) => {
   const dash = readFileSync(join(UI_DIR, 'js/views/dashboard.js'), 'utf8')
   const indexHtml = readFileSync(join(UI_DIR, 'index.html'), 'utf8')
-  const hasProductStatus = /product-status|deriveProductStatus|primaryAction/.test(dash)
+  const appSrc = readFileSync(join(UI_DIR, 'app.js'), 'utf8')
+  const hasProductStatus = /product-status|deriveProductStatus|productStatus/.test(dash)
   const hasConnectionsRoute = /data-route="connections"/.test(indexHtml)
   if (!hasProductStatus || !hasConnectionsRoute) {
     t.skip('BLOCKED_UNTIL_A1: dashboard.js 尚未接入产品状态投影（product-status=' + hasProductStatus + '），index.html 尚无 connections 分组导航（connections=' + hasConnectionsRoute + '）')
     return
   }
+  // 静态职责：导航项全量在 HTML 中；aria-current 是运行时状态，必须由 app.js 写入，
+  // 不能要求静态 HTML 预先带 aria-current（也不会在离线假装验证了运行时行为）。
+  for (const id of ['overview', 'connections', 'settings', 'providers', 'models', 'clients', 'aggregation', 'observability']) {
+    assert.match(indexHtml, new RegExp('data-route="' + id + '"'), 'index.html 必须有导航项 data-route="' + id + '"')
+  }
+  assert.match(indexHtml, /id="nav-advanced"/, '高级功能必须是可收起分组')
   assert.match(dash, /deriveProductStatus|productStatus/, '首屏必须消费统一投影')
-  assert.match(indexHtml, /data-route="connections"/)
-  assert.match(indexHtml, /aria-current/, '导航必须可表达当前页')
+  assert.match(appSrc, /setAttribute\(['"]aria-current['"],\s*['"]page['"]\)/, 'app.js 必须在运行时设置 aria-current="page"')
+  assert.doesNotMatch(indexHtml, /aria-current=/, '静态 HTML 不应预写运行时状态（职责分离）')
+  t.diagnostic('离线只验证静态/运行时职责分离；真实 aria-current 由 scripts/e2e/ui-v3-browser.mjs 的 UI-01-nav-current 在 Chrome 中断言（本文件不假装已验运行时）')
 })
 
 // —— UI-16 / UI-04 真实推理：本轮无付费授权 → BLOCKED ——

@@ -40,16 +40,19 @@ const OVERALL_TAGS = Object.freeze({
   loading: ['读取中', 'muted'],
 })
 
-function evidenceTag (level) {
-  const text = EVIDENCE_TAG_LABELS[String(level || '')] || EVIDENCE_TAG_LABELS.unknown
-  const kind = level === 'runtime-verified'
-    ? 'good'
-    : level === 'configured'
-      ? 'accent'
-      : level === 'detected'
-        ? 'info'
-        : 'muted'
-  return tag(text, kind)
+// 证据徽章只显示"比状态本身多出来的信息"：
+//   detected 只说明"探测到了存在性"，不是可用结论，因此不再单独出徽章；
+//   任何"待…/需要…/未知"状态都不并排 已检测/已配置/已实测，避免被读成"可以用了"。
+const PENDING_LABEL = /^(待|需要|未检测到|未找到|无法|状态未知)/
+export function evidenceBadge (level, item) {
+  const label = String((item && item.label) || '')
+  if (level === 'detected') return null
+  if (level === 'unknown') return tag(EVIDENCE_TAG_LABELS.unknown, 'muted')
+  if (PENDING_LABEL.test(label)) return null
+  if (level === 'configured') return tag(EVIDENCE_TAG_LABELS.configured, 'accent')
+  if (level === 'runtime-verified') return tag(EVIDENCE_TAG_LABELS['runtime-verified'], 'good')
+  if (level === 'not-tested') return tag(EVIDENCE_TAG_LABELS['not-tested'], 'muted')
+  return null
 }
 
 function stateKind (key, item) {
@@ -168,14 +171,16 @@ export function buildOverall (product) {
     h('p', { class: 'home-overall-detail', text: overall.detail || '没有取得总体结论。' })))]
 }
 
-function statusRow ({ key, title, item, detail, level }) {
-  return h('div', { class: 'list-row home-status-row', 'data-status': key },
-    h('div', { class: 'grow' },
-      h('div', { class: 'primary' }, title),
-      h('div', { class: 'secondary', text: detail })),
-    h('div', { class: 'flex home-status-tags' },
-      tag((item && item.label) || '状态未知', stateKind(key, item)),
-      evidenceTag(level || (item && item.level))))
+// 行结构：名称独立一行；状态值、模型名、说明各自成行并允许换行（360px 不出现半截模型名）。
+function statusRow ({ key, title, item, detail, level, model }) {
+  const badge = evidenceBadge(level || (item && item.level), item)
+  return h('div', { class: 'status-row is-' + stateKind(key, item), 'data-status': key, role: 'group' },
+    h('div', { class: 'status-row-main' },
+      h('span', { class: 'status-row-label', text: title }),
+      h('span', { class: 'status-row-value', text: (item && item.label) || '状态未知' }),
+      model ? h('span', { class: 'status-row-detail home-status-model', text: model }) : null,
+      h('p', { class: 'status-row-detail', text: detail })),
+    badge ? h('div', { class: 'home-status-tags' }, badge) : null)
 }
 
 // ② 三条连接状态行：ChatGPT 套餐 / OpenCode Go / Codex Desktop，每行都带证据等级。
@@ -194,10 +199,11 @@ export function buildStatusRows (product) {
     }),
     statusRow({
       key: 'go',
-      title: [h('span', { text: 'OpenCode Go' }), h('span', { class: 'home-model-chip', text: GO_MODEL_DISPLAY })],
+      title: 'OpenCode Go',
       item: go,
       detail: goDetail(go),
       level: go.level,
+      model: GO_MODEL_DISPLAY,
     }),
     statusRow({
       key: 'codex',
@@ -257,7 +263,7 @@ export function buildPrimaryAction (product, ctx = {}) {
   const p = product || {}
   const primary = p.primary || { id: 'wait', label: '正在读取状态…', kind: 'wait', detail: '' }
   const button = h('button', {
-    class: 'btn btn-primary',
+    class: 'btn btn-primary btn-lg primary-action-button',
     type: 'button',
     'data-primary-cta': primary.id || 'primary',
     text: primary.label,
@@ -276,9 +282,9 @@ export function buildPrimaryAction (product, ctx = {}) {
     return b
   })
   return [h('section', { class: 'home-cta', 'aria-label': '下一步操作' },
-    h('div', { class: 'home-cta-main' },
+    h('div', { class: 'primary-action' },
       button,
-      primary.detail ? h('p', { class: 'home-cta-detail', text: primary.detail }) : null),
+      primary.detail ? h('p', { class: 'primary-action-detail', text: primary.detail }) : null),
     secondaryButtons.length ? h('div', { class: 'home-cta-secondary' }, secondaryButtons) : null)]
 }
 
@@ -311,9 +317,10 @@ export function render (root, ctx = {}) {
   root.append(...buildOverall(product))
 
   if (product && !loading && !locked) {
-    root.append(card('连接状态', '证据等级来自只读快照：检测到不等于已实测。', h('div', { class: 'list' }, buildStatusRows(product))))
-    root.append(buildAggregationCard(product))
+    // 主操作紧跟总体结论：360×800 / 768×900 首屏可见，不靠缩小字号或隐藏状态行。
     root.append(...buildPrimaryAction(product, ctx))
+    root.append(card('连接状态', '证据等级来自只读快照：检测到不等于已实测。', h('div', { class: 'home-status-list' }, buildStatusRows(product))))
+    root.append(buildAggregationCard(product))
   } else if (product) {
     root.append(...buildPrimaryAction(product, ctx))
   }

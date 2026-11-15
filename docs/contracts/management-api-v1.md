@@ -49,6 +49,8 @@
 ### `GET /api/status`
 响应即状态快照，字段见第 4 节。所有模型/上游统计与掩码 Key 元数据都在此聚合，前端只读。
 
+**V3 新增只读字段 `official`（2026-11-15）**：`{credential:'detected'|'missing'|'unknown', expiry:'valid'|'expired'|'unknown', reason, authMode, level:'detected'|'unknown', source:'local_codex_auth_probe', checkedAt}`。来源是只读的 `probeLocalCodexAuth()`（判定 `auth_mode==='chatgpt'` 且 token 存在）与只读的 `readSubscriptionCredential()`（解析 JWT `exp` 判过期，**不刷新、不发请求**）。任何取值为"读不到/无法判定"（HOME 不可解析、文件不可读/超大/损坏）时必须为 `unknown`，不得报 `missing`；**永不返回、记录或回显 token、account id 或文件正文**。前端只允许把它当作 `detected` 级证据，不得显示成"官方推理已验证"（真实推理证据只能来自 `lastServing`）。回归：`scripts/test/offline/ui-product-status.test.mjs`。
+
 ### `GET /api/config`
 
 只读配置投影（MG-009 D-6）：返回 `{ configVersion, providers, models, defaults, virtualModels }`，形状与 `POST /api/config/save` 的请求体一致，可直接“读 → 改 → 保存”。不含运行时统计/探针字段（providers 的 hasKey/keySource/keyOk/st/probe、models 的 probe/requests/errors/tokens/today/hitRate/affinity/avgMs 等），不返回 `_keys`/`_paths`；`defaults.clientKey` 在 `keys.__mg_client` 或旧明文存在时固定回显 `********`（只检查 defaults 会导致永远为空、前端误判未设置）；`virtualModels[*]` 回显 `expiresAt`/`note`（存于 `keys.__mg_vm_meta_<name>`，不回显则一次保存会误清空），并额外返回后端判定的 `expiresAtState`（`none`/`valid`/`expired`/`invalid`）与 `expiresAtMs`（无效时另带 `expiresAtDiagnostic` 码）；前端只展示状态，不自行比较时间；未知扩展字段按原样返回。鉴权与错误信封同其它管理 GET（401/403）。回归见 `scripts/test/offline/config-projection.test.mjs`、`scripts/test/offline/ui-contract.test.mjs`。
