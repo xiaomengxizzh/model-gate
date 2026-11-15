@@ -159,6 +159,8 @@ POST /api/probe {"id":"mock"} → 200 {"ok":true,"results":[{"id":"mock","ok":tr
 
 ## 7. 前端兼容矩阵
 
+> **历史说明（2026-11-15）**：旧管理员控制台 `src/admin.html` 已按所有者指令退役，`GET /` 302 → `/ui-next/`，`/admin`、`/admin.html` 返回 `410 Gone`。以下调用清单描述的是**历史客户端**，用于溯源服务端 API 的来历，不代表当前仍有该页面。
+
 `src/admin.html` 实际调用：`/api/auth`、`/api/status`、`/api/model-stats?days=`、`/api/logs?lines=250`、`/api/config/save`（带 `version`，整体回传 `providers/models/defaults/virtualModels`）、`/api/config/reload`；`GET /api/config` 已提供但面板尚未改用（F1/F2 迁移点）、`/api/keys`（含 `__mg_vm_*`）、`/api/route-preview`、`/api/probe`、`/api/model-test`、`/api/admin-token`。面板用 `Authorization: Bearer`；401 时弹令牌输入框。
 
 已知读写不一致（MG-009）：面板把 `status.providers/models` 数组映射为 `C.providers/C.models` 映射再整体回存，映射规则散落在面板脚本里，缺少服务端 fixture 校验。

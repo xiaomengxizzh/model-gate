@@ -40,8 +40,14 @@ test('UI: static tree, CSP, auth and traversal protection', { timeout: 30000 }, 
     const r = await gw.get(p)
     assert.equal(r.status, 404, p)
   }
-  assert.equal((await gw.get('/')).status, 200, 'legacy entry remains intact')
-  assert.equal((await gw.get('/admin')).status, 200, 'legacy /admin console must remain available (M4-2)')
+  // 2026-11-15 所有者指令：旧管理台退役，根路径只做跳转，/admin 明确 410（不再提供第二份前端）。
+  // 必须用 redirect:'manual'，否则 fetch 会自动跟随 302 得到 200（掩盖真实状态码）。
+  const rootEntry = await fetch(gw.base + '/', { redirect: 'manual' })
+  assert.equal(rootEntry.status, 302, 'root must redirect to the single V3 console')
+  assert.equal(rootEntry.headers.get('location'), '/ui-next/', 'root redirect target')
+  const legacyAdmin = await gw.get('/admin')
+  assert.equal(legacyAdmin.status, 410, 'legacy /admin console retired (owner instruction 2026-11-15)')
+  assert.match(await legacyAdmin.text(), /已退役/, 'retirement notice must explain where to go')
   assert.equal((await gw.get('/api/status')).status, 401, 'read-only asset serving does not weaken admin auth')
   const authorized = await gw.get('/api/status', { authorization: 'Bearer preview-test-token' })
   assert.equal(authorized.status, 200)

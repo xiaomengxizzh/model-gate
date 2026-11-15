@@ -40,7 +40,10 @@ import { registerConfigRoot, sha256Hex } from './codex/config.js'
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
 const RESPONSES_PATHS = new Set(['/v1/responses', '/responses'])
-const ADMIN_PAGE = new URL('./admin.html', import.meta.url)
+// 2026-11-15 所有者指令：旧管理台（src/admin.html）退役，不再对外提供。
+// 根路径统一跳到 V3 唯一控制台；/admin 与 /admin.html 返回 410 并说明去向。
+// 旧文件保留在仓库中仅作溯源（不参与任何请求处理），不再有 HTML 读取路径。
+const LEGACY_CONSOLE_RETIRED = '旧管理台已退役：请使用 /ui-next/（ModelGate V3 控制台）。旧源码仅作历史留存，不再提供页面。'
 // Isolated /ui-next console: serve only the frozen asset tree, no directory listing,
 // no path traversal, no symlink following. Old '/' and '/admin' remain unchanged.
 const UI_NEXT_TYPES = Object.freeze({
@@ -2036,11 +2039,15 @@ function makeHandler(state) {
       }
       if ((req.method === 'GET' || req.method === 'HEAD') && path === '/healthz') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok'); return }
       if (req.method === 'GET' && path === '/favicon.ico') { res.writeHead(204); res.end(); return }
-      if (req.method === 'GET' && (path === '/' || path === '/admin' || path === '/admin.html')) {
-        let html
-        try { html = readFileSync(ADMIN_PAGE, 'utf8') } catch { html = '<h1>admin 页面缺失：src/admin.html 未找到</h1>' }
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(html); return
+      if ((req.method === 'GET' || req.method === 'HEAD') && path === '/') {
+        // 根入口只做跳转，避免出现"第二份前端"。
+        res.writeHead(302, { location: '/ui-next/', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' })
+        res.end(req.method === 'HEAD' ? undefined : 'ModelGate 控制台：/ui-next/'); return
+      }
+      if ((req.method === 'GET' || req.method === 'HEAD') && (path === '/admin' || path === '/admin.html')) {
+        // 旧管理台已按所有者指令退役：明确 410（不是 404），并指向唯一入口。
+        res.writeHead(410, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' })
+        res.end(req.method === 'HEAD' ? undefined : LEGACY_CONSOLE_RETIRED); return
       }
       if (path === '/api/auth' && req.method === 'GET') { sendJson(res, 200, { needAuth: !!state.adminToken, startedAt: state.st.startedAt }); return }
       // E6 管理面：/api/codex/*（P0-2 / M4-1b）。

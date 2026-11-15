@@ -383,7 +383,7 @@ test('UI-10: 401/403 响应无敏感数据、错误令牌不泄露状态', { tim
 })
 
 // —— UI-13：旧入口不丢失 ——
-test('UI-13: /ui-next/index.html、/、/admin 仍返回 200', { timeout: 40000 }, async (t) => {
+test('UI-13: /ui-next 深链可用；根路径 302 跳转；旧 /admin 410 退役（2026-11-15 所有者指令）', { timeout: 40000 }, async (t) => {
   const codexHome = await isolatedCodexHome(null)
   const gw = await startGateway({ name: 'a5-ui13', env: { MG_ADMIN_TOKEN: ADMIN, CODEX_HOME: codexHome } })
   t.after(async () => { await gw.stop(); await rm(codexHome, { recursive: true, force: true }) })
@@ -391,11 +391,14 @@ test('UI-13: /ui-next/index.html、/、/admin 仍返回 200', { timeout: 40000 }
   const deep = await gw.get('/ui-next/index.html')
   assert.equal(deep.status, 200)
   assert.match(await deep.text(), /\/ui-next\/app\.js/)
-  for (const p of ['/', '/admin', '/admin.html']) {
+  // redirect:'manual' 才能看到 302 本身（fetch 默认自动跟随，会把跳转掩盖成 200）。
+  const root = await fetch(gw.base + '/', { redirect: 'manual' })
+  assert.equal(root.status, 302, '根路径必须跳到唯一控制台')
+  assert.equal(root.headers.get('location'), '/ui-next/')
+  for (const p of ['/admin', '/admin.html']) {
     const r = await gw.get(p)
-    assert.equal(r.status, 200, p + ' 必须保留 200')
-    assert.match(r.headers.get('content-type') || '', /text\/html/)
-    assert.ok((await r.text()).length > 0)
+    assert.equal(r.status, 410, p + ' 旧管理台必须明确退役（410）')
+    assert.match(await r.text(), /已退役/)
   }
   const traversal = await gw.get('/ui-next/../src/index.js')
   assert.equal(traversal.status, 404, '路径穿越必须 404')

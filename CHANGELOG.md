@@ -2,6 +2,15 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-15 前端入口收敛（旧管理员控制台退役，所有者指令）
+
+### Changed（行为变更，非向后兼容）
+
+- **退役旧管理员控制台**（`src/admin.html`，原 `GET /`、`/admin`、`/admin.html`）：`GET /` 改为 `302 → /ui-next/`；`/admin`、`/admin.html` 改为 `410 Gone` + 退役说明。文件保留在仓库仅作历史溯源，**不再有任何读取/服务路径**。
+- **旧 `/ui-next` 控制台被 V3 控制台替换**：同一路径 `/ui-next/` 现在提供唯一的前端（状态驱动首页、`#/connections` 向导、高级功能分组）。
+- 影响：只依赖旧管理台 DOM/脚本的外部工具（如 `scripts/test/ui-browser-check.mjs`、旧 `admin-projection` 的"客户端行为"断言）不再适用于运行中的实例；服务端 API 与鉴权未变。所有者已明确授权放弃两份旧前端。
+- 回归更新：`ui-next.test.mjs` 与 `ui-v3-acceptance.test.mjs`（UI-13）改为断言"根路径 302 + 旧入口 410"。
+
 ## [Unreleased] —— 2026-11-15 前端体验 V3（UX-00…UX-06，开发分支）
 
 ### Added — 前端 V3（`feat/modelgate-ux-v3`，非发布）
