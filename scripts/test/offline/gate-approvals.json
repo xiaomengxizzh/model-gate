@@ -26,5 +26,12 @@
     "approver": "A5 round 6 explicit approval",
     "reason": "R005/R006 同时 FAIL 后，独立套件从『首个阻断必须是 R006』改为『阻断行必须点名 R006』；A5 书面确认这是随状态更新、非放宽",
     "at": "2026-11-15"
+  },
+  {
+    "sha": "fb986eeb",
+    "rule": "gate-weakened",
+    "approver": "A5 round 8 review",
+    "reason": "R006 断言从\"必须是 FAIL\"改为\"状态必须与证据一致\"：PASS_REAL 分支要求 8 用例 + 压缩后 + 完整 40 位新树 + 显式取代旧树，非 PASS_REAL 分支保留 FAIL 语义；A5 复核批准",
+    "at": "2026-11-15"
   }
 ]

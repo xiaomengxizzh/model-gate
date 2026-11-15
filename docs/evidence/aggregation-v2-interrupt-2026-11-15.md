@@ -44,3 +44,15 @@
 - 本轮真实调用：中断轮 ~15k tokens + resume 轮 ~16k tokens + 一次误 resume（子 session，~30k tokens，被识别并改用父 session id 重跑）。
 - 全部 GPT 调用为 `gpt-6-luna`；无其他型号、无自动回退。
 - 已知噪声：中断时 Codex 自身 rollout 记录竞态报错（客户端侧，不是网关侧丢事件）；如后续需要零噪声证据，可在中断前等待 1 个 token 计数周期。
+
+
+## 5. thread-id 级对照（回应 A5 第七轮 P2）
+
+| 时点 | 父 thread | 子 thread | 证据 |
+| --- | --- | --- | --- |
+| 中断前（spawn 后） | `01a1ddc8-e8b3-7801-9363-5c1b080ce440` | `01a1ddc9-032d-7751-bf9c-85231bfd60bd` | 两个 rollout 的 `session_meta` |
+| 中断瞬间 | 同一父 thread：`turn_aborted:1` | 同一子 thread：`turn_aborted:1`，`int3-long.txt` 未生成 | rollout 事件 |
+| resume 后（`resume 01a1ddc8-…`） | 同一父 thread | **同一子 thread**：`RESUME_AFTER_INTERRUPT_OK` 与 `CHILD_STARTED3` 都出现在 `01a1ddc9-…` 的 rollout 里 | 该 rollout 内容检索 |
+
+- rollout 文件总数在中断与 resume 前后都保持 **2**（父 + 子），没有第三个子 thread 文件 → 不存在"中断后重建子代理"。
+- 中断瞬间的 `failed to record rollout items: thread … not found` 只影响客户端**即时记录**：子 rollout 文件仍在、且 resume 后的工具结果写入了**同一个**子 thread，因此不影响子会话持久化与身份复用。

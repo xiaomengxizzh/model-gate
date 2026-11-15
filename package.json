@@ -19,7 +19,8 @@
     "test:live": "node scripts/test/live.mjs",
     "docs:check": "node scripts/check-docs.mjs",
     "gate:v2:independent": "node --test scripts/test/offline/aggregation-v2-independent-qa.test.mjs",
-    "gate:audit-diff": "node scripts/test/offline/aggregation-audit-diff.mjs"
+    "gate:audit-diff": "node scripts/test/offline/aggregation-audit-diff.mjs",
+    "release:freeze": "node scripts/test/offline/aggregation-freeze-check.mjs"
   },
   "license": "MIT"
 }

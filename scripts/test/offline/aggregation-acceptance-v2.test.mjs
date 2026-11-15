@@ -125,6 +125,8 @@ test('V2 状态证据：12 条齐全，MG-R006 的状态必须与证据一致（
   assert.ok(shas.length > 0, 'PASS_REAL 必须绑定完整 40 位被测树 SHA')
   const V1 = ['67b97354ad28a3924607b35a663801f417f14b8e', '4feafe0e51dc02d48c45734df5b34e70d3679bd5']
   assert.ok(shas.some((x) => !V1.includes(x)), '不得只绑 V1 旧树')
+  // 即使升级通过，也必须显式取代旧树 PASS_REAL（不能静默覆盖历史）。
+  assert.match(r006.basis, /取代\s*PASS_REAL\s*@\s*docs\/evidence\/aggregation-native-real-2026-11-14\.md/)
 })
 
 test('V2 门禁：当前状态 ready:false，且不因所有者批准而放行', () => {

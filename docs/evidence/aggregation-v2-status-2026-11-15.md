@@ -40,7 +40,7 @@
 
 ## 4. 本轮明确未解决项（不得因门禁迁移而消失）
 
-- **MG-R006 真实 native compaction**：真实 Codex 上仍未通过（历史失败保留）；离线协议与配置声明只到 `PASS_MOCK`。恢复条件：所有者授权的 Codex 时间窗/额度，A5 用 `gpt-6-luna` 父模型 + `deepseek-v4.1-flash` 子模型实测。
+- **MG-R006**：已 `PASS_REAL`（真实父 `gpt-6-luna` + 子 `go_deepseek`，八个用例全部成立，含中断/去重/压缩后追派）。历史 `unsupported_input_item` 失败记录保留不删改；回执绑定 `3116459`，发布冻结 SHA 上需重跑。
 - **N04（`history/export` 迁移导出）：所有者已批准书面例外（2026-11-15）**。授权来源：所有者在本轮对话中明确指令"保留并书面登记例外"。例外边界写在 [V2 产品契约](../product/2026-11-14-owner-scope-v2.md) 「明确取消与明确保留」段：非压缩/摘要器、不调用 LLM、不参与模型请求组装（有守卫断言）、原件逐字节不变、不得用于满足 `MG-R006`。超出该边界的任何摘要/压缩实现仍按绝对条款禁止。
 - **managed provider 运行时登录复用**：`requires_openai_auth` 仅经 serde 解析验证，运行时是否复用 ChatGPT 登录为 `UNVERIFIED`，默认关闭（保持内置 `openai` 身份）。
 

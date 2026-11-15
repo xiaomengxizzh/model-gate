@@ -24,7 +24,7 @@ export const AUDIT_RULE_IDS = Object.freeze([
 ])
 
 // 门禁定义文件（V2-00 / A5 F1）：改它们等于改门禁，必须显式人工复核，不能靠"改实现时顺手删断言"过关。
-const GATE_FILES = /^(?:scripts\/(?:check-product-contract\.mjs|test\/offline\/aggregation-(?:matrix|gate|audit)(?:-v2)?\.js|test\/offline\/aggregation-acceptance-v2\.test\.mjs|test\/offline\/aggregation-v2-independent-qa\.test\.mjs)|docs\/evidence\/aggregation-v2-status-2026-11-15\.md|test\/offline\/gate-approvals\.json)$/
+const GATE_FILES = /^(?:scripts\/(?:check-product-contract\.mjs|test\/offline\/aggregation-(?:matrix|gate|audit)(?:-v2)?\.js|test\/offline\/aggregation-acceptance-v2\.test\.mjs|test\/offline\/aggregation-v2-independent-qa\.test\.mjs)|docs\/evidence\/aggregation-v2-status-2026-11-15\.md|scripts\/test\/offline\/gate-approvals\.json)$/
 
 // 仓库内脚本无法证明的部分：必须由人类复核并在 PR 里附证据。
 export const MANUAL_AUDIT_STEPS = Object.freeze([

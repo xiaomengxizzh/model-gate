@@ -1,4 +1,6 @@
-# ModelGate V2｜发布裁决（2026-11-15 收尾，被测树 `75270d3`+GUI 复测 `fb986ee`）
+# ModelGate V2｜发布裁决（2026-11-15 收尾）
+
+> 被测树：中间树 `258c810`（后续仅文档/门禁修补）。**发布以 `npm run release:freeze` 为准**：所有 `PASS_REAL` 必须在冻结 SHA 上重跑，当前检查会列出全部待重跑项。
 
 > **两个结论必须分开读**：门禁迁移（V2-00）**PASS**；产品发布**FAIL / 不可签收**。
 > 本文件是 Lead 对 A5 第五轮独立复核（`3dfd44a`）的登记，不替代 A5 原始证据，也不改变任何 `MG-R` 口径。
@@ -16,21 +18,22 @@
 | 命令 | 结果 |
 | --- | --- |
 | `npm run check` | PASS（UI modules 17/17）|
-| `npm test` | 116 套件 / 1120 用例 / 0 失败 / 2 skipped |
+| `npm test` | 119 套件 / 1135 用例 / 0 失败 / 2 skipped |
 | `node scripts/check-metadata.mjs` | PASS（39 checks）|
 | `npm run docs:check` | PASS（92 文件）|
 | `npm run contract:check` | PASS |
 | `npm run gate:v2` | 9/9 自证 PASS |
 | `aggregation-matrix-v2.js --check` | PASS（byte-identical）|
-| `npm run gate:audit-diff --base main --all-commits` | PASS（0 未批准 findings；4 条历史改动见 `gate-approvals.json`）|
+| `npm run gate:audit-diff --base main --all-commits` | PASS（0 未批准 findings；5 条历史改动见 `gate-approvals.json`）|
 | `npm run gate:v2:independent` | **12/12**（N04 已由所有者书面例外覆盖）|
 
 ## 3. 发布阻断（不得删除）
 
-1. **真实原生父生子已成立（已关闭）**：网关新增受限订阅承载（复用本机 Codex 登录 → `chatgpt.com/backend-api/codex`，仅显式 `gatewaySubscription` + loopback + 官方 host），真实 `gpt-6-luna` 父通过 `[agents.go_deepseek]` 派生真实 Go 子代理并执行工具；R002/R003/R005/R012 均已 `PASS_REAL`（绑 `754a687`）。
+1. **真实原生父生子已成立**：网关新增受限订阅承载（复用本机 Codex 登录 → `chatgpt.com/backend-api/codex`，仅显式 `gatewaySubscription` + loopback + 官方 host），真实 `gpt-6-luna` 父通过 `[agents.go_deepseek]` 派生真实 Go 子代理并执行工具；R002/R003/R005/R012 均已 `PASS_REAL`（绑 `754a687`）。
 2. **MG-R006 已 `PASS_REAL`（已关闭）**：`interrupt`（工具执行中 SIGINT，父/子 `turn_aborted:1`、工具未完成、`spawn_agent:1`）与 `no-duplicates`（2 个会话来回复用、无第三个子会话）真机成立；`resume` 后继续用同一子代理。
 3. **原版 Desktop GUI 已真机验收（R004 `PASS_REAL`）**：隔离实例窗口 + 选择器双方可见（截图/DOM）+ 官方 `gpt-6-luna` 与 Go 模型各一次真实请求；官方路径 403 已由 `0c867fd`（仅 app 模式注入 chatgptPlan）修复并复测通过。
-4. **剩余 6 项 `PASS_MOCK`**：R001（Web 一键启停未操作，本轮走 launcher）、R007/R010（经 desktop-integration activate/deactivate 的导入/回滚链路未走）、R008/R009/R011（真实负向与双身份未执行）。
+4. **剩余 6 项 `PASS_MOCK`**：R001（Web 一键启停未操作）、R007/R010（经 desktop-integration 的导入/回滚链路未走）、R008/R011（真实负向与冻结回执）、R009（**需所有者授权第二身份**）。
+5. **冻结 SHA 重跑（P05 强制）**：`npm run release:freeze` 当前 FAIL，列出 6 项 PASS_REAL 待重跑；中间树回执只用于推进，不作为发布证据。
 4. **结构性残余**：伪造 evidence 绑当前 HEAD + 布尔批准仍可过门禁；真实性由 A5 真实回执与所有者审批兜底。
 4. **结构性残余（不可由仓库脚本消除）**：伪造 evidence 绑当前 HEAD + 所有者布尔批准仍可过门禁；真实性只能由 A5 真实回执与所有者审批兜底。哈希钉死与 `gate-approvals.json` 都是“可见的二次确认”，不是防篡改金库。
 

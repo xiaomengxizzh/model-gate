@@ -6,7 +6,7 @@
 >
 > 结论摘要：**GUI 内同时可见官方模型与 Go 模型（PASS_REAL）**；**Go `deepseek-v4.1-flash` 在 GUI 内真实推理成功（PASS_REAL）**；**产品 `launch` 路径的官方 `gpt-6-luna` 请求在树 `3116459` 上被网关 403 拒绝（FAIL，已确定性复现；历史记录保留）**；退出后用户日常配置/登录字节未变、官方订阅再请求成功（PASS_REAL）。
 >
-> **修复复测（2026-11-15，树 `fb986eeb7341877c8e8017918abf2f2b90cd95bb` + 修复提交 `0c867fd`）**：`MG_DESKTOP_SUBSCRIPTION_MODE=auto` → `mode=local`，产品默认 `launch` 下 GUI 官方 `gpt-6-luna` 正常回复 `MG_GUI_LUNA_FIXED_OK`，网关出现 `gateway_subscription ... target=chatgpt.com/backend-api/codex/responses` 且**无** `chatgpt_plan_target_denied` → **官方 GUI 请求升 PASS_REAL**（详见 §8）。原 `3116459` FAIL 记录不删改。
+> **修复复测（2026-11-15，树 `fb986eeb7341877c8e8017918abf2f2b90cd95bb` + 修复提交 `5481bd9（旁支等价提交 0c867fd）`）**：`MG_DESKTOP_SUBSCRIPTION_MODE=auto` → `mode=local`，产品默认 `launch` 下 GUI 官方 `gpt-6-luna` 正常回复 `MG_GUI_LUNA_FIXED_OK`，网关出现 `gateway_subscription ... target=chatgpt.com/backend-api/codex/responses` 且**无** `chatgpt_plan_target_denied` → **官方 GUI 请求升 PASS_REAL**（详见 §8）。原 `3116459` FAIL 记录不删改。
 
 ## 1. 环境与隔离（本机事实）
 
@@ -73,7 +73,7 @@ MG_DESKTOP_EXECUTABLE=/tmp/mg-chatgpt-cdp-wrapper.sh node bin/mg-desktop.mjs lau
 | 产品 `launch` 拉起原版 Desktop（隔离 user-data-dir），窗口存在、网关健康 | **PASS_REAL** | `xwininfo` 窗口行、`curl /healthz → ok`；截图 [01](2026-11-15-desktop-gui/01-isolated-desktop-window.png) |
 | 打开原版模型选择器，同时出现官方与 Go 模型 | **PASS_REAL** | 截图 [02](2026-11-15-desktop-gui/02-model-picker-both-models.png)；DOM 文本 `选择模型 / 6 Luna / deepseek-v4.1-flash (opencodego)`；目录 `models.json` 中 slug 为 `gpt-6-luna` 与 `mg-opencodego-deepseek-v4-1-flash`（display_name 即截图文案） |
 | GUI 内选择官方 `gpt-6-luna` 并发请求（产品 launch 路径，历史树 `3116459`） | **FAIL**（历史） | GUI 显示 `403 Forbidden: ChatGPT 应用授权只允许指定的本机入口与 OpenAI Responses 目标`；截图 [03](2026-11-15-desktop-gui/03-official-403-in-gui.png)；确定性复现见 §4。**已在 `fb986ee` 修复并复测，见下一行与 §8** |
-| 同上，修复后复测（树 `fb986ee` + `0c867fd`，`MG_DESKTOP_SUBSCRIPTION_MODE=auto`→local） | **PASS_REAL** | GUI 回复 `MG_GUI_LUNA_FIXED_OK`（截图 [06](2026-11-15-desktop-gui/06-luna-fixed-ok.png)）；网关日志 `gateway_subscription provider=chatgpt-plan target=chatgpt.com/backend-api/codex/responses`，`chatgpt_plan_target_denied` 0 次；回执见 `2026-11-15-desktop-gui/luna-fixed-receipts.txt` |
+| 同上，修复后复测（树 `fb986ee` + `5481bd9（旁支等价提交 0c867fd）`，`MG_DESKTOP_SUBSCRIPTION_MODE=auto`→local） | **PASS_REAL** | GUI 回复 `MG_GUI_LUNA_FIXED_OK`（截图 [06](2026-11-15-desktop-gui/06-luna-fixed-ok.png)）；网关日志 `gateway_subscription provider=chatgpt-plan target=chatgpt.com/backend-api/codex/responses`，`chatgpt_plan_target_denied` 0 次；回执见 `2026-11-15-desktop-gui/luna-fixed-receipts.txt` |
 | GUI 内选择 `deepseek-v4.1-flash` 并发请求 | **PASS_REAL** | 回复 `MG_GUI_GO_OK`（截图 [04](2026-11-15-desktop-gui/04-go-deepseek-reply.png)）；网关 stats `byModel.mg-opencodego-deepseek-v4-1-flash.tokens=34879`（in 34818 / out 61）；provider=`opencodego` 日志见 `gateway-receipts.txt` §3 |
 | 诊断性替代接线（隔离 gateway.json 内 provider 改名 `chatgpt-local`，不传 `chatgptPlan`）下官方 `gpt-6-luna` | **PASS_MOCK**（workaround，非产品默认） | 回复 `MG_GUI_LUNA_OK`（截图 [05](2026-11-15-desktop-gui/05-luna-diagnostic-reply.png)）；日志 `gateway_subscription provider=chatgpt-local target=chatgpt.com/backend-api/codex/responses` |
 | 退出 GUI 实例：日常 `config.toml`/`auth.json` 字节不变、日常状态目录未写 | **PASS_REAL** | §1 哈希与 mtime 前后一致；隔离进程全部退出、端口释放 |
@@ -113,7 +113,7 @@ MG_DESKTOP_EXECUTABLE=/tmp/mg-chatgpt-cdp-wrapper.sh node bin/mg-desktop.mjs lau
 
 ## 6. 未满足项与恢复条件
 
-1. **官方模型 GUI 请求（产品默认路径）**：~~FAIL~~ → **已在 `fb986ee`（修复提交 `0c867fd`）修复并复测 PASS_REAL**（§8）。历史 FAIL 与复现回执保留；如后续换树失败，按新树重新记 FAIL。
+1. **官方模型 GUI 请求（产品默认路径）**：~~FAIL~~ → **已在 `fb986ee`（修复提交 `5481bd9（旁支等价提交 0c867fd）`）修复并复测 PASS_REAL**（§8）。历史 FAIL 与复现回执保留；如后续换树失败，按新树重新记 FAIL。
 2. **Web 控制台一键启停**：NOT_TESTED。恢复条件：所有者授权后在 GUI 控制台操作并保留截图+配置哈希，或明确该能力不纳入本轮。
 3. **模型选择器内容的机器可读证明**：本轮用截图 + DOM 文本 + `models.json` slug 对照；未做像素级 OCR 门禁。
 4. **真实额度记录**：本轮 Go 消耗 34,879 tokens（网关 stats）；官方请求为订阅入口，本地 stats 未计 token（`gpt-6-luna` 条目 tokens=0，请求次数已计）。
@@ -125,9 +125,9 @@ MG_DESKTOP_EXECUTABLE=/tmp/mg-chatgpt-cdp-wrapper.sh node bin/mg-desktop.mjs lau
 - 本轮**未**修改 `src/**`、`bin/**`、`docs/product/**`、`docs/roadmap/**`；CDP 端口仅本机回环，仅用于读取 UI 与截图。
 - 手动复现步骤见 [desktop 验收手册](../how-to/desktop-acceptance.md)；只读检查器见 `scripts/test/live/desktop-gui-checklist.mjs`。
 
-## 8. 修复复测：官方 GUI 请求（PASS_REAL，树 `fb986ee` + `0c867fd`）
+## 8. 修复复测：官方 GUI 请求（PASS_REAL，树 `fb986ee` + `5481bd9（旁支等价提交 0c867fd）`）
 
-修复：A4 策略 A 提交 `0c867fd` 将 `chatgptPlan` 限制为 **仅 app 模式**注入（`chatgptPlan: subscription.mode === 'app' ? {...} : undefined`），local/gatewaySubscription 模式不再触发 `appPlan` 冲突守卫。
+修复：A4 策略 A 提交 `5481bd9（旁支等价提交 0c867fd）` 将 `chatgptPlan` 限制为 **仅 app 模式**注入（`chatgptPlan: subscription.mode === 'app' ? {...} : undefined`），local/gatewaySubscription 模式不再触发 `appPlan` 冲突守卫。
 
 被测树：`fb986eeb7341877c8e8017918abf2f2b90cd95bb`（`mg-codex-native`，工作树 `.agents/worktrees/v2-a3-gui-fixed`，分支 `feat/v2-a3-gui`）。
 
