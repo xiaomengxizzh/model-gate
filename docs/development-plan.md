@@ -253,3 +253,11 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 - 已执行：`npm run check` PASS；`npm test` 108 套件 / 1068 用例 / 0 失败；`node scripts/check-metadata.mjs` PASS；`npm run docs:check` PASS；`npm run contract:check` PASS；`npm run gate:v2` 9 条自证 PASS；`npm run gate:v2:independent` 11/12（N04 待所有者裁决）。
 - 未验证：真实原版 Desktop 选模、真实 ChatGPT 套餐请求、真实 Go 推理、真实 Codex 原生压缩（全部 BLOCKED，无额度/时间窗授权）；managed provider 运行时登录复用 UNVERIFIED。
 - 待裁决：N04（`history/export` 迁移导出）与契约“网关不得自建 summarize”冲突，需所有者选择保留并书面登记或移除；在裁决前 A5 独立门禁保持 FAIL。
+
+### P02 真实客户端压缩实测（2026-11-15，零额度）
+
+- 环境：原版 Desktop 捆绑 `codex-cli 0.167.0-alpha.3.2`，隔离 `CODEX_HOME=/tmp/mg-compact-exp/codexhome`，回环 mock 上游 + 本仓库网关（`MG_CONFIG_DIR` 隔离、端口 8788）；未触碰 `~/.codex`、未调用真实上游、未下载。
+- 结果：`remote_compaction="unsupported"` ⇒ Codex 自己发起本地压缩（`CONTEXT CHECKPOINT COMPACTION` 提示逐字到达上游、输出 `context compacted`、压缩后追派成功）；`remote_compaction="v2"` ⇒ Codex 发 `{type:"compaction_trigger"}` 并要求上游返回 `compaction` 输出项（mock 返回 message 即报 "expected exactly one compaction output item"）。
+- 代码：interop 识别 `compaction_trigger`（仅 `codex-owned-remote` 透传，其余 `native_compaction_route_not_ready`）；回放回归 `agg-v2-real-client-compaction.test.mjs`（4 用例）。
+- 状态：`PASS_MOCK`（真实客户端 + mock 上游）。`MG-R006` 仍为 `FAIL`：真实 Go 推理、真实原生父子 + 压缩后追派/中断/恢复未执行（BLOCKED，无额度授权）。
+- 已知 flake：`routing-ledger.test.mjs` 跨进程并发用例在全量并发下偶发失败，单跑 3/3 通过，与本轮改动无关。
