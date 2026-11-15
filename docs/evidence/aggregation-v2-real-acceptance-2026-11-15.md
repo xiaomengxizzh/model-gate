@@ -3,7 +3,9 @@
 > 所有者授权：本轮对话中明确「授权真实验收」。执行范围遵守 V2 契约：**真实 GPT 只允许 `gpt-6-luna`**；Go 只用 `deepseek-v4.1-flash`；不下载、不安装、不改用户日常 Codex 配置与生产服务。
 > 本文件只记录**实际发生**的事实，不构成对未执行项的通过。
 
-被测树：真实调用发生在 `2645b8f` 之上、携带未提交的 `projectThirdPartyResponsesParams` 修复；该修复与本文件同批提交固化（后续提交 SHA 见 `git log --grep V2-REAL`）。
+被测树绑定（按用例区分，避免"一次实验绑所有回执"的精度问题）：
+- §2.1 直连 Go 回执：`2645b8f29d2a5ac31302300f56830d3222ae349c`。该路径是 `/v1/responses` 直连，**不经过** `projectThirdPartyResponsesParams`（只在 Codex 原生代理路径生效），因此在 `2645b8f` 上可复现。
+- §2.2–§2.4 Codex 会话回执：`3dfd44aee948409825306cbbff067bbf4f23b2c4`（含第三方参数投影修复）。
 
 ## 1. 环境与隔离
 
@@ -17,7 +19,7 @@
 
 ## 2. 实测结果
 
-### 2.1 Go 真实推理：PASS_REAL（网关层）
+### 2.1 Go 真实推理：PASS_REAL（网关层，绑定 `2645b8f`）
 
 ```
 POST http://127.0.0.1:8891/v1/responses
@@ -30,7 +32,7 @@ POST http://127.0.0.1:8891/v1/responses
 
 **结论**：MG-R003 的「Go 凭据 + 目标模型真实推理 + 公共 ID 出站一致」在网关层成立。
 
-### 2.2 Codex 原生压缩（真实 Go 模型）：native-compaction 子用例 PASS_REAL
+### 2.2 Codex 原生压缩（真实 Go 模型）：observed（部分成立，不足以判该子用例 PASS_REAL）
 
 真实 `codex exec` 两轮（第二轮回放同一会话）：
 
@@ -40,6 +42,8 @@ turn2: codex exec resume --last → 客户端输出 "context compacted"，随后
 ```
 
 压缩由 **Codex 自己**执行（`context compacted` 由客户端打印），网关只转发；Go 上游收到的是明文压缩提示，不是伪造密文。
+
+**边界**：V2 的 `native-compaction` 子用例还要求压缩事件属性（`owner=codex`）、历史未丢、压缩后上下文可续；本节只证明了「Codex 自己触发压缩 + 网关透传」，故仅记 `observed`，不把该子用例写成 `PASS_REAL`。
 
 ### 2.3 真实缺口 1：第三方 Responses 参数（已修，本轮）
 
@@ -72,7 +76,7 @@ OpenCode Go 上游直接 400：`reasoning.context: this reasoning option require
 | 项 | 状态 | 依据 |
 | --- | --- | --- |
 | MG-R003 Go 真实授权 + 推理 + 模型 ID | **PASS_REAL** | §2.1（两条 200 回执，绑定本轮被测树）|
-| MG-R006 native-compaction（Codex 自己压缩） | **PASS_REAL（仅该子用例）** | §2.2 |
+| MG-R006 native-compaction（Codex 自己压缩） | **observed（partial）** | §2.2（不写满子用例 PASS_REAL）|
 | MG-R005 / MG-R006 其余（工具、追派、中断、恢复、压缩后上下文） | **FAIL** | §2.4 工具未执行 |
 | MG-R012 真实 GPT 仅 Luna | 未在本轮复测（保持旧树 PASS_REAL，门禁仍按 stale 阻断）| 本轮零 GPT 调用 |
 | MG-R001/R004/R007 真实 Desktop GUI | **BLOCKED** | 需 GUI 会话与用户本机交互 |
@@ -86,5 +90,5 @@ OpenCode Go 上游直接 400：`reasoning.context: this reasoning option require
 
 ## 5. 费用与边界
 
-- 本轮真实调用：Go 推理 4 次（含 1 次截断探针）+ Codex 三轮会话；GPT 调用 0 次。
+- 本轮真实调用：Go 推理 4 次（含 1 次截断探针与 1 次工具探针）+ Codex 四轮会话（1 轮工具形状排查）；GPT 调用 0 次。
 - 未下载/安装任何资源；未改 `~/.codex` 与生产服务；凭据未打印、未入库；`/tmp/mg-real-accept` 为一次性隔离目录。

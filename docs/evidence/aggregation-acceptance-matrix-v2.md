@@ -8,7 +8,7 @@
 - 用例映射来源：`docs/roadmap/2026-11-14-go-deepseek-native-compact-plan.md` §2.1（sha256 `fc42dccb424e978930e2cbeea45f0dd8409dcc956d409a9b9c34c0cf050d5ca1`）
 - 状态来源：`docs/evidence/aggregation-v2-status-2026-11-15.md`（12 行）、`docs/evidence/aggregation-native-real-2026-11-14.md`（2 行）、`docs/evidence/aggregation-real-luna-2026-11-14.md`（1 行）、`docs/evidence/aggregation-integration-2026-11-14.md`（12 行）、`docs/evidence/agg-p01-opencode-discovery-2026-11-14.md`（6 行）；冲突必须显式 `取代 <旧状态> @ <旧文档>`。
 - 状态口径：`NOT_TESTED` / `BLOCKED` / `FAIL` / `PASS_MOCK` / `PASS_REAL`；`PASS_REAL` 必须绑定完整 40 位 SHA，换树即失效。
-- 当前门禁：`ready:false`（12 项中 3 项 `PASS_REAL`，均为旧树历史回执）。首个产品级阻断是 `MG-R006`：Codex 原生压缩尚未真实通过。
+- 当前门禁：`ready:false`（12 项中 3 项 `PASS_REAL`：MG-R003@2645b8f2（绑定树 2645b8f2，非本表基线）、MG-R005@67b97354（V1 旧树回执，当前树未复测）、MG-R012@4feafe0e（V1 旧树回执，当前树未复测））。首个产品级阻断是 `MG-R006`（状态 FAIL，依据见该行）。
 
 ## 1. 矩阵
 

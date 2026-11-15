@@ -250,7 +250,24 @@ export function renderV2Markdown({ contractText, planText, matrix }) {
   lines.push('- 用例映射来源：`' + PLAN_PATH_V2 + '` §2.1（sha256 `' + sha256(planText) + '`）')
   lines.push('- 状态来源：' + matrix.evidenceDocs.map((d) => '`' + d.docPath + '`（' + d.rowCount + ' 行）').join('、') + '；冲突必须显式 `取代 <旧状态> @ <旧文档>`。')
   lines.push('- 状态口径：`NOT_TESTED` / `BLOCKED` / `FAIL` / `PASS_MOCK` / `PASS_REAL`；`PASS_REAL` 必须绑定完整 40 位 SHA，换树即失效。')
-  lines.push('- 当前门禁：`ready:false`（12 项中 ' + counts.PASS_REAL + ' 项 `PASS_REAL`，均为旧树历史回执）。首个产品级阻断是 `MG-R006`：Codex 原生压缩尚未真实通过。')
+  const realRows = matrix.rows.filter((r) => r.status === 'PASS_REAL')
+  const realDetail = realRows.length
+    ? realRows.map((r) => {
+      const pinned = (String(r.statusBasis).match(/\b[0-9a-f]{40}\b/) || [])[0]
+      const V1_TREES = ['67b97354', '4feafe0e']
+      const tag = !pinned ? '（未绑树）'
+        : pinned.slice(0, 8) === short ? '（当前基线树）'
+          : V1_TREES.includes(pinned.slice(0, 8)) ? '（V1 旧树回执，当前树未复测）'
+            : '（绑定树 ' + pinned.slice(0, 8) + '，非本表基线）'
+      return r.id + (pinned ? '@' + pinned.slice(0, 8) : '') + tag
+    }).join('、')
+    : '无'
+  const firstFail = matrix.rows.find((r) => r.status === 'FAIL')
+  const firstBlocked = matrix.rows.find((r) => r.status === 'BLOCKED')
+  const blocker = firstFail
+    ? '`' + firstFail.id + '`（状态 FAIL，依据见该行）'
+    : (firstBlocked ? '`' + firstBlocked.id + '`（BLOCKED）' : '无 FAIL/BLOCKED 行，但仍需逐项 PASS_REAL 与所有者批准')
+  lines.push('- 当前门禁：`ready:false`（12 项中 ' + counts.PASS_REAL + ' 项 `PASS_REAL`：' + realDetail + '）。首个产品级阻断是 ' + blocker + '。')
   lines.push('')
   lines.push('## 1. 矩阵')
   lines.push('')

@@ -1,16 +1,17 @@
-# ModelGate V2｜发布裁决（2026-11-15，被测树 `edd0830`）
+# ModelGate V2｜发布裁决（2026-11-15 更新，被测树 `3dfd44a`）
 
 > **两个结论必须分开读**：门禁迁移（V2-00）**PASS**；产品发布**FAIL / 不可签收**。
-> 本文件是 Lead 对 A5 四轮独立复核结论的登记，不替代 A5 原始证据，也不改变任何 `MG-R` 口径。
+> 本文件是 Lead 对 A5 第五轮独立复核（`3dfd44a`）的登记，不替代 A5 原始证据，也不改变任何 `MG-R` 口径。
+> 本页已 `取代` 早先 `edd0830` 版本（当时 R003 仍 BLOCKED、N04 无裁决），历史内容不再作为当前结论。
 
 ## 1. 结论
 
 | 维度 | 结论 | 依据 |
 | --- | --- | --- |
 | V2 门禁迁移（V2-00） | **PASS** | A5 第四轮复核：`gate:audit-diff --base main` 真实 PASS、空 diff fail-closed、`--replay` 不得放行、门禁模块/状态表哈希二次确认、`gate-weakened` 登记与单测 |
-| 产品发布 | **FAIL（不可签收）** | 见 §3 阻断清单 |
+| 产品发布 | **FAIL（不可签收）** | 见 §3 阻断清单（N04 已由所有者书面例外移出阻断） |
 
-## 2. 本轮实测结果（被测树 `edd08305a5cda63ec11b14638666fda8fae69896`）
+## 2. 本轮实测结果（被测树 `3dfd44aee948409825306cbbff067bbf4f23b2c4`）
 
 | 命令 | 结果 |
 | --- | --- |
@@ -22,20 +23,21 @@
 | `npm run gate:v2` | 9/9 自证 PASS |
 | `aggregation-matrix-v2.js --check` | PASS（byte-identical）|
 | `npm run gate:audit-diff --base main` | PASS（0 findings，422 files，非空 diff）|
-| `npm run gate:v2:independent` | 11/12（唯一 FAIL = N04）|
+| `npm run gate:v2:independent` | **12/12**（N04 已由所有者书面例外覆盖）|
 
 ## 3. 发布阻断（不得删除）
 
-1. **MG-R006 真实 Codex 原生压缩：FAIL / BLOCKED**。真实 Go `deepseek-v4.1-flash` 推理与真实原生父子 + 压缩后追派/中断/恢复未执行（无所有者额度/时间窗授权）。现有最强证据是真实客户端 + 回环上游的 `PASS_MOCK`（[实测记录](aggregation-v2-native-compaction-real-client-2026-11-15.md)），不得升级。
-2. **N04 摘要导出：FAIL**。`src/codex/history.js` + `/api/codex/history/export*` 仍可达，契约“网关不得自建 summarize”为绝对条款且无所有者书面裁决。已加边界守卫（不参与模型请求组装），但**可达路径仍在**。
-3. **真实原版 Desktop 选模、真实 ChatGPT 套餐（`gpt-6-luna`）、真实 OpenCode Go 推理：全部 BLOCKED**（无授权）。
+1. **真实工具未执行（首要阻断）**：真机实测 Codex 对第三方 Go 模型不下发工具（`tools: None`），模型输出 `<|DSML| invoke …>` 文本、客户端不执行 → MG-R005 `native-tools` 与 MG-R006 `native-tool` / `post-compact-followup` / `context-proof` 不成立。网关直连 Go 的 `function_call` 翻译正常（探针已证）。修复方向：ModelGate 生成的 ModelInfo 需给出正确的工具能力/`tool_mode` 声明（A1 进行中）。
+2. **真实原版 Desktop GUI 选模/退出恢复未执行**（MG-R001/R004 real `BLOCKED`/`NOT_TESTED`），需 GUI 会话。
+3. **真实 GPT（仅 `gpt-6-luna`）在 `3dfd44a` 未复测**：本轮零 GPT 调用，MG-R012 保持旧树 `PASS_REAL`，门禁按 stale 阻断。
+4. **MG-R006 整体仍 `FAIL`**：压缩已观测（Codex 自己执行），但工具与压缩后上下文不成立。
 4. **结构性残余（不可由仓库脚本消除）**：伪造 evidence 绑当前 HEAD + 所有者布尔批准仍可过门禁；真实性只能由 A5 真实回执与所有者审批兜底。哈希钉死是“二次可见确认”，不是防篡改金库。
 
-## 4. 待所有者决策
+## 4. 所有者已决定事项
 
-- **N04**：保留并书面登记例外，或移除该可达导出路径。
-- **真实验收授权**：批准额度/时间窗后，A5 只用 `gpt-6-luna` 做真实压缩/Desktop/Go 验收，回执绑定**冻结 SHA**。
-- 发布动作（PR #7 转 Ready、合并 main、发版）在以上两项完成前不执行。
+- **N04**：所有者已批准**保留 + 书面例外**（2026-11-15），边界写入 [V2 产品契约](../product/2026-11-14-owner-scope-v2.md)；A5 独立套件相应合法变绿（12/12）。不再计入发布阻断。
+- **真实验收**：所有者已授权。首轮结果见 [真实验收记录](aggregation-v2-real-acceptance-2026-11-15.md)：Go 推理 `PASS_REAL`、Codex 原生压缩 `observed`、真实工具未执行 `FAIL`。
+- 发布动作（PR #7 转 Ready、合并 main、发版）在「真实工具可用 + 真实 Desktop/Luna 验收」完成前不执行。
 
 ## 5. 本轮交付的代码与证据索引
 
