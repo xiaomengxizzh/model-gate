@@ -279,3 +279,11 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 - `--replay` 语义收紧：输出 `replay:true` / `releaseEligible:false`，永不 `ready:true`（历史复算不再能伪装发布放行）。
 - 门禁模块整体 sha256 + V2 状态表逐行 sha256 双钉（等行数改写必须显式二次确认）。
 - 已执行：`npm test` 114 套件 / 1106 用例 / 0 失败；`npm run gate:audit-diff --base main` 在**提交后**的 HEAD 上重跑（见下一次状态记录）。
+
+### V2 发布裁决（2026-11-15，`edd0830`）
+
+- 门禁迁移（V2-00）：**PASS**（A5 第四轮独立复核）。
+- 产品发布：**FAIL / 不可签收**。阻断：MG-R006 真实原生压缩 FAIL/BLOCKED、N04 摘要导出 FAIL 待所有者裁决、真实 Desktop/Luna/Go 全部 BLOCKED、N3 结构性真实性弱点。
+- 已执行：`npm run check` / `npm test`（114 套件 1107 用例）/ `check-metadata` / `docs:check` / `contract:check` / `gate:v2`（9/9）/ `matrix-v2 --check` / `gate:audit-diff --base main`（PASS）/ `gate:v2:independent`（11/12）。
+- 发布动作（PR #7 转 Ready、合并 main、发版）在所有者裁决 N04 并批准真实验收额度前不执行。
+- 裁决登记：[V2 发布裁决](evidence/aggregation-v2-release-verdict-2026-11-15.md)
