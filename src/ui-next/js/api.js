@@ -3,11 +3,13 @@ let token = ''
 let unauthorizedHandler = null
 
 export class ApiError extends Error {
-  constructor(message, status, data) {
+  constructor(message, status, data, aborted = false) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.data = data
+    // 外部取消（AbortController）不是 401，也不是超时：调用方据此丢弃旧响应。
+    this.aborted = !!aborted
     this.currentVersion = data && Number.isFinite(Number(data.currentVersion)) ? Number(data.currentVersion) : null
   }
 }
@@ -25,13 +27,25 @@ function errorMessage(data, status) {
   return 'HTTP ' + status
 }
 
+function abortedError() {
+  return new ApiError('请求已取消', 0, null, true)
+}
+
 export async function request(path, opts = {}) {
   const method = opts.method || 'GET'
   const headers = { accept: 'application/json' }
   if (token) headers.authorization = 'Bearer ' + token
   if (opts.body !== undefined) headers['content-type'] = 'application/json'
+  // 外部 signal（store 的 epoch 取消）与内部 25s 超时共用同一个底层 controller；
+  // 两者必须区分：外部取消标记 aborted，绝不触发 unauthorizedHandler。
+  const external = opts.signal && typeof opts.signal.addEventListener === 'function' ? opts.signal : null
+  if (external && external.aborted) throw abortedError()
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs || 25000)
+  let timedOut = false
+  let cancelled = false
+  const onExternalAbort = () => { cancelled = true; controller.abort() }
+  if (external) external.addEventListener('abort', onExternalAbort, { once: true })
+  const timer = setTimeout(() => { timedOut = true; controller.abort() }, opts.timeoutMs || 25000)
   let res
   try {
     res = await fetch(path, {
@@ -43,11 +57,13 @@ export async function request(path, opts = {}) {
       signal: controller.signal,
     })
   } catch (e) {
-    clearTimeout(timer)
-    if (e && e.name === 'AbortError') throw new ApiError('请求超时（25s），本地网关可能繁忙或不可达', 0, null)
+    if (cancelled || (external && external.aborted)) throw abortedError()
+    if (timedOut || (e && e.name === 'AbortError')) throw new ApiError('请求超时（25s），本地网关可能繁忙或不可达', 0, null)
     throw new ApiError('无法连接本地网关：' + (e && e.message ? e.message : '网络错误'), 0, null)
+  } finally {
+    clearTimeout(timer)
+    if (external) external.removeEventListener('abort', onExternalAbort)
   }
-  clearTimeout(timer)
   let data = null
   const type = res.headers.get('content-type') || ''
   try { data = type.includes('application/json') ? await res.json() : await res.text() } catch { data = null }
@@ -61,10 +77,14 @@ export async function request(path, opts = {}) {
   return data
 }
 
+function aggregationPath(id, suffix) {
+  return '/api/aggregation/providers/' + encodeURIComponent(String(id || '')) + (suffix || '')
+}
+
 export const api = {
-  auth: () => request('/api/auth', { authEvent: false }),
-  status: () => request('/api/status'),
-  config: () => request('/api/config'),
+  auth: (opts = {}) => request('/api/auth', Object.assign({ authEvent: false }, opts)),
+  status: (opts = {}) => request('/api/status', opts),
+  config: (opts = {}) => request('/api/config', opts),
   logs: (lines = 200) => request('/api/logs?lines=' + encodeURIComponent(lines)),
   modelStats: (days = 7) => request('/api/model-stats?days=' + encodeURIComponent(days)),
   nativeUsage: (days = 7) => request('/api/native-usage?days=' + encodeURIComponent(days)),
@@ -75,4 +95,17 @@ export const api = {
   probe: (id) => request('/api/probe', { method: 'POST', body: id ? { id } : {} }),
   modelTest: (id) => request('/api/model-test', { method: 'POST', body: id ? { id } : {} }),
   setAdminToken: (value) => request('/api/admin-token', { method: 'POST', body: { token: value } }),
+
+  // —— 聚合管理只读快照（首页/连接页/聚合页共用，见契约 §5）——
+  aggregationHealth: (opts = {}) => request('/api/aggregation/health', opts),
+  aggregationProviders: (opts = {}) => request('/api/aggregation/providers', opts),
+  aggregationModels: (opts = {}) => request('/api/aggregation/models', opts),
+  aggregationDiagnostics: (opts = {}) => request('/api/aggregation/diagnostics', opts),
+
+  // —— 聚合写操作（仍走现有管理 API；Key 只经 POST /api/keys，不进存储）——
+  addAggregationProvider: (body) => request('/api/aggregation/providers', { method: 'POST', body: body === undefined ? {} : body }),
+  syncAggregationProvider: (id) => request(aggregationPath(id, '/sync'), { method: 'POST', body: {} }),
+  removeAggregationProvider: (id, body) => request(aggregationPath(id), { method: 'DELETE', body: body === undefined ? {} : body }),
+  activateAggregation: (body) => request('/api/aggregation/activate', { method: 'POST', body: body === undefined ? {} : body }),
+  deactivateAggregation: (body) => request('/api/aggregation/deactivate', { method: 'POST', body: body === undefined ? {} : body }),
 }
