@@ -476,6 +476,26 @@ export const AUTH_DOMAINS = Object.freeze({
 const AUTH_DOMAIN_VALUES = Object.freeze(Object.values(AUTH_DOMAINS))
 const API_KEY_DEFAULT_PATH = '/v1/responses'
 
+// 凭据**来源域** → 出站**授权域**的唯一比较点：租约（src/subscription/isolation.js）与头构造
+// 共用这一个函数，避免两处各写一份"订阅能不能发到第三方"的判定而漂移。
+// 跨域即 typed 403；消息只带域名，绝不含 token / 账号 id。
+export function assertCredentialOriginDomain(origin, authDomain) {
+  const o = String(origin == null ? '' : origin).trim().toLowerCase()
+  if (!AUTH_DOMAIN_VALUES.includes(o)) {
+    throw deny('credential_origin_invalid', '未知的凭据来源域：' + (o || '?'), { status: 400 })
+  }
+  const target = String(authDomain == null ? '' : authDomain).trim().toLowerCase()
+  if (!AUTH_DOMAIN_VALUES.includes(target)) {
+    throw deny('auth_domain_invalid', '未知的授权域：' + (target || '?'), { status: 400 })
+  }
+  if (o !== target) {
+    throw deny('credential_domain_mismatch', '凭据来源域 ' + o + ' 不得用于 ' + target + ' 出站请求：订阅与 api-key 凭据互不串域', {
+      origin: o, authDomain: target,
+    })
+  }
+  return target
+}
+
 function nonEmptyString(value) {
   return typeof value === 'string' && value.trim() !== ''
 }
@@ -700,9 +720,16 @@ export function assertNoSubscriptionCredentialToThirdParty(headers, upstreamHost
   const h = headers && typeof headers === 'object' ? headers : {}
   const hp = requireHost(upstreamHost)
   const subscriptionDomain = opts.credentialSource === AUTH_DOMAINS.CODEX_SUBSCRIPTION || opts.credentialSource === AUTH_DOMAINS.SIWC_APP
+  // 来源层（比头名层更强）：租约自己声明是订阅凭据时，只要目的地不是订阅入口就拒绝——
+  // 即使头集合里看不出订阅特征（例如订阅 token 被当成了普通 authorization）。
+  const leaseOrigin = String((opts.lease && opts.lease.origin) || '').trim().toLowerCase()
+  const leaseSubscription = leaseOrigin === AUTH_DOMAINS.CODEX_SUBSCRIPTION || leaseOrigin === AUTH_DOMAINS.SIWC_APP
   const official = isOfficialHost(hp.hostname, opts.cfg || {})
   const destination = official || GATEWAY_SUBSCRIPTION_HOSTS.includes(hp.hostname) || (subscriptionDomain && isLoopbackHost(hp.hostname))
   if (destination) return headers
+  if (leaseSubscription) {
+    throw deny('subscription_credential_to_third_party', '订阅来源租约不得发往非订阅上游：' + hp.host, { host: hp.host, origin: leaseOrigin })
+  }
   for (const name of Object.keys(h)) {
     if (isSubscriptionIdentityHeader(name)) {
       throw deny('subscription_credential_to_third_party', '订阅身份头不得发往非订阅上游：' + name + ' → ' + hp.host, { header: name, host: hp.host })
@@ -740,6 +767,9 @@ export function buildDomainHeaders(resolved, opts = {}) {
   const r = assertResolvedShape(resolved)
   const incoming = opts.incoming && typeof opts.incoming === 'object' ? opts.incoming : {}
   const cred = opts.credential && typeof opts.credential === 'object' ? opts.credential : {}
+  // 凭据来源域租约（A4）：调用方只要带了租约，就必须与收据的授权域一致；不一致时零发送拒绝，
+  // 绝不"先发出去再看上游 401"。没有租约时仍走既有的头名/域标记防线（向后兼容）。
+  if (cred.lease && typeof cred.lease === 'object') assertCredentialOriginDomain(cred.lease.origin, r.authDomain)
   const target = { origin: 'https://' + r.upstreamHost }
   const caller = {
     incoming,
