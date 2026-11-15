@@ -262,10 +262,10 @@ export function renderV2Markdown({ contractText, planText, matrix }) {
       return r.id + (pinned ? '@' + pinned.slice(0, 8) : '') + tag
     }).join('、')
     : '无'
-  const firstFail = matrix.rows.find((r) => r.status === 'FAIL')
+  const failRows = matrix.rows.filter((r) => r.status === 'FAIL')
   const firstBlocked = matrix.rows.find((r) => r.status === 'BLOCKED')
-  const blocker = firstFail
-    ? '`' + firstFail.id + '`（状态 FAIL，依据见该行）'
+  const blocker = failRows.length
+    ? '`' + failRows[0].id + '`（状态 FAIL，依据见该行）；同批 FAIL：' + failRows.map((r) => '`' + r.id + '`').join('、')
     : (firstBlocked ? '`' + firstBlocked.id + '`（BLOCKED）' : '无 FAIL/BLOCKED 行，但仍需逐项 PASS_REAL 与所有者批准')
   lines.push('- 当前门禁：`ready:false`（12 项中 ' + counts.PASS_REAL + ' 项 `PASS_REAL`：' + realDetail + '）。首个产品级阻断是 ' + blocker + '。')
   lines.push('')

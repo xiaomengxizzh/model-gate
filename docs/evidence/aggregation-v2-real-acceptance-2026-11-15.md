@@ -127,3 +127,48 @@ OpenCode Go 上游直接 400：`reasoning.context: this reasoning option require
 ### 6.4 本轮真机附加调用
 
 Go 推理：生成目录工具测试 1 次 + shell 变体 1 次 + workspace-write 工具测试 1 次 + 压缩复测 1 轮（超时）；GPT：0 次。
+
+
+## 7. 追加实测（2026-11-15 12:50–13:15）：真实压缩后工具与记忆、父 GPT 阻断
+
+### 7.1 用「真实能力值」生成目录（非夹具）
+
+`buildCatalog()` 生成：`context_window=1048576`、`auto_compact_token_limit=943718`（A1 从本机 OpenCode 目录快照取证）、`shell_type=unified_exec`、`apply_patch_tool_type=freeform`、无 `use_responses_lite`/`tool_mode`。
+
+### 7.2 真实 Go：工具 → 压缩 → 压缩后工具 → 压缩前记忆（全部成立）
+
+基线单轮（工具）：`exec_command` 执行，`marker-a.txt=BASE_OK`，`tokens used 20,850`。
+
+压缩轮（测试夹具阈值 32k，仅为在低成本下触发；**不是**产品默认值）：`compaction=2 次`，输出 `BASE_OK` —— 压缩后仍记得压缩前命令输出。
+
+压缩后工具轮（`resume --last` + 显式 `-c sandbox_mode="workspace-write"`）：
+
+| 观测 | 结果 |
+| --- | --- |
+| `context compacted` | 3 次（Codex 自己压缩）|
+| 工具执行 | **成功**：`marker-b.txt=POST_COMPACT_MARKER` |
+| 压缩前记忆 | **成立**：回答仍为 `BASE_OK` |
+| 本轮用量 | 402,350 tokens（真实 Go 计费）|
+
+即真实目标上的 `native-tool`、`native-compaction`（observed）、`post-compact-followup`、`context-proof`、`resume` **均有真实回执**；仍缺 `same-child-followup` / `interrupt` / `no-duplicates`（需要原生父 GPT spawn 子 Go）。
+
+### 7.3 关键阻断：父 GPT 经 ModelGate 被 F01 拒绝
+
+| 步骤 | 结果 |
+| --- | --- |
+| 应用侧目录 `/home/xiaomengxizi/.local/state/modelgate-desktop/codex/models.json` | 已含 `gpt-6-luna` 与 `mg-opencodego-deepseek-v4-1-flash`（正是 V2 目标形态）|
+| 应用侧 Codex 配置 | `model_provider="modelgate"`、`base_url=http://127.0.0.1:18787/v1`、`model="gpt-6-luna"` |
+| 按应用方式启动网关后请求 `gpt-6-luna` | **403** `official_no_gateway_key`：「F01 起不再透传客户端官方凭据，请配置 apiKeyEnv」 |
+
+结论：**同一 Codex 会话里父用 ChatGPT 套餐、子用 Go 模型，在当前网关实现下不成立**——因为会话只有一个 `model_provider`，父请求也走网关，而网关对官方目标要求**网关自有 key**（F01 已退役客户端凭据透传）。这不是配置问题，是 F01 的产品决策与 V2「保留套餐 + 同会话父子」的冲突。
+
+需要所有者决策的三种出路：
+1. **网关自有 OpenAI key**（可用 API 计费模型；`gpt-6-luna` 是否可用取决于该 key 的模型权限）；
+2. **恢复一条受限的订阅凭据路径**（仅 loopback + 仅官方目标 + 只读租约，带审计），即对 F01 做**范围受限**的回退；
+3. **Codex 侧按角色分 provider**（父用内置 openai 订阅、子用 modelgate）——需要确认 0.167.0 是否支持子代理配置覆盖；若不支持，则产品形态必须改。
+
+### 7.4 本轮真实调用与费用
+
+- Go 推理：基线 1 轮 + 压缩轮 2 次 + 压缩后工具轮 3 次（含 compaction 调用）；tokens 合计约 65 万（含 22.4 万与 40.2 万两轮大头）。
+- GPT：`gpt-6-luna` 1 次探针，被 F01 拒绝（**零上游请求、零费用**）。
+- 无下载/安装；未改 `~/.codex` 与生产服务；应用侧网关仅临时启动后关闭。

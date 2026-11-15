@@ -302,3 +302,10 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 - 修复：`buildCatalog()` 对第三方 Responses 路由默认 `shell_type=unified_exec`，绝不写 `use_responses_lite`/`code_mode_only`，冲突 fail-closed，meta 记 `toolAccess` 证据；新增 `agg-v2-tool-declaration.test.mjs`（10 项）。
 - 真机复测（生成目录 + 真实 Go + `--sandbox workspace-write`）：`exec_command` 真实执行，`marker-real.txt=TOOL_REAL_OK`，0 行 DSML。压缩仍出现 `context compacted`；但 4000 token 夹具导致重复压缩与超时，压缩后追派未成立。
 - 状态：R003 `PASS_REAL`；R005/R006 仍 `FAIL`（缺真实父子 spawn 与压缩后追派证据）。
+
+### 真机续测（2026-11-15 13:15）
+
+- 生成目录改用真实能力值（ctx 1048576 / auto_compact 943718）；真实 Go 单轮基线 20,850 tokens。
+- 真实压缩链成立：`context compacted` 多次、压缩后 `exec_command` 真实执行（`marker-b.txt=POST_COMPACT_MARKER`）、压缩前输出 `BASE_OK` 仍能复述。
+- 关键阻断：应用侧 Codex 已把父模型 `gpt-6-luna` 指向 ModelGate（18787），但网关对官方目标返回 `403 official_no_gateway_key`（F01 退役凭据透传）→ 同一会话「套餐父 + Go 子」当前不成立，需所有者决策（网关自有 key / 受限订阅路径 / Codex 角色级 provider）。
+- 仍缺：真实原生父 spawn 子 Go 的 `same-child-followup`/`interrupt`/`no-duplicates`；原版 Desktop GUI 选模；`gpt-6-luna` 真实调用（本轮探针被拒，零费用）。

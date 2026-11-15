@@ -303,7 +303,10 @@ test('V2 状态：R006 未真实通过时，V2 门禁必须 ready:false 且首�
 
   if (r006.status !== 'PASS_REAL') {
     assert.match(matrixV2, /当前门禁[：:]\s*`ready:false`/, 'V2 矩阵必须声明当前门禁 ready:false')
-    assert.match(matrixV2, /首个产品级阻断是\s*`MG-R006`/, 'V2 矩阵必须点名 MG-R006 是首个阻断')
+    // R005 与 R006 可能同时 FAIL；要求是 R006 必须出现在阻断点名里（不得因另一个 FAIL 被掩盖），
+    // 而不是"必须是第一个"（那会随真实状态变化而误判）。
+    assert.match(matrixV2, /首个产品级阻断是[^\n]*MG-R006|同批 FAIL：[^\n]*MG-R006/,
+      'V2 矩阵必须点名 MG-R006 处于阻断状态')
     // 黑箱观测：直接运行 Lead 的门禁 CLI，只读其 JSON 输出，不 import 内部实现。
     assert.ok(existsSync(rel(GATE_V2)), '缺少 V2 门禁脚本 ' + GATE_V2 + '（P00 未完成）')
     const run = spawnSync(process.execPath, [GATE_V2], {
