@@ -11,6 +11,7 @@
 | 查 V2 发布裁决（门禁迁移 PASS / 发布 FAIL） | [V2 发布裁决](evidence/aggregation-v2-release-verdict-2026-11-15.md) |
 | 查 V2 真实验收首轮结果与真实缺口 | [V2 真实验收记录](evidence/aggregation-v2-real-acceptance-2026-11-15.md) |
 | 查 V2 真实回执（脱敏，供门禁识别） | [V2 真实回执](evidence/aggregation-v2-receipts-2026-11-15.json) |
+| 查 V2 支线合并与清理记录 | [V2 支线清单](evidence/v2-branch-inventory-2026-11-15.md) |
 | 查用户批准的不可降级产品目标、完整真实验收 | [ModelGate 产品契约 MG-R001..MG-R012](product/2026-11-14-owner-product-contract.md) |
 | 直接执行聚合模式开发（伪代码、模块、测试与 PR） | [2026-11-14 聚合完整执行计划](roadmap/2026-11-14-aggregation-pseudocode-plan.md) |
 | 激活主代理与最多 5 名专职子代理 | [Agent Team 直接执行启动提示词](roadmap/2026-11-14-aggregation-agentteam-start.md) |
