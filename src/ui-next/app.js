@@ -4,7 +4,7 @@ import { setToken, hasToken, clearToken } from './js/api.js'
 import {
   state, loadAuth, loadAll, loadStatus, resetData, on, phaseOf, handleUnauthorized,
   productStatus, aggregationState, refreshProduct, refreshAggregation, shouldRefresh,
-  invalidateProductStatus, onProductStatus,
+  invalidateProductStatus, onProductStatus, canReadControlPlane, markAuthPending,
 } from './js/store.js'
 import { ROUTES, routeFromHash, startRouter } from './js/router.js'
 import { toast, callout, closeDialog } from './js/components.js'
@@ -195,6 +195,9 @@ export function renderRoute(route) {
     else b.removeAttribute('aria-current')
   })
   if (!state.status) {
+    if (phaseOf('status') === 'error') { renderFatal(state.lastError || new Error('读取状态失败')); return }
+    // 鉴权尚未确定/等待解锁：保持 loading 骨架，不显示"读取失败"，更不发管理面请求。
+    if (!canReadControlPlane()) { renderLoading(); return }
     renderFatal(state.lastError || new Error('尚未加载状态（未知）'))
     return
   }
@@ -223,6 +226,8 @@ export function renderRoute(route) {
 async function refreshForRoute(route, opts = {}) {
   const section = sectionForRoute(route)
   if (!section) return null
+  // 鉴权未确定或缺令牌时不读取、也不重绘（首屏由 bootstrap 的 loading/锁定页接管）。
+  if (!canReadControlPlane()) return null
   const force = opts.force === true
   if (!force && !shouldRefresh(section)) return null
   const epoch = viewEpoch
@@ -232,11 +237,12 @@ async function refreshForRoute(route, opts = {}) {
       ? await refreshAggregation({ reason, force, silent: opts.silent === true })
       : await refreshProduct({ reason, force, silent: opts.silent === true })
     if (epoch !== viewEpoch || currentRoute !== route) return ps
+    if (!canReadControlPlane()) return ps
     if (!isEditing()) renderRoute(route)
     return ps
   } catch (e) {
     if (e && e.status === 401) return null
-    if (epoch === viewEpoch && currentRoute === route && !isEditing()) renderRoute(route)
+    if (canReadControlPlane() && epoch === viewEpoch && currentRoute === route && !isEditing()) renderRoute(route)
     return null
   }
 }
@@ -247,6 +253,8 @@ async function refreshForRoute(route, opts = {}) {
 //  * 弹窗或未保存草稿打开时不重建视图。
 export async function pollRefresh(opts = {}) {
   if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return null
+  // 未解锁/鉴权未确定时轮询必须完全静默：不产生任何管理面请求。
+  if (!canReadControlPlane()) return null
   const section = sectionForRoute(currentRoute)
   if (!section) return null
   const force = opts.force === true
@@ -287,6 +295,8 @@ export async function pollRefresh(opts = {}) {
 // 启停聚合等写操作完成后由 A2 调用：强制失效 + 立即刷新共享快照（也支持 window 事件）。
 export async function notifyAggregationChanged(reason = 'aggregation-changed') {
   invalidateProductStatus(reason)
+  // 令牌失效/未解锁时只标脏，不读取；解锁后的路由刷新会取到新快照。
+  if (!canReadControlPlane()) return state.product
   const route = currentRoute
   const epoch = viewEpoch
   const section = sectionForRoute(route)
@@ -382,6 +392,8 @@ async function unlock(e) {
 }
 
 function wire() {
+  // 模块接线早于 bootstrap 的 /api/auth：先关闸，防止 router 首跳提前读管理面（401/403 噪声）。
+  markAuthPending()
   document.querySelectorAll('.nav-link').forEach((b) => b.addEventListener('click', () => { location.hash = '#/' + b.dataset.route }))
   document.getElementById('refresh').addEventListener('click', manualRefresh)
   document.getElementById('theme-toggle').addEventListener('click', () => {
