@@ -1,0 +1,90 @@
+{
+  "MG-R002": {
+    "status": "PASS_REAL",
+    "commitSha": "e049eed444d7698d1d127fad472e5ca9228cfd99",
+    "command": "curl -s http://127.0.0.1:8897/v1/responses -d '{\"model\":\"gpt-6-luna\",\"input\":\"Reply with exactly LUNA_REAL_OK\",\"stream\":true}'",
+    "receipt": {
+      "traceId": "339b878533adc16e0f8f3786c8d6d978"
+    },
+    "realTarget": true,
+    "passedAllOnRealTarget": true,
+    "cases": {
+      "codex-official-login-unchanged": {
+        "passed": true,
+        "receipt": "339b878533adc16e0f8f3786c8d6d978:codex-official-login-unchanged"
+      },
+      "official-gpt-6-luna-real": {
+        "passed": true,
+        "receipt": "339b878533adc16e0f8f3786c8d6d978:official-gpt-6-luna-real"
+      }
+    },
+    "note": "gateway subscription entry; auth.json mtime 2026-11-07 unchanged during run"
+  },
+  "MG-R003": {
+    "status": "PASS_REAL",
+    "commitSha": "e049eed444d7698d1d127fad472e5ca9228cfd99",
+    "command": "curl -s http://127.0.0.1:8897/v1/responses -d '{\"model\":\"deepseek-v4.1-flash\",\"input\":\"Reply with exactly: REAL_GO_OK\"}'",
+    "receipt": {
+      "traceId": "668fa9d578adff9b7a506fac63f9b71d"
+    },
+    "realTarget": true,
+    "passedAllOnRealTarget": true,
+    "cases": {
+      "go-deepseek-auth-real": {
+        "passed": true,
+        "receipt": "668fa9d578adff9b7a506fac63f9b71d:go-deepseek-auth-real"
+      },
+      "go-deepseek-inference-real": {
+        "passed": true,
+        "receipt": "668fa9d578adff9b7a506fac63f9b71d:go-deepseek-inference-real"
+      },
+      "model-id-exact": {
+        "passed": true,
+        "receipt": "668fa9d578adff9b7a506fac63f9b71d:model-id-exact"
+      }
+    },
+    "note": "HTTP 200, model echo, billing_source=go"
+  },
+  "MG-R005": {
+    "status": "PASS_REAL",
+    "commitSha": "e049eed444d7698d1d127fad472e5ca9228cfd99",
+    "command": "CODEX_HOME=<isolated> codex exec --sandbox workspace-write \"Use the go_deepseek agent to run: printf PRODUCT_CHILD_OK ...\"",
+    "receipt": {
+      "traceId": "4c83d207871515e928171560b04db6fa"
+    },
+    "realTarget": true,
+    "passedAllOnRealTarget": true,
+    "cases": {
+      "native-child-thread-not-mcp": {
+        "passed": true,
+        "receipt": "4c83d207871515e928171560b04db6fa:native-child-thread-not-mcp"
+      },
+      "native-tools": {
+        "passed": true,
+        "receipt": "4c83d207871515e928171560b04db6fa:native-tools"
+      }
+    },
+    "note": "parent gpt-6-luna -> child mg-opencodego-deepseek-v4-1-flash; two rollouts"
+  },
+  "MG-R012": {
+    "status": "PASS_REAL",
+    "commitSha": "e049eed444d7698d1d127fad472e5ca9228cfd99",
+    "command": "grep rollouts + gateway SSE model field",
+    "receipt": {
+      "traceId": "5408876124f83e914c39840fa1db8140"
+    },
+    "realTarget": true,
+    "passedAllOnRealTarget": true,
+    "cases": {
+      "codex-gpt-parent-only-luna": {
+        "passed": true,
+        "receipt": "5408876124f83e914c39840fa1db8140:codex-gpt-parent-only-luna"
+      },
+      "no-gpt-fallback": {
+        "passed": true,
+        "receipt": "5408876124f83e914c39840fa1db8140:no-gpt-fallback"
+      }
+    },
+    "note": "all GPT calls were gpt-6-luna"
+  }
+}

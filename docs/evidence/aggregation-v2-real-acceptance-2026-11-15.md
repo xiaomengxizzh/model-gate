@@ -209,3 +209,10 @@ Go 推理：生成目录工具测试 1 次 + shell 变体 1 次 + workspace-writ
 - 本机 `auth.json` 只读使用，未写入、未复制到仓库；`mtime` 保持 `2026-11-15 11:07` 之前，运行期间未变。
 - 仍未做：`interrupt` / `no-duplicates` 真机用例；原版 Desktop **GUI 选模**（本轮是 CLI 驱动同一份产品配置）；真实 GUI 的启停/回滚演练。
 - 应用自有 OAuth 路径（`grant.json`）本机不存在（未做过 `mg-desktop sign-in`），因此走的是"复用本机 Codex 登录"路径；两条路径都由开关/存在性决定，不静默互换。
+
+
+## 9. 门禁回执（脱敏）
+
+- `docs/evidence/aggregation-v2-receipts-2026-11-15.json`：R002 / R003 / R005 / R012 的脱敏回执（commitSha + command + traceId + 逐用例 passed），不含 token、账号、路径。
+- 门禁结果：`ready:false`；已承认 **4/12** 为 `proven_on_real_target`（R002、R003、R005、R012），其余 8 项 `missing_evidence`。
+- R006 仍 FAIL：`interrupt` / `no-duplicates` 未做真机用例；压缩、压缩后工具与记忆、同子追派已真实成立。
