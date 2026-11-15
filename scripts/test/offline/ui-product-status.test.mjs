@@ -4,7 +4,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  PRODUCT_STATUS_CONTRACT, HOME_STATES, GO_TARGET_MODEL, GO_PUBLIC_MODEL_ID,
+  PRODUCT_STATUS_CONTRACT, HOME_STATES, GO_TARGET_MODEL, GO_PUBLIC_MODEL_ID, GO_TARGET_PUBLIC_ID, matchesGoTargetId,
   deriveProductStatus, deriveGo, deriveCodex, deriveOfficial, deriveAggregation,
   classifyAggregationError, nextPrimaryAction, homeStateOf, overallOf,
 } from '../../../src/ui-next/js/product-status.js'
@@ -57,7 +57,12 @@ test('契约标识与状态机词表固定', () => {
   assert.ok(HOME_STATES.includes('needs_codex_restart'))
   assert.ok(HOME_STATES.includes('read_only_unknown'))
   assert.equal(GO_TARGET_MODEL, 'deepseek-v4.1-flash')
-  assert.equal(GO_PUBLIC_MODEL_ID, 'opencodego/deepseek-v4.1-flash')
+  assert.equal(GO_PUBLIC_MODEL_ID, 'mg-opencodego-deepseek-v4-1-flash')
+  assert.equal(GO_TARGET_PUBLIC_ID, GO_PUBLIC_MODEL_ID)
+  assert.ok(matchesGoTargetId('mg-opencodego-deepseek-v4-1-flash'))
+  assert.ok(matchesGoTargetId('opencodego/deepseek-v4.1-flash'))
+  assert.ok(matchesGoTargetId('deepseek-v4.1-flash'))
+  assert.ok(!matchesGoTargetId('mg-opencodego-gpt-6-luna'))
 })
 
 test('锁定与加载：不显示任何成功状态', () => {
@@ -140,6 +145,25 @@ test('Key + 目标模型 + 官方模式 → 唯一主操作是启用聚合', () 
   assert.equal(ps.state, 'ready_to_enable')
   assert.equal(ps.primary.id, 'enable-aggregation')
   assert.equal(ps.primary.label, '启用聚合模式')
+})
+
+test('目标模型匹配同时接受已发布公共 ID 与上游别名，且不把其它模型算作目标', () => {
+  const status = statusWith({ providers: [{ id: 'opencodego', hasKey: true }], models: [{ name: GO_TARGET_PUBLIC_ID }] })
+  const published = deriveGo(status, snap({ providers: { providers: [{ id: 'opencodego', kind: 'opencode-go' }] } }))
+  assert.equal(published.targetModelConfigured, true)
+
+  const aliasStatus = statusWith({ providers: [{ id: 'opencodego', hasKey: true }], models: [] })
+  const byUpstream = deriveGo(aliasStatus, snap({
+    providers: { providers: [{ id: 'opencodego', kind: 'opencode-go' }] },
+    models: { models: [{ publicId: 'opencodego/deepseek-v4.1-flash', upstreamId: GO_TARGET_MODEL, authorized: true }] },
+  }))
+  assert.equal(byUpstream.targetModelConfigured, true)
+
+  const other = deriveGo(statusWith({ providers: [{ id: 'opencodego', hasKey: true }], models: [] }), snap({
+    providers: { providers: [{ id: 'opencodego', kind: 'opencode-go' }] },
+    models: { models: [{ publicId: 'mg-opencodego-gpt-6-luna', upstreamId: 'gpt-6-luna', authorized: true }] },
+  }))
+  assert.equal(other.targetModelConfigured, false)
 })
 
 test('只有真实 lastServing 命中才允许 runtime-verified', () => {

@@ -17,7 +17,25 @@ export const EVIDENCE_LEVELS = Object.freeze(['detected', 'configured', 'runtime
 
 export const GO_TARGET_MODEL = 'deepseek-v4.1-flash'
 export const GO_PROVIDER_ID = 'opencodego'
-export const GO_PUBLIC_MODEL_ID = 'opencodego/' + GO_TARGET_MODEL
+// 已发布公共 ID 由 stableModelId() 生成：'mg-' + provider 段 + '-' + 模型段（见 src/codex/catalog.js）。
+// 这里同时接受历史/协议里出现过的等价写法，避免把"已配置"误判成"未配置"。
+export const GO_TARGET_PUBLIC_ID = 'mg-opencodego-deepseek-v4-1-flash'
+export const GO_PUBLIC_MODEL_IDS = Object.freeze([GO_TARGET_PUBLIC_ID, 'opencodego/' + GO_TARGET_MODEL, GO_TARGET_MODEL])
+export const GO_PUBLIC_MODEL_ID = GO_TARGET_PUBLIC_ID
+
+// 公共 ID 比较必须容错（mg- 前缀、斜杠/点号/大小写），否则真实目录会被读成"目标模型未配置"。
+function idKey (value) {
+  return String(value == null ? '' : value).toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+const TARGET_ID_KEYS = new Set(GO_PUBLIC_MODEL_IDS.map(idKey))
+
+export function matchesGoTargetId (value) {
+  const key = idKey(value)
+  if (!key) return false
+  if (TARGET_ID_KEYS.has(key)) return true
+  // 'mg-opencodego-<model>' 之外的 provider 段也接受：只要模型段是目标模型。
+  return key === 'mgopencodegodeepseekv41flash' || key === 'deepseekv41flash'
+}
 
 // 首页状态机（执行计划 §2.1 的 HomeState）。
 export const HOME_STATES = Object.freeze([
@@ -137,12 +155,13 @@ function hasTargetModel (aggregation, status) {
   for (const m of rows) {
     const publicId = str(m && (m.publicId || m.slug || m.id))
     const upstream = str(m && (m.upstreamId || m.model))
-    if (publicId === GO_PUBLIC_MODEL_ID || publicId === GO_TARGET_MODEL || upstream === GO_TARGET_MODEL) return m
+    if (matchesGoTargetId(publicId) || matchesGoTargetId(upstream)) return m
   }
-  // status.models 是网关真实配置的模型表（name 为公共 ID）。
+  // status.models 是网关真实配置的模型表（name 为公共 ID，alias 为该模型的别名数组）。
   const configured = list(obj(status) && status.models).find((m) => {
-    const name = str(m && m.name)
-    return name === GO_PUBLIC_MODEL_ID || name === GO_TARGET_MODEL || str(m && m.alias).includes(GO_PUBLIC_MODEL_ID)
+    if (matchesGoTargetId(m && m.name)) return true
+    const alias = list(m && m.alias)
+    return alias.some((a) => matchesGoTargetId(a))
   })
   return configured || null
 }
@@ -155,7 +174,7 @@ function runtimeServingForGo (status, providerId) {
   const provider = str(last.provider)
   const model = str(last.model)
   if (!provider || provider !== providerId) return null
-  if (model !== GO_PUBLIC_MODEL_ID && model !== GO_TARGET_MODEL_ID && model !== GO_TARGET_MODEL) return null
+  if (!matchesGoTargetId(model)) return null
   return { at: Number(last.at) || null, provider, model }
 }
 
