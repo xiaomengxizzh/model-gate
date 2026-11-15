@@ -8,6 +8,9 @@ import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { buildCatalog } from '../src/codex/catalog.js'
 import { signIn, createPlanCredential } from '../src/subscription/official.js'
+import {
+  resolveSubscriptionMode, buildSubscriptionProviderConfig, refreshLocalSubscriptionCredential,
+} from '../src/codex/local-subscription.js'
 
 const appState = resolve(process.env.MG_DESKTOP_STATE || join(homedir(), '.local/state/modelgate-desktop'))
 const codexHome = join(appState, 'codex')
@@ -18,16 +21,37 @@ const parentModel = 'gpt-6-luna'
 const childModel = 'deepseek-v4.1-flash'
 const parentProvider = 'chatgpt-plan'
 
-async function localCodexAuthAvailable() {
+// 订阅模式（所有者策略 A）：auto（默认，按本机 Codex 登录自动选择 local/app）/local/app/off。
+// 判定与配置块都由 src/codex/local-subscription.js 提供（单一真源，可离线断言）。
+const REFRESH_INTERVAL_MS = 5 * 60 * 1000
+const refreshState = { timer: null, lastReason: null, attempts: 0, refreshed: 0 }
+
+// 仅在 local 模式、且由本启动器显式触发时刷新过期 token；失败只打印稳定 reason，
+// 绝不打印/记录 token，也绝不因此改走 app（fail-closed 留在订阅域）。
+async function refreshSubscriptionCredentialOnce() {
+  refreshState.attempts += 1
   try {
-    const home = process.env.CODEX_HOME && String(process.env.CODEX_HOME).trim() !== '' ? String(process.env.CODEX_HOME).trim() : join(homedir(), '.codex')
-    const raw = JSON.parse(await readFile(join(home, 'auth.json'), 'utf8'))
-    return raw && raw.auth_mode === 'chatgpt' && !!(raw.tokens && raw.tokens.access_token)
-  } catch { return false }
+    const result = await refreshLocalSubscriptionCredential({ env: process.env, fetchImpl: globalThis.fetch })
+    refreshState.lastReason = result.reason
+    if (result.refreshed) refreshState.refreshed += 1
+    return result
+  } catch (error) {
+    refreshState.lastReason = (error && error.reason) || (error && error.code) || 'refresh_failed'
+    console.error('subscription refresh skipped: ' + refreshState.lastReason)
+    return null
+  }
+}
+
+function scheduleRefresh(mode) {
+  if (mode !== 'local') return
+  refreshState.timer = setInterval(() => { refreshSubscriptionCredentialOnce().catch(() => {}) }, REFRESH_INTERVAL_MS)
+  if (typeof refreshState.timer.unref === 'function') refreshState.timer.unref()
 }
 
 async function configure() {
-  const localCodexAuth = await localCodexAuthAvailable()
+  // local 无本机登录 / 非法模式 → typed SubscriptionModeError（fail-closed，不写配置）。
+  const subscription = resolveSubscriptionMode({ env: process.env })
+  const parentProviderConfig = buildSubscriptionProviderConfig(subscription.mode).provider
   const cachedPath = process.env.MG_DESKTOP_MODELS || join(homedir(), '.codex/models_cache.json')
   const models = JSON.parse(await readFile(cachedPath, 'utf8')).models
   const original = models.find((item) => item.slug === parentModel)
@@ -48,19 +72,12 @@ async function configure() {
       timeout: { overallMs: 120000, firstByteMs: 60000, idleMs: 60000 },
     },
     providers: {
-      // 官方父模型的两条授权路径（V2 真机结论）：
-      //  1) 应用自有 OAuth（grant.json，`mg-desktop sign-in`）→ api.openai.com + 注入 plan token；
-      //  2) **复用本机 Codex 登录态**（~/.codex/auth.json，与 cc-switch / codex-responses-proxy 同一做法）
-      //     → chatgpt.com/backend-api/codex + gatewaySubscription。凭据由网关自己只读读取，绝不透传客户端凭据。
-      // 本机已有 Codex 登录时默认走 (2)，用户无需再次登录；没有登录时才需要 sign-in 拿 (1)。
-      [parentProvider]: localCodexAuth
-        ? {
-          baseUrl: 'https://chatgpt.com',
-          codexIdentity: 'official',
-          responsesPath: '/backend-api/codex/responses',
-          gatewaySubscription: { enabled: true },
-        }
-        : { baseUrl: 'https://api.openai.com', codexIdentity: 'official' },
+      // 官方父模型的授权来源由 MG_DESKTOP_SUBSCRIPTION_MODE 决定（默认 auto）：
+      //  local —— 复用本机 Codex 登录（chatgpt.com + /backend-api/codex + gatewaySubscription），
+      //           凭据由网关自己只读读取，绝不透传客户端凭据；token 过期由本启动器在 CAS 保护下刷新。
+      //  app   —— 应用自有 OAuth（grant.json，`mg-desktop sign-in`）+ api.openai.com plan token。
+      //  off   —— 不写订阅字段：官方请求回到「需网关自有 key」，由网关返回 typed 403，绝不换路径。
+      [parentProvider]: parentProviderConfig,
       opencodego: { baseUrl: 'https://opencode.ai/inference/go', pathPrefix: '/openai', api: 'openai', apiKeyEnv: 'OPENCODE_API_KEY' },
     },
     models: {
@@ -109,7 +126,12 @@ config_file = "go-deepseek.toml"
 `
   await writeFile(join(codexHome, 'go-deepseek.toml'), `model = "${alias}"\nmodel_reasoning_effort = "low"\n`, { mode: 0o600 })
   await writeFile(join(codexHome, 'config.toml'), desktopConfig, { mode: 0o600 })
-  return { alias }
+  return {
+    alias,
+    subscriptionMode: subscription.mode,
+    subscriptionReason: subscription.reason,
+    subscription,
+  }
 }
 
 async function main() {
@@ -121,19 +143,42 @@ async function main() {
     console.log('ChatGPT plan connected.')
     return
   }
-  const { alias } = await configure()
+  const { alias, subscription } = await configure()
   if (action === 'configure') {
-    console.log(JSON.stringify({ codexHome, guiHome, gatewayHome, port, parentModel, childModel, alias }))
+    console.log(JSON.stringify({
+      codexHome, guiHome, gatewayHome, port, parentModel, childModel, alias,
+      subscriptionMode: subscription.mode,
+      subscriptionReason: subscription.reason,
+      subscriptionLocalAuthAvailable: subscription.localAuthAvailable,
+      subscriptionLocalAuthReason: subscription.localAuthReason,
+    }))
     return
   }
   if (!process.env.OPENCODE_API_KEY) throw new Error('Missing OpenCode Go key in OPENCODE_API_KEY')
-  const accessToken = createPlanCredential(appState)
+  // 父模型凭据按模式准备：app 用应用授权（未 sign-in 明确报错）；local 由网关只读本机登录，
+  // 启动器只负责在 CAS 保护下刷新过期 token；off 不注入任何凭据（官方请求由网关 typed 403）。
+  let accessToken = null
+  if (subscription.mode === 'app') {
+    try {
+      await readFile(join(appState, 'grant.json'), 'utf8')
+    } catch {
+      throw new Error('MG_DESKTOP_SUBSCRIPTION_MODE=app 需要应用自有 OAuth 授权：请先运行 node bin/mg-desktop.mjs sign-in，或改用 MG_DESKTOP_SUBSCRIPTION_MODE=off（需网关自有 key）。')
+    }
+    accessToken = createPlanCredential(appState)
+  } else if (subscription.mode === 'local') {
+    // 过期则刷新（失败只打印 reason，仍留在订阅域；网关随后会返回 typed 401，不静默换路径）。
+    await refreshSubscriptionCredentialOnce()
+    scheduleRefresh(subscription.mode)
+  }
   process.env.MG_CONFIG_DIR = gatewayHome
   process.env.MG_CLIENT_KEY = randomBytes(32).toString('hex')
   process.env.MG_ADMIN_TOKEN = randomBytes(32).toString('hex')
   const { start } = await import('../src/index.js')
-  const gw = await start({ chatgptPlan: { providerId: parentProvider, accessToken }, rejectBindFailure: true })
-  console.log('ModelGate Desktop gateway ready at http://127.0.0.1:' + port + ' (' + parentModel + ' / ' + alias + ')')
+  const gw = await start({
+    chatgptPlan: subscription.mode === 'app' ? { providerId: parentProvider, accessToken } : undefined,
+    rejectBindFailure: true,
+  })
+  console.log('ModelGate Desktop gateway ready at http://127.0.0.1:' + port + ' (' + parentModel + ' / ' + alias + ', subscription=' + subscription.mode + ')')
   const desktopEnv = { ...process.env, CODEX_HOME: codexHome, MODELGATE_CLIENT_KEY: process.env.MG_CLIENT_KEY }
   for (const name of ['OPENCODE_API_KEY', 'MG_CLIENT_KEY', 'MG_ADMIN_TOKEN', 'MG_CONFIG_DIR', 'OPENAI_API_KEY',
     'OPENAI_BASE_URL', 'CODEX_API_KEY', 'SIWC_ACCESS_TOKEN', 'CODEX_THREAD_ID']) delete desktopEnv[name]
@@ -150,12 +195,16 @@ async function main() {
   } finally {
     process.off('SIGINT', stopDesktop)
     process.off('SIGTERM', stopDesktop)
+    if (refreshState.timer) clearInterval(refreshState.timer)
     await gw.close()
   }
 }
 
 main().catch((error) => {
-  const message = error.code === 'ENOENT' ? 'Required local configuration or ChatGPT grant is missing. Run sign-in first.' : error.message
+  const typed = error && error.deny === true && typeof error.code === 'string'
+  const message = typed
+    ? '[' + error.code + '] ' + error.message
+    : (error.code === 'ENOENT' ? 'Required local configuration or ChatGPT grant is missing. Run sign-in first.' : error.message)
   console.error(message)
   process.exitCode = 1
 })
