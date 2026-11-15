@@ -6,6 +6,40 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
+## 2026-11-15 V2 收尾复核
+
+裁决与当前发布限制见[ModelGate V2 发布裁决](evidence/aggregation-v2-release-verdict-2026-11-15.md)。PR #7 仍为 Draft；发布审批 JSON 为空，`release:freeze` 仍因待批事项阻断。状态矩阵中的 12 行 `PASS_REAL` 是按各自真实采集树保留的证据状态，不表示最终冻结树 `12cf5d97a60f151af59c731e26b71245a50e5169` 上每个子用例均已重现。不得改回执、审批文件、矩阵、哈希或产品契约来消除阻断。
+
+### 控制台合同核对
+
+- 已对照 [V2 所有者契约](product/2026-11-14-owner-scope-v2.md)、[新控制台/API 适配矩阵](contracts/ui-next-api-matrix.md) 与 [V2 收尾交接记录](roadmap/2026-11-15-v2-handoff.md)。R001 的聚合启用/停用真实操作证据仍有效；聚合视图 409 冲突展示的本地 UI 与浏览器回归通过，细节见下方命令结果。
+- 当前 V2 产品契约未要求统一增加 `configVersion`、`traceId`，也未要求 `/api/aggregation/status` 路由；运行时已有 `/api/aggregation/health`，创建供应商的 POST 回执已有 `configVersion`。交接任务书提到的额外字段/路由不应当作现行合同，若要新增须先修订产品/API 契约。
+- 多租户 UI/单实例多租户后端仍未实现。R009 当前只按双实例配置、凭据、日志隔离形态保留证据，并须所有者批准此验收形态；原采集中的 token rotation 没有执行，本轮独立复核补测了 9 项真实网关进程 + 回环 mock / 合成 Key 情况，但真实上游轮换流程仍未验证。不要将此口径扩写成单实例多租户通过。
+
+### 本轮验证
+
+| 命令 / 复核 | 结果 |
+| --- | --- |
+| `npm run check` | PASS |
+| `npm test` | PASS：Node v24.22.2，119 suites、1,135 passed、0 failed、2 skipped（79.3s）|
+| `npm run docs:check` | PASS（复核前 103 个文件）|
+| `node scripts/check-metadata.mjs` | PASS（39 checks）|
+| `npm run contract:check` | PASS |
+| `npm run gate:v2` / `npm run gate:v2:independent` | PASS（9/9、12/12）|
+| `node scripts/test/offline/aggregation-matrix-v2.js --check` | PASS（byte-identical）|
+| `npm run gate:audit-diff -- --base origin/main --all-commits` | PASS（399 commits、0 未批准 findings）|
+| `npm run release:freeze` | 预期 FAIL：空审批文件下七项待批；见[裁决表](evidence/aggregation-v2-release-verdict-2026-11-15.md) |
+| 四个 UI 离线套件：`agg-desktop-ui.test.mjs`、`agg-desktop-activate.test.mjs`、`agg-desktop-rollback.test.mjs`、`agg-tenant-isolation.test.mjs` | PASS（34/34）|
+| Chrome 临时 profile + HTTP 409 fixture | PASS：真实加载 `aggregation.js`，点击退出并确认；显示 base/ours/theirs SHA、增删行与手工合并指引，只发一个 deactivate POST；没有上游调用或配置写入 |
+| R009 token-rotation 独立补测 | PASS（9 项，真实网关进程 + 回环 mock + 合成 Key；0 真实上游）；历史回执保持不变 |
+| `git diff --check` 与本次 `npm run docs:check` | PASS（103 files、480 links）|
+
+### 未验证事项
+
+- 发布所需的两项代码等价冻结、R006 四条 partial、R009 双实例验收形式审批仍未写入；PR #7 不得转 Ready、合并或发布。
+- R006 三项原生压缩成功证据来自 `3116459`；在 `1a527c6` 冻结树复核时三次都未触发压缩，`resume` 换建子代理。最终冻结树 `12cf5d9` 未发起真实请求/付费重测。UI 回归通过不改变这四项 partial。
+- 单实例多租户 UI/API/后端仍为 GAP；SSE 原文捕获、真实上游 token rotation，以及新增控制台 API 合同字段均未验收/未纳入现行 V2 合同。
+
 ## 2026-11-14 原生父子闭环与公开订阅路由
 
 在锁定版本源码中复核了子代理继承 Provider、角色仅覆盖模型等字段的限制。公开 SIWC 提供自有本地应用和原版 app-server 的订阅授权入口。既有 P07 是合成原型，P09 是已授权的本机登录态实验。官方预览不接受实验 V2 Code Mode 使用的顶层工具。选用一个自定义 Codex Provider 聚合两套授权，原版 CLI 0.167.0 已通过隔离的 V1 原生初派、工具执行、两次等待、同子追派和父端正常退出（11/11，含子上下文与父会话恢复验证）。真实 OAuth、公开端点的模型与工具兼容、Desktop 仍待验。详见[订阅路由边界与验收](explanation/codex-subscription-routing.md)。
