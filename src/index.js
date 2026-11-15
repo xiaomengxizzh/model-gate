@@ -488,11 +488,25 @@ function buildStatus(state) {
     official: (() => {
       try {
         const probe = probeLocalCodexAuth()
+        const reason = (probe && probe.reason) || null
+        // 探测本身没能判定（HOME 不可解析/文件不可读/超大/损坏）时必须是 unknown，
+        // 不能报成 missing ——那会让 UI 要求用户"重新登录"，而事实只是"读不到"。
+        const INDETERMINATE = new Set(['codex_home_unresolved', 'auth_file_unreadable', 'auth_file_too_large', 'auth_file_invalid'])
+        const detected = !!(probe && probe.available === true)
+        const credential = detected ? 'detected' : (INDETERMINATE.has(reason) ? 'unknown' : 'missing')
+        // 只读校验令牌有效期：与转发链同一判定源（readSubscriptionCredential），不刷新、不发请求。
+        let expiry = 'unknown'
+        if (detected) {
+          try { readSubscriptionCredential(); expiry = 'valid' } catch (error) {
+            expiry = error && error.reason === 'access_token_expired' ? 'expired' : 'unknown'
+          }
+        }
         return {
-          credential: probe && probe.available === true ? 'detected' : 'missing',
-          reason: (probe && probe.reason) || null,
+          credential,
+          expiry,
+          reason,
           authMode: (probe && probe.authMode) || null,
-          level: 'detected',
+          level: credential === 'detected' ? 'detected' : 'unknown',
           source: 'local_codex_auth_probe',
           checkedAt: new Date(now).toISOString(),
         }

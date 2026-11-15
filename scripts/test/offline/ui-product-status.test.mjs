@@ -4,7 +4,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  PRODUCT_STATUS_CONTRACT, HOME_STATES, GO_TARGET_MODEL, GO_PUBLIC_MODEL_ID,
+  PRODUCT_STATUS_CONTRACT, HOME_STATES, GO_TARGET_MODEL, GO_PUBLIC_MODEL_ID, GO_TARGET_PUBLIC_ID, matchesGoTargetId,
   deriveProductStatus, deriveGo, deriveCodex, deriveOfficial, deriveAggregation,
   classifyAggregationError, nextPrimaryAction, homeStateOf, overallOf,
 } from '../../../src/ui-next/js/product-status.js'
@@ -57,7 +57,12 @@ test('契约标识与状态机词表固定', () => {
   assert.ok(HOME_STATES.includes('needs_codex_restart'))
   assert.ok(HOME_STATES.includes('read_only_unknown'))
   assert.equal(GO_TARGET_MODEL, 'deepseek-v4.1-flash')
-  assert.equal(GO_PUBLIC_MODEL_ID, 'opencodego/deepseek-v4.1-flash')
+  assert.equal(GO_PUBLIC_MODEL_ID, 'mg-opencodego-deepseek-v4-1-flash')
+  assert.equal(GO_TARGET_PUBLIC_ID, GO_PUBLIC_MODEL_ID)
+  assert.ok(matchesGoTargetId('mg-opencodego-deepseek-v4-1-flash'))
+  assert.ok(matchesGoTargetId('opencodego/deepseek-v4.1-flash'))
+  assert.ok(matchesGoTargetId('deepseek-v4.1-flash'))
+  assert.ok(!matchesGoTargetId('mg-opencodego-gpt-6-luna'))
 })
 
 test('锁定与加载：不显示任何成功状态', () => {
@@ -140,6 +145,25 @@ test('Key + 目标模型 + 官方模式 → 唯一主操作是启用聚合', () 
   assert.equal(ps.state, 'ready_to_enable')
   assert.equal(ps.primary.id, 'enable-aggregation')
   assert.equal(ps.primary.label, '启用聚合模式')
+})
+
+test('目标模型匹配同时接受已发布公共 ID 与上游别名，且不把其它模型算作目标', () => {
+  const status = statusWith({ providers: [{ id: 'opencodego', hasKey: true }], models: [{ name: GO_TARGET_PUBLIC_ID }] })
+  const published = deriveGo(status, snap({ providers: { providers: [{ id: 'opencodego', kind: 'opencode-go' }] } }))
+  assert.equal(published.targetModelConfigured, true)
+
+  const aliasStatus = statusWith({ providers: [{ id: 'opencodego', hasKey: true }], models: [] })
+  const byUpstream = deriveGo(aliasStatus, snap({
+    providers: { providers: [{ id: 'opencodego', kind: 'opencode-go' }] },
+    models: { models: [{ publicId: 'opencodego/deepseek-v4.1-flash', upstreamId: GO_TARGET_MODEL, authorized: true }] },
+  }))
+  assert.equal(byUpstream.targetModelConfigured, true)
+
+  const other = deriveGo(statusWith({ providers: [{ id: 'opencodego', hasKey: true }], models: [] }), snap({
+    providers: { providers: [{ id: 'opencodego', kind: 'opencode-go' }] },
+    models: { models: [{ publicId: 'mg-opencodego-gpt-6-luna', upstreamId: 'gpt-6-luna', authorized: true }] },
+  }))
+  assert.equal(other.targetModelConfigured, false)
 })
 
 test('只有真实 lastServing 命中才允许 runtime-verified', () => {
@@ -242,6 +266,59 @@ test('聚合模式未知不写成未启用', () => {
   assert.equal(missing.mode, 'official')
 })
 
+test('A5 审查 P1/P2 回归：未知≠未安装、428 可达、模式未知不提示启用、429 保留 Retry-After', () => {
+  // health 存在但没有 detect 明细 → codex 未知，不得要求"去安装 Codex"。
+  const noDetect = deriveProductStatus({ authenticatedAdmin: true, status: statusWith(), aggregation: snap({ health: { ok: true, mode: 'official' } }) })
+  assert.equal(noDetect.codex.detectionLevel, 'unknown')
+  assert.notEqual(noDetect.state, 'cannot_detect_codex')
+  assert.equal(noDetect.state, 'recoverable_error')
+
+  // 428 → phase=preview_pending 必须真的可进入该状态（不是死状态）。
+  const preview = deriveProductStatus({ authenticatedAdmin: true, phase: 'preview_pending', status: statusWith(), aggregation: snap() })
+  assert.equal(preview.state, 'preview_pending')
+  assert.equal(preview.primary.id, 'review-preview')
+
+  // 聚合模式未知 + Go 已配置 → 不得提示"启用聚合模式"。
+  const unknownMode = deriveProductStatus({
+    authenticatedAdmin: true,
+    status: statusWith({ providers: [{ id: 'opencodego', hasKey: true }], models: [{ name: GO_TARGET_PUBLIC_ID }] }),
+    aggregation: snap({ health: health({ mode: 'weird-mode' }), providers: { providers: [{ id: 'opencodego', kind: 'opencode-go' }] } }),
+  })
+  assert.equal(unknownMode.aggregation.mode, 'weird-mode')
+  assert.equal(unknownMode.state, 'recoverable_error')
+  assert.notEqual(unknownMode.primary.id, 'enable-aggregation')
+
+  // 429 必须与"连不上"区分，并保留 Retry-After。
+  const throttled = deriveProductStatus({ authenticatedAdmin: true, status: statusWith(), aggregation: snap(), aggregationError: { status: 429, data: { retryAfter: 30 } } })
+  assert.equal(throttled.error.kind, 'throttled')
+  assert.equal(throttled.error.retryAfter, 30)
+  assert.match(throttled.overall.label, /受限/)
+  assert.equal(throttled.primary.id, 'retry-later')
+  assert.match(throttled.primary.detail, /30 秒/)
+})
+
+test('状态请求失败与聚合失败必须区分来源（都不得被读成“未连接”）', () => {
+  const statusFailed = deriveProductStatus({
+    authenticatedAdmin: true,
+    status: null,
+    statusError: { status: 500, message: 'boom' },
+    aggregation: snap(),
+  })
+  assert.equal(statusFailed.state, 'recoverable_error')
+  assert.equal(statusFailed.error.source, 'status')
+  assert.equal(statusFailed.primary.id, 'retry')
+
+  const aggregationFailed = deriveProductStatus({
+    authenticatedAdmin: true,
+    status: statusWith(),
+    aggregation: null,
+    aggregationError: { status: 404, data: { code: 'not_mounted' } },
+  })
+  assert.equal(aggregationFailed.state, 'read_only_unknown')
+  assert.equal(aggregationFailed.error.source, 'aggregation')
+  assert.equal(aggregationFailed.error.kind, 'unsupported')
+})
+
 test('每个状态都有一个可展示的主操作与总体结论', () => {
   const cases = [
     { authenticatedAdmin: false },
@@ -293,6 +370,32 @@ test('GET /api/status.official：检测到 ChatGPT 登录但不回显任何凭�
   assert.doesNotMatch(raw, /fixture-refresh-must-not-leak/, '状态投影不得含 refresh_token')
   // 该投影只是 detected：UI 不得因此显示"官方推理已验证"。
   assert.notEqual(body.official.level, 'runtime-verified')
+})
+
+test('GET /api/status.official：探测无法判定时报 unknown，过期令牌报 expiry=expired', { timeout: 30000 }, async (t) => {
+  // HOME 与 CODEX_HOME 都无法解析 → 只能 unknown（不得报 missing/待登录）。
+  const gwUnknown = await startGateway({ name: 'ux00-official-unknown', env: { CODEX_HOME: '', HOME: '', MG_ADMIN_TOKEN: 'ux00-token' } })
+  t.after(() => gwUnknown.stop())
+  const unknownBody = await (await gwUnknown.get('/api/status', { authorization: 'Bearer ux00-token' })).json()
+  assert.equal(unknownBody.official.credential, 'unknown')
+  assert.equal(unknownBody.official.level, 'unknown')
+  const unknownDerived = deriveOfficial(unknownBody)
+  assert.equal(unknownDerived.state, 'unknown')
+  assert.equal(unknownDerived.label, '未验证')
+
+  // 过期 JWT（exp 已过）→ detected + expiry=expired，投影显示"登录已过期"，不显示"已检测到登录"。
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url')
+  const expiredJwt = [b64({ alg: 'none', typ: 'JWT' }), b64({ exp: Math.floor(Date.now() / 1000) - 3600 }), 'sig'].join('.')
+  const expiredHome = await codexHomeWith({ auth_mode: 'chatgpt', tokens: { access_token: expiredJwt, refresh_token: 'r' } })
+  const gwExpired = await startGateway({ name: 'ux00-official-expired', env: { CODEX_HOME: expiredHome, MG_ADMIN_TOKEN: 'ux00-token' } })
+  t.after(async () => { await gwExpired.stop(); await rm(expiredHome, { recursive: true, force: true }) })
+  const expiredBody = await (await gwExpired.get('/api/status', { authorization: 'Bearer ux00-token' })).json()
+  assert.equal(expiredBody.official.credential, 'detected')
+  assert.equal(expiredBody.official.expiry, 'expired')
+  const expiredDerived = deriveOfficial(expiredBody)
+  assert.equal(expiredDerived.state, 'blocked')
+  assert.equal(expiredDerived.label, '登录已过期')
+  assert.doesNotMatch(JSON.stringify(expiredBody), /expiredJwt|fixture-refresh/, '不得回显令牌')
 })
 
 test('GET /api/status.official：没有登录文件时是 missing，不是 detected/verified', { timeout: 30000 }, async (t) => {
