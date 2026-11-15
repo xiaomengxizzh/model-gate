@@ -56,6 +56,33 @@ function migrateGate(oldEvidence) {
 }
 ```
 
+### 2.1 V2 用例映射（P00 冻结，确定性投影源）
+
+下面这段是被 `scripts/test/offline/aggregation-matrix-v2.js` 逐字解析的唯一用例映射源，**只由 V1 §I 派生**：移除 V2 已取消的 OpenCode Console 全量用例，其余 8 条按语义等价复用，`MG-R003/R004/R006/R008` 采用本节上方 `cases` 的 V2 关键用例集。它不新增、不删减任何 `MG-R` 要求；改它等于改门禁，必须走所有者批准。
+
+```ts
+// V2-MATRIX-BEGIN 由 V1 §I 派生；V2 取消项（all-opencode-console-models / desktop-model-picker-console / catalog-not-truncated 全量对账）不在其中。
+const v2Matrix = [
+  {id:"MG-R001", tests:["gui-activate","gui-deactivate","restart"]},
+  {id:"MG-R002", tests:["codex-official-login-unchanged","official-gpt-6-luna-real"]},
+  {id:"MG-R003", tests:["go-deepseek-auth-real","go-deepseek-inference-real","model-id-exact"]},
+  {id:"MG-R004", tests:["desktop-picker-gpt","desktop-picker-deepseek"]},
+  {id:"MG-R005", tests:["native-child-thread-not-mcp","native-tools"]},
+  {id:"MG-R006", tests:["native-tool","same-child-followup","interrupt","native-compaction",
+                        "post-compact-followup","context-proof","resume","no-duplicates"]},
+  {id:"MG-R007", tests:["fresh-install-no-manual-edit","existing-config-preserve"]},
+  {id:"MG-R008", tests:["no-silent-model-fallback","no-silent-tool-drop",
+                        "no-silent-compaction-drop","typed-error","request-identity"]},
+  {id:"MG-R009", tests:["two-user-isolation","token-rotation","redacted-logs"]},
+  {id:"MG-R010", tests:["rollback-byte-compatible","crash-recovery","conflict-409"]},
+  {id:"MG-R011", tests:["receipts-pin-sha","mock-vs-real-accuracy"]},
+  {id:"MG-R012", tests:["codex-gpt-parent-only-luna","no-gpt-fallback"]},
+];
+// V2-MATRIX-END
+```
+
+`MG-R006` 的 `native-compaction` + `post-compact-followup` + `context-proof` 是 V2 新增的**不可跳过**用例：压缩必须由 Codex 原生执行，压缩后同一子代理继续、记得压缩前标记；不接受“调大窗口避开压缩”或“网关自建摘要”。
+
 **P00 完成条件**：所有 AI 入口指向 V2，CI 可以发现“20 个不支持模型”不再是阻断、但“Codex 原生压缩未真实通过”仍然阻断；旧 V1 文档保持可追溯，PR Draft 不自动转 ready。新增门禁通过不等于产品通过。
 
 ## 3. P01（最高产品优先级，可与 P02 并行）：原版 Desktop 一键聚合 —— A3 + A2 + A4

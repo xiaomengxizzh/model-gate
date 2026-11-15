@@ -54,6 +54,7 @@ export const SUITES = [
   'scripts/test/offline/aggregation-acceptance-gate.test.mjs',
   'scripts/test/offline/aggregation-acceptance-matrix.test.mjs',
   'scripts/test/offline/aggregation-acceptance-redaction.test.mjs',
+  'scripts/test/offline/aggregation-acceptance-v2.test.mjs',
   'scripts/test/offline/boundary.test.mjs',
   'scripts/test/offline/codex-api.test.mjs',
   'scripts/test/offline/codex-catalog-coherence.test.mjs',

@@ -99,6 +99,8 @@ jobs:
         run: npm run check
       - name: Product contract consistency (not real acceptance; fail on accidental drift)
         run: npm run contract:check
+      - name: V2 release gate (Codex native compaction is a hard blocker)
+        run: npm run gate:v2
       - name: Isolated mock suites (local mock only, no upstream, no credentials)
         run: npm test
       - name: Documentation link check

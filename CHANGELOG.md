@@ -2,6 +2,19 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-15 V2 门禁迁移（P00）
+
+### Added
+
+- **V2 独立验收矩阵与门禁**：`scripts/test/offline/aggregation-matrix-v2.js` 从 V2 契约（`docs/product/2026-11-14-owner-scope-v2.md`）、V2 计划 §2.1 冻结用例映射与证据状态表生成 `docs/evidence/aggregation-acceptance-matrix-v2.md`；`aggregation-gate-v2.js` 复用同一门禁状态机，把 `MG-R006` 的 `native-compaction` / `post-compact-followup` / `context-proof` 设为不可跳过条件。新增套件 `aggregation-acceptance-v2.test.mjs`（101 套件）。
+- **`npm run gate:v2`**：CI 新增 V2 发布门禁步骤，自证“缺 native-compaction 记录 / skipped / 旧 V1 PASS_REAL / 换树”四条路径都被阻断，而“只有 Go 单模型的绿集”可放行；V2 已取消的 Console 全量模型用例不再阻断。
+- `scripts/check-product-contract.mjs` 增加 V2 门禁接线检查（冻结用例映射 12 行、矩阵存在、CI 跑 `gate:v2`、V1 历史矩阵未被改写）。
+
+### Changed
+
+- 验收权威源从 V1 切到 V2：V1 矩阵 `docs/evidence/aggregation-acceptance-matrix.md` 与 V1 套件继续逐字节冻结，仅作历史溯源；当前发布门禁改由 V2 矩阵/门禁裁决。
+- `docs/evidence/aggregation-v2-status-2026-11-15.md` 记录 V2 逐项状态：`MG-R006` 为 `FAIL`（真实触发 Codex 原生压缩时返回 `unsupported_input_item`，未通过），旧 V1 `PASS_REAL` 显式取代、不继承。
+
 ## [Unreleased] —— 2026-11-12 收工闭环 (`integration/modelgate-release`)
 
 - 增加隔离的 Codex Desktop 启动入口 `bin/mg-desktop.mjs`，使用应用独立 ChatGPT 套餐授权和 OpenCode Go Key。套餐请求固定发往 OpenAI 公开 Responses API；真实桌面双上游验收以实际回执为准。

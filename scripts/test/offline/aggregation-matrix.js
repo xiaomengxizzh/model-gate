@@ -203,7 +203,7 @@ export function supersedes(basis, oldStatus, oldDocPath) {
   return new RegExp('取代\\s*' + oldStatus + '\\s*@\\s*' + escaped).test(String(basis))
 }
 
-function mergeEvidenceStatuses(docs) {
+export function mergeEvidenceStatuses(docs) {
   const byId = new Map()
   for (const doc of docs) {
     for (const row of doc.rows) {

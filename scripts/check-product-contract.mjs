@@ -2,7 +2,7 @@
 // WARNING: protection against a write-capable adversary requires externally controlled
 // owner-signed requirements, protected branches, required checks and CODEOWNERS.
 // This script detects accidental drift; it does NOT independently enforce owner authority.
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -70,6 +70,26 @@ for (const role of ['A1','A2','A3','A4','A5']) {
 ok(v2Prompt.includes('最多 5 个子代理') && v2Prompt.includes('gpt-6-luna'),
   'active V2 prompt must cap team at 5 and pin Luna')
 ok(agents.includes('2026-11-14-owner-scope-v2.md'), 'AGENTS.md must prioritize active V2 scope')
+
+// V2 发布门禁接线（任务 V2-00）：原生 Codex 压缩是不可跳过的硬阻断，且 V1 全量模型不再是阻断。
+const v2CaseBlock = (v2Plan.match(/V2-MATRIX-BEGIN([\s\S]*?)V2-MATRIX-END/) || [])[1] || ''
+ok(Boolean(v2CaseBlock), 'active V2 plan must carry the frozen V2-MATRIX-BEGIN/END case map')
+ok(JSON.stringify([...v2CaseBlock.matchAll(/\{id:"(MG-R\d{3})"/g)].map(x => x[1])) === JSON.stringify(ids),
+  'frozen V2 case map must list MG-R001..MG-R012 in order')
+ok(v2CaseBlock.includes('native-compaction'), 'frozen V2 case map must include native-compaction')
+const v2CaseLists = [...v2CaseBlock.matchAll(/tests:\[([^\]]*)\]/g)].map(x => x[1]).join(',')
+ok(!v2CaseLists.includes('all-opencode-console-models'), 'frozen V2 case map must not re-block cancelled Console full-model cases')
+const v2MatrixPath = 'docs/evidence/aggregation-acceptance-matrix-v2.md'
+const v2Matrix = existsSync(join(root, v2MatrixPath)) ? read(v2MatrixPath) : ''
+ok(v2Matrix.length > 0, 'V2 acceptance matrix must exist: ' + v2MatrixPath)
+ok(v2Matrix.includes('MG-R006') && v2Matrix.includes('native-compaction'),
+  'V2 matrix must expose MG-R006 native compaction as the current blocker')
+const v1Matrix = read('docs/evidence/aggregation-acceptance-matrix.md')
+ok(v1Matrix.includes('all-opencode-console-models'), 'V1 historical matrix must remain traceable (not rewritten)')
+ok(existsSync(join(root, 'docs/evidence/aggregation-v2-status-2026-11-15.md')), 'V2 status evidence must exist')
+ok(pkg.scripts && typeof pkg.scripts['gate:v2'] === 'string' && pkg.scripts['gate:v2'].includes('aggregation-gate-v2.js'),
+  'package.json must expose gate:v2 for the V2 release gate')
+ok(workflow.includes('npm run gate:v2'), 'GitHub CI must run the V2 release gate')
 
 for (const failure of failures) console.error('FAIL product-contract: ' + failure)
 if (!failures.length) console.log('Product contract consistency PASS: ' + ids.length + ' requirements, 7 stages, 5 subagent roles')

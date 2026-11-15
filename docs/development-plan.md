@@ -235,3 +235,13 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 同一时刻一个文件一个作者：MG-008 与 MG-009 都改 src/index.js，必须串行；MG-015 的 format.js/router.js 写集与二者不重叠。全部完成后由 Lead 统一提交并更新本表。
 
 并行分派记录（2026-11-08 第二批）：MG-004、MG-008、MG-010 写集互不重叠。2026-11-09 第二批：MG-002 由 Lead 独写 src/ 四文件；mg002-tests 只写 scripts/test/offline/；mg015-spec 只写 docs/contracts/responses-v1.md；mg009-fixture 只写 docs/contracts/management-ui-projection-v1.md、docs/contracts/fixtures/v1/、docs/how-to/tray-deployment.md。2026-11-09 第三批：MG-008 余项由 Lead 独写 src/（router/request/index/forward/format）；MG-015 纯映射模块由 mg002-tests 只写 src/responses.js 与 scripts/test/offline/responses-mapping.test.mjs，接线待其后串行。
+
+## V2 执行记录（2026-11-15，`mg-codex-native`）
+
+### P00 门禁迁移（主代理 + A5）
+
+- 起点：`git fetch origin` → 本地落后 17 个提交（远端 `9db5ed1`，含 V2 契约/计划/启动词与 `check-product-contract.mjs` 守卫）；工作树干净，`git merge --ff-only origin/mg-codex-native` 快进，未重写任何历史。
+- 新增：`scripts/test/offline/aggregation-matrix-v2.js`（V2 矩阵生成器）、`aggregation-gate-v2.js`（V2 门禁 + `--assert-native-compaction-blocking` 自证）、`aggregation-acceptance-v2.test.mjs`（11 用例）、`docs/evidence/aggregation-acceptance-matrix-v2.md`（生成物）、`docs/evidence/aggregation-v2-status-2026-11-15.md`（当前状态源）。
+- 修改：V2 计划 §2.1 冻结 12 行用例映射（`V2-MATRIX-BEGIN/END`）、`scripts/test/run.mjs`（注册第 101 套件）、`scripts/check-product-contract.mjs`（V2 门禁接线）、`package.json`（`gate:v2` / `matrix:v2` / `check` 增两模块语法检查）、`.github/workflows/check.yml`（V2 门禁步骤）、`docs/README.md`、`CHANGELOG.md`。
+- 已执行：`npm run check`（UI 17/17 语法 OK）、`npm test`（101 套件 / 1009 通过 / 2 skip / 0 失败，74.6s）、`npm run docs:check`（88 文件 364 链接 PASS）、`node scripts/check-product-contract.mjs` PASS、`npm run gate:v2`（9 条自证全 PASS）、`node scripts/check-metadata.mjs` PASS。
+- 未验证：V2 真实目标证据（真实 Codex Desktop、`gpt-6-luna`、OpenCode Go 推理）全部未执行，无所有者额度/时间窗授权；`MG-R006` 保持 `FAIL`，不得因门禁迁移而升状态。
