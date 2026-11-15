@@ -1,35 +1,1225 @@
-// 连接与聚合（UX-02 由 A2 落地；本文件在 UX-00 提供**诚实的最小壳**，不伪造任何状态）。
+// 连接与聚合向导（UX-02 / UX-03，owner: A2）。
 //
-// 目的：让路由与状态层（A1/A3）在 A2 交付前可独立运行；A2 会在本文件位置实现完整
-// "连接 OpenCode Go → 预览 → 启用聚合 → 重启提示 → 退出恢复"向导。
-// 本壳只渲染真实快照能证明的事实，缺失就是"未知"，绝不显示"已连接/已启用"。
-import { h } from '../dom.js'
-import { pageHead, card, callout, tag } from '../components.js'
+// 目标：普通用户"只填一个 OpenCode Go API Key"就能完成
+//   注册供应商 → 保存 Key → 同步目标模型 → 预览并确认启用聚合 → 重启 Codex → 在 Codex 中使用 → 退出恢复。
+//
+// 硬约束：
+//   * 零依赖、纯 DOM（h() 构造），禁止任何 HTML 字符串注入；
+//   * Key 只在提交那一刻存在于局部变量：提交前清空输入框，不回显、不写入任何浏览器存储、
+//     不进 URL、不进日志、不进入任何返回结果（凭据写入通道只有 POST /api/keys）；
+//   * 状态只来自真实快照：A3 提供 store.productStatus()/aggregationState()/refreshProduct()；
+//     缺失时如实显示"正在读取真实状态"，绝不显示"已连接/已启用"；
+//   * 428 预览 → 一次显式确认 → 带 consentToken + expectedSha 提交；409 只展示三方差异，
+//     保留用户输入，绝不强制覆盖；422 如实展示 blocked；
+//   * 重启结论只来自 health.detect.restart；没检测到重启不说"已生效"，也没有假"打开 Codex"按钮。
+//
+// 可测试性：编排与判定拆成可注入 deps 的纯函数（buildProviderRequest/buildKeyRequest/runConnectFlow/
+// partialStateMessage/classifyActivation/activationPreviewSummary/describeOverall/statusRows），
+// 视图只负责渲染与事件接线。
+import { h, clear } from '../dom.js'
+import {
+  pageHead, card, callout, tag, field, confirmDialog, toast, table, kvList,
+} from '../components.js'
+import * as store from '../store.js'
+import { request } from '../api.js'
+import { fmtTime } from '../format.js'
+import * as productStatus from '../product-status.js'
+import {
+  AGGREGATION_ENDPOINTS,
+  summarizeDiscovery,
+  restartNotice,
+  describeThreeWay,
+  buildActivateRequest,
+} from './aggregation.js'
 
 export const CONNECTIONS_VIEW_CONTRACT = 'mg-ui-connections/1'
 
-function line (label, value, kind) {
-  return h('div', { class: 'list-row' },
-    h('div', { class: 'grow' }, h('div', { class: 'primary', text: label }), h('div', { class: 'secondary', text: value })),
-    tag(kind === 'good' ? '就绪' : kind === 'warn' ? '需要操作' : '未知', kind === 'good' ? 'good' : kind === 'warn' ? 'warn' : 'muted'))
+// 单一事实来源：供应商段与目标模型名都来自产品状态契约模块（不在本文件另写一份）。
+const GO_PROVIDER = productStatus.GO_PROVIDER_ID || 'opencodego'
+const GO_TARGET_UPSTREAM = productStatus.GO_TARGET_MODEL || 'deepseek-v4.1-flash'
+// 面向用户只显示模型名（契约 §7：默认不出现 providerId / 公共 ID 等技术字段）。
+export const GO_TARGET_LABEL = 'DeepSeek V4.1 Flash'
+export const PROVIDER_PRESET_ID = 'opencode-go'
+
+// 线性向导步骤；conflict/codex 是状态机分支，不在线性序列里。
+export const CONNECT_STEPS = Object.freeze([
+  { id: 'key', label: '连接 OpenCode Go', hint: '只需要一个 API Key' },
+  { id: 'model', label: '确认 DeepSeek 模型', hint: '确认 ' + GO_TARGET_LABEL + ' 已发现' },
+  { id: 'enable', label: '启用聚合', hint: '预览后一次确认' },
+  { id: 'restart', label: '重新打开 Codex', hint: '完全退出再打开' },
+  { id: 'use', label: '在 Codex 中使用', hint: '在模型选择器里选择' },
+  { id: 'revert', label: '退出并恢复', hint: '撤销 ModelGate 改过的字节' },
+])
+export const SPECIAL_CONNECT_STEPS = Object.freeze(['conflict', 'codex'])
+export const CONNECT_ACTION_ORDER = Object.freeze(['provider', 'key', 'sync'])
+const CONNECT_ACTION_LABELS = Object.freeze({
+  provider: '注册 OpenCode Go 供应商',
+  key: '保存 OpenCode Go API Key',
+  sync: '同步 DeepSeek 模型目录',
+})
+
+// —— 纯函数：步骤与路由 ——
+export function normalizeStep (value, fallback = 'key') {
+  const v = String(value == null ? '' : value).trim()
+  if (CONNECT_STEPS.some((s) => s.id === v) || SPECIAL_CONNECT_STEPS.includes(v)) return v
+  return fallback
 }
 
-export function render (root, ctx = {}) {
-  const product = typeof ctx.product === 'function' ? ctx.product() : (ctx.product || null)
-  root.append(pageHead('模型与账号', '连接 OpenCode Go、启用聚合、必要时重新打开 Codex。', { eyebrow: 'CONNECTIONS' }))
+export function stepFromHash (hash) {
+  const raw = String(hash == null ? '' : hash)
+  const q = raw.indexOf('?')
+  const query = q >= 0 ? raw.slice(q + 1) : ''
+  let step = ''
+  try {
+    step = new URLSearchParams(query).get('step') || ''
+  } catch {
+    step = ''
+  }
+  return normalizeStep(step)
+}
+
+export function stepHash (step) {
+  return '#/connections?step=' + encodeURIComponent(normalizeStep(step))
+}
+
+// 目标模型 ID 匹配：公共 ID 是 mg-opencodego-deepseek-v4-1-flash（catalog.js:stableModelId），
+// 上游名是 deepseek-v4.1-flash；旧文档里的 opencodego/deepseek-v4.1-flash 也一并容错。
+// 集成后产品状态模块提供 matchesGoTargetId 时优先用它（保持单一判定来源）。
+export function isGoTargetModelId (value) {
+  if (typeof productStatus.matchesGoTargetId === 'function') return productStatus.matchesGoTargetId(value)
+  const v = String(value == null ? '' : value).trim().toLowerCase()
+  if (!v) return false
+  const upstream = GO_TARGET_UPSTREAM.toLowerCase()
+  const slug = 'mg-opencodego-' + upstream.replace(/[^a-z0-9]+/g, '-')
+  return v === upstream || v === GO_PROVIDER + '/' + upstream || v === slug
+}
+
+// 从 /api/aggregation/models 的返回里挑出目标模型；挑不到返回 null（不是"0 个模型"）。
+export function targetModelOf (modelsPayload) {
+  const list = Array.isArray(modelsPayload)
+    ? modelsPayload
+    : (modelsPayload && Array.isArray(modelsPayload.models) ? modelsPayload.models : [])
+  for (const m of list) {
+    if (!m || typeof m !== 'object') continue
+    if (isGoTargetModelId(m.publicId) || isGoTargetModelId(m.upstreamId) ||
+        isGoTargetModelId(m.id) || isGoTargetModelId(m.name)) return m
+  }
+  return null
+}
+
+// —— 纯函数：写入请求（只提交真实必要字段）——
+const PROVIDER_OVERRIDE_FIELDS = Object.freeze(['id', 'kind', 'baseUrl', 'apiKeyEnv'])
+
+// 默认只交 preset + configVersion：供应商 ID/端点/变量名由服务端已登记模板补全，
+// 普通表单不要求用户理解它们。overrides 只来自"高级设置"（排障用途）。
+export function buildProviderRequest ({ configVersion, overrides } = {}) {
+  const body = { preset: PROVIDER_PRESET_ID }
+  const v = Number(configVersion)
+  if (Number.isFinite(v)) body.configVersion = v
+  const o = overrides && typeof overrides === 'object' ? overrides : null
+  if (o) {
+    for (const key of PROVIDER_OVERRIDE_FIELDS) {
+      const value = o[key] == null ? '' : String(o[key]).trim()
+      if (value) body[key] = value
+    }
+  }
+  return body
+}
+
+// Key 的唯一写入形状：POST /api/keys { id: 'opencodego', key }。
+export function buildKeyRequest (key) {
+  return { id: GO_PROVIDER, key: String(key == null ? '' : key) }
+}
+
+export function buildDeactivateRequest (expectedSha) {
+  const sha = expectedSha == null ? '' : String(expectedSha)
+  return sha ? { expectedSha: sha } : {}
+}
+
+// —— 纯函数：编排 ——
+function errorInfo (error) {
+  const data = error && error.data && typeof error.data === 'object' ? error.data : null
+  const status = Number(error && error.status) || 0
+  const code = String(
+    (data && (data.code || data.error)) ||
+    (error && (error.code || error.message)) ||
+    'unknown_error',
+  )
+  return { status, code }
+}
+
+function startFlags (prior) {
+  const p = prior && typeof prior === 'object' ? prior : null
+  return {
+    providerRegistered: !!(p && p.providerRegistered === true),
+    providerExisted: !!(p && p.providerExisted === true),
+    keySaved: !!(p && p.keySaved === true),
+    synced: !!(p && p.synced === true),
+    syncPartial: !!(p && p.syncPartial === true),
+  }
+}
+
+function finishConnect (result) {
+  result.ok = result.failedStep === null && result.keySaved === true &&
+    result.synced === true && result.syncPartial !== true
+  return result
+}
+
+// 顺序固定：providers → keys → sync（Key 只能在供应商写入之后保存，doSaveKeys 要求 id 已在 cfg.providers）。
+// deps: { post(path, body) → Promise<data>, key, configVersion, overrides, prior, from }
+//   * from = 'provider' | 'key' | 'sync'：只重试后续步骤（前面步骤标记 not-run，不谎称已执行）；
+//   * prior = 上一次结果：重试时沿用已知成功的步骤，但未重跑过的步骤不会被标成 done；
+//   * provider 返回 409 provider_exists 时按"已注册"继续（重试幂等），其它 409 如实失败。
+export async function runConnectFlow (deps = {}) {
+  const post = deps.post
+  if (typeof post !== 'function') throw new TypeError('runConnectFlow 需要注入 post(path, body)')
+  const key = String(deps.key == null ? '' : deps.key)
+  const requestedFrom = String(deps.from == null ? '' : deps.from)
+  const from = CONNECT_ACTION_ORDER.includes(requestedFrom) ? requestedFrom : CONNECT_ACTION_ORDER[0]
+  const fromIndex = CONNECT_ACTION_ORDER.indexOf(from)
+  const steps = CONNECT_ACTION_ORDER.map((id) => ({ id, label: CONNECT_ACTION_LABELS[id], status: 'pending', message: '', code: null }))
+  const result = Object.assign({
+    ok: false,
+    from,
+    keyProvided: key.length > 0,
+    failedStep: null,
+    failedCode: null,
+    steps,
+  }, startFlags(deps.prior))
+
+  const markNotRun = (index) => {
+    steps[index].status = 'not-run'
+    steps[index].message = '本次只重试后续步骤，未重复执行'
+  }
+
+  // 1) 注册供应商（preset 由服务端补全 ID/端点/名称/v2 作用域）
+  if (fromIndex > 0) markNotRun(0)
+  else {
+    try {
+      await post(AGGREGATION_ENDPOINTS.providers, buildProviderRequest({ configVersion: deps.configVersion, overrides: deps.overrides }))
+      steps[0].status = 'done'
+      steps[0].message = '已注册 OpenCode Go 供应商'
+      result.providerRegistered = true
+    } catch (error) {
+      const info = errorInfo(error)
+      if (info.status === 409 && info.code === 'provider_exists') {
+        steps[0].status = 'existing'
+        steps[0].message = '供应商已存在，继续保存 Key（不重复创建）'
+        result.providerRegistered = true
+        result.providerExisted = true
+      } else {
+        steps[0].status = 'failed'
+        steps[0].code = info.code
+        steps[0].message = '供应商注册失败：' + info.code
+        result.failedStep = 'provider'
+        result.failedCode = info.code
+        steps[1].status = 'skipped'
+        steps[1].message = '未执行：供应商注册失败，没有写入任何 Key'
+        steps[2].status = 'skipped'
+        steps[2].message = '未执行：供应商注册失败'
+        return finishConnect(result)
+      }
+    }
+  }
+
+  // 2) 保存 Key（唯一凭据写入通道；只有这里会带上 Key 值）
+  if (fromIndex > 1) markNotRun(1)
+  else if (!key) {
+    steps[1].status = 'failed'
+    steps[1].code = 'key_required'
+    steps[1].message = '缺少 OpenCode Go API Key'
+    result.failedStep = 'key'
+    result.failedCode = 'key_required'
+    steps[2].status = 'skipped'
+    steps[2].message = '未执行：还没有保存 Key'
+    return finishConnect(result)
+  } else {
+    try {
+      const res = await post('/api/keys', buildKeyRequest(key))
+      if (res && res.ok === false) {
+        throw Object.assign(new Error('key_save_rejected'), { code: res.code || 'key_save_rejected', data: res })
+      }
+      steps[1].status = 'done'
+      steps[1].message = 'Key 已保存（仅存于本机网关，不回显、不写入浏览器）'
+      result.keySaved = true
+    } catch (error) {
+      const info = errorInfo(error)
+      steps[1].status = 'failed'
+      steps[1].code = info.code
+      steps[1].message = 'Key 保存失败：' + info.code
+      result.failedStep = 'key'
+      result.failedCode = info.code
+      steps[2].status = 'skipped'
+      steps[2].message = '未执行：Key 未保存'
+      return finishConnect(result)
+    }
+  }
+
+  // 3) 同步目录（只读取模型清单，不发起推理）
+  if (fromIndex > 2) markNotRun(2)
+  else {
+    try {
+      const res = await post(AGGREGATION_ENDPOINTS.sync(GO_PROVIDER), {})
+      if (res && res.ok === false) {
+        throw Object.assign(new Error('sync_failed'), { code: res.code || 'sync_failed', data: res })
+      }
+      const completeness = res && res.completeness ? String(res.completeness) : ''
+      steps[2].completeness = completeness || null
+      if (completeness && completeness.indexOf('partial') >= 0) {
+        steps[2].status = 'partial'
+        steps[2].message = '模型发现未完成（这不是 0 个模型，可重试同步）'
+        result.syncPartial = true
+      } else {
+        steps[2].status = 'done'
+        steps[2].message = '模型目录已同步'
+        result.synced = true
+      }
+    } catch (error) {
+      const info = errorInfo(error)
+      steps[2].status = 'failed'
+      steps[2].code = info.code
+      steps[2].message = '模型同步失败：' + info.code
+      result.failedStep = 'sync'
+      result.failedCode = info.code
+    }
+  }
+  return finishConnect(result)
+}
+
+// 部分成功必须如实：既有成功步骤就说成功，失败步骤给稳定 code，绝不显示"已连接"。
+export function partialStateMessage (result) {
+  const r = result && typeof result === 'object' ? result : {}
+  const code = r.failedCode ? String(r.failedCode) : ''
+  const suffix = code ? '（' + code + '）' : ''
+  if (r.failedStep === 'unknown') {
+    return {
+      tone: 'error',
+      label: '连接流程异常',
+      text: '连接流程异常' + suffix,
+      detail: '可能没有写入、也可能只完成了一部分；请按真实状态重新检测，本页不会自动重试或伪造成功。',
+      partial: true,
+    }
+  }
+  if (r.failedStep === 'provider') {
+    return {
+      tone: 'error',
+      label: '供应商注册失败',
+      text: '供应商注册失败' + suffix,
+      detail: '这次没有保存 Key，也没有发起模型同步。请确认网关版本与本机回环访问后重试；不会伪造成功。',
+      partial: false,
+    }
+  }
+  if (r.failedStep === 'key') {
+    return {
+      tone: 'warn',
+      label: 'Key 未保存',
+      text: '已注册 OpenCode Go 供应商，但 Key 保存失败' + suffix,
+      detail: '供应商已存在，重试时不会重复创建；请重新输入 Key 后再提交。',
+      partial: true,
+    }
+  }
+  if (r.failedStep === 'sync') {
+    return {
+      tone: 'warn',
+      label: 'Key 已保存，连接未完成',
+      text: 'Key 已保存，连接未完成' + suffix,
+      detail: '模型目录同步失败：没有拿到模型清单不是 0 个模型。可以只重试同步。',
+      partial: true,
+    }
+  }
+  if (r.syncPartial) {
+    return {
+      tone: 'warn',
+      label: 'Key 已保存，发现未完成',
+      text: 'Key 已保存，但模型发现未完成（不是 0 个模型）',
+      detail: '当前列表不是完整目录；可重试同步或查看高级诊断。',
+      partial: true,
+    }
+  }
+  if (r.ok) {
+    return {
+      tone: 'good',
+      label: '已注册并保存 Key',
+      text: '已注册并保存 Key，模型目录同步完成',
+      detail: '下一步确认 ' + GO_TARGET_LABEL + ' 是否已出现在模型目录中。',
+      partial: false,
+    }
+  }
+  return { tone: 'muted', label: '尚未完成', text: '还没有执行任何写入。', detail: '', partial: false }
+}
+
+// —— 纯函数：启用/退出判定（428 预览 / 422 blocked / 409 三方差异 / 200 回执）——
+function outcomeBody (outcome) {
+  if (!outcome || typeof outcome !== 'object') return {}
+  if (outcome.data && typeof outcome.data === 'object') return outcome.data
+  return outcome
+}
+
+export function activationPreviewSummary (preview) {
+  const p = preview && typeof preview === 'object' ? preview : {}
+  const rows = Array.isArray(p.rows) ? p.rows.filter((r) => r && r.kind !== 'same') : []
+  const conflicts = Array.isArray(p.conflicts) ? p.conflicts : []
+  const backup = p.backup && typeof p.backup === 'object' ? p.backup : {}
+  return {
+    changeRows: rows,
+    changeCount: rows.length,
+    conflicts: conflicts.map((c) => (c && c.path) || String(c)),
+    backupAvailable: backup.available === true,
+    backupPath: backup.path || null,
+    firstRun: p.firstRun === true,
+    warnings: Array.isArray(p.warnings) ? p.warnings : [],
+    catalog: p.catalog || null,
+    expectedSha: p.expectedSha == null ? '' : String(p.expectedSha),
+    consentToken: typeof p.consentToken === 'string' ? p.consentToken : '',
+    blocked: Array.isArray(p.blocked) ? p.blocked : [],
+  }
+}
+
+export function classifyActivation (outcome) {
+  const status = Number(outcome && outcome.status) || 0
+  const body = outcomeBody(outcome)
+  const code = String(body.code || '')
+  if (status === 428 || code === 'consent_required') {
+    const preview = body.preview && typeof body.preview === 'object' ? body.preview : null
+    return {
+      kind: 'preview',
+      status: status || 428,
+      code: 'consent_required',
+      preview,
+      summary: activationPreviewSummary(preview),
+      writes: false,
+    }
+  }
+  if (status === 422 || code === 'activation_blocked') {
+    return {
+      kind: 'blocked',
+      status: status || 422,
+      code: code || 'activation_blocked',
+      blocked: Array.isArray(body.blocked) ? body.blocked : [],
+      summary: activationPreviewSummary(body.preview),
+      writes: false,
+    }
+  }
+  if (status === 409) {
+    return {
+      kind: 'conflict',
+      status: 409,
+      code: code || 'config_conflict',
+      threeWay: describeThreeWay(outcome),
+      writes: false,
+      mayOverwrite: false,
+    }
+  }
+  if (body.ok === true && (status === 0 || status === 200)) {
+    return { kind: 'applied', status: 200, receipt: body, writes: true }
+  }
+  if (status >= 400) {
+    return { kind: 'error', status, code, message: String(body.error || body.message || ''), writes: false }
+  }
+  return { kind: 'unknown', status, code, writes: false }
+}
+
+export function receiptSummary (receipt) {
+  const r = receipt && typeof receipt === 'object' ? receipt : {}
+  const reload = r.reload && typeof r.reload === 'object' ? r.reload : null
+  const verification = r.verification && typeof r.verification === 'object' ? r.verification : null
+  const catalog = verification && verification.catalog && typeof verification.catalog === 'object' ? verification.catalog : null
+  return {
+    sha: r.sha || null,
+    preservedUserEdits: r.preservedUserEdits === true,
+    reloadApplied: !!(reload && reload.applied === true),
+    needsRestart: !!(reload && reload.needsRestart === true),
+    reloadReason: (reload && reload.reason) || null,
+    catalogCount: catalog && Number.isFinite(Number(catalog.modelCount)) ? Number(catalog.modelCount) : null,
+    gatewayStatus: verification && verification.gateway ? verification.gateway.status : null,
+  }
+}
+
+// —— 纯函数：总体状态与三条状态行 ——
+const LEVEL_TONE = Object.freeze({ ready: 'good', action: 'warn', error: 'bad', locked: 'muted', unknown: 'muted', loading: 'muted' })
+
+function toneOfTag (tone) {
+  return tone === 'good' ? 'good' : tone === 'bad' ? 'bad' : tone === 'warn' ? 'warn' : tone === 'info' ? 'info' : 'muted'
+}
+
+export function describeOverall (product) {
   if (!product) {
-    root.append(callout('info',
+    return {
+      level: 'loading',
+      tone: 'muted',
+      label: '正在读取真实状态',
+      detail: '还没有取得真实状态快照；数据到达前不显示任何成功结论。',
+    }
+  }
+  const overall = product.overall && typeof product.overall === 'object' ? product.overall : {}
+  const level = String(overall.level || 'unknown')
+  return {
+    level,
+    tone: LEVEL_TONE[level] || 'muted',
+    label: String(overall.label || '状态未知'),
+    detail: String(overall.detail || ''),
+    state: String(product.state || ''),
+  }
+}
+
+// 三条必要状态行（官方套餐 / OpenCode Go / Codex Desktop）；聚合模式单独一枚标签。
+// product 缺失时三行都是"未知"，绝不写成已连接。
+export function statusRows (product) {
+  if (!product) {
+    return ['official', 'go', 'codex'].map((id) => ({
+      id,
+      label: id === 'official' ? 'ChatGPT 套餐' : id === 'go' ? 'OpenCode Go' : 'Codex Desktop',
+      value: '未知',
+      detail: '正在读取真实状态',
+      level: 'unknown',
+      tone: 'muted',
+    }))
+  }
+  const official = product.official && typeof product.official === 'object' ? product.official : {}
+  const go = product.go && typeof product.go === 'object' ? product.go : {}
+  const codex = product.codex && typeof product.codex === 'object' ? product.codex : {}
+  const officialTone = official.state === 'detected' ? 'good' : official.state === 'missing' ? 'warn' : 'muted'
+  const goTone = go.state === 'verified' || go.state === 'configured' ? 'good' : go.state === 'error' ? 'bad' : go.state === 'missing' ? 'warn' : 'muted'
+  const codexTone = !codex.found ? 'muted' : codex.restartNeeded === true ? 'warn' : codex.restartNeeded === false ? 'good' : 'info'
+  return [
+    { id: 'official', label: 'ChatGPT 套餐', value: String(official.label || '未知'), detail: String(official.detail || ''), level: String(official.level || 'unknown'), tone: officialTone },
+    { id: 'go', label: 'OpenCode Go', value: String(go.label || '未知'), detail: String(go.detail || ''), level: String(go.level || 'unknown'), tone: goTone },
+    { id: 'codex', label: 'Codex Desktop', value: String(codex.label || '未知'), detail: String(codex.detail || ''), level: String(codex.detectionLevel || 'unknown'), tone: codexTone },
+  ]
+}
+
+function aggregationTag (product) {
+  if (!product) return { label: '聚合状态未知', tone: 'muted' }
+  const agg = product.aggregation && typeof product.aggregation === 'object' ? product.aggregation : {}
+  return {
+    label: String(agg.label || '聚合状态未知'),
+    tone: agg.mode === 'aggregated' ? 'good' : agg.mode === 'official' ? 'muted' : 'warn',
+  }
+}
+
+const LEVEL_LABELS = Object.freeze({
+  detected: '检测到', configured: '已配置', 'runtime-verified': '运行时已验证',
+  'not-tested': '未实测', unknown: '未知',
+})
+
+// —— 视图取数（只读；状态层缺失时如实降级）——
+function productOf (ctx) {
+  if (ctx && typeof ctx.product === 'function') {
+    try { return ctx.product() } catch { return null }
+  }
+  if (ctx && ctx.product && typeof ctx.product === 'object') return ctx.product
+  if (typeof store.productStatus === 'function') {
+    try { return store.productStatus() } catch { return null }
+  }
+  return null
+}
+
+function aggregationOf (ctx) {
+  if (ctx && ctx.aggregation && typeof ctx.aggregation === 'object') return ctx.aggregation
+  if (typeof store.aggregationState === 'function') {
+    try { return store.aggregationState() } catch { return null }
+  }
+  return null
+}
+
+function currentConfigVersion () {
+  const config = store.state && store.state.config ? store.state.config : null
+  const status = store.state && store.state.status ? store.state.status : null
+  const value = config && config.configVersion != null ? config.configVersion : (status ? status.configVersion : null)
+  const n = Number(value)
+  return Number.isFinite(n) ? n : undefined
+}
+
+function viewPost (ctx) {
+  const injected = ctx && ctx.deps && typeof ctx.deps.post === 'function' ? ctx.deps.post : null
+  if (injected) return injected
+  return (path, body) => request(path, { method: 'POST', body, timeoutMs: 60000 })
+}
+
+async function refreshAll (ctx) {
+  const refresh = ctx && typeof ctx.refreshProduct === 'function'
+    ? ctx.refreshProduct
+    : (typeof store.refreshProduct === 'function' ? store.refreshProduct : null)
+  if (refresh) {
+    try { await refresh({ reason: 'connections', force: true }) } catch { /* 状态层自己进入错误态，视图不伪造成功 */ }
+  }
+  if (ctx && typeof ctx.rerender === 'function') ctx.rerender()
+}
+
+function goToStep (step) {
+  try { location.hash = stepHash(step) } catch { /* 无 location（测试/非浏览器）时不跳转 */ }
+}
+
+// —— 视图：局部组件 ——
+function statusLine (row) {
+  return h('div', { class: 'list-row' },
+    h('div', { class: 'grow' },
+      h('div', { class: 'primary', text: row.label }),
+      h('div', { class: 'secondary', text: row.detail || row.value })),
+    h('div', { class: 'toolbar', style: { margin: '0' } },
+      tag(LEVEL_LABELS[row.level] || row.level, toneOfTag(row.tone)),
+      tag(row.value, toneOfTag(row.tone))))
+}
+
+function overallCard (product) {
+  const overall = describeOverall(product)
+  const agg = aggregationTag(product)
+  const primary = product && product.primary && typeof product.primary === 'object' ? product.primary : null
+  const body = h('div', null,
+    callout(overall.tone === 'good' ? 'good' : overall.tone === 'bad' ? 'danger' : overall.tone === 'warn' ? 'warn' : 'info',
+      h('strong', { text: overall.label + '：' }), ' ' + overall.detail),
+    h('div', { class: 'list' }, statusRows(product).map(statusLine)),
+    h('div', { class: 'toolbar', style: { marginTop: '10px' } },
+      tag(agg.label, agg.tone),
+      primary && String(primary.route || '').startsWith('#/connections')
+        ? h('button', {
+          class: 'btn btn-sm btn-primary',
+          type: 'button',
+          text: primary.label,
+          onclick: () => goToStep(stepFromHash(primary.route)),
+        })
+        : null,
+      product && product.secondary && Array.isArray(product.secondary)
+        ? product.secondary
+          .filter((x) => x && String(x.route || '').startsWith('#/connections'))
+          .map((x) => h('button', {
+            class: 'btn btn-sm',
+            type: 'button',
+            text: x.label,
+            onclick: () => goToStep(stepFromHash(x.route)),
+          }))
+        : null))
+  return card('当前状态', '来自只读状态快照（/api/status 与 /api/aggregation/*）；缺失的部分显示为未知。', body,
+    { foot: product && product.checkedAt ? '快照时间 ' + fmtTime(product.checkedAt) : '尚未取得真实快照' })
+}
+
+function stepNav (active, ctx) {
+  return h('div', { class: 'toolbar', role: 'tablist', 'aria-label': '接入步骤' },
+    CONNECT_STEPS.map((s) => h('button', {
+      class: 'btn btn-sm' + (s.id === active ? ' btn-primary' : ''),
+      type: 'button',
+      role: 'tab',
+      'aria-selected': s.id === active ? 'true' : 'false',
+      'aria-current': s.id === active ? 'step' : null,
+      title: s.hint,
+      text: (CONNECT_STEPS.indexOf(s) + 1) + '. ' + s.label,
+      onclick: () => goToStep(s.id),
+    })),
+    h('span', { class: 'spacer' }),
+    h('button', { class: 'btn btn-sm', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) }))
+}
+
+const STEP_STATUS_TEXT = Object.freeze({
+  pending: '等待', done: '已完成', existing: '已存在', partial: '未完成',
+  failed: '失败', skipped: '未执行', 'not-run': '未执行',
+})
+const STEP_STATUS_TONE = Object.freeze({
+  pending: 'muted', done: 'good', existing: 'info', partial: 'warn',
+  failed: 'bad', skipped: 'muted', 'not-run': 'muted',
+})
+
+function renderFlowResult (host, result) {
+  const summary = partialStateMessage(result)
+  const kind = summary.tone === 'good' ? 'good' : summary.tone === 'error' ? 'danger' : summary.tone === 'muted' ? 'info' : 'warn'
+  clear(host)
+  host.append(
+    callout(kind,
+      h('strong', { text: summary.label + '：' }), ' ' + summary.text,
+      summary.detail ? h('p', { class: 'hint', text: summary.detail }) : null),
+    h('div', { class: 'list' }, (result.steps || []).map((s) => h('div', { class: 'list-row' },
+      h('div', { class: 'grow' },
+        h('div', { class: 'primary', text: s.label }),
+        h('div', { class: 'secondary', text: s.message || '' })),
+      tag(STEP_STATUS_TEXT[s.status] || s.status, STEP_STATUS_TONE[s.status] || 'muted')))))
+}
+
+// —— 步骤 1：只填 Key ——
+function keyPanel (ctx, product) {
+  const input = h('input', {
+    type: 'password',
+    autocomplete: 'new-password',
+    spellcheck: 'false',
+    'aria-required': 'true',
+    placeholder: '粘贴 OpenCode Go API Key',
+  })
+  const error = h('p', { class: 'field-error', role: 'alert' })
+  const live = h('p', { class: 'hint', role: 'status', 'aria-live': 'polite' })
+  const resultHost = h('div')
+  const submit = h('button', { class: 'btn btn-primary', type: 'button', text: '连接 OpenCode Go' })
+
+  const idInput = h('input', { type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: '默认 opencodego' })
+  const baseInput = h('input', { type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: '留空使用已登记端点' })
+  const envInput = h('input', { type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: '只填变量名，例如 OPENCODE_API_KEY' })
+  const advanced = h('details', { class: 'advanced' },
+    h('summary', { text: '高级设置（仅排障时使用）' }),
+    callout('warn',
+      h('strong', { text: '风险：' }),
+      ' 手写供应商 ID / 端点 / 变量名会绕过默认模板；写错会注册失败或指向错误端点。普通接入请不要展开本区域。'),
+    field('供应商 ID（高级）', idInput, { help: '默认由服务端按 preset 生成；自定义 ID 必须与类型匹配。' }),
+    field('端点 Base URL（高级）', baseInput, { help: '必须是 https 且属于 OpenCode 白名单；不要把 Key 写进 URL。' }),
+    field('apiKeyEnv（高级）', envInput, { help: '只填环境变量名，不要粘贴 Key。' }))
+
+  const keyField = field('OpenCode Go API Key', input, {
+    help: '只会提交给本机 ModelGate（POST /api/keys）。不会回显、不写入浏览器存储、不进入页面地址或日志。',
+  })
+  keyField.append(error)
+
+  const next = h('div', { class: 'toolbar', style: { marginTop: '10px' } },
+    h('button', { class: 'btn btn-sm', type: 'button', text: '查看模型发现结果', onclick: () => goToStep('model') }))
+
+  submit.addEventListener('click', async () => {
+    error.textContent = ''
+    live.textContent = ''
+    const raw = String(input.value == null ? '' : input.value)
+    if (!raw.trim()) {
+      error.textContent = '请输入 OpenCode Go API Key'
+      try { input.focus() } catch { /* 无 DOM 焦点 API 时忽略 */ }
+      return
+    }
+    // 提交瞬间清空输入框：Key 不再留在 DOM 里（不回显、不持久化、不进 URL/日志）。
+    input.value = ''
+    submit.disabled = true
+    submit.setAttribute('aria-busy', 'true')
+    submit.textContent = '连接中…'
+    live.textContent = '正在注册供应商并保存 Key…'
+    let result = null
+    try {
+      result = await runConnectFlow({
+        post: viewPost(ctx),
+        key: raw.trim(),
+        configVersion: currentConfigVersion(),
+        overrides: {
+          id: idInput.value.trim(),
+          baseUrl: baseInput.value.trim(),
+          apiKeyEnv: envInput.value.trim(),
+        },
+      })
+    } catch (e) {
+      result = {
+        ok: false,
+        failedStep: 'unknown',
+        failedCode: (e && e.message) ? String(e.message) : 'connect_flow_failed',
+        steps: [],
+      }
+    } finally {
+      submit.disabled = false
+      submit.removeAttribute('aria-busy')
+      submit.textContent = '连接 OpenCode Go'
+    }
+    renderFlowResult(resultHost, result)
+    const summary = partialStateMessage(result)
+    live.textContent = summary.label + '：' + summary.text
+    if (result.ok) {
+      toast('OpenCode Go 已接入，模型目录已同步', 'success')
+      await refreshAll(ctx)
+      goToStep('model')
+      return
+    }
+    if (result.failedStep === 'sync') {
+      const retry = h('button', {
+        class: 'btn btn-sm',
+        type: 'button',
+        text: '只重试同步',
+        onclick: async () => {
+          retry.disabled = true
+          retry.textContent = '同步中…'
+          const again = await runConnectFlow({ post: viewPost(ctx), from: 'sync', prior: result })
+          retry.remove()
+          renderFlowResult(resultHost, again)
+          live.textContent = partialStateMessage(again).text
+          if (again.ok) {
+            toast('模型目录已同步', 'success')
+            await refreshAll(ctx)
+            goToStep('model')
+          } else {
+            retry.disabled = false
+            retry.textContent = '只重试同步'
+            resultHost.append(retry)
+          }
+        },
+      })
+      resultHost.append(retry)
+    } else if (result.failedStep === 'key') {
+      resultHost.append(h('button', {
+        class: 'btn btn-sm',
+        type: 'button',
+        text: '重新输入 Key 后保存',
+        onclick: () => { try { input.focus() } catch {} },
+      }))
+    }
+  })
+
+  const stateCallout = !product
+    ? callout('info',
       h('strong', { text: '正在读取真实状态。' }),
-      ' 连接向导不会在取得真实快照前显示任何"已连接"或"已启用"结论。'))
+      ' 表单可以填写，但页面不会在取得真实快照前显示任何成功结论。')
+    : (product.go && product.go.credentialPresent
+        ? callout('info',
+          h('strong', { text: '已检测到 OpenCode Go Key。' }),
+          ' 重新填写会覆盖本机已保存的 Key；不填写也不会丢。')
+        : null)
+
+  return card('连接 OpenCode Go', '普通接入只需要一个 OpenCode Go API Key；供应商、端点与 ' + GO_TARGET_LABEL + ' 由 ModelGate 自动配置。',
+    h('div', null,
+      stateCallout,
+      keyField,
+      h('div', { class: 'toolbar', style: { marginTop: '4px' } }, submit),
+      live,
+      h('p', { class: 'hint', text: '不会发起任何模型推理请求；同步只读取模型清单。' }),
+      resultHost,
+      next,
+      advanced))
+}
+
+// —— 步骤 2：模型发现结果 ——
+function modelPanel (ctx) {
+  const snapshot = aggregationOf(ctx)
+  const health = snapshot && snapshot.health ? snapshot.health : null
+  const body = h('div')
+  const live = h('p', { class: 'hint', role: 'status', 'aria-live': 'polite' })
+  const models = snapshot && snapshot.models ? snapshot.models : null
+  const diagnostics = snapshot && snapshot.diagnostics ? snapshot.diagnostics : null
+
+  if (!snapshot) {
+    body.append(
+      callout('info',
+        h('strong', { text: '正在读取真实的模型发现结果。' }),
+        ' 状态层还没有返回聚合快照；这里不会显示"0 个模型"，也不会显示成功。'),
+      h('div', { class: 'toolbar' },
+        h('button', { class: 'btn btn-primary', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) })))
+    return card('确认 ' + GO_TARGET_LABEL, '发现结果只来自真实同步快照。', h('div', null, body, live))
+  }
+
+  const summary = summarizeDiscovery(diagnostics, models)
+  const target = targetModelOf(models)
+  const mode = health && health.mode ? String(health.mode) : 'unknown'
+
+  body.append(
+    callout(summary.kind === 'bad' ? 'danger' : summary.kind === 'warn' ? 'warn' : 'info',
+      h('strong', { text: summary.label + '：' }), ' ' + summary.detail),
+    h('div', { class: 'toolbar', style: { margin: '2px 0 10px' } },
+      tag(summary.countText || '数量未知（不按 0 显示）', summary.kind),
+      tag('状态 ' + summary.state, 'muted')),
+    target
+      ? callout('good',
+        h('strong', { text: '已发现目标模型：' }), GO_TARGET_LABEL,
+        h('p', { class: 'hint', text: '模型身份由 ModelGate 统一发布；具体公共 ID 只在高级详情里展示。' }))
+      : callout('warn',
+        h('strong', { text: '没有找到目标模型：' }), GO_TARGET_LABEL,
+        ' 这不等于模型数量为 0：请先确认同步是否完成，或检查 Key 是否有效。'),
+    h('div', { class: 'toolbar' },
+      h('button', {
+        class: 'btn btn-sm',
+        type: 'button',
+        text: '重新同步模型目录',
+        onclick: async () => {
+          live.textContent = '正在同步模型目录…'
+          const result = await runConnectFlow({ post: viewPost(ctx), from: 'sync' })
+          live.textContent = partialStateMessage(result).text
+          if (result.ok) { toast('模型目录已同步', 'success'); await refreshAll(ctx) }
+          else toast(partialStateMessage(result).text, 'error')
+        },
+      }),
+      h('button', { class: 'btn btn-sm', type: 'button', text: '查看高级诊断', onclick: () => { try { location.hash = '#/aggregation' } catch {} } })),
+    live)
+
+  if (mode === 'aggregated') body.append(callout('info', h('strong', { text: '聚合模式已启用。' }), ' 目标模型已写入 Codex 配置；如需确认重启状态请进入「重新打开 Codex」。'))
+
+  return card('确认 ' + GO_TARGET_LABEL,
+    '目标模型固定为 ' + GO_TARGET_LABEL + '（上游模型 ' + GO_TARGET_UPSTREAM + '）；不要求你理解或手写模型 ID。',
+    body)
+}
+
+// —— 步骤 3：预览 + 一次确认 ——
+function diffTable (rows) {
+  return table([
+    { label: '字段', render: (r) => h('span', { class: 'mono', text: r.path }) },
+    { label: '变更', render: (r) => tag(r.kind === 'add' ? '新增' : r.kind === 'replace' ? '覆盖' : '不变', r.kind === 'replace' ? 'warn' : r.kind === 'add' ? 'info' : 'muted') },
+    { label: '当前值', render: (r) => h('span', { class: 'mono-break muted', text: r.from == null ? '—（文件中没有）' : r.from }) },
+    { label: '写入后', render: (r) => h('span', { class: 'mono-break', text: r.to }) },
+  ], rows)
+}
+
+function renderConflict (host, outcome, ctx) {
+  const tw = outcome.threeWay || describeThreeWay(outcome)
+  clear(host)
+  host.append(
+    callout('warn',
+      h('strong', { text: '拒绝覆盖：' }),
+      ' Codex 配置在预览后被其他程序修改过。ModelGate 保留你的改动，不会为了启用聚合而覆盖。'),
+    h('p', { class: 'hint', text: tw.summary }),
+    tw.available && tw.rows.length
+      ? table([
+        { label: '行', render: (r) => h('span', { class: 'mono', text: String(r.afterNo == null ? r.beforeNo : r.afterNo) }) },
+        { label: '差异', render: (r) => tag(r.kind === 'add' ? '新增' : r.kind === 'del' ? '删除' : '修改', r.kind === 'del' ? 'bad' : r.kind === 'add' ? 'info' : 'warn') },
+        { label: '当前内容', render: (r) => h('span', { class: 'mono-break', text: r.text || '' }) },
+      ], tw.rows)
+      : h('p', { class: 'muted', text: tw.summary }),
+    h('p', { class: 'hint', text: tw.guidance || '先手工合并，再重新检测。' }),
+    h('div', { class: 'toolbar' },
+      h('button', { class: 'btn btn-primary', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) })))
+}
+
+function renderPreview (host, outcome, ctx, live) {
+  const s = outcome.summary
+  const confirm = h('button', { class: 'btn btn-primary', type: 'button', text: '确认写入并验证' })
+  if (!s.consentToken) confirm.disabled = true
+  const body = h('div', null,
+    callout('info',
+      h('strong', { text: '即将更新 Codex 接入设置，请先确认：' }),
+      ' 只写 ModelGate 拥有的字段；其它行（MCP / projects / 权限 / 注释 / 你自己的 [model_providers.*]）逐字节保留。这次预览没有写入任何内容。'),
+    s.firstRun ? callout('warn', h('strong', { text: '首次设置：' }), ' 会在 Codex 用户级配置中新增下面这些字段。') : null,
+    s.blocked.length
+      ? callout('danger', h('strong', { text: '前置条件未满足：' }), s.blocked.map((b) => (b && (b.code || b.message)) || 'blocked').join('、'))
+      : null,
+    s.conflicts.length ? callout('warn', h('strong', { text: '将覆盖 ' + s.conflicts.length + ' 个已有值：' }), s.conflicts.join('、')) : null,
+    s.consentToken ? null : callout('warn', h('strong', { text: '缺少确认令牌：' }), ' 服务端没有返回 consentToken，无法安全写入；请重新检测后再预览。'),
+    diffTable(s.changeRows),
+    h('p', { class: 'hint', text: '备份：' + (s.backupAvailable ? '写入前快照可用（失败可自动回滚）' : '无（当前文件不存在或尚未接入，失败将保持原样）') }),
+    s.warnings.length ? callout('warn', h('strong', { text: '注意：' }), s.warnings.join(' ')) : null,
+    s.catalog ? h('p', { class: 'hint', text: '目录：' + (s.catalog.ok ? (s.catalog.modelCount + ' 个模型（含目标模型）') : ('当前不可用（' + (s.catalog.state || '未知') + '）：' + (s.catalog.reason || ''))) }) : null,
+    h('p', { class: 'hint', text: '写入后自动验证：配置解析 + 目录含目标模型 + 网关 /healthz；任一项失败会自动回滚到写入前字节。' }),
+    h('div', { class: 'toolbar' }, confirm,
+      h('button', { class: 'btn', type: 'button', text: '取消（不写入）', onclick: () => { clear(host); host.append(callout('info', h('strong', { text: '已取消：' }), ' 没有写入任何配置。')) } })))
+  clear(host)
+  host.append(body)
+
+  confirm.addEventListener('click', async () => {
+    if (!s.consentToken) return
+    confirm.disabled = true
+    confirm.textContent = '写入并验证中…'
+    live.textContent = '正在写入并验证 Codex 配置…'
+    try {
+      const payload = buildActivateRequest(outcome.preview, true)
+      const res = await viewPost(ctx)(AGGREGATION_ENDPOINTS.activate, payload)
+      showActivationOutcome(host, classifyActivation(res), ctx, live)
+    } catch (error) {
+      showActivationOutcome(host, classifyActivation(error), ctx, live)
+    }
+  })
+}
+
+function showActivationOutcome (host, outcome, ctx, live) {
+  if (outcome.kind === 'preview') {
+    renderPreview(host, outcome, ctx, live)
     return
   }
-  root.append(card('当前状态', '来自只读状态快照（/api/status 与 /api/aggregation/*）',
-    h('div', { class: 'list' },
-      line('ChatGPT 套餐', product.official ? product.official.detail : '未验证（没有状态投影）', product.official && product.official.state === 'detected' ? 'good' : 'warn'),
-      line('OpenCode Go', product.go ? product.go.detail : '状态未知', product.go && product.go.state === 'configured' ? 'good' : 'warn'),
-      line('Codex Desktop', product.codex ? product.codex.detail : '状态未知', product.codex && product.codex.found ? 'good' : 'warn'),
-      line('聚合模式', product.aggregation ? product.aggregation.detail : '状态未知', product.aggregation && product.aggregation.mode === 'aggregated' ? 'good' : 'muted'))))
-  root.append(callout('warn',
-    h('strong', { text: '连接向导尚未在本实例启用。' }),
-    ' 单字段 Go 接入与一键聚合将由 UX-02 在此页实现；在此之前请勿手工修改 Codex 配置。本页不会代替你写入。'))
+  if (outcome.kind === 'conflict') {
+    live.textContent = '配置已被其他程序修改：没有写入，也不会覆盖。'
+    renderConflict(host, outcome, ctx)
+    return
+  }
+  if (outcome.kind === 'blocked') {
+    const rows = outcome.blocked.map((b) => h('div', { class: 'list-row' },
+      h('div', { class: 'grow' }, h('div', { class: 'primary', text: (b && b.code) || 'blocked' }), h('div', { class: 'secondary', text: (b && (b.message || b.detail)) || '' }))))
+    clear(host)
+    live.textContent = '接入被前置条件阻止：没有写入。'
+    host.append(
+      callout('danger', h('strong', { text: '接入被阻止（未写入）：' }), ' 先满足下列前置条件再重试；ModelGate 不会跳过检查。'),
+      rows.length ? h('div', { class: 'list' }, rows) : null,
+      h('div', { class: 'toolbar' },
+        h('button', { class: 'btn btn-primary', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) })))
+    return
+  }
+  if (outcome.kind === 'applied') {
+    const r = receiptSummary(outcome.receipt)
+    clear(host)
+    live.textContent = '聚合模式已启用并通过验证。'
+    host.append(
+      callout('good',
+        h('strong', { text: '聚合模式已启用并通过验证。' }),
+        r.catalogCount == null ? '' : ' 目录 ' + r.catalogCount + ' 个模型（含目标模型）。',
+        r.gatewayStatus == null ? '' : ' 网关 HTTP ' + r.gatewayStatus + '。'),
+      r.reloadApplied
+        ? callout('info', h('strong', { text: '网关进程已重载新配置。' }), ' 接下来需要重启 Codex Desktop 才能加载新配置。')
+        : callout('warn',
+          h('strong', { text: '配置已写入磁盘，但网关进程没有重载：' }),
+          ' 需要重启网关后才会按新配置工作（原因：' + (r.reloadReason || '未知') + '）。本页不会谎称已生效。'),
+      h('div', { class: 'toolbar' },
+        h('button', { class: 'btn btn-primary', type: 'button', text: '下一步：重新打开 Codex', onclick: () => goToStep('restart') })))
+    toast('聚合模式已启用并通过验证', 'success')
+    refreshAll(ctx)
+    return
+  }
+  clear(host)
+  live.textContent = '启用失败：' + (outcome.code || '未知错误')
+  host.append(
+    callout('danger',
+      h('strong', { text: '启用失败（未写入或已回滚）：' }),
+      ' ' + (outcome.message || outcome.code || '未知错误'),
+      h('p', { class: 'hint', text: '失败不会被显示成成功；可重新预览后重试。' })),
+    h('div', { class: 'toolbar' },
+      h('button', { class: 'btn btn-primary', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) })))
+}
+
+function enablePanel (ctx) {
+  const snapshot = aggregationOf(ctx)
+  const health = snapshot && snapshot.health ? snapshot.health : null
+  const mode = health && health.mode ? String(health.mode) : 'unknown'
+  const host = h('div')
+  const live = h('p', { class: 'hint', role: 'status', 'aria-live': 'polite' })
+  const previewBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '预览变更（不写入）' })
+  if (!snapshot) {
+    host.append(callout('info', h('strong', { text: '正在读取真实聚合状态。' }), ' 快照到达前不会推测是否已启用，也不会写入任何配置。'))
+  } else if (mode === 'aggregated') {
+    host.append(
+      callout('good', h('strong', { text: '聚合模式已启用。' }), ' 如需撤销 ModelGate 写入的字节，请使用「退出并恢复」。'),
+      h('div', { class: 'toolbar' },
+        h('button', { class: 'btn btn-sm', type: 'button', text: '查看退出并恢复', onclick: () => goToStep('revert') })))
+  } else if (mode === 'official') {
+    host.append(callout('info', h('strong', { text: '当前是原版官方模式（未聚合）。' }), ' 点击预览可以看到将写入的字段；预览本身不写任何字节。'))
+  } else {
+    host.append(callout('warn', h('strong', { text: '聚合模式未知。' }), ' 服务端没有返回可识别模式；预览会重新检测，不会盲目写入。'))
+  }
+
+  previewBtn.addEventListener('click', async () => {
+    previewBtn.disabled = true
+    previewBtn.textContent = '正在生成预览…'
+    live.textContent = '正在生成预览（不写入）…'
+    try {
+      const res = await viewPost(ctx)(AGGREGATION_ENDPOINTS.activate, {})
+      showActivationOutcome(host, classifyActivation(res), ctx, live)
+    } catch (error) {
+      showActivationOutcome(host, classifyActivation(error), ctx, live)
+    } finally {
+      previewBtn.disabled = false
+      previewBtn.textContent = '预览变更（不写入）'
+    }
+  })
+
+  const actions = h('div', { class: 'toolbar' }, snapshot && mode !== 'aggregated' ? previewBtn : null)
+  return card('启用聚合', '进入聚合模式会改写 Codex 接入配置；先预览、再一次确认，失败自动回滚。',
+    h('div', null,
+      callout('info',
+        h('strong', { text: '一次性确认：' }),
+        ' 只改 ModelGate 拥有的顶层字段与 [features] 白名单键；不编辑 TOML、不碰 auth.json，也不重启你的 Codex。'),
+      actions,
+      live,
+      host))
+}
+
+// —— 步骤 4：重启 ——
+function restartPanel (ctx) {
+  const snapshot = aggregationOf(ctx)
+  const health = snapshot && snapshot.health ? snapshot.health : null
+  const mode = health && health.mode ? String(health.mode) : 'unknown'
+  const restart = health
+    ? (health.restart || (health.activation && health.activation.restart) || (health.detect && health.detect.restart) || null)
+    : null
+  const body = h('div')
+  if (!health) {
+    body.append(
+      callout('info',
+        h('strong', { text: '正在读取 Codex 探测结果。' }),
+        ' 未取得 health.detect.restart 前，不判断是否已重启，也不说"已生效"。'),
+      h('div', { class: 'toolbar' },
+        h('button', { class: 'btn btn-primary', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) })))
+    return card('重新打开 Codex', '重启结论只来自真实进程探测。', body)
+  }
+  if (mode !== 'aggregated' && mode !== 'official') {
+    body.append(
+      callout('warn',
+        h('strong', { text: '无法确认是否需要重启：' }),
+        ' 服务端没有返回可识别的聚合模式；不把它当成"无需重启"。'),
+      h('div', { class: 'toolbar' },
+        h('button', { class: 'btn btn-primary', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) })))
+    return card('重新打开 Codex', '重启结论只来自真实进程探测。', body)
+  }
+  const notice = restartNotice(restart, mode)
+  const needs = notice.needed === true
+  body.append(
+    callout(needs ? 'warn' : 'good', h('strong', { text: notice.label + '：' }), ' ' + notice.detail),
+    h('ol', { style: { margin: '6px 0 0 18px', padding: '0' } },
+      h('li', { text: '完全退出 Codex Desktop（不是只关窗口）。' }),
+      h('li', { text: '重新打开 Codex Desktop，进入一个新会话。' }),
+      h('li', { text: '在模型选择器里核对官方 GPT 与 ' + GO_TARGET_LABEL + ' 都能被选中。' })),
+    h('p', { class: 'hint', text: '检测到客户端在写入后启动过时，本页提示会自动消失；如果一直提示，说明检测到的仍是旧进程。' }),
+    h('p', { class: 'hint', text: 'ModelGate 不会也不能替你启动或重启 Codex Desktop（没有受支持的启动能力，也不提供假按钮）。' }),
+    h('div', { class: 'toolbar' },
+      h('button', { class: 'btn btn-sm', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) }),
+      h('button', { class: 'btn btn-sm', type: 'button', text: '下一步：在 Codex 中使用', onclick: () => goToStep('use') })))
+  return card('重新打开 Codex', '配置写入后，运行中的 Codex 仍在使用旧配置。',
+    body,
+    { foot: needs ? '未检测到重启：不会显示"已生效"' : '已检测到重启：新配置已加载' })
+}
+
+// —— 步骤 5：使用 ——
+function usePanel (ctx, product) {
+  const codex = product && product.codex ? product.codex : null
+  return card('在 Codex 中使用', 'ModelGate 已经完成配置；接下来由你在原版 Codex Desktop 里操作。',
+    h('div', null,
+      callout('info',
+        h('strong', { text: '请在原版 Codex Desktop 的模型选择器里选择：' }),
+        ' 官方 GPT 模型与 ' + GO_TARGET_LABEL + '。两者都在同一个模型选择器里，不需要改配置文件。'),
+      h('ol', { style: { margin: '6px 0 0 18px', padding: '0' } },
+        h('li', { text: '完全退出并重新打开 Codex Desktop（如果上一步还没做）。' }),
+        h('li', { text: '新建会话，打开模型选择器，确认官方 GPT 与 ' + GO_TARGET_LABEL + ' 都存在。' }),
+        h('li', { text: '各发一条最小消息；需要核对请求归因时到「查看高级诊断」。' })),
+      codex && codex.found
+        ? callout('info', h('strong', { text: 'Codex 检测结果：' }), ' ' + (codex.label || '已检测到') + '。' + (codex.detail || ''))
+        : callout('warn', h('strong', { text: '未检测到 Codex Desktop。' }), ' 请先安装/打开原版 Codex Desktop；本页不会假装已启动。'),
+      h('p', { class: 'hint', text: '本页不声称已自动启动 Codex，也没有"打开 Codex"按钮。' })))
+}
+
+// —— 步骤 6：退出并恢复 ——
+function revertPanel (ctx) {
+  const snapshot = aggregationOf(ctx)
+  const health = snapshot && snapshot.health ? snapshot.health : null
+  const mode = health && health.mode ? String(health.mode) : 'unknown'
+  const activation = health && health.activation ? health.activation : {}
+  const expectedSha = activation.appliedSha || (health && health.config && health.config.sha256) || ''
+  const host = h('div')
+  const live = h('p', { class: 'hint', role: 'status', 'aria-live': 'polite' })
+
+  if (!snapshot) {
+    host.append(callout('info', h('strong', { text: '正在读取真实聚合状态。' }), ' 快照到达前不会推测是否已启用，也不会写入。'))
+  } else if (mode !== 'aggregated') {
+    host.append(callout('info', h('strong', { text: '当前不是聚合模式。' }), ' 没有需要撤销的 ModelGate 改动；如果确实需要修复，请到高级诊断核对。'))
+  } else {
+    const btn = h('button', { class: 'btn btn-danger', type: 'button', text: '退出并恢复' })
+    btn.addEventListener('click', async () => {
+      const ok = await confirmDialog({
+        title: '退出聚合模式并恢复配置',
+        message: '将把 ModelGate 改过的字节恢复到接入前的快照。期间如果你手工改过配置，会返回 409 + 三方差异，不会覆盖。',
+        confirmLabel: '退出并恢复',
+        danger: true,
+      })
+      if (!ok) return
+      btn.disabled = true
+      btn.textContent = '正在恢复…'
+      live.textContent = '正在退出聚合并验证恢复…'
+      try {
+        const res = await viewPost(ctx)(AGGREGATION_ENDPOINTS.deactivate, buildDeactivateRequest(expectedSha))
+        const r = receiptSummary(res)
+        clear(host)
+        live.textContent = '已退出聚合模式。'
+        host.append(
+          callout('good',
+            h('strong', { text: '已退出聚合模式。' }),
+            r.preservedUserEdits
+              ? ' 只撤销了 ModelGate 自有键；接入后你新增/修改的其它配置已保留。'
+              : ' 配置已恢复到接入前。'),
+          r.reloadApplied
+            ? callout('info', h('strong', { text: '网关进程已重载。' }), ' 如需完全回到官方模式，请完全退出并重新打开 Codex Desktop。')
+            : callout('warn', h('strong', { text: '配置已恢复，但网关进程没有重载：' }), ' 需要重启网关后才会按恢复后的配置工作。'),
+          h('div', { class: 'toolbar' },
+            h('button', { class: 'btn btn-sm', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) })))
+        toast('已退出聚合模式', 'success')
+        refreshAll(ctx)
+      } catch (error) {
+        const out = classifyActivation(error)
+        if (out.kind === 'conflict') {
+          clear(host)
+          live.textContent = '退出被拒绝：配置已被修改，未覆盖。'
+          renderConflict(host, out, ctx)
+          return
+        }
+        clear(host)
+        live.textContent = '退出失败：' + (out.code || '未知错误')
+        host.append(
+          callout('danger',
+            h('strong', { text: '退出失败（未覆盖任何内容）：' }),
+            ' ' + (out.message || out.code || '未知错误')),
+          h('div', { class: 'toolbar' },
+            h('button', { class: 'btn btn-primary', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) })))
+      } finally {
+        btn.disabled = false
+        btn.textContent = '退出并恢复'
+      }
+    })
+    host.append(
+      callout('info',
+        h('strong', { text: '无损退出：' }),
+        ' 只回滚 ModelGate 改过的字节，不碰 auth.json、不删你的登录、不改其它配置。'),
+      h('div', { class: 'toolbar' }, btn))
+  }
+  return card('退出并恢复', '把 Codex 配置恢复到接入前；冲突时只展示三方差异，不强制覆盖。', h('div', null, host, live))
+}
+
+// —— 分支步骤：冲突 / 未检测到 Codex ——
+function conflictPanel (ctx) {
+  return card('配置冲突', 'ModelGate 不会覆盖被其他程序修改的配置。',
+    h('div', null,
+      callout('warn',
+        h('strong', { text: '先手工合并，再重新检测。' }),
+        ' 启用/退出时如果返回 409，会展示三方差异（基准 / 我们写入 / 当前），并保留你的全部改动。'),
+      h('p', { class: 'hint', text: '这里没有"强制覆盖"按钮：覆盖会丢掉你在 Codex 配置里的改动。' }),
+      h('div', { class: 'toolbar' },
+        h('button', { class: 'btn btn-primary', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) }),
+        h('button', { class: 'btn', type: 'button', text: '查看高级诊断', onclick: () => { try { location.hash = '#/aggregation' } catch {} } }))))
+}
+
+function codexGuidePanel (product) {
+  return card('找到 Codex Desktop', '需要先有原版 Codex Desktop 才能使用聚合模式。',
+    h('div', null,
+      callout('info',
+        h('strong', { text: 'ModelGate 不会安装或启动 Codex。' }),
+        ' 请先在本机安装并打开原版 Codex Desktop，登录 ChatGPT 套餐后再回到本页重新检测。'),
+      product && product.codex && product.codex.detail
+        ? callout('warn', h('strong', { text: '当前探测结果：' }), ' ' + product.codex.detail)
+        : callout('info', h('strong', { text: '尚未取得探测结果。' }), ' 状态层没有返回 Codex 探测；不推断已安装或未安装。'),
+      h('div', { class: 'toolbar' },
+        h('button', { class: 'btn btn-primary', type: 'button', text: '重新检测', onclick: () => { goToStep('key') } }))))
+}
+
+// —— 高级详情（技术字段只在展开后出现）——
+function advancedDetails (ctx, product) {
+  const snapshot = aggregationOf(ctx)
+  const health = snapshot && snapshot.health ? snapshot.health : null
+  const aggView = product && product.aggregation ? product.aggregation : {}
+  const activation = health && health.activation ? health.activation : {}
+  const backup = health && health.backup ? health.backup : {}
+  const publicId = productStatus.GO_PUBLIC_MODEL_ID || ('mg-opencodego-' + GO_TARGET_UPSTREAM.replace(/[^a-z0-9]+/g, '-'))
+  const rows = [
+    ['供应商 ID', GO_PROVIDER],
+    ['preset', PROVIDER_PRESET_ID],
+    ['目标公开模型 ID', publicId],
+    ['目标上游模型', GO_TARGET_UPSTREAM],
+    ['配置版本', String(currentConfigVersion() == null ? '未知' : currentConfigVersion())],
+    ['聚合模式', String((health && health.mode) || aggView.mode || '未知')],
+    ['接入 SHA', activation.appliedSha ? String(activation.appliedSha).slice(0, 12) : '无记录'],
+    ['接入前备份', backup.available ? (backup.path || '可用') + (backup.matches === false ? '（与当前不一致，不可回滚）' : '') : '无'],
+    ['最近一次写入', activation.lastApply && activation.lastApply.at ? fmtTime(activation.lastApply.at) + (activation.lastApply.ok ? ' · 成功' : ' · 失败') : '无记录'],
+  ]
+  return h('details', { class: 'advanced' },
+    h('summary', { text: '高级详情（技术字段与诊断）' }),
+    h('p', { class: 'hint', text: '默认页面不展示这些字段；排障或核对证据时再展开。' }),
+    kvList(rows.map(([k, v]) => [k, h('span', { class: 'mono-break', text: String(v) })])),
+    h('p', { class: 'hint', text: '完整诊断长表在' }),
+    h('button', {
+      class: 'btn btn-sm',
+      type: 'button',
+      text: '打开聚合详情（高级）',
+      onclick: () => { try { location.hash = '#/aggregation' } catch {} },
+    }))
+}
+
+// —— 渲染入口 ——
+export function render (root, ctx = {}) {
+  const product = productOf(ctx)
+  const step = normalizeStep(ctx.step || (typeof location !== 'undefined' && location.hash ? stepFromHash(location.hash) : 'key'))
+  root.append(pageHead('模型与账号', '连接 OpenCode Go、启用聚合、必要时重新打开 Codex；日常只需要填一个 Key。', {
+    eyebrow: 'CONNECTIONS',
+    actions: [
+      h('button', { class: 'btn', type: 'button', text: '查看高级诊断', onclick: () => { try { location.hash = '#/aggregation' } catch {} } }),
+    ],
+  }))
+  root.append(overallCard(product))
+  root.append(stepNav(step, ctx))
+
+  const panel = h('div')
+  switch (step) {
+    case 'model': panel.append(modelPanel(ctx)); break
+    case 'enable': panel.append(enablePanel(ctx)); break
+    case 'restart': panel.append(restartPanel(ctx)); break
+    case 'use': panel.append(usePanel(ctx, product)); break
+    case 'revert': panel.append(revertPanel(ctx)); break
+    case 'conflict': panel.append(conflictPanel(ctx)); break
+    case 'codex': panel.append(codexGuidePanel(product)); break
+    case 'key':
+    default: panel.append(keyPanel(ctx, product)); break
+  }
+  root.append(panel)
+  root.append(advancedDetails(ctx, product))
+  root.append(h('p', { class: 'page-note', text: '本页只使用真实状态快照与同源管理 API；428/409/422 一律如实展示，不伪造成功。契约 ' + CONNECTIONS_VIEW_CONTRACT + '。' }))
 }
