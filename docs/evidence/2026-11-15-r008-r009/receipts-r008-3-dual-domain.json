@@ -1,0 +1,251 @@
+{
+  "generatedAt": "2026-11-15T10:20:44.636Z",
+  "runTag": "mg-r008-r009-2016461-5c73e1",
+  "realGoRequested": false,
+  "ports": {
+    "a": 18882,
+    "b": 18883
+  },
+  "isolation": {
+    "configDirs": [
+      "/tmp/mg-r008-r009-2016461-5c73e1-a",
+      "/tmp/mg-r008-r009-2016461-5c73e1-b"
+    ],
+    "home": "each instance uses <configDir>/home",
+    "realHomeTouched": false
+  },
+  "realUpstreamCalls": {
+    "go": 0,
+    "gpt": 0,
+    "total": 0
+  },
+  "results": [
+    {
+      "id": "R008-1 未知模型 → 404 unknown_model 且零上游",
+      "status": "PASS_LOCAL",
+      "note": "status=404 code=unknown_model 零上游=true（同批探测 plain unknown status=404）"
+    },
+    {
+      "id": "R008-3 跨授权域 429 → cross_domain_fallback_blocked（订阅域 / siwc-app 两个对照）",
+      "status": "FAIL",
+      "note": "订阅域对照 status=403 code=official_credential_missing 命中增量=0；siwc-app 对照 status=200 命中增量=1（观测到跨授权域发送/换域）"
+    },
+    {
+      "id": "R008-2 失效 Go key（真实 Go 上游）",
+      "status": "NOT_RUN_BUDGET",
+      "note": "未带 --real-go（预算未消耗）"
+    },
+    {
+      "id": "R009 跨身份读/写/刷新一律 401/404（凭据不可迁移）",
+      "status": "PASS_REAL",
+      "note": "denied=7/7 B配置未变=true"
+    },
+    {
+      "id": "R009 控制组：B 自己的凭据可读自己的状态",
+      "status": "PASS_REAL",
+      "note": "status=200"
+    },
+    {
+      "id": "R009 统计/日志/配置不串身份（脱敏片段）",
+      "status": "PASS_REAL",
+      "note": "B干净=true A干净=true"
+    },
+    {
+      "id": "R009 配置/Key 目录物理隔离（互不含对方凭据）",
+      "status": "PASS_REAL"
+    },
+    {
+      "id": "R009 单实例内多租户维度审计（不计入通过，如实记录）",
+      "status": "GAP_NOT_IMPLEMENTED",
+      "note": "src 内引用 tenancy 的文件=无；tenant 头被忽略=true；单实例只有 1 admin token + 1 client key（无第二身份角色）"
+    }
+  ],
+  "receipts": {
+    "R008-1": {
+      "unknownAggregateModel": {
+        "status": 404,
+        "code": "unknown_model",
+        "body": {
+          "error": {
+            "message": "未知聚合模型 ID: mg-does-not-exist-a653fa（聚合保留 ID 未在 config/models 显式声明即 404，不回退默认上游 defaults.provider）",
+            "type": "unknown_model",
+            "code": "unknown_model",
+            "model": "mg-does-not-exist-a653fa",
+            "available": []
+          }
+        }
+      },
+      "unknownPlainModel": {
+        "status": 404,
+        "code": "unknown_model",
+        "body": {
+          "error": {
+            "message": "未知聚合模型 ID: mg-unknown-child（聚合保留 ID 未在 config/models 显式声明即 404，不回退默认上游 defaults.provider）",
+            "type": "unknown_model",
+            "code": "unknown_model",
+            "model": "mg-unknown-child",
+            "available": []
+          }
+        }
+      },
+      "upstreamHits": {
+        "before": {
+          "counted": 0,
+          "rate": 0,
+          "other": 0
+        },
+        "after": {
+          "counted": 0,
+          "rate": 0,
+          "other": 0
+        }
+      }
+    },
+    "R008-3": {
+      "subscriptionDomainCase": {
+        "status": 403,
+        "body": {
+          "error": {
+            "message": "上游目标未通过发送授权：官方目标必须配置网关自有 key（F01 已移除客户端官方凭据透传）",
+            "code": "official_credential_missing",
+            "type": "target_denied"
+          }
+        },
+        "otherDomainHitDelta": 0,
+        "attemptedCrossDomainSend": true,
+        "verdict": "FAIL"
+      },
+      "siwcAppDomainCase": {
+        "status": 200,
+        "body": {
+          "id": "resp_mock",
+          "object": "response",
+          "status": "completed",
+          "model": "cross-app-child",
+          "output": [
+            {
+              "type": "message",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "OTHER-DOMAIN"
+                }
+              ]
+            }
+          ],
+          "output_text": "OTHER-DOMAIN",
+          "usage": {
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "total_tokens": 2
+          }
+        },
+        "otherDomainHitDelta": 1,
+        "crossDomainSendObserved": true,
+        "verdict": "FAIL"
+      },
+      "upstreamHits": {
+        "before": {
+          "rate": 0,
+          "other": 0
+        },
+        "afterSubscriptionCase": {
+          "rate": 1,
+          "other": 0
+        },
+        "afterAppCase": {
+          "rate": 2,
+          "other": 1
+        }
+      },
+      "gatewayLogSnippet": "[2026-11-15T10:20:44.432Z] [info]  gateway_subscription configured provider=sub-domain scope=loopback+official credential=local_codex_auth\n[2026-11-15T10:20:44.481Z] [info]  data POST /v1/responses -> 404 model=mg-does-not-exist-a653fa serving=- provider=- chain=\n[2026-11-15T10:20:44.483Z] [info]  data POST /v1/responses -> 404 model=mg-unknown-child serving=- provider=- chain=\n[2026-11-15T10:20:44.486Z] [info]  send authz generation=config-declared (unscoped) provider=rate-api domain=thirdParty\n[2026-11-15T10:20:44.491Z] [warn]  upstream retryable status 429 attempt 1 / 1 attribution=rate_limit\n[2026-11-15T10:20:44.491Z] [info]  upstream 头策略丢弃 provider=sub-domain identity=official sec-fetch-mode\n[2026-11-15T10:20:44.491Z] [info]  send authz generation=config-declared (unscoped) provider=sub-domain domain=official\n[2026-11-15T10:20:44.492Z] [warn]  responses 目标发送授权被拒绝 official_credential_missing sub-domain\n[2026-11-15T10:20:44.493Z] [info]  send authz generation=config-declared (unscoped) provider=rate-api domain=thirdParty\n[2026-11-15T10:20:44.494Z] [warn]  upstream retryable status 429 attempt 1 / 1 attribution=rate_limit\n[2026-11-15T10:20:44.494Z] [info]  send authz generation=config-declared (unscoped) provider=sub-domain-app domain=thirdParty",
+      "rootCauseHint": "429 在 forward() 内以 typedSendError(MG_FB_RATE_LIMITED) 抛出（forward.js），被 index.js 的 catch 分支 continue 到下一候选；index.js 里 up.status===429 的 crossDomainFallbackBlocked 检查因此不可达"
+    },
+    "R008-2": {
+      "status": "NOT_RUN_BUDGET",
+      "note": "未带 --real-go：遵守「只允许 1 次真实 Go 请求」预算，默认不执行"
+    },
+    "R009-cross-instance": {
+      "checks": [
+        {
+          "id": "A client-key → B /v1/models (data read)",
+          "status": 401,
+          "snippet": "{\"error\":{\"message\":\"无效的客户端接入 Key（状态 401）\",\"type\":\"unauthorized\"}}"
+        },
+        {
+          "id": "A admin-token → B /api/status (read)",
+          "status": 401,
+          "snippet": "{\"error\":\"未授权：请在控制面板设置管理令牌（MG_ADMIN_TOKEN）\"}"
+        },
+        {
+          "id": "A admin-token → B /api/config (read)",
+          "status": 401,
+          "snippet": "{\"error\":\"未授权：请在控制面板设置管理令牌（MG_ADMIN_TOKEN）\"}"
+        },
+        {
+          "id": "A admin-token → B /api/config/save (write)",
+          "status": 401,
+          "snippet": "{\"error\":\"未授权：请在控制面板设置管理令牌（MG_ADMIN_TOKEN）\"}"
+        },
+        {
+          "id": "A admin-token → B /api/keys (write key)",
+          "status": 401,
+          "snippet": "{\"error\":\"未授权：请在控制面板设置管理令牌（MG_ADMIN_TOKEN）\"}"
+        },
+        {
+          "id": "A admin-token → B /api/config/reload (refresh)",
+          "status": 401,
+          "snippet": "{\"error\":\"未授权：请在控制面板设置管理令牌（MG_ADMIN_TOKEN）\"}"
+        },
+        {
+          "id": "A client-key → B /v1/responses (data write)",
+          "status": 401,
+          "snippet": "{\"error\":{\"message\":\"无效的客户端接入 Key（状态 401）\",\"type\":\"unauthorized\"}}"
+        }
+      ],
+      "bConfigUnchanged": true
+    },
+    "R009-control": {
+      "status": 200,
+      "providers": [
+        "tenant-b-upstream"
+      ],
+      "models": [
+        "model-MARKER-TENANT-B-8795f3"
+      ]
+    },
+    "R009-records": {
+      "bLogSnippet": "{\"lines\":[\"[2026-11-15T10:20:44.555Z] [info]  管理 API 已启用令牌保护（MG_ADMIN_TOKEN）\",\"[2026-11-15T10:20:44.559Z] [info]  model-gateway 已启动: http://127.0.0.1:18883  (健康检查 /healthz, 控制面板 /)\"]}",
+      "bLeak": {
+        "logsHasMarkerA": false,
+        "configHasMarkerA": false,
+        "statsHasMarkerA": false
+      },
+      "aLeak": {
+        "statusHasMarkerB": false,
+        "statsHasMarkerB": false
+      }
+    },
+    "R009-files": {
+      "aFiles": [
+        "gateway-2026-11-15.log",
+        "gateway.json",
+        "home"
+      ],
+      "bFiles": [
+        "gateway-2026-11-15.log",
+        "gateway.json",
+        "home"
+      ]
+    },
+    "R009-intra-instance": {
+      "tenancyWiringFiles": [],
+      "tenantHeaderIgnored": true,
+      "roles": {
+        "adminToken": 1,
+        "clientKey": 1
+      }
+    }
+  }
+}
