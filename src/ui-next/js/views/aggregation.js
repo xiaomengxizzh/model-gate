@@ -2,7 +2,7 @@
 //
 // UX-03（A2）整理：默认页面只保留结论、主操作与重启提示；SHA/备份/版本/原生压缩/
 // 供应商/模型/诊断长表统一收进「高级详情」折叠区（深链 #/aggregation 不变），
-// 并去掉 V1 的 Console 全量/自动发现全部模型话术——Go 默认 preset=opencode-go + DeepSeek V4.1 Flash。
+// 并去掉 V1 的「Console 目录一次全量」旧话术——Go 默认 preset=opencode-go + DeepSeek V4.1 Flash。
 //
 // 约束（与 views/codex.js 一致）：
 //  * 纯前端、零依赖、不 import 后端模块；不读本地文件、不写 cookie/localStorage。
