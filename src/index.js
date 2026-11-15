@@ -25,7 +25,7 @@ import { todayKey } from './shared.js'
 import { readNativeUsage, nativeUsageConfig } from './native-usage.js'
 import { classifyTarget, isLoopbackHost } from './codex/identity.js'
 import { restoreResponseJson, detectOpaqueV2Task, detectEncryptedToolSchema } from './codex/interop.js'
-import { readSubscriptionCredential, isGatewaySubscriptionTarget, SubscriptionCredentialError } from './codex/local-subscription.js'
+import { readSubscriptionCredential, isGatewaySubscriptionTarget, probeLocalCodexAuth, SubscriptionCredentialError } from './codex/local-subscription.js'
 import { isTargetAuthzError, resolveUpstream, assertResolvedUpstream, assertNoSubscriptionCredentialToThirdParty, authFailureReceipt, authFailureResponse } from './codex/target-authz.js'
 import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
 import { createObservability, hashId } from './observability/events.js'
@@ -482,6 +482,25 @@ function buildStatus(state) {
     nativeUsage: (() => { const n = nativeUsageConfig(state.cfg); return { enabled: n.enabled, dirLabel: n.label } })(),
     providers,
     models,
+    // UX-00：只读的本机 Codex 登录探测（不返回 token、不刷新、不发请求）。
+    // 首页据此区分"检测到 ChatGPT 登录 / 待登录 / 不可用"；这只是 detected 级证据，
+    // 不得被 UI 升级成"官方推理已实测"（真实推理证据只能来自 lastServing）。
+    official: (() => {
+      try {
+        const probe = probeLocalCodexAuth()
+        return {
+          credential: probe && probe.available === true ? 'detected' : 'missing',
+          reason: (probe && probe.reason) || null,
+          authMode: (probe && probe.authMode) || null,
+          level: 'detected',
+          source: 'local_codex_auth_probe',
+          checkedAt: new Date(now).toISOString(),
+        }
+      } catch (error) {
+        // 探测本身失败时如实报 unknown，绝不假定"已登录"。
+        return { credential: 'unknown', reason: (error && error.reason) || 'probe_failed', authMode: null, level: 'unknown', source: 'local_codex_auth_probe', checkedAt: new Date(now).toISOString() }
+      }
+    })(),
     // defaults 原样返回（仅 clientKey 掩码）：否则自定义字段（affinityTtlMs / failbackProbe 等）
     // 会在任意一次配置保存后被静默丢弃（与 circuit 同源的问题）
     defaults: Object.assign({ directory: [], preheat: [], retry: {}, timeout: {}, concurrency: {}, extraHeaders: {}, proxy: '', proxyMode: 'auto' }, defaults, { clientKey: currentClientKey(state) ? '********' : '' }),
