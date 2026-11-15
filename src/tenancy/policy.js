@@ -11,6 +11,7 @@
 //   · 日志脱敏：日志字段只有 scope/provider/域，正文与历史默认不进入调用上下文。
 
 import { TenancyError, sanitizeLogEntry } from './scope.js'
+import { assertCredentialOriginDomain } from '../codex/target-authz.js'
 
 export const TENANCY_AUTH_DOMAINS = Object.freeze(['codex-subscription', 'siwc-app', 'api-key'])
 
@@ -80,6 +81,18 @@ export function enforceKeySeparationAndNoSecretsInLogs(scope, provider, options 
   }
   if (authDomain === 'api-key' && options.subscriptionCredentialPresent === true) {
     throw deny('credential_mixing_api_key_subscription', 'api-key 域同时存在订阅凭据：凭据会串域', { status: 403 })
+  }
+  // A4（V2-03）：凭据**来源域**（订阅 / SIWC / api-key 租约）必须与本次授权域一致。
+  // 判定复用 codex/target-authz 的单一真源，只把错误类型换成租户层的 TenancyError，保持 code 稳定。
+  if (idOf(options.credentialOrigin)) {
+    try { assertCredentialOriginDomain(options.credentialOrigin, authDomain) } catch (error) {
+      // 保留授权层给的 status（未知来源域=400，跨域=403），只换成租户层的错误类型。
+      throw deny(
+        error && error.code ? error.code : 'credential_domain_mismatch',
+        String((error && error.message) || '凭据来源域与授权域不一致'),
+        { status: error && Number.isFinite(error.status) ? error.status : 403 },
+      )
+    }
   }
   return Object.freeze(sanitizeLogEntry({
     scopeId: scope.scopeId,
