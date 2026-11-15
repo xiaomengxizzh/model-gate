@@ -1,0 +1,12 @@
+PASS isolation_paths — /tmp/mg-freeze-a3/blank-state | /tmp/mg-freeze-a3/blank-state/codex
+PASS paths_separated — configDir 与 codexHome 不同（允许隔离内嵌套）
+PASS gateway_config — server.port=18881 bind=127.0.0.1
+PASS catalog_fixture — generation=1 current=1 slugs=gpt-6-luna,mg-opencodego-deepseek-v4-1-flash
+PASS codex_config_mode — config.toml 不存在（空白用户/已撤销）→ official
+PASS expect_mode — expected=official actual=official
+PASS desktop_state_consistent — state.mode=official fileMode=official
+SKIP backup_matches_before — 无接入前备份（空白接入或已撤销）
+SKIP gateway_health — 未提供 --port
+---
+OK: 无 FAIL（SKIP 项需人工确认）
+exit=0

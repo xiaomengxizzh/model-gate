@@ -160,3 +160,26 @@ MG_DESKTOP_EXECUTABLE=/tmp/mg-chatgpt-cdp-wrapper.sh node bin/mg-desktop.mjs lau
 - 日常完整性：退出后 `~/.codex/config.toml` / `auth.json` sha256 与 mtime 不变；隔离端口/进程全部停止。
 
 **结论**：产品默认路径（无 provider 改名 workaround）下，原版 Desktop GUI 的官方 `gpt-6-luna` 请求 **PASS_REAL**。历史 `3116459` 的 FAIL 与 `repro-403-response.json` 保留作溯源。
+
+## 9. 冻结树复核（`1a527c6e0d3217ee008ed7da950e4f297acda604`，2026-11-15）
+
+> 冻结后仅文档改动；本轮在 `.agents/worktrees/v2-a3-freeze` 用隔离 `MG_DESKTOP_STATE=/tmp/mg-freeze-a3/gui-state`、端口 `18883`、`MG_DESKTOP_SUBSCRIPTION_MODE=auto` 重跑。历史 `3116459` FAIL 与 `fb986ee` 修复复测记录保留不删改。真实调用共 **2 次**（官方 1 + Go 1），仅 `gpt-6-luna` / `deepseek-v4.1-flash`。
+
+- `configure` 输出：`subscriptionMode:"local"`, `subscriptionReason:"auto_local_login"`；`providers.chatgpt-plan = https://chatgpt.com + gatewaySubscription.enabled=true`（`2026-11-15-freeze-a3/gui-configure.json`）。
+- 窗口：`0x3400004 "ChatGPT" ("chatgpt (/tmp/mg-freeze-a3/gui-state/desktop)" ...)`；`/healthz → ok`。
+- 原版 GUI 选 `6 Luna` 发 `Reply with exactly FREEZE_GUI_LUNA_OK` → 回复 **`FREEZE_GUI_LUNA_OK`**（截图 `40-gui-luna-reply.png`）。
+- 原版 GUI 选 `deepseek-v4.1-flash (opencodego)` 发 `Reply with exactly FREEZE_GUI_GO_OK` → 回复 **`FREEZE_GUI_GO_OK`**（7 秒，截图 `41-selected-go.png` / `42-gui-go-reply.png`）。
+- 网关日志（`gui-gateway.log`）：
+
+```
+[2026-11-15T10:55:23.279Z] [info]  gateway_subscription provider=chatgpt-plan target=chatgpt.com/backend-api/codex/responses credential=local_codex_auth
+[2026-11-15T10:55:23.280Z] [info]  send authz generation=config-declared (unscoped) provider=chatgpt-plan domain=official
+[2026-11-15T10:56:02.827Z] [info]  upstream 头策略丢弃 provider=opencodego identity=thirdParty ...
+```
+
+- `grep -c chatgpt_plan_target_denied` = **0**；`gui-stats.json`：`requests=3`，`byModel.gpt-6-luna`（订阅入口本地不计 token）、`byModel.mg-opencodego-deepseek-v4-1-flash` = 34,811 tokens（in 34,797 / out 14）。
+- 模型回执：客户端 rollout 节选 `gui-rollout-models.txt` 同时含 `"model":"gpt-6-luna"` 与 `"model":"mg-opencodego-deepseek-v4-1-flash"`，任务标记 `FREEZE_GUI_LUNA_OK` / `FREEZE_GUI_GO_OK`。未额外发起请求去抓 SSE 原文（调用预算 2 次），SSE 模型口径以客户端 rollout + 订阅目标日志为准。
+- 日常完整性：`~/.codex/config.toml` / `auth.json` sha256、日常状态目录 mtime 未变；隔离进程/端口全部停止。
+
+**结论**：冻结树产品默认路径下，原版 Desktop GUI 的官方 `gpt-6-luna` 与 Go `deepseek-v4.1-flash` 均 **PASS_REAL**；无 `chatgpt_plan_target_denied`。
+

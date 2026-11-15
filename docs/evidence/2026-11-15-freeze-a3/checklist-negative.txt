@@ -1,0 +1,10 @@
+FAIL isolation_paths — 指向日常/仓库目录：/home/xiaomengxizi/.codex
+PASS paths_separated — configDir 与 codexHome 不同（允许隔离内嵌套）
+FAIL gateway_config — gateway.json 不可读：ENOENT: no such file or directory, open '/home/xiaomengxizi/.local/state/modelgate-desktop/gateway.json'
+FAIL catalog_fixture — 目录状态不可读：ENOENT: no such file or directory, open '/home/xiaomengxizi/.local/state/modelgate-desktop/aggregation/catalog/local/state.json'
+PASS codex_config_mode — mode=official observedOwned=model
+PASS desktop_state_consistent — 状态文件不可读：ENOENT: no such file or directory, open '/home/xiaomengxizi/.codex/.modelgate-desktop-state.json'
+SKIP gateway_health — 未提供 --port
+---
+FAIL: 3 项
+negative_exit=1

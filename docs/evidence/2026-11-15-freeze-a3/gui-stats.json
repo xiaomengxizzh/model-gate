@@ -1,0 +1,128 @@
+{
+  "daily": {
+    "mg-opencodego-deepseek-v4-1-flash": {
+      "2026-11-15": {
+        "tokens": 34811,
+        "hit": 0,
+        "miss": 0,
+        "inTokens": 34797,
+        "outTokens": 14
+      }
+    }
+  },
+  "hourly": {
+    "mg-opencodego-deepseek-v4-1-flash": {
+      "2026-11-15:18": {
+        "tokens": 34811,
+        "hit": 0,
+        "miss": 0,
+        "inTokens": 34797,
+        "outTokens": 14
+      }
+    }
+  },
+  "byModel": {
+    "gpt-6-luna": {
+      "tokens": 0,
+      "inTokens": 0,
+      "outTokens": 0
+    },
+    "mg-opencodego-deepseek-v4-1-flash": {
+      "tokens": 34811,
+      "inTokens": 34797,
+      "outTokens": 14
+    }
+  },
+  "dialogue": {},
+  "global": {
+    "requests": 3,
+    "errors": 0,
+    "retries": 0,
+    "interrupts": 0,
+    "tokens": 34811,
+    "latencySum": 0,
+    "confirmed": 0,
+    "lats": [],
+    "latTrend": [
+      {
+        "t": 1794740091578,
+        "v": 0
+      },
+      {
+        "t": 1794740101582,
+        "v": 0
+      },
+      {
+        "t": 1794740111582,
+        "v": 0
+      },
+      {
+        "t": 1794740121586,
+        "v": 0
+      },
+      {
+        "t": 1794740131587,
+        "v": 0
+      },
+      {
+        "t": 1794740141587,
+        "v": 0
+      },
+      {
+        "t": 1794740151591,
+        "v": 0
+      },
+      {
+        "t": 1794740161597,
+        "v": 0
+      },
+      {
+        "t": 1794740171597,
+        "v": 0
+      },
+      {
+        "t": 1794740181598,
+        "v": 0
+      },
+      {
+        "t": 1794740191602,
+        "v": 0
+      },
+      {
+        "t": 1794740201602,
+        "v": 0
+      },
+      {
+        "t": 1794740211606,
+        "v": 0
+      },
+      {
+        "t": 1794740221608,
+        "v": 0
+      }
+    ]
+  },
+  "byProvider": {
+    "chatgpt-plan": {
+      "requests": 2,
+      "errors": 0,
+      "retries": 0,
+      "latencySum": 0,
+      "latencyCount": 0,
+      "tokens": 0,
+      "lats": [],
+      "probe": null
+    },
+    "opencodego": {
+      "requests": 1,
+      "errors": 0,
+      "retries": 0,
+      "latencySum": 0,
+      "latencyCount": 0,
+      "tokens": 34811,
+      "lats": [],
+      "probe": null
+    }
+  },
+  "lastServing": null
+}

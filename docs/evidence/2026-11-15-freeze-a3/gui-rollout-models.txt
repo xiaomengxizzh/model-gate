@@ -1,0 +1,6 @@
+# 客户端 rollout 节选（隔离 CODEX_HOME；仅模型标记与任务标记，无凭据）
+"model":"gpt-6-luna"
+"model":"mg-opencodego-deepseek-v4-1-flash"
+--- 任务标记 ---
+FREEZE_GUI_GO_OK
+FREEZE_GUI_LUNA_OK
