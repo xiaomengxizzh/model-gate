@@ -194,7 +194,8 @@ test('GET /api/codex/policy：所有权 + 目录摘要 + 写能力（普通模�
   assert.equal(out.body.contract, CODEX_API_CONTRACT)
   const p = out.body.policy
   assert.deepEqual(p.ownedTopLevel, ['model_provider', 'openai_base_url', 'model', 'model_catalog_json'])
-  assert.deepEqual(p.reservedOverrideSections, ['model_providers.openai'])
+  // V2-01（A3）：openai 及其 capabilities 子表都被 Codex 视为 reserved built-in provider ID。
+  assert.deepEqual(p.reservedOverrideSections, ['model_providers.openai', 'model_providers.openai.capabilities'])
   assert.ok(p.guarantees.includes('never-writes-auth-json'))
   assert.equal(out.body.write.available, false, '普通产品模式默认不允许 apply/rollback')
   assert.equal(out.body.write.applyEnabled, false)

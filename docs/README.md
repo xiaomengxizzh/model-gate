@@ -7,6 +7,7 @@
 | **启动主代理与最多 5 个子代理** | [V2 Agent Team 启动词](roadmap/2026-11-14-go-deepseek-native-compact-start.md) |
 | **查 V2 当前验收矩阵（Go 单模型 + Codex 原生压缩）** | [V2 验收矩阵](evidence/aggregation-acceptance-matrix-v2.md) |
 | **查 V2 当前门禁结论与逐项状态** | [V2 当前验收状态](evidence/aggregation-v2-status-2026-11-15.md) |
+| 查 V2 本轮代码与本机事实取证 | [V2 集成证据](evidence/aggregation-v2-integration-2026-11-15.md) |
 | 查用户批准的不可降级产品目标、完整真实验收 | [ModelGate 产品契约 MG-R001..MG-R012](product/2026-11-14-owner-product-contract.md) |
 | 直接执行聚合模式开发（伪代码、模块、测试与 PR） | [2026-11-14 聚合完整执行计划](roadmap/2026-11-14-aggregation-pseudocode-plan.md) |
 | 激活主代理与最多 5 名专职子代理 | [Agent Team 直接执行启动提示词](roadmap/2026-11-14-aggregation-agentteam-start.md) |

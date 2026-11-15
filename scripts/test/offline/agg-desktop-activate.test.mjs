@@ -271,9 +271,15 @@ test('Desktop 接入：detect 不执行 Desktop 二进制，版本未知时明�
   assert.equal(before.configPath, f.configPath)
   assert.equal(['known', 'unknown', 'not_found'].includes(before.cli.versionState), true)
   assert.equal(['known', 'unknown', 'not_found'].includes(before.desktop.versionState), true)
-  // V2-01：Desktop 版本只允许来自文件（version/包元数据），不允许通过执行 GUI 得到；
-  // disableExec 关闭的是 --version 执行，不是元数据读取。
-  assert.equal(before.desktop.versionState === 'not_found' ? true : (before.desktop.version === null || before.client.versionEvidence.desktop.executed === false), true, '不执行 Desktop 时版本只能来自文件')
+  // V2-01：Desktop 版本只允许来自**文件**（version 文件 / 包元数据），不允许通过执行 GUI 得到。
+  // 收紧口径：版本非 null 时必须能指出文件来源（source 为实际读到的文件名），且标记未执行。
+  if (before.desktop.version !== null) {
+    const ev = before.client.versionEvidence.desktop
+    assert.equal(ev.executed, false, 'Desktop 版本必须来自文件读取，不得执行 GUI')
+    assert.equal(typeof ev.source, 'string', 'Desktop 版本必须给出文件来源')
+    assert.match(ev.source, /metadata\.json|version|\.json$/i, 'Desktop 版本来源必须是文件（实际路径/文件名），得到: ' + ev.source)
+  }
+  assert.equal(['known', 'unknown', 'not_found'].includes(before.desktop.versionState), true)
   assert.equal(before.cli.version, null, 'disableExec 下不得执行 PATH 里的 CLI')
 
   const p = preview(f.opts)

@@ -2,6 +2,21 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-15 V2 代码交付（P01–P04，离线可证）
+
+### Added
+
+- **Go 单模型作用域**（A2）：`preset:'opencode-go'` + `v2Scope=go-single-model`；目录对 Go 只发布 `deepseek-v4.1-flash`，越界模型进 `outOfScope` 诊断，目标缺失 fail-closed；跨供应商 `fallbacks` 在目录层拒绝（`v2_cross_provider_fallback_forbidden`）；readiness/failurePolicy 提供 typed code。
+- **Desktop 一键聚合**（A3）：原版 Desktop 与捆绑 Codex 版本只从文件探测（不拉起 GUI）；重启判定改为只读 `/proc` 启动时间；退出聚合只撤销自有键并逐字节保留用户后改配置；provider 级 `remote_compaction="unsupported"` 声明（隔离 CODEX_HOME 由 0.167.0-alpha.3.2 serde 解析器实测枚举），内置 `openai` 身份被 Codex 保留为 reserved，故 managed provider 默认关闭。
+- **原生压缩归属声明**（A1）：`codex.nativeCompaction ∈ {codex-owned-local, codex-owned-remote, unsupported}` 与 `history.compaction:"preserve"`；密文压缩项仅在声明支持时原样透传，未声明/不匹配返回 typed 错误，`drop` 仍是显式有损路径；`context_compaction` 显式分类；目录支持 `auto_compact_token_limit` 且拒绝超过上下文窗口的取值。
+
+### Fixed
+
+- **授权域终态归因**（A4 + Lead 接线）：上游 401/402/403/配额型 429 按候选自身 `authDomain` 返回终态信封，不再被兜底链吞成 `502 all_providers_failed`；存在跨授权域候选时 429 返回 `cross_domain_fallback_blocked`，禁止静默换供应商/换套餐；请求身份校验纳入 `model`。
+- **SSE 终态单一化**（A4）：连接级终态门，完成/中断只写一个终态，重复收尾为 no-op。
+- **凭据来源域租约**（A4）：订阅 token 与 Go key 互不串域，跨域出站 typed 拒绝，租约 `toJSON` 脱敏。
+- **反降级审计**（Lead，A5 F1/F2/F4）：保护 V2 计划/门禁/矩阵文件，新增 `gate-weakened`（不依赖 `src/**` 改动也能发现删断言/删文件/净删行）；V2 门禁默认被测树取 `git rev-parse HEAD`，旧树 `PASS_REAL` 在矩阵中显式标注绑定树。
+
 ## [Unreleased] —— 2026-11-15 V2 门禁迁移（P00）
 
 ### Added

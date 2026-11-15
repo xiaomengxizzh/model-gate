@@ -245,3 +245,11 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 - 修改：V2 计划 §2.1 冻结 12 行用例映射（`V2-MATRIX-BEGIN/END`）、`scripts/test/run.mjs`（注册第 101 套件）、`scripts/check-product-contract.mjs`（V2 门禁接线）、`package.json`（`gate:v2` / `matrix:v2` / `check` 增两模块语法检查）、`.github/workflows/check.yml`（V2 门禁步骤）、`docs/README.md`、`CHANGELOG.md`。
 - 已执行：`npm run check`（UI 17/17 语法 OK）、`npm test`（101 套件 / 1009 通过 / 2 skip / 0 失败，74.6s）、`npm run docs:check`（88 文件 364 链接 PASS）、`node scripts/check-product-contract.mjs` PASS、`npm run gate:v2`（9 条自证全 PASS）、`node scripts/check-metadata.mjs` PASS。
 - 未验证：V2 真实目标证据（真实 Codex Desktop、`gpt-6-luna`、OpenCode Go 推理）全部未执行，无所有者额度/时间窗授权；`MG-R006` 保持 `FAIL`，不得因门禁迁移而升状态。
+
+### P01–P04 代码交付（A1–A4 + 主代理集成，2026-11-15）
+
+- 已合入（fast-forward cherry-pick，未重写历史）：A1 `5e6c069`/`0bed7ed`/`3bb8f4e`/`d232ba6`、A2 `9a2c552`…`204faa6`、A3 `14b14a9`…`a568f98`、A4 `31c981c`…`241abcb`、A5 `2e8e70a`；主代理接线提交见 `git log --grep V2`。
+- 主代理独占文件接线：`src/index.js` 放开 `history.compaction:"preserve"` 与 `codex.nativeCompaction`；5 处候选切换点改为授权域终态（不再吞成 502）；429 跨授权域候选阻断；`assertResolvedUpstream` 接 `model` 收据。
+- 已执行：`npm run check` PASS；`npm test` 108 套件 / 1068 用例 / 0 失败；`node scripts/check-metadata.mjs` PASS；`npm run docs:check` PASS；`npm run contract:check` PASS；`npm run gate:v2` 9 条自证 PASS；`npm run gate:v2:independent` 11/12（N04 待所有者裁决）。
+- 未验证：真实原版 Desktop 选模、真实 ChatGPT 套餐请求、真实 Go 推理、真实 Codex 原生压缩（全部 BLOCKED，无额度/时间窗授权）；managed provider 运行时登录复用 UNVERIFIED。
+- 待裁决：N04（`history/export` 迁移导出）与契约“网关不得自建 summarize”冲突，需所有者选择保留并书面登记或移除；在裁决前 A5 独立门禁保持 FAIL。
