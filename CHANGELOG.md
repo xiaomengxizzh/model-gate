@@ -2,6 +2,27 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-15 前端体验 V3（UX-00…UX-06，开发分支）
+
+### Added — 前端 V3（`feat/modelgate-ux-v3`，非发布）
+
+- **产品状态投影 `mg-ui-product-status/1`**（`src/ui-next/js/product-status.js`）：把 `/api/status` 与四个 `/api/aggregation/*` 只读接口组合成单一 ProductStatus；首页、连接向导、聚合详情、状态层共用同一判定与唯一主 CTA。证据等级 `detected/configured/runtime-verified/not-tested/unknown` 显式可见；`runtime-verified` **只**在 `/api/status.lastServing` 真实命中 Go 目标模型时成立。
+- **`GET /api/status` 新增只读 `official`**：`{credential,expiry,reason,authMode,level,source,checkedAt}`。只读探测 `auth_mode=chatgpt`、token 存在性与 JWT `exp`；不刷新、不发请求、**不返回任何凭据**；无法判定时为 `unknown`。
+- **`#/connections` 单页引导**：只填 OpenCode Go API Key → 服务端 preset 自动注册 `opencodego` → 写 Key → 同步 → 428 预览 → 一次确认 → 原子写入 → 重启提示 → 退出恢复。高级 ID/URL/env 折叠在"高级设置"。部分成功、409 三方差异、401/429/404 均如实展示。
+- **普通/高级分层导航**：主分区（首页 / 模型与账号 / 设置）+ 默认收起的"高级功能"（上游供应商 / 模型与路由 / 客户端接入 / 聚合详情 / 监控与诊断）；7 个旧 hash 路由与 `/`、`/admin` 全部保留。
+- **状态一致性**：共享快照 + epoch/AbortController + freshness 预算；旧响应不覆盖新状态，并发请求合并，401 清快照与敏感 DOM，403 只进局部错误，弹窗/草稿不被轮询重建。
+- **设计与可访问性**：设计令牌、明暗主题、正文 15px/最小 12px、按钮 ≥40px（主 CTA 44px）、`:focus-visible`、`prefers-reduced-motion`、360/768/1440 断点、`statusRow/primaryAction/stepper/formField` 组件、dialog Escape+焦点圈定+焦点归还。
+
+### Changed
+
+- `POST /api/aggregation/providers` 透传 `preset`（`{"preset":"opencode-go"}` 可省略 id/baseUrl/apiKeyEnv）；内联 `apiKey` 仍被 registry 拒绝，Key 只能经 `POST /api/keys`。
+- `views/aggregation.js` 技术长表收进"高级详情"，删除 V1 Console 全量话术；既有 9 个导出与 `#/aggregation` 深链不变。
+
+### Notes
+
+- 本轮**零**真实 Go/GPT 模型调用（无付费授权）；真实推理与真实 Desktop 交互标 `BLOCKED`。真实 GPT 仍只允许 `gpt-6-luna`，Go 仍只 `deepseek-v4.1-flash`。
+- 新增测试：`ui-product-status`、`ui-v3-home`、`ui-v3-connections`、`ui-v3-state`、`ui-v3-visual`、`ui-v3-acceptance`；浏览器证据脚本 `scripts/e2e/ui-v3-browser.mjs`（复用本机 Chrome，无新依赖）。
+
 ## [Unreleased] —— 2026-11-15 V2 代码交付（P01–P04，离线可证）
 
 ### Added
