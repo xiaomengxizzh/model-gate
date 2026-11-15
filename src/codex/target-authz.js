@@ -669,7 +669,8 @@ function assertResolvedShape(resolved) {
 }
 
 // 发送前二次校验：实际 URL 必须与收据的 host/path 完全一致（scheme 只允许 https，loopback 可 http）。
-export function assertResolvedUpstream(resolved, urlUsed) {
+// opts.model 给出时要同时核对上游模型名（请求身份收据 = host + path + model 三者同源）。
+export function assertResolvedUpstream(resolved, urlUsed, opts = {}) {
   const r = assertResolvedShape(resolved)
   const actualKey = targetKeyOfUrl(urlUsed)
   let url
@@ -689,6 +690,7 @@ export function assertResolvedUpstream(resolved, urlUsed) {
   if (url.protocol !== 'https:' && !isLoopbackHost(url.hostname)) {
     throw deny('send_target_scheme_not_allowed', '非 loopback 上游必须走 https：' + r.upstreamHost)
   }
+  if (opts && opts.model !== undefined && opts.model !== null) assertResolvedModel(r, opts.model)
   return r
 }
 
@@ -795,18 +797,141 @@ export function resolvedDiagnostic(resolved) {
   })
 }
 
-// 401/403 是终态：不得变成成功、不得重试到另一域、不得改写模型或状态码。
-// 接线卡必须原样使用本收据（见交付报告里的 src/index.js 补丁）。
-export function authFailureReceipt(status) {
+// ————————————————————————————————————————————————————————————————————————————
+// A4（V2-03）：授权域内失败归因（401/402/403/429）与「请求身份收据」（host + path + model）
+//
+// 背景（MG-R002/R008/R009/R012）：
+//   · 401/403 是**授权域内**的终态（key/登录/权限），不是「这个模型不可用」；402 与配额型 429
+//     是同一授权域的额度终态。这类失败一旦被降级成「换候选」，计费身份、套餐归属与错误归因
+//     就全部变成另一个域的，属于静默换路由/换套餐 —— 明确禁止。
+//   · 速率型 429 可以在**同一域**内按 Retry-After/退避重试，但仍不得跨域回退、不得换模型。
+//   · 收据只钉 host/path 会放过「换模型名」的漂移，因此请求身份收据必须同时钉 host/path/model。
+// 本层仍是纯判定：不读凭据、不发请求、不写日志；消息/收据只带稳定 code 与域名。
+// ————————————————————————————————————————————————————————————————————————————
+
+export const AUTH_FAILURE_KINDS = Object.freeze({
+  UNAUTHORIZED: 'unauthorized',        // 401：key 无效 / 本机登录失效
+  FORBIDDEN: 'forbidden',              // 403：无权限 / 账号或套餐被拒
+  QUOTA_EXHAUSTED: 'quota_exhausted',  // 402、或语义为额度的 429：该授权域额度用尽
+  RATE_LIMITED: 'rate_limited',        // 429：速率限流（域内可重试，不得跨域回退）
+})
+
+// 只做保守文本匹配：命中即归因，匹配不到不臆造（与 retry-policy 的 429 归因同源语义）。
+const QUOTA_BODY_RE = /(insufficient|quota|billing|balance|credit|payment|欠费|余额|额度|配额|exhausted|exceeded your current quota)/i
+const RATE_BODY_RE = /(rate.?limit|too many requests|requests per (minute|second)|\brpm\b|\btpm\b|throttl|频率|速率)/i
+
+function authDomainArgument(opts) {
+  const o = opts || {}
+  const raw = o.authDomain != null ? o.authDomain : o.credentialSource
+  if (raw == null || raw === '') return null
+  const v = String(raw).trim().toLowerCase()
+  if (!AUTH_DOMAIN_VALUES.includes(v)) {
+    throw deny('auth_domain_invalid', '未知授权域：' + v, { status: 400 })
+  }
+  return v
+}
+
+function finiteMs(value) {
+  if (value == null) return null
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0) return null
+  return n
+}
+
+/**
+ * 上游鉴权/额度失败的域内归因（单一真源）。
+ * @param {number} status 上游 HTTP 状态（401/402/403/429）
+ * @param {{authDomain?:string, bodyText?:string, retryAfterMs?:number, headers?:object}} [opts]
+ * @returns {null | Readonly<{kind,code,status,authDomain,terminal,retryable,retryAfterMs,
+ *   fallbackAllowed,rewriteModel,rewriteStatus}>} 非授权域状态返回 null（其他错误走各自通道）
+ */
+export function classifyAuthDomainFailure(status, opts = {}) {
   const s = Number(status)
-  if (s !== 401 && s !== 403) return null
-  return Object.freeze({
+  if (!Number.isInteger(s)) return null
+  if (s !== 401 && s !== 402 && s !== 403 && s !== 429) return null
+  const authDomain = authDomainArgument(opts)
+  const base = Object.freeze({
     status: s,
-    code: s === 401 ? 'upstream_unauthorized' : 'upstream_forbidden',
+    authDomain,
     terminal: true,
-    retryable: false,
+    // 任何授权域失败都不得改写模型/状态码，也不得自动换到另一个授权域或套餐。
     fallbackAllowed: false,
     rewriteModel: false,
     rewriteStatus: false,
+  })
+  if (s === 401) {
+    return Object.freeze(Object.assign({}, base, { kind: AUTH_FAILURE_KINDS.UNAUTHORIZED, code: 'upstream_unauthorized', retryable: false, retryAfterMs: null }))
+  }
+  if (s === 403) {
+    return Object.freeze(Object.assign({}, base, { kind: AUTH_FAILURE_KINDS.FORBIDDEN, code: 'upstream_forbidden', retryable: false, retryAfterMs: null }))
+  }
+  const retryAfterMs = finiteMs(opts && opts.retryAfterMs)
+  if (s === 402) {
+    return Object.freeze(Object.assign({}, base, { kind: AUTH_FAILURE_KINDS.QUOTA_EXHAUSTED, code: 'upstream_quota_exhausted', retryable: false, retryAfterMs }))
+  }
+  // 429：额度语义 → 终态（不准靠换域/换套餐继续）；速率语义 → 同域可重试，但仍不跨域。
+  const body = String((opts && opts.bodyText) || '')
+  const quota = QUOTA_BODY_RE.test(body) || (!RATE_BODY_RE.test(body) && (opts && opts.assumeQuota === true))
+  if (quota) {
+    return Object.freeze(Object.assign({}, base, { kind: AUTH_FAILURE_KINDS.QUOTA_EXHAUSTED, code: 'upstream_quota_exhausted', retryable: false, retryAfterMs }))
+  }
+  return Object.freeze(Object.assign({}, base, { kind: AUTH_FAILURE_KINDS.RATE_LIMITED, code: 'upstream_rate_limited', retryable: true, retryAfterMs }))
+}
+
+// 401/402/403 与「配额型 429」是授权域终态：不得变成成功、不得重试到另一域、不得改写模型或状态码。
+// 速率型 429 不在此列（它有同域重试通道），但仍由 classifyAuthDomainFailure 给出 fallbackAllowed=false。
+// 接线卡必须原样使用本收据：FALLBACK 判定应为 `if (authFailureReceipt(status, opts) === null) → 允许换候选`。
+export function authFailureReceipt(status, opts = {}) {
+  const classified = classifyAuthDomainFailure(status, opts)
+  if (!classified) return null
+  if (classified.kind === AUTH_FAILURE_KINDS.RATE_LIMITED) return null
+  return classified
+}
+
+/**
+ * 用**收据自带的授权域**归因上游失败：域不来自调用方猜测，避免把 Go 的 401 记成订阅域错误。
+ * @param {object} resolved resolveUpstream() 的产物
+ */
+export function authFailureOfResolved(resolved, status, opts = {}) {
+  const r = assertResolvedShape(resolved)
+  return classifyAuthDomainFailure(status, Object.assign({}, opts, { authDomain: r.authDomain }))
+}
+
+// —— 请求身份收据：host + path + model 三者必须与收据完全一致 ——
+// 上游模型名漂移（例如把公共/聚合 ID、别名或另一个模型名发出去）与 host/path 漂移同等严重：
+// 它会让「计费/能力/压缩路径」全部落在未授权目标上，因此单独给稳定 code。
+export function assertResolvedModel(resolved, modelSent) {
+  const r = assertResolvedShape(resolved)
+  const m = nonEmptyString(modelSent) ? String(modelSent).trim() : ''
+  if (!m) throw deny('send_model_missing', '实际发送模型缺失，无法与收据核对', { status: 400 })
+  if (m !== r.upstreamModel) {
+    throw deny('send_model_drift', '实际发送模型与收据不一致：authorized=' + r.upstreamModel + ' actual=' + m, {
+      expected: r.upstreamModel,
+      actual: m,
+    })
+  }
+  return r
+}
+
+/**
+ * 一次校验「真正要发出去的东西」：URL(host/port/path/query) + 上游模型名。
+ * 返回冻结的请求身份收据（只含 provider/域/host/path/模型，不含任何凭据）。
+ */
+export function verifyRequestIdentity(resolved, request = {}) {
+  const r = assertResolvedShape(resolved)
+  if (request.urlUsed === undefined || request.urlUsed === null) {
+    throw deny('send_target_not_absolute', '缺少实际发送 URL，无法核对请求身份', { status: 400 })
+  }
+  assertResolvedUpstream(r, request.urlUsed)
+  // 请求身份收据不接受「模型未知」：无法核对就是请求错误（assertResolvedUpstream 的
+  // opts.model 是向后兼容的可选校验，这里必须强制要求模型名）。
+  assertResolvedModel(r, request.model)
+  return Object.freeze({
+    providerId: r.providerId,
+    authDomain: r.authDomain,
+    upstreamHost: r.upstreamHost,
+    upstreamPath: r.upstreamPath,
+    model: r.model,
+    upstreamModel: r.upstreamModel,
   })
 }
