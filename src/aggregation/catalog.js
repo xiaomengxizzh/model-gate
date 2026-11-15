@@ -266,6 +266,19 @@ export function createAggregatedCatalog(options = {}) {
       }
       if (goScope.enforced) {
         for (const m of scopeOut) outOfScope.push(m)
+        // V2 硬约束（MG-R008）：Go 目标模型不得声明跨供应商 fallbacks。
+        // 上游 429/5xx 时运行期会按 fallbacks 换供应商（实测），那等于把 DeepSeek 请求
+        // 静默交给别的上游（甚至 GPT）。这里 fail-closed，让配置层先暴露，而不是运行期偷换。
+        const modelDef = (cfg.models && (cfg.models[goScope.targetUpstreamModel] ||
+          cfg.models[goScope.targetPublicId])) || {}
+        const fallbacks = Array.isArray(modelDef.fallbacks) ? modelDef.fallbacks : []
+        const foreign = fallbacks.filter((id) => String(id) !== String(provider.id))
+        if (foreign.length) {
+          throw new AggregatedCatalogError('v2_cross_provider_fallback_forbidden',
+            'V2 目标模型 ' + goScope.targetUpstreamModel + ' 声明了跨供应商 fallbacks（' + foreign.join(', ') +
+            '）：Go 失败时必须按真实域返回，禁止静默换上游/换供应商（含 GPT）',
+            { providerId: provider.id, target: goScope.targetUpstreamModel, fallbacks: foreign })
+        }
         scopeMeta.push(Object.freeze({
           providerId: provider.id,
           kind: provider.kind,
@@ -274,6 +287,7 @@ export function createAggregatedCatalog(options = {}) {
           targetPublicId: goScope.targetPublicId,
           published: targetPublished ? [goScope.targetPublicId] : [],
           outOfScope: scopeOut.map((m) => m.upstreamId),
+          crossProviderFallback: false,
         }))
       }
       layers.push({ providerId: provider.id, providerSegment: provider.providerSegment, name: provider.name, models, snapshot })
