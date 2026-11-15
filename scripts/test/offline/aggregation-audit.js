@@ -181,11 +181,18 @@ export function auditCandidate({
   // 运行期 `t.skip('root ...')` / `{ skip: <条件> }` 是环境门控，属于如实报告不适用，不是把通过当通过。
   // 注释/说明文本里的 `test.skip(`、`skip: true` 不是"新增跳过用例"，必须先排除，
   // 否则门禁自己的注释就会让 CI 变红（A5 在 d41da77 实测到的自注释误报）。
-  const isCommentOrString = (line) => /^\s*(?:\/\/|\*|\/\*)/.test(line) || /^\s*['"`]/.test(line)
+  // 先剥掉字符串字面量与注释再判定：测试标题、fixture 文本、门禁自己的注释里出现
+  // `test.skip(` / `skip: true` 都不是"新增跳过用例"（A5 两轮实测的误报来源）。
+  const stripText = (line) => line
+    .replace(/\/\/.*$/, '')
+    .replace(/\/\*.*?\*\//g, '')
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/`(?:[^`\\]|\\.)*`/g, '``')
   const skipAdded = testFiles.flatMap((f) => f.added
-    .filter((l) => !isCommentOrString(l))
+    .map(stripText)
     .filter((l) => /^\s*test\.skip\s*\(/.test(l) || /\bskip\s*:\s*true\b/.test(l))
-    .map((l) => f.file))
+    .map(() => f.file))
   for (const file of skipAdded) add('skipped-as-passed', file, 'diff adds skip to a test; a skipped case cannot be counted passed')
 
   // 7. 所有者契约/计划被**改写**才算降级：只追加解释/映射不触发，删改需求行才触发。
