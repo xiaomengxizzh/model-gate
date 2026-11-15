@@ -44,7 +44,7 @@ deriveProductStatus({
 
 ### 2.1 首页状态机（`state`）
 
-`locked → loading → read_only_unknown | cannot_detect_codex | needs_go_key | go_key_invalid | ready_to_enable | needs_codex_restart | ready | conflict | recoverable_error`
+`locked → loading → read_only_unknown | needs_admin_token | cannot_detect_codex | needs_go_key | go_key_invalid | ready_to_enable | needs_codex_restart | ready | conflict | recoverable_error`
 
 派生顺序（先命中先返回，实现见 `homeStateOf`）：
 
@@ -153,6 +153,7 @@ api.activateAggregation(body) / deactivateAggregation(body)
 | 409 | `conflict` | "设置已被其他程序修改，未覆盖" | 三方 diff，可重新检测，不强制覆盖 |
 | 404 聚合接口 | `read_only_unknown` | "当前实例不支持聚合管理" | 停止自动写入 |
 | 断网/超时 | `recoverable_error` | "无法连接本地网关，可重试" | 不显示旧成功状态 |
+| 聚合接口 403 `explicit_admin_required` | `needs_admin_token` | "需要操作：设置管理令牌" | 不清 token、不锁屏、不冒充读取失败；CTA 指向 `#/settings?section=admin-token` |
 | 401 管理令牌 | `locked` | "令牌已失效，请重新解锁" | 清空快照/敏感 DOM |
 
 ## 9. 非目标

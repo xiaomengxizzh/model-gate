@@ -297,6 +297,21 @@ test('A5 审查 P1/P2 回归：未知≠未安装、428 可达、模式未知不
   assert.match(throttled.primary.detail, /30 秒/)
 })
 
+test('聚合接口 403 explicit_admin_required → needs_admin_token（不是“读取失败”）', () => {
+  const ps = deriveProductStatus({
+    authenticatedAdmin: true,
+    status: statusWith({ providers: [{ id: 'opencodego', hasKey: true }], models: [{ name: GO_TARGET_PUBLIC_ID }] }),
+    aggregation: null,
+    aggregationError: { status: 403, data: { code: 'explicit_admin_required' }, message: '403' },
+  })
+  assert.equal(ps.error.kind, 'denied')
+  assert.equal(ps.state, 'needs_admin_token')
+  assert.equal(ps.primary.id, 'set-admin-token')
+  assert.equal(ps.primary.route, '#/settings?section=admin-token')
+  assert.match(ps.overall.label, /管理令牌/)
+  assert.notEqual(ps.primary.id, 'retry')
+})
+
 test('状态请求失败与聚合失败必须区分来源（都不得被读成“未连接”）', () => {
   const statusFailed = deriveProductStatus({
     authenticatedAdmin: true,
