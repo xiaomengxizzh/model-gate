@@ -137,6 +137,8 @@ export const SUITES = [
   'scripts/test/offline/ui-v3-home.test.mjs',
   'scripts/test/offline/ui-v3-state.test.mjs',
   'scripts/test/offline/ui-v3-visual.test.mjs',
+  'scripts/test/offline/ui-v3-connections.test.mjs',
+  'scripts/test/offline/ui-v3-acceptance.test.mjs',
   'scripts/test/offline/user-env.test.mjs',
   'scripts/test/offline/wiring-e2e.test.mjs',
   'scripts/test/offline/video.test.mjs',

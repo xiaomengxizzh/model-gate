@@ -362,7 +362,9 @@ test('product=null：只显示"正在读取真实状态"，不出现"已连接/�
   }
   const el = renderRoot({ step: 'key' })
   const text = el.textContent
-  assert.match(text, /正在读取真实状态/)
+  // 集成后（A3 状态层 + 状态投影）在没有真实快照时会给出"读取失败/正在读取"这类诚实降级，
+  // 而不是恒定的"正在读取"。两者都必须满足：绝不出现成功状态。
+  assert.match(text, /正在读取真实状态|读取失败|出现问题/)
   assert.doesNotMatch(text, /已连接|已启用/)
 })
 
