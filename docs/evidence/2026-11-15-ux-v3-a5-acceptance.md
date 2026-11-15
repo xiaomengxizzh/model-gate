@@ -5,6 +5,7 @@
 > 相关：[UX-00 独立审查](2026-11-15-ux-v3-a5-ux00-review.md) · [契约](../contracts/ui-v3-product-status.md) · [执行计划](../roadmap/2026-11-15-frontend-experience-v3-execution-plan.md)
 > **本轮没有任何真实模型请求**（无付费调用授权）；所有网关都是隔离实例 + 本地 mock/临时目录。状态词严格区分 mocked / real / BLOCKED / NOT_TESTED。
 > **R2 复验（集成分支）已追加在 §8**：被测代码 = `1ab9239`（A5 合并提交 `741525c`）；基线截图保留，集成截图带 `-integrated`。
+> **R3 最终复验已追加在 §9**：被测 SHA = `9f7f524`（A5 合并 `85f2c08`）；正式截图带 `-r3`；真实模型项仍全部 BLOCKED。
 
 ## 1. 交付物
 
@@ -177,4 +178,108 @@ Lead 把 `product=null` 的断言从"必须正在读取真实状态"放宽为"�
 - 完整 428→preview→consent→原子写→验证（UI-05/08）：**BLOCKED**（隔离实例无已发布聚合目录；仅既有 `agg-desktop-activate` 单测覆盖）。
 - 真实旧版本网关实例：**BLOCKED_OLD_INSTANCE**。
 - PR #7 远端状态：**BLOCKED_REMOTE_PR_STATE**（无 gh/未联网）。
-- 360/768 首屏可见与首绘 401/403：**FAIL，已分派 A1/A3**，修复后重跑本文件 §8.1 两条命令即可更新（截图仍用 `--suffix -integrated`）。
+- 360/768 首屏可见与首绘 401/403：**FAIL，已分派 A1/A3**（R3 已修复，见 §9），修复后重跑本文件 §8.1 两条命令即可更新（截图仍用 `--suffix -integrated`）。
+
+## 9. R3 最终复验（被测 SHA `9f7f524`）
+
+> 最终集成分支 HEAD = `9f7f524`（父 `127ba12`：允许 `preview_pending` 相位、补 F-9 契约注、V3 交付报告与 `-final` 截图）。
+> A5 合并提交 `85f2c08`；本文件所在提交为 R3 证据提交。
+> **证据完整性**：Lead 首次声称的两处修正在 `127ba12` 中实际不存在（仅存在于其工作树未提交文件）。A5 没有把未提交内容算入证据，也没有替 Lead 写产品源码；Lead 提交 `9f7f524` 后，A5 重新合并并**全量重跑**，以下数字全部来自 `9f7f524`。
+
+### 9.1 命令与真实数字
+
+```bash
+npm run check
+# exit 0 · UI modules 19/19 syntax OK
+
+node --test scripts/test/offline/ui-v3-acceptance.test.mjs
+# tests 11 · pass 10 · fail 0 · skipped 1（UI-16 BLOCKED_NO_PAID_MODEL_AUTH）
+
+node scripts/e2e/ui-v3-browser.mjs --suffix -r3
+# exit 0 · checks 11 · passed 11 · failed 0
+# 截图：docs/evidence/screenshots/ui-v3-{360x800,768x900,1440x900}-r3.png（A5 独立采集，未复用 -final）
+
+npm test
+# suites: 125 passed / 0 failed / 0 skipped / 0 timed out / 0 not run（manifest 125/selected 125）
+# tests:  1216 passed / 0 failed / 3 skipped
+# total:  82.3s
+
+npm run contract:check   # PASS：12 requirements / 7 stages / 5 subagent roles
+npm run docs:check       # PASS（R3 文档写入后补跑，链接均指向真实文件）
+```
+
+### 9.2 浏览器 11 项逐项（独立复跑，真实 Chrome 153）
+
+| # | check | 结论 | 实测细节 |
+| --- | --- | --- | --- |
+| 1 | UI-00-load | PASS | `title="ModelGate · 控制台"`、route=`#/overview` |
+| 2 | UI-01-status-rows | PASS | 首屏同时出现 ChatGPT / OpenCode Go / Codex 与证据等级词（文本 557 字符） |
+| 3 | UI-01-single-cta | PASS | 仅 1 个主 CTA："连接 OpenCode Go" |
+| 4 | UI-01-advanced-collapsed | PASS | `details.open=false` 且高级 5 项**像素级不可见**（`checkVisibility`+`elementFromPoint`，`pixelVisible=[]`） |
+| 5 | UI-01-nav-current | PASS | overview → `#/connections`（aria-current 移到 connections）→ 返回 overview；始终唯一 |
+| 6 | UI-01-no-fake-success | PASS | 无 Key/无真实推理时无"准备就绪/已启用/已实测"结论 |
+| 7 | UI-10-no-credential-persistence | PASS | localStorage 仅 `mg-theme`，sessionStorage 空 |
+| 8 | UI-15-viewport-360 | PASS | CTA `top=507.8 < 800`，`336×46.25`，左右 12→348 未截断 |
+| 9 | UI-15-viewport-768 | PASS | CTA `top=455.8 < 900`，`176×46.25` |
+| 10 | UI-15-viewport-1440 | PASS | CTA `top=336.8 < 900`，`176×46.25` |
+| 11 | UI-13-no-page-errors | PASS | 页面异常/错误日志 **0 条**（A3 鉴权前置生效） |
+
+### 9.3 UI-01..UI-16 最终结论
+
+| Case | 最终结论 | 证据 |
+| --- | --- | --- |
+| UI-01 | **PASS** | 浏览器 #2–#6 + 离线静态职责断言（§9.4） |
+| UI-02 | **PASS** | detected/missing/expired 三态 + expiry valid/unknown/expired + 零 token 回显 |
+| UI-03 | **PASS** | preset 201（服务端 baseUrl/ID/v2Scope）、内联 Key 400、重复注册 409 `provider_exists` 不覆盖、过期 version 409 `version_conflict` |
+| UI-04 | **BLOCKED（真实上游）+ 投影 PASS** | 429→throttled/Retry-After/"稍后重试"；真实 Go 401/429 未调用 |
+| UI-05 | **PASS（Key 路径）+ 428 全链 BLOCKED** | Key 写入 200→`hasKey=true`、零回显；`activate` 空 body 实测 422 `invalid_desired` 且不写 `config.toml`；`preview_pending` 已可由状态层进入（§9.5），真实 428 链仍 BLOCKED |
+| UI-06 | **NOT_TESTED（真实重启）+ 状态逻辑 PASS** | 缺 detect→unknown；restart 判定来自真实 detect（F-9 WONTFIX 依据） |
+| UI-07 | **BLOCKED** | 需真实"已启用回访"状态；无已发布聚合目录 |
+| UI-08 | **PASS（不写入）/ 409 演练 NOT_TESTED** | 未同意/伪造 consent 均 4xx 且 CODEX_HOME 保持空 |
+| UI-09 | **NOT_TESTED（A5 黑箱）** | A3 `ui-v3-state` 套件覆盖并在 `npm test` 通过；A5 未做浏览器并发黑箱 |
+| UI-10 | **PASS** | 401/403 无敏感字段；零凭据持久化；页面错误 0 |
+| UI-11 | **PASS + BLOCKED_OLD_INSTANCE** | 404→`read_only_unknown`；404 后 UI 仍 200；真实旧实例不可得 |
+| UI-12 | **PASS（静态反降级）** | 见 §9.6 |
+| UI-13 | **PASS** | `/ui-next/index.html`、`/`、`/admin`、`/admin.html` 200；7 旧路由 + connections；路径穿越 404；首绘网络错误 0 |
+| UI-14 | **NOT_TESTED** | 真实退出恢复/字节对账需真机；既有 rollback/restore 套件在 `npm test` 中通过 |
+| UI-15 | **PASS** | 三视口 CTA 首屏可见（507.8/455.8/336.8）、高度 46.25px、无横向溢出（360=0、768=-15、1440=-15） |
+| UI-16 | **BLOCKED_NO_PAID_MODEL_AUTH** | 零真实请求；无 `PASS_REAL` |
+
+### 9.4 UI-01 `aria-current` 冲突裁定：**接受静态默认标记**
+
+1. 默认路由就是 `overview`（`router.js` 未知/空 hash 的回退值），静态值与首绘真值一致，属标准首绘/SSR 可访问性，不是"伪造运行时状态"。
+2. `app.js:194-195` 每次 `renderRoute` 对全部 nav-link 执行 `setAttribute/removeAttribute` reconcile；浏览器三段实测证明 deep link 会移除默认标记。
+3. `ui-v3-home.test.mjs:515` 明确断言"默认首页导航项带 aria-current"，与实现一致。
+4. A5 R2 添加的 `assert.doesNotMatch(indexHtml, /aria-current=/)` 超出 Lead 当轮要求，属于**测试自身过严**，不是产品缺陷。
+
+**断言修改（不变量未降低）**：允许静态默认标记，但断言**只有 `overview`** 可预写（`staticCurrent==['overview']`）；继续要求 app.js 同时 `setAttribute` 与 `removeAttribute`；运行时由浏览器三段验证；离线不假装验证运行时。修改后 `npm test` 归零（125/0，1216/0）。
+
+### 9.5 Lead 两处修正复核（`9f7f524`）
+
+| 修正 | 结论 | 依据 / 风险 |
+| --- | --- | --- |
+| `store.setProductPhase` 允许 `preview_pending` | **合理，PASS** | `store.js:230-236` 白名单加入该相位，与 `HOME_STATES`/`homeStateOf`/`deriveProductStatus(phase)` 对齐；A5 新增集成断言：设置后 `productStatus().state==='preview_pending'`、主 CTA=确认配置变更、`overall.level!=='ready'`，非法相位仍抛错，清除后退出预览态。当前无调用方主动设置（A2 连接页仍本地管理预览），属补全状态机能力，不会制造虚假预览态。 |
+| 契约补注 F-9（`computeRestartState` 全分支恒带布尔 `needed`） | **合理，PASS** | 与 A5 R2 独立复核一致（`desktop-integration.js:400-413`）；注释不削弱"缺字段只能无法确认"，只说明真实响应不可达，与 WONTFIX 一致。 |
+| 遗留小账（不阻断） | 观察 | 契约 §5 第 111 行仍写 `setProductPhase(phase:'conflict'|'write_in_progress'|null)`，未同步 `preview_pending`；建议 Lead 后续补一行（实现与 §2.1/§8 已一致）。 |
+
+### 9.6 最终反降级结论（`9f7f524`）
+
+| 检查 | 结论 | 证据 |
+| --- | --- | --- |
+| 冻结证据未被改写 | **PASS** | `v2-frozen-sha.txt` 在 `708cf5e` 与 `9f7f524` blob 同为 `a08a2f10…`（内容 `12cf5d9…`）；`v2-release-approvals.json` 同为 `5898f53f…`；`git diff --stat 9f7f524 -- <两文件>` 为空 |
+| `main` / 冻结分支未被改 | **PASS（本地）** | `main` reflog 最后移动 **2026-09-18**；`mg-codex-native` 仍 `e337f4a`（reflog 2026-11-15 19:46，本轮之前）；`main=e746385`、`origin/main=6bc6441` 均未被本分支触碰 |
+| 未删既有导出 | **PASS** | `708cf5e..9f7f524` 导出符号差集 missing=[]：components 19→25、router 4→6、store 16→29、api 8→8、app 6→10 |
+| 未删既有路由/入口 | **PASS** | 8 个路由 id（7 旧 + connections）；`/api/status`、`/admin`、`/ui-next` 仍在；`src/index.js` 仅 1 行"删除"（import 行改写） |
+| 零新依赖 | **PASS** | `package.json` 无 dependencies/devDependencies；该文件 diff 为空 |
+| 未把 mock 写成 real | **PASS** | 真实模型/Desktop 全部 BLOCKED；无 `PASS_REAL`；UI-16 显式 skip |
+| 未改压缩/原生 Harness | **PASS** | `src/codex/interop.js`、responses/原生 capabilities 无 diff |
+| PR #7 远端状态 | **BLOCKED_REMOTE_PR_STATE** | 无 `gh`、未联网 fetch，不声称已确认 Draft |
+| 证据卫生（观察） | 记录 | A1 `42f20f1` 覆盖了默认文件名的 R1 基线截图（旧内容仍可从 `ddbac72` 取回）；A5 `-integrated`/`-r3` 均保留，Lead 另存 `-final`；R3 截图不覆盖既有文件 |
+
+### 9.7 R3 残余 BLOCKED / NOT_TESTED
+
+- 真实 Go/GPT 与真实原版 Desktop（UI-04/06/07/16）：**BLOCKED_NO_PAID_MODEL_AUTH**，0 次请求、无 `PASS_REAL`。
+- 完整 428→preview→consent→原子写→验证（UI-05/08）：**BLOCKED**（隔离实例无已发布聚合目录，实测 422 `invalid_desired`；`preview_pending` 仅验证到状态层/投影）。
+- 真实旧版本网关实例：**BLOCKED_OLD_INSTANCE**；PR #7 远端：**BLOCKED_REMOTE_PR_STATE**。
+- UI-09 并发/切页与 UI-14 真实退出恢复：A5 本轮 **NOT_TESTED**（A3/既有后端套件在 `npm test` 中全绿，不等同 A5 黑箱验收）。
+

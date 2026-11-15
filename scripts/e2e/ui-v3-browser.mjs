@@ -257,12 +257,24 @@ async function main () {
     check('UI-01-advanced-collapsed', !!(advanced && advanced.found && advanced.closed && (advanced.pixelVisible || []).length === 0), '高级分组（需真正像素不可见）：' + JSON.stringify(advanced))
 
     // 运行时 aria-current（静态文件不写它，必须由 app.js 在运行时表达当前页）
-    const navCurrent = await ev("(() => {"
+    const navExpr = "(() => {"
       + " const raw = (location.hash || '#/overview').split('?')[0];"
       + " const route = raw.indexOf('#/') === 0 ? raw.slice(2) : (raw || 'overview');"
       + " const current = [...document.querySelectorAll('[data-route]')].filter((el) => el.getAttribute('aria-current') === 'page').map((el) => el.dataset.route);"
-      + " return { current, route }; })()")
-    check('UI-01-nav-current', !!(navCurrent && Array.isArray(navCurrent.current) && navCurrent.current.length === 1 && navCurrent.current[0] === navCurrent.route), '运行时 aria-current=' + JSON.stringify(navCurrent))
+      + " return { current, route }; })()"
+    const navDefault = await ev(navExpr)
+    // 路由切换：运行时必须把 aria-current 从默认项移到目标项（真实 DOM 验证，不靠源码推断）
+    await ev("location.hash = '#/connections'")
+    await sleep(600)
+    const navConnections = await ev(navExpr)
+    await ev("location.hash = '#/overview'")
+    await sleep(600)
+    const navBack = await ev(navExpr)
+    const navOk = !!(navDefault && navConnections && navBack &&
+      navDefault.current.length === 1 && navDefault.current[0] === 'overview' &&
+      navConnections.current.length === 1 && navConnections.current[0] === 'connections' &&
+      navBack.current.length === 1 && navBack.current[0] === 'overview')
+    check('UI-01-nav-current', navOk, '运行时 aria-current（默认/切到 connections/返回）=' + JSON.stringify({ navDefault, navConnections, navBack }))
 
     // 不显示伪成功：无 Key 时不得出现这些结论
     const fake = ['准备就绪', '聚合模式已启用', '可用（已实测推理）', '所有已配置上游均可用'].filter((w) => (pageInfo.bodyText || '').includes(w))
