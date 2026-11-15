@@ -38,7 +38,9 @@ deriveProductStatus({
 | `codex` | `GET /api/aggregation/health.detect`（desktop/bundledCli/cli/restart） | `detected` | 不得猜"已重启"；`restart.needed` 缺失时只能说"无法确认" |
 | `aggregation` | `GET /api/aggregation/health`（mode/backup/activation） | `detected` | 不得把 `unknown` 写成 `official`（未聚合）或反之 |
 
-**`go.level === 'runtime-verified'` 的唯一允许条件**：`/api/status.lastServing` 的 `provider` 是 Go 供应商 **且** `model` 命中 `opencodego/deepseek-v4.1-flash`。任何"配置写好""探测 200""发现目录成功"都只能到 `configured`。
+**公共模型 ID 事实（已核对代码）**：已发布公共 ID 由 `src/codex/catalog.js:stableModelId()` 生成，为 **`mg-opencodego-deepseek-v4-1-flash`**（`AGGREGATED_ID_PREFIX + 段 + '-' + 模型段`）；上游真实模型名是 `deepseek-v4.1-flash`；`/api/status.models[i].name` 与 `lastServing.model` 都是公共 ID。`product-status.js` 的 `matchesGoTargetId()` 容错接受 `mg-opencodego-deepseek-v4-1-flash` / `opencodego/deepseek-v4.1-flash` / `deepseek-v4.1-flash`，并**不**把 `mg-opencodego-gpt-6-luna` 等其它模型算作目标。
+
+**`go.level === 'runtime-verified'` 的唯一允许条件**：`/api/status.lastServing` 的 `provider` 是 Go 供应商 **且** `model` 命中上述目标模型 ID。任何"配置写好""探测 200""发现目录成功"都只能到 `configured`。用户界面显示 `DeepSeek V4.1 Flash`，不要求用户理解或输入任何 ID。
 
 ### 2.1 首页状态机（`state`）
 

@@ -17,7 +17,25 @@ export const EVIDENCE_LEVELS = Object.freeze(['detected', 'configured', 'runtime
 
 export const GO_TARGET_MODEL = 'deepseek-v4.1-flash'
 export const GO_PROVIDER_ID = 'opencodego'
-export const GO_PUBLIC_MODEL_ID = 'opencodego/' + GO_TARGET_MODEL
+// 已发布公共 ID 由 stableModelId() 生成：'mg-' + provider 段 + '-' + 模型段（见 src/codex/catalog.js）。
+// 这里同时接受历史/协议里出现过的等价写法，避免把"已配置"误判成"未配置"。
+export const GO_TARGET_PUBLIC_ID = 'mg-opencodego-deepseek-v4-1-flash'
+export const GO_PUBLIC_MODEL_IDS = Object.freeze([GO_TARGET_PUBLIC_ID, 'opencodego/' + GO_TARGET_MODEL, GO_TARGET_MODEL])
+export const GO_PUBLIC_MODEL_ID = GO_TARGET_PUBLIC_ID
+
+// 公共 ID 比较必须容错（mg- 前缀、斜杠/点号/大小写），否则真实目录会被读成"目标模型未配置"。
+function idKey (value) {
+  return String(value == null ? '' : value).toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+const TARGET_ID_KEYS = new Set(GO_PUBLIC_MODEL_IDS.map(idKey))
+
+export function matchesGoTargetId (value) {
+  const key = idKey(value)
+  if (!key) return false
+  if (TARGET_ID_KEYS.has(key)) return true
+  // 'mg-opencodego-<model>' 之外的 provider 段也接受：只要模型段是目标模型。
+  return key === 'mgopencodegodeepseekv41flash' || key === 'deepseekv41flash'
+}
 
 // 首页状态机（执行计划 §2.1 的 HomeState）。
 export const HOME_STATES = Object.freeze([
@@ -52,6 +70,11 @@ export function classifyAggregationError (error) {
     return { kind: 'unsupported', status, code: code || 'aggregation_route_unknown', message }
   }
   if (status === 401 || status === 403) return { kind: 'denied', status, code, message }
+  if (status === 429) {
+    // 限流既不是"连不上"也不是"配置错误"：单独分类，保留 Retry-After 供 UI 如实提示。
+    const retryAfter = Number(data.retryAfter ?? data.retry_after ?? e.retryAfter)
+    return { kind: 'throttled', status, code: code || 'rate_limited', message, retryAfter: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null }
+  }
   if (status === 409 || code === 'version_conflict' || code === 'config_conflict') {
     return { kind: 'conflict', status, code, message }
   }
@@ -75,6 +98,16 @@ export function deriveOfficial (status) {
   }
   const credential = str(official.credential)
   const reason = str(official.reason)
+  if (credential === 'detected' && str(official.expiry) === 'expired') {
+    return {
+      state: 'blocked',
+      level: 'detected',
+      reason: 'access_token_expired',
+      label: '登录已过期',
+      detail: '本机登录文件存在，但访问令牌已过期（只读解析 exp，未刷新、未发请求）。请在原版 Codex 中重新登录。',
+      source: '/api/status.official → probeLocalCodexAuth + readSubscriptionCredential（只读）',
+    }
+  }
   if (credential === 'detected') {
     return {
       state: 'detected',
@@ -137,12 +170,13 @@ function hasTargetModel (aggregation, status) {
   for (const m of rows) {
     const publicId = str(m && (m.publicId || m.slug || m.id))
     const upstream = str(m && (m.upstreamId || m.model))
-    if (publicId === GO_PUBLIC_MODEL_ID || publicId === GO_TARGET_MODEL || upstream === GO_TARGET_MODEL) return m
+    if (matchesGoTargetId(publicId) || matchesGoTargetId(upstream)) return m
   }
-  // status.models 是网关真实配置的模型表（name 为公共 ID）。
+  // status.models 是网关真实配置的模型表（name 为公共 ID，alias 为该模型的别名数组）。
   const configured = list(obj(status) && status.models).find((m) => {
-    const name = str(m && m.name)
-    return name === GO_PUBLIC_MODEL_ID || name === GO_TARGET_MODEL || str(m && m.alias).includes(GO_PUBLIC_MODEL_ID)
+    if (matchesGoTargetId(m && m.name)) return true
+    const alias = list(m && m.alias)
+    return alias.some((a) => matchesGoTargetId(a))
   })
   return configured || null
 }
@@ -155,7 +189,7 @@ function runtimeServingForGo (status, providerId) {
   const provider = str(last.provider)
   const model = str(last.model)
   if (!provider || provider !== providerId) return null
-  if (model !== GO_PUBLIC_MODEL_ID && model !== GO_TARGET_MODEL_ID && model !== GO_TARGET_MODEL) return null
+  if (!matchesGoTargetId(model)) return null
   return { at: Number(last.at) || null, provider, model }
 }
 
@@ -266,6 +300,13 @@ export function deriveCodex (aggregation) {
     })
   }
   const detect = obj(health.detect) || obj(health.desktop) || {}
+  // 只有部分探测对象时不能断言"未安装"：缺 detect 就是 unknown（未知不等于未安装）。
+  if (!obj(detect.desktop) && !obj(detect.bundledCli) && !obj(detect.bundledCodex) && !obj(detect.cli)) {
+    return Object.assign(base, {
+      mode: str(health.mode) || 'unknown',
+      detail: '服务端没有返回 Codex 探测明细（detect）；这是"未知"，不是"未安装"。请重新检测或查看高级诊断。',
+    })
+  }
   const desktop = obj(detect.desktop) || {}
   const bundled = obj(detect.bundledCli) || obj(detect.bundledCodex) || {}
   const cli = obj(detect.cli) || {}
@@ -335,8 +376,10 @@ export function deriveAggregation (aggregation) {
   const activation = obj(health.activation) || {}
   const nativeCompaction = obj(health.nativeCompaction) || obj(detect.nativeCompaction) || null
   const compactionBlocked = !!(nativeCompaction && nativeCompaction.blocked === true)
+  const modeKnown = mode === 'aggregated' || mode === 'official'
   return Object.assign(base, {
     mode: mode || 'unknown',
+    modeKnown,
     configSha: str(activation.appliedSha || state.appliedSha) || null,
     backupAvailable: backup.available === true,
     needsRestart: health.needsRestart === true || activation.needsRestart === true,
@@ -344,6 +387,7 @@ export function deriveAggregation (aggregation) {
     label: mode === 'aggregated' ? '聚合模式已启用' : mode === 'official' ? '官方模式（未聚合）' : '状态未知',
     detail: mode === 'aggregated'
       ? 'Codex 配置已指向 ModelGate；官方 GPT 与 ' + GO_TARGET_MODEL + ' 都通过原版 Codex 使用。'
+        + (compactionBlocked ? ' 原生压缩状态：尚未验证/存在阻断（不声称已通过，详见高级诊断）。' : '')
       : mode === 'official'
         ? '当前是原版 Codex 官方模式，未启用聚合。'
         : '后端没有返回可识别模式；不把它当成"已启用"或"未启用"。',
@@ -393,8 +437,19 @@ export function nextPrimaryAction (ps) {
       return { id: 'wait-write', label: '正在写入配置…', kind: 'wait', route: null, detail: '不要关闭页面；失败会回滚。' }
     case 'ready':
       return { id: 'use-codex', label: '在 Codex 中使用', kind: 'route', route: '#/connections?step=use', detail: '打开原版 Codex Desktop 的模型选择器。' }
-    case 'recoverable_error':
-      return { id: 'retry', label: '重试连接', kind: 'retry', route: null, detail: '上一次读取失败；不显示旧的成功状态。' }
+    case 'recoverable_error': {
+      const err = obj(p.error)
+      const throttled = !!(err && err.kind === 'throttled')
+      return {
+        id: throttled ? 'retry-later' : 'retry',
+        label: throttled ? '稍后重试' : '重试连接',
+        kind: 'retry',
+        route: null,
+        detail: throttled
+          ? '管理接口当前限流；' + (err.retryAfter ? '约 ' + err.retryAfter + ' 秒后' : '稍后') + '再试，不会自动改写配置。'
+          : '上一次读取失败；不显示旧的成功状态。',
+      }
+    }
     default:
       return aggregation.mode === 'aggregated' || codex.restartNeeded === false
         ? { id: 'use-codex', label: '在 Codex 中使用', kind: 'route', route: '#/connections?step=use', detail: '' }
@@ -414,10 +469,17 @@ export function homeStateOf (ps) {
     if (p.error.kind === 'conflict') return 'conflict'
     return 'recoverable_error'
   }
-  if (!p.codex.found) return 'cannot_detect_codex'
+  if (p.phase === 'preview_pending') return 'preview_pending'
+  if (!p.codex.found) {
+    // 探测不可用（缺 detect / 没有快照）时不能要求用户"去安装 Codex"。
+    if (p.codex.detectionLevel === 'unknown') return 'recoverable_error'
+    return 'cannot_detect_codex'
+  }
   if (p.go.state === 'error') return 'go_key_invalid'
   if (!p.go.credentialPresent) return 'needs_go_key'
   if (!p.go.targetModelConfigured) return 'ready_to_enable'
+  // 聚合模式未知时不得提示"启用聚合"：那可能在不确定的情况下二次写入。
+  if (p.aggregation.modeKnown === false || p.aggregation.mode === 'unknown') return 'recoverable_error'
   if (p.aggregation.mode !== 'aggregated') return 'ready_to_enable'
   if (p.codex.restartNeeded === true) return 'needs_codex_restart'
   if (p.aggregation.mode === 'aggregated' && p.codex.restartNeeded === false) return 'ready'
@@ -426,6 +488,10 @@ export function homeStateOf (ps) {
 
 export function overallOf (ps) {
   const p = obj(ps) || {}
+  if (p.error && p.error.kind === 'throttled') {
+    const wait = p.error.retryAfter ? '（Retry-After ' + p.error.retryAfter + ' 秒）' : ''
+    return { level: 'error', label: '当前受限，请稍后重试', detail: '管理接口返回 429' + wait + '；没有显示任何旧的成功状态。' }
+  }
   switch (str(p.state)) {
     case 'ready':
       return { level: 'ready', label: '准备就绪', detail: '官方套餐与 ' + GO_TARGET_MODEL + ' 都可在原版 Codex 中使用。' }
@@ -458,6 +524,16 @@ export function overallOf (ps) {
   }
 }
 
+// 错误来源合并：聚合错误优先（它决定 supported），否则状态请求错误（整页可恢复错误）。
+function effectiveErrorOf ({ aggError, statusError, aggUnsupported }) {
+  if (aggUnsupported) {
+    return { kind: 'unsupported', source: 'aggregation', status: aggError.status, code: aggError.code, message: aggError.message }
+  }
+  if (aggError && aggError.kind !== 'none') return Object.assign({ source: 'aggregation' }, aggError)
+  if (statusError && statusError.kind !== 'none') return Object.assign({ source: 'status' }, statusError)
+  return null
+}
+
 // 主入口：把一次只读快照投影成产品状态。
 // input = { authenticatedAdmin, loading, status, config, aggregation, aggregationError, phase, now }
 export function deriveProductStatus (input) {
@@ -468,6 +544,9 @@ export function deriveProductStatus (input) {
   const aggError = inp.aggregationError ? classifyAggregationError(inp.aggregationError) : classifyAggregationError(
     obj(aggregation) && obj(aggregation).error ? obj(aggregation).error : null,
   )
+  // 状态请求（/api/status）失败与聚合请求失败必须区分来源：前者整页进可恢复错误，
+  // 后者只影响聚合支持性判断。两者都不能被投影成"未连接"。
+  const statusError = inp.statusError ? classifyAggregationError(inp.statusError) : null
   const official = deriveOfficial(status)
   const go = deriveGo(status, aggregation ? Object.assign({}, aggregation, { error: inp.aggregationError || (aggregation && aggregation.error) || null }) : (inp.aggregationError ? { error: inp.aggregationError } : null))
   const codex = deriveCodex(aggregation ? Object.assign({}, aggregation, { error: inp.aggregationError || (aggregation && aggregation.error) || null }) : (inp.aggregationError ? { error: inp.aggregationError } : null))
@@ -478,7 +557,7 @@ export function deriveProductStatus (input) {
     authenticatedAdmin: inp.authenticatedAdmin !== false,
     loading: inp.loading === true,
     phase: str(inp.phase) || null,
-    error: aggError.kind === 'none' && !inp.aggregationError ? null : aggUnsupported ? { kind: 'unsupported', status: aggError.status, code: aggError.code, message: aggError.message } : aggError,
+    error: effectiveErrorOf({ aggError, statusError, aggUnsupported }),
     official,
     go,
     codex,

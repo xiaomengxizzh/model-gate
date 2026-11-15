@@ -241,7 +241,14 @@ function diagnosticsRows (deps) {
   return rows
 }
 
-function normalizeProviderInput (body) {
+// 输入规范化：把 GUI/调用方提供的形状收敛成注册表能接受的字段。
+//   * preset 透传是 A2/UX-02 的唯一后端改动：注册表用已登记位形（baseUrl/api/name/v2Scope/id 段）
+//     补全，普通用户因此只需提交一个 Key。模板只填「缺失」的字段，显式字段仍然优先。
+//   * 只写真正提供的字段：Object.assign 语义下显式 undefined 会覆盖模板字段（把 preset 的
+//     kind/baseUrl 抹成 undefined），因此不能把空 id/kind/baseUrl 塞进请求。
+//   * 内联 apiKey 继续原样交给注册表，由 registry 抛出 provider_key_inline_forbidden；
+//     Key 的唯一写入通道仍是 POST /api/keys。
+export function normalizeProviderInput (body) {
   const raw = body && body.provider && typeof body.provider === 'object' ? body.provider : body
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const kindMap = {
@@ -257,14 +264,16 @@ function normalizeProviderInput (body) {
   // 其它自定义 ID 原样交给注册表，由它给出 typed 错误，绝不静默改名。
   if (segment && (!id || id === 'opencode-console' || id === 'opencode-go' || id === 'console' || id === 'go')) id = segment
   const version = raw.configVersion !== undefined ? raw.configVersion : raw.version
-  return {
-    id,
-    kind,
-    baseUrl: raw.baseUrl,
-    apiKeyEnv: raw.apiKeyEnv,
-    apiKey: raw.apiKey,
-    version: version === undefined ? undefined : Number(version),
-  }
+  const preset = raw.preset == null ? '' : String(raw.preset).trim()
+  const out = {}
+  if (preset) out.preset = preset
+  if (id) out.id = id
+  if (kind != null && String(kind).trim() !== '') out.kind = kind
+  if (raw.baseUrl != null && String(raw.baseUrl).trim() !== '') out.baseUrl = raw.baseUrl
+  if (raw.apiKeyEnv != null && String(raw.apiKeyEnv).trim() !== '') out.apiKeyEnv = raw.apiKeyEnv
+  if (raw.apiKey != null) out.apiKey = raw.apiKey
+  if (version !== undefined) out.version = Number(version)
+  return out
 }
 
 function liftVersionConflict (out) {
