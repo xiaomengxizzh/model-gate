@@ -187,7 +187,7 @@ test('历史迁移导出不得进入模型请求路径（非压缩/摘要路径�
 // A5 N1 / N5-R：门禁自证的期望语义与状态表都可能被**等行数改写**（不触发 gate-weakened）。
 // 这里分别钉住「整个门禁模块」与「状态表逐行内容」的 sha256：
 // 任何语义改动都必须同时改这两个哈希，形成两次可见的修改，而不是悄悄换一个 true/false。
-const PINNED_GATE_MODULE_SHA = '18dfaa9e27cc31c89e99f3639346298c37269674b914333f2c3329811d182731'
+const PINNED_GATE_MODULE_SHA = 'c6fe1ef39596a8c68b6d492f4b4fdf2038a018fb6a5d9c352b5ed63f46d4b31a'
 const PINNED_STATUS_TABLE_SHA = '6f29fa9e597a6fda69beac63857860c2d8faab76925f003f86c2ceb22305600b'
 
 test('门禁模块整体钉死 sha256（等行数语义削弱必须显式二次确认）', () => {
@@ -206,4 +206,28 @@ test('V2 状态表逐行钉死 sha256（状态值等行数改写必须显式二�
   const digest = createHash('sha256').update(table, 'utf8').digest('hex')
   assert.equal(digest, PINNED_STATUS_TABLE_SHA,
     'V2 状态表内容被改动：状态升级/降级必须同时更新 PINNED_STATUS_TABLE_SHA 并在证据里写明来源')
+})
+
+test('历史复算不得伪装发布：replay 结果必须 ready:false 且标记 releaseEligible:false', () => {
+  const caseIndex = v2CaseIndex()
+  const forged = {}
+  for (const id of REQUIREMENT_IDS) {
+    forged[id] = {
+      status: 'PASS_REAL', commitSha: 'b'.repeat(40), command: 'x', receipt: { traceId: 't' },
+      realTarget: true, passedAllOnRealTarget: true,
+      cases: Object.fromEntries((caseIndex[id] || []).map((c) => [c, { passed: true }])),
+    }
+  }
+  const replay = gateV2({ sha: 'b'.repeat(40), ownerApproval: true, evidence: forged, allowNonHead: true })
+  assert.equal(replay.ready, false, 'replay 不得 ready:true')
+  assert.equal(replay.status, 'BLOCKED')
+  assert.equal(replay.replay, true)
+  assert.equal(replay.releaseEligible, false)
+  assert.equal(replay.reason, 'replay_is_not_release_evidence')
+  assert.equal(replay.canAskOwnerToMerge, false)
+
+  // 非 replay 且 SHA 与 HEAD 不一致：直接拒绝（non_head_sha_requires_replay_flag）。
+  const nonHead = gateV2({ sha: 'b'.repeat(40), ownerApproval: true, evidence: forged })
+  assert.equal(nonHead.ready, false)
+  assert.equal(nonHead.reason, 'non_head_sha_requires_replay_flag')
 })

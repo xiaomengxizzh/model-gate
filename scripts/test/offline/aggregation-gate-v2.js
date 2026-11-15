@@ -44,6 +44,19 @@ export function currentHeadSha() {
   return out
 }
 
+// 历史复算（--replay）永远不等于发布放行：显式标记 replay / releaseEligible:false，
+// 且无论证据多完整都不得 ready:true —— 旧树回执只能用于解释历史，不能当当前证据。
+function replayNotRelease(result) {
+  return Object.assign({}, result, {
+    replay: true,
+    releaseEligible: false,
+    ready: false,
+    status: 'BLOCKED',
+    canAskOwnerToMerge: false,
+    reason: result && result.ready ? 'replay_is_not_release_evidence' : (result && result.reason),
+  })
+}
+
 export function v2CaseIndex() {
   return buildV2Matrix(loadV2Sources()).caseIndex
 }
@@ -82,13 +95,14 @@ export function gateV2({ sha = null, ownerApproval = false, evidence = null, cas
   const cases = caseIndex || matrix.caseIndex
   const statusDoc = sources.evidence[0]
   const records = evidence || v2EvidenceFromStatus(statusDoc.rows)
-  return evaluateGate({
+  const result = evaluateGate({
     evidence: records,
     ownerApproval,
     headSha: target,
     requirementIds: V2_REQUIREMENT_IDS,
     caseIndex: cases,
   })
+  return allowNonHead ? replayNotRelease(result) : result
 }
 
 export function releaseV2({ sha = null, ownerApproval = false, evidence = null, diff = '', allowNonHead = false } = {}) {
@@ -106,7 +120,7 @@ export function releaseV2({ sha = null, ownerApproval = false, evidence = null, 
   const matrix = buildV2Matrix(sources)
   const statusDoc = sources.evidence[0]
   const records = evidence || v2EvidenceFromStatus(statusDoc.rows)
-  return evaluateRelease({
+  const result = evaluateRelease({
     evidence: records,
     ownerApproval,
     headSha: target,
@@ -114,6 +128,7 @@ export function releaseV2({ sha = null, ownerApproval = false, evidence = null, 
     caseIndex: matrix.caseIndex,
     diff,
   })
+  return allowNonHead ? replayNotRelease(result) : result
 }
 
 const SYNTHETIC_SHA = 'a'.repeat(40)
