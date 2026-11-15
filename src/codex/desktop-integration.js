@@ -337,7 +337,20 @@ function restoreIfOurs (paths, journal) {
 
 // —— 探测：CLI / Desktop / 配置 / 备份 ——
 const CLI_CANDIDATES = ['~/.local/bin/codex', '/usr/local/bin/codex', '/usr/bin/codex', '/opt/homebrew/bin/codex']
-const DESKTOP_CANDIDATES = ['/usr/bin/chatgpt', '/usr/lib/chatgpt/ChatGPT', '/opt/ChatGPT/ChatGPT', '/Applications/ChatGPT.app/Contents/MacOS/ChatGPT']
+// Linux 包布局：/usr/lib/chatgpt/ChatGPT（Electron 主体）优先于 /usr/bin/chatgpt（launcher 脚本），
+// 因为版本元数据与捆绑 Codex CLI 都在 resources/ 下；只查存在性，绝不执行 Desktop 本体。
+const DESKTOP_CANDIDATES = ['/usr/lib/chatgpt/ChatGPT', '/usr/bin/chatgpt', '/opt/ChatGPT/ChatGPT', '/usr/lib/chatgpt/codex-launcher', '/Applications/ChatGPT.app/Contents/MacOS/ChatGPT']
+
+// Desktop 安装内随包分发的 Codex CLI：只从已确认的 Desktop 目录推导，不接受任意路径。
+function bundledCodexCandidates (desktopPath) {
+  const dir = dirname(desktopPath)
+  return [
+    join(dir, 'resources', 'codex'),
+    join(dir, 'resources', 'codex', 'codex'),
+    join(dir, 'codex'),
+    join(dir, '..', 'resources', 'codex'),
+  ]
+}
 
 function expandHome (p) {
   if (p.startsWith('~/')) return join(homedir(), p.slice(2))
@@ -370,7 +383,7 @@ function probeCliVersion (binPath) {
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { PATH: process.env.PATH || '/usr/bin:/bin', HOME: process.env.HOME || '' },
     })
-    const m = /(\d+\.\d+\.\d+)/.exec(String(out || ''))
+    const m = /(\d+(?:\.\d+){2,3}(?:[-+][0-9A-Za-z.-]+)?)/.exec(String(out || ''))
     value = m ? { version: m[1], source: 'codex --version' } : { version: null, source: 'unparsed' }
   } catch {
     value = { version: null, source: 'probe_failed' }
@@ -382,19 +395,57 @@ function probeCliVersion (binPath) {
 const VERSION_TTL_MS = 5 * 60 * 1000
 const versionCache = new Map()
 
-// Desktop 二进制不执行（会拉起 GUI）：只从同目录的版本文件/package.json 读取，读不到就 unknown。
+// Desktop 二进制不执行（会拉起 GUI）：只从同目录的版本文件/包元数据读取，读不到就 unknown。
+// Linux 安装的版本在 resources/linux-package-metadata.json（纯文件读取，不需要也不允许执行 GUI）。
+const DESKTOP_VERSION_FILES = ['version', 'VERSION']
+const DESKTOP_VERSION_METADATA = [
+  ['resources', 'linux-package-metadata.json'],
+  ['resources', 'app', 'package.json'],
+  ['..', 'resources', 'app', 'package.json'],
+]
+
+function readDesktopVersionFile (candidate) {
+  if (!existsSync(candidate)) return null
+  const text = readFileSync(candidate, 'utf8')
+  if (candidate.endsWith('.json')) {
+    try {
+      const parsed = JSON.parse(text)
+      const version = parsed && (parsed.version || parsed.appVersion)
+      if (version) return { version: String(version), buildFlavor: parsed.codexBuildFlavor || parsed.buildFlavor || null }
+    } catch { /* 非法 JSON 视为没有版本，继续找下一个来源 */ }
+    return null
+  }
+  const m = /^\s*v?(\d+(?:\.\d+){2,3}(?:[-+][0-9A-Za-z.-]+)?)/m.exec(text)
+  return m ? { version: m[1], buildFlavor: null } : null
+}
+
 function probeDesktopVersion (binPath) {
   const cached = versionCache.get('desktop:' + binPath)
   if (cached && Date.now() - cached.at < VERSION_TTL_MS) return cached.value
   const dir = dirname(binPath)
-  let value = { version: null, source: 'not_read' }
-  for (const candidate of [join(dir, 'version'), join(dir, 'VERSION'), join(dir, 'resources/app/package.json'), join(dir, '..', 'resources/app/package.json')]) {
+  let runtime = null
+  let product = null
+  for (const name of DESKTOP_VERSION_FILES) {
     try {
-      if (!existsSync(candidate)) continue
-      const text = readFileSync(candidate, 'utf8')
-      const m = /"version"\s*:\s*"([^"]+)"/.exec(text) || /^v?(\d+\.\d+\.\d+)/m.exec(text)
-      if (m) { value = { version: m[1], source: basename(candidate) }; break }
-    } catch {}
+      const found = readDesktopVersionFile(join(dir, name))
+      if (found) { runtime = { version: found.version, source: basename(name) }; break }
+    } catch { /* 单个来源不可读不阻断其它来源 */ }
+  }
+  // Linux 包元数据是产品版本（如 26.1103.32239）；目录下 version 通常是运行时版本，两者都保留以便复核。
+  for (const parts of DESKTOP_VERSION_METADATA) {
+    try {
+      const candidate = join(dir, ...parts)
+      const found = readDesktopVersionFile(candidate)
+      if (found) { product = { version: found.version, source: basename(candidate), buildFlavor: found.buildFlavor }; break }
+    } catch { /* 单个来源不可读不阻断其它来源 */ }
+  }
+  const value = {
+    version: product ? product.version : (runtime ? runtime.version : null),
+    source: product ? product.source : (runtime ? runtime.source : 'not_read'),
+    versionKind: product ? 'package-metadata' : (runtime ? 'version-file' : null),
+    buildFlavor: product ? product.buildFlavor : null,
+    runtimeVersion: runtime ? runtime.version : null,
+    runtimeVersionSource: runtime ? runtime.source : null,
   }
   versionCache.set('desktop:' + binPath, { at: Date.now(), value })
   return value
@@ -441,10 +492,37 @@ export function detect (opts = {}) {
 
   const desktopEnvPath = String(opts.desktopPath || process.env.MG_DESKTOP_EXECUTABLE || '').trim()
   const desktop = existingPath(desktopEnvPath ? [desktopEnvPath, ...DESKTOP_CANDIDATES] : DESKTOP_CANDIDATES)
-  let desktopInfo = { found: desktop.found, path: desktop.path, version: null, versionState: desktop.found ? 'unknown' : 'not_found', source: null }
+  let desktopInfo = { found: desktop.found, path: desktop.path, version: null, versionState: desktop.found ? 'unknown' : 'not_found', source: null, buildFlavor: null, bundledCodex: { found: false, path: null, version: null, versionState: 'desktop_not_found', source: null } }
   if (desktop.found) {
-    const probed = opts.disableExec === true ? { version: null, source: 'exec_disabled' } : probeDesktopVersion(desktop.path)
-    desktopInfo = Object.assign(desktopInfo, { version: probed.version, versionState: probed.version ? 'known' : 'unknown', source: probed.source })
+    // 读取版本文件/包元数据不是执行 Desktop：即使 disableExec 也允许读取（只读、不拉起 GUI）。
+    const probed = probeDesktopVersion(desktop.path)
+    desktopInfo = Object.assign(desktopInfo, {
+      version: probed.version,
+      versionState: probed.version ? 'known' : 'unknown',
+      source: probed.source,
+      versionKind: probed.versionKind || null,
+      buildFlavor: probed.buildFlavor || null,
+      runtimeVersion: probed.runtimeVersion || null,
+      runtimeVersionSource: probed.runtimeVersionSource || null,
+    })
+
+    // Desktop 随包分发的 Codex CLI：优先于 PATH 里的独立 CLI 作为"原版客户端引擎"证据。
+    const bundled = existingPath(bundledCodexCandidates(desktop.path))
+    let bundledInfo = { found: bundled.found, path: bundled.path, version: null, versionState: bundled.found ? 'not_probed' : 'not_found', source: null }
+    if (bundled.found) {
+      // 捆绑 Codex CLI 来自已验证的 Desktop 安装目录，--version 不会拉起 GUI 也不写配置；
+      // 与 PATH 里来源不明的 CLI 不同，因此 disableExec 不阻止它，只有显式 false 才关闭。
+      if (opts.probeBundledCodex === false) {
+        bundledInfo.source = 'disabled'
+      } else if (typeof opts.probeBundledCodex === 'function') {
+        const probedBundled = opts.probeBundledCodex(bundled.path) || {}
+        bundledInfo = Object.assign(bundledInfo, { version: probedBundled.version || null, versionState: probedBundled.version ? 'known' : 'unknown', source: probedBundled.source || 'injected' })
+      } else {
+        const probedBundled = probeCliVersion(bundled.path)
+        bundledInfo = Object.assign(bundledInfo, { version: probedBundled.version, versionState: probedBundled.version ? 'known' : 'unknown', source: probedBundled.source })
+      }
+    }
+    desktopInfo.bundledCodex = bundledInfo
   }
 
   return {
@@ -461,6 +539,27 @@ export function detect (opts = {}) {
     }),
     cli: cliInfo,
     desktop: desktopInfo,
+    // 面向"原版 Desktop 用户路径"的单一探测摘要：优先使用 Desktop 随包 CLI 作为客户端引擎证据。
+    bundledCli: desktopInfo.bundledCodex,
+    client: {
+      kind: desktopInfo.found ? 'desktop' : (cliInfo.found ? 'cli' : 'unknown'),
+      desktopPath: desktopInfo.path,
+      desktopVersion: desktopInfo.version,
+      desktopVersionSource: desktopInfo.source,
+      desktopVersionKind: desktopInfo.versionKind || null,
+      desktopRuntimeVersion: desktopInfo.runtimeVersion || null,
+      desktopBuildFlavor: desktopInfo.buildFlavor || null,
+      bundledCodexPath: desktopInfo.bundledCodex.path,
+      bundledCodexVersion: desktopInfo.bundledCodex.version,
+      cliPath: cliInfo.path,
+      cliVersion: cliInfo.version,
+      // 明确区分"文件元数据"与"执行 --version"两种版本来源，证据可按来源复核。
+      versionEvidence: {
+        desktop: desktopInfo.version ? { source: desktopInfo.source, executed: false } : null,
+        bundledCodex: desktopInfo.bundledCodex.version ? { source: desktopInfo.bundledCodex.source, executed: desktopInfo.bundledCodex.source !== 'exec_disabled' } : null,
+        cli: cliInfo.version ? { source: cliInfo.source, executed: true } : null,
+      },
+    },
     state: state
       ? { mode: state.mode, appliedAt: state.appliedAt || null, appliedSha: state.appliedSha || null, lastApply: state.lastApply || null }
       : null,
