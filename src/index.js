@@ -603,6 +603,29 @@ function providerAuthDomain(prov) {
   return 'api-key'
 }
 
+// 受限订阅入口的请求整形（与生态实现一致：chatgpt.com/backend-api/codex 的硬约束）：
+//   · input 必须是 list（字符串需包成 user message）；
+//   · store 必须 false（后端拒绝 true）；
+//   · 删除 max_output_tokens / max_completion_tokens（后端不接受）；
+//   · 上游必须 stream（下游是否流式由网关自己决定）；
+//   · 删除重放的 reasoning 项（store=false 时后端不持久化）；
+//   · web_search_preview → web_search（后端内部工具名）。
+// 只改发往订阅后端的请求，不回写客户端 body，不影响其它路由。
+export function patchSubscriptionRequestBody(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return body
+  const out = Object.assign({}, body)
+  if (typeof out.input === 'string') out.input = [{ role: 'user', content: [{ type: 'input_text', text: out.input }] }]
+  if (Array.isArray(out.input)) out.input = out.input.filter((item) => !(item && item.type === 'reasoning'))
+  out.store = false
+  out.stream = true
+  delete out.max_output_tokens
+  delete out.max_completion_tokens
+  if (Array.isArray(out.tools)) {
+    out.tools = out.tools.map((tool) => (tool && tool.type === 'web_search_preview' ? Object.assign({}, tool, { type: 'web_search' }) : tool))
+  }
+  return out
+}
+
 // V2 真机实测（MG-R003/R008，2026-11-15）：Codex 0.167.0-alpha.3.2 会发 ChatGPT 专属参数，
 // 第三方 Responses 上游直接 400：
 //   reasoning.context（如 "all_turns"）、text.verbosity、include 里的 reasoning.encrypted_content。
@@ -1663,14 +1686,15 @@ async function proxyOfficialResponses(state, budget, log, opts) {
       }
       log && log.info('gateway_subscription', 'provider=' + pid, 'target=' + identity.host + upstreamPath, 'credential=local_codex_auth')
     } else {
-      const deny = targetDeny({ identity, provider: prov, cfg: state.cfg, path: upstreamPath, env: process.env })
+      const deny = targetDeny({ identity, provider: prov, cfg: state.cfg, path: upstreamPath, env: process.env, subscription: gatewaySubscription })
       if (deny) {
         log && log.warn('官方目标被拒绝', deny.code, pid)
         return jsonError(deny.status, deny.code, deny.message)
       }
     }
     const target = modelTarget(state.cfg, modelName, pid)
-    const payload = Buffer.from(JSON.stringify(Object.assign({}, body, { model: target.servingName })))
+    const outboundBody = gatewaySubscription ? patchSubscriptionRequestBody(body) : body
+    const payload = Buffer.from(JSON.stringify(Object.assign({}, outboundBody, { model: target.servingName })))
     let headers
     let dropped = []
     if (gatewaySubscription) {

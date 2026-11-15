@@ -23,6 +23,13 @@
 - `gate:audit-diff` 新增 `--all-commits`：对 `base..HEAD` 每个提交的自身 diff 跑反降级审计，堵住"同一 PR 内新增门禁/测试文件后再弱化"的 main-based 盲区。CI 已改用该模式。
 - 新增 `scripts/test/offline/gate-approvals.json`：门禁文件的历史改动必须有书面批准记录（approver + reason + sha），审计输出 `APPROVED` 行；该清单本身纳入受保护门禁文件，删除即 `gate-weakened`。
 
+### Added — 订阅承载（复用本机 Codex 登录，V2-REAL 2026-11-15）
+
+- `src/codex/auth.js`：新增受限订阅入口 `/backend-api/codex`——**只有** `providers.<id>.gatewaySubscription.enabled=true` 时允许（仍要求官方 host + loopback），凭据由网关只读本机 `~/.codex/auth.json`；`/v1` 直连仍按 F01 要求网关自有 key，客户端凭据透传保持退役。
+- `src/index.js`：`patchSubscriptionRequestBody()` 按订阅后端约束整形请求（input→list、`store:false`、`stream:true`、删 `max_output_tokens`/`max_completion_tokens`、删重放 reasoning、`web_search_preview`→`web_search`）。
+- `bin/mg-desktop.mjs`：检测到本机 Codex 登录时，父 provider 生成 `chatgpt.com` + `gatewaySubscription` 配置（与 cc-switch / codex-responses-proxy 同一做法）；无登录时保留应用自有 OAuth 路径。
+- 真机：网关直连 `gpt-6-luna` HTTP 200；产品路径（`mg-desktop configure` 生成的配置）真实 `gpt-6-luna` 父 + `go_deepseek` 子，子代理执行 `printf PRODUCT_CHILD_OK` 成功；同子追派复述第一次输出成立。
+
 ### Known Issue — 真实工具未执行（阻断 MG-R005/R006）
 
 - ~~真机实测：Codex 对第三方 Go 模型不下发工具定义~~ **已定位并修复（2026-11-15）**：根因是 `use_responses_lite:true`（完全无 tools）/`shell_type:disabled`（无 `exec_command`）/`tool_mode:"code_mode_only"`（只有 code-cell）——三者都是"抄官方 GPT 目录"带进来的字段。`buildCatalog()` 现对第三方 Responses 路由默认 `shell_type=unified_exec`、绝不写前两者、冲突 fail-closed。

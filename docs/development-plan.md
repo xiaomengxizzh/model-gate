@@ -309,3 +309,10 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 - 真实压缩链成立：`context compacted` 多次、压缩后 `exec_command` 真实执行（`marker-b.txt=POST_COMPACT_MARKER`）、压缩前输出 `BASE_OK` 仍能复述。
 - 关键阻断：应用侧 Codex 已把父模型 `gpt-6-luna` 指向 ModelGate（18787），但网关对官方目标返回 `403 official_no_gateway_key`（F01 退役凭据透传）→ 同一会话「套餐父 + Go 子」当前不成立，需所有者决策（网关自有 key / 受限订阅路径 / Codex 角色级 provider）。
 - 仍缺：真实原生父 spawn 子 Go 的 `same-child-followup`/`interrupt`/`no-duplicates`；原版 Desktop GUI 选模；`gpt-6-luna` 真实调用（本轮探针被拒，零费用）。
+
+### 订阅承载打通（2026-11-15 13:35）
+
+- 核实生态做法：codex-responses-proxy 读 `~/.codex/auth.json` 转发 `chatgpt.com/backend-api/codex`（含 refresh 与请求整形）；cc-switch 写配置；liteLLM 有 `chatgpt/*` provider。结论：可行，前提是网关自己持有订阅凭据，而非接收客户端凭据。
+- 实现：`auth.js` 受限订阅路径（仅显式 gatewaySubscription + loopback + 官方 host）；`index.js` 订阅请求整形；`bin/mg-desktop.mjs` 优先复用本机 Codex 登录。
+- 真机：`gpt-6-luna` 经网关 200；产品生成配置下真实父 `gpt-6-luna` + 子 `go_deepseek` 执行工具成功；同子追派与复述成立；原生父子两个 rollout（父 gpt-6-luna / 子 go 别名）。
+- 仍未做：`interrupt`/`no-duplicates` 真机用例；原版 Desktop GUI 选模与启停回滚演练。

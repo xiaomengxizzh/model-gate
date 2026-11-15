@@ -174,3 +174,38 @@ Go 推理：生成目录工具测试 1 次 + shell 变体 1 次 + workspace-writ
 - Go 推理：基线 1 轮 + 压缩轮 2 次 + 压缩后工具轮 3 次（含 compaction 调用）；tokens 合计约 65 万（含 22.4 万与 40.2 万两轮大头）。
 - GPT：`gpt-6-luna` 1 次探针，被 F01 拒绝（**零上游请求、零费用**）。
 - 无下载/安装；未改 `~/.codex` 与生产服务；应用侧网关仅临时启动后关闭。
+
+
+## 8. 订阅承载打通（2026-11-15 13:20–13:35）：按 cc-switch / codex-responses-proxy 的既有做法
+
+### 8.1 生态做法（已核实，非推测）
+
+| 项目 | 做法 |
+| --- | --- |
+| [codex-responses-proxy](https://github.com/David-Factor/codex-responses-proxy) | 读 `~/.codex/auth.json` 的 ChatGPT OAuth token → 转发 `https://chatgpt.com/backend-api/codex/responses`；过期用 refresh token 走 `https://auth.openai.com/oauth/token` 刷新并回写 0600；带 `ChatGPT-Account-ID`；请求整形：强制 `stream:true`、`store:false`、字符串 input→消息数组、删 `max_output_tokens`、删重放 reasoning 项、工具名重映射 |
+| [cc-switch](https://github.com/farion1231/cc-switch) | 不做代理：按端点协议生成 Codex 的 `auth.json`/`config.toml`（含 base_url/wire_api/模型）|
+| [liteLLM](https://docs.litellm.ai/docs/tutorials/openai_codex_byok) | 内置 `chatgpt/*` provider，用订阅凭据暴露 Responses 端点 |
+
+结论：**"同一会话套餐父 + 第三方子"不是不可行，而是必须让网关自己持有订阅凭据**（读本机登录态或应用授权），而不是接收客户端凭据。F01 退役的是后者，前者从未被真正禁止。
+
+### 8.2 本轮实现（受限、显式开关）
+
+- `src/codex/auth.js`：新增 `SUBSCRIPTION_PATH_PREFIXES = ['/backend-api/codex']`；**只有** `providers.<id>.gatewaySubscription.enabled === true` 时才允许该路径，且仍需官方 host + loopback；订阅入口不要求 provider key（凭据由网关只读本机登录态），`/v1` 直连仍保持 F01（必须网关自有 key）。未开该开关时，订阅路径一律 `official_path_not_allowlisted`。
+- `src/index.js`：订阅入口请求整形 `patchSubscriptionRequestBody()`（input→list、`store:false`、`stream:true`、删 `max_output_tokens`/`max_completion_tokens`、删重放 reasoning、`web_search_preview`→`web_search`）。
+- `bin/mg-desktop.mjs`：`configure()` 检测 `~/.codex/auth.json`（auth_mode=chatgpt 且有 access_token）→ 父 provider 写成 `https://chatgpt.com` + `/backend-api/codex/responses` + `gatewaySubscription:{enabled:true}`；没有本机登录时保留应用自有 OAuth（`grant.json` + api.openai.com）路径。
+
+### 8.3 真机结果（真实上游、真实计费）
+
+| 步骤 | 结果 |
+| --- | --- |
+| 网关直连 `gpt-6-luna`（订阅入口） | **HTTP 200 / 1.62s**，SSE `model:"gpt-6-luna"`，含 `LUNA_REAL_OK` |
+| 产品生成器 | `MG_DESKTOP_STATE=/tmp/mg-app-state node bin/mg-desktop.mjs configure` → provider `https://chatgpt.com` + gatewaySubscription + responsesPath；codex 配置含 `[agents.go_deepseek]` |
+| **产品路径父生子** | 真实 `gpt-6-luna` 父 + `go_deepseek` 子 → 子代理执行 `printf PRODUCT_CHILD_OK`，`product-child.txt=PRODUCT_CHILD_OK`，父代理回报该输出 |
+| 原生父子会话 | 两个 rollout：父 `gpt-6-luna`、子 `mg-opencodego-deepseek-v4-1-flash` |
+| 同子追派 | 同一子代理第二次任务成功（`child.txt` = `CHILD_REAL_OK` + `CHILD_SECOND_OK`），并复述第一次输出 |
+
+### 8.4 边界
+
+- 本机 `auth.json` 只读使用，未写入、未复制到仓库；`mtime` 保持 `2026-11-15 11:07` 之前，运行期间未变。
+- 仍未做：`interrupt` / `no-duplicates` 真机用例；原版 Desktop **GUI 选模**（本轮是 CLI 驱动同一份产品配置）；真实 GUI 的启停/回滚演练。
+- 应用自有 OAuth 路径（`grant.json`）本机不存在（未做过 `mg-desktop sign-in`），因此走的是"复用本机 Codex 登录"路径；两条路径都由开关/存在性决定，不静默互换。

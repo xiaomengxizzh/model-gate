@@ -18,7 +18,16 @@ const parentModel = 'gpt-6-luna'
 const childModel = 'deepseek-v4.1-flash'
 const parentProvider = 'chatgpt-plan'
 
+async function localCodexAuthAvailable() {
+  try {
+    const home = process.env.CODEX_HOME && String(process.env.CODEX_HOME).trim() !== '' ? String(process.env.CODEX_HOME).trim() : join(homedir(), '.codex')
+    const raw = JSON.parse(await readFile(join(home, 'auth.json'), 'utf8'))
+    return raw && raw.auth_mode === 'chatgpt' && !!(raw.tokens && raw.tokens.access_token)
+  } catch { return false }
+}
+
 async function configure() {
+  const localCodexAuth = await localCodexAuthAvailable()
   const cachedPath = process.env.MG_DESKTOP_MODELS || join(homedir(), '.codex/models_cache.json')
   const models = JSON.parse(await readFile(cachedPath, 'utf8')).models
   const original = models.find((item) => item.slug === parentModel)
@@ -39,7 +48,19 @@ async function configure() {
       timeout: { overallMs: 120000, firstByteMs: 60000, idleMs: 60000 },
     },
     providers: {
-      [parentProvider]: { baseUrl: 'https://api.openai.com', codexIdentity: 'official' },
+      // 官方父模型的两条授权路径（V2 真机结论）：
+      //  1) 应用自有 OAuth（grant.json，`mg-desktop sign-in`）→ api.openai.com + 注入 plan token；
+      //  2) **复用本机 Codex 登录态**（~/.codex/auth.json，与 cc-switch / codex-responses-proxy 同一做法）
+      //     → chatgpt.com/backend-api/codex + gatewaySubscription。凭据由网关自己只读读取，绝不透传客户端凭据。
+      // 本机已有 Codex 登录时默认走 (2)，用户无需再次登录；没有登录时才需要 sign-in 拿 (1)。
+      [parentProvider]: localCodexAuth
+        ? {
+          baseUrl: 'https://chatgpt.com',
+          codexIdentity: 'official',
+          responsesPath: '/backend-api/codex/responses',
+          gatewaySubscription: { enabled: true },
+        }
+        : { baseUrl: 'https://api.openai.com', codexIdentity: 'official' },
       opencodego: { baseUrl: 'https://opencode.ai/inference/go', pathPrefix: '/openai', api: 'openai', apiKeyEnv: 'OPENCODE_API_KEY' },
     },
     models: {

@@ -19,6 +19,10 @@ export const PASSTHROUGH_ENV = LEGACY_PASSTHROUGH_ENV
 // 官方端点允许的路径前缀：只保留 OpenAI API 直连（/v1/...）。
 // /backend-api/codex（ChatGPT 订阅后端）已随凭据透传一并移除——见 F01。
 export const OFFICIAL_PATH_PREFIXES = Object.freeze(['/v1/', '/v1'])
+// 受限订阅入口（V2-REAL）：只有 providers.<id>.gatewaySubscription.enabled === true 时才允许，
+// 且必须 loopback 监听 + loopback 客户端 + 官方 host。凭据由网关**自己**经 local-subscription 模块读取本机登录态，
+// 绝不透传客户端凭据（F01 对"客户端凭据透传"的退役仍然有效）。
+export const SUBSCRIPTION_PATH_PREFIXES = Object.freeze(['/backend-api/codex', '/backend-api/codex/'])
 
 // 凭据类：任何身份域都不得由 extraHeaders 注入/覆盖，第三方域也必须剥掉客户端带来的。
 export const CREDENTIAL_HEADERS = Object.freeze([
@@ -186,11 +190,17 @@ export function targetDeny(opts) {
     return deny('official_target_insecure_scheme', '官方目标必须走 https：' + host + '（当前 ' + (scheme || 'unknown') + '）。')
   }
   const pathname = safePathname(def.pathPrefix, o.path)
-  if (!OFFICIAL_PATH_PREFIXES.some((p) => pathname === p || pathname.startsWith(p.endsWith('/') ? p : p + '/'))) {
+  const subscriptionMode = o.subscription === true
+  const isSubscriptionPath = SUBSCRIPTION_PATH_PREFIXES.some((p) => pathname === p || pathname.startsWith(p))
+  if (isSubscriptionPath && !subscriptionMode) {
+    return deny('official_path_not_allowlisted', '订阅入口 /backend-api/codex 只在 providers.<id>.gatewaySubscription.enabled=true 时允许：' + pathname)
+  }
+  if (!isSubscriptionPath && !OFFICIAL_PATH_PREFIXES.some((p) => pathname === p || pathname.startsWith(p.endsWith('/') ? p : p + '/'))) {
     return deny('official_path_not_allowlisted', '官方目标路径不在白名单：' + pathname + '（允许 ' + OFFICIAL_PATH_PREFIXES.join(', ') + '）。')
   }
-  // F01：官方目标只认网关自有 key。无 key = 零发送，并给旧配置明确的迁移提示。
+  // F01：官方 /v1 直连只认网关自有 key。订阅入口由网关自持的本机登录态承载，不需要 provider key。
   const hasGatewayKey = !!provider.apiKey || identity.credential === 'provider-key'
+  if (subscriptionMode && isSubscriptionPath) return null
   if (!hasGatewayKey) {
     if (legacyPassthroughRequested(o.env)) {
       return deny('official_passthrough_retired', '客户端官方凭据透传（MG_CODEX_OFFICIAL_PASSTHROUGH + /backend-api/codex）已移除（F01）：官方目标必须配置网关自有 key。请删除该环境变量并为 provider 配置 apiKeyEnv 或面板 Key。')
