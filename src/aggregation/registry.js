@@ -18,6 +18,7 @@
 import { beginWrite, fingerprint, TARGET_CONFIG } from '../config-transaction.js'
 import { configPaths, loadConfig, readLocalConfigStrict, INLINE_CREDENTIAL_FIELDS } from '../router.js'
 import { isOpencodeGoHost } from '../codex/identity.js'
+import { V2_LEGACY_PROFILE, V2_PROFILE, providerPreset } from '../providers/opencode-go.js'
 
 export const REGISTRY_SCHEMA = 'modelgate.aggregation.provider/1'
 export const PROVIDER_KINDS = Object.freeze(['opencode-go', 'opencode-console', 'chatgpt-plan'])
@@ -103,6 +104,16 @@ function validateModelListUrl(raw, cfg) {
 // cfg 只用于白名单判定，不读 Key 值。
 export function normalizeProviderConfig(input, cfg = {}) {
   if (!isPlainObject(input)) reject('provider_invalid', 'addProvider 需要一个 provider 配置对象')
+  // GUI 可以用 `preset: 'opencode-go'` 只交凭据引用与名称；模板只给已登记位形，不猜第三方形状。
+  // 显式字段永远覆盖模板字段（用户/调用方优先）。
+  const presetId = input.preset == null ? '' : lower(input.preset)
+  const preset = presetId ? presetFor(presetId) : null
+  if (presetId && !preset) reject('provider_preset_unknown', '未知的 provider preset：' + String(input.preset))
+  const merged = preset ? Object.assign({}, preset, input) : input
+  if (preset && merged.kind !== preset.kind) {
+    reject('provider_preset_kind_mismatch', 'preset ' + presetId + ' 只用于 kind=' + preset.kind + '：' + String(merged.kind))
+  }
+  input = merged
   for (const field of Object.keys(input)) {
     if (SECRET_FIELDS.includes(field) && input[field] != null && input[field] !== '') {
       // 接受一个自己不会读取的字段 = 静默失败（上游会以未鉴权发送）。这里直接拒绝，
@@ -129,6 +140,16 @@ export function normalizeProviderConfig(input, cfg = {}) {
   const baseUrl = String(input.baseUrl == null ? '' : input.baseUrl).trim()
   if (!baseUrl) reject('provider_base_url_missing', 'provider.baseUrl 缺失')
   const { host } = validateBaseUrl(baseUrl, cfg)
+  // V2 单模型作用域：Go 默认 go-single-model（GUI/注册表新增即生效）；其它 kind 不使用该字段。
+  // legacy-full 只为历史记录/兼容测试保留，不是新交付路径。
+  const v2ScopeRaw = input.v2Scope == null || input.v2Scope === '' ? '' : lower(input.v2Scope)
+  if (v2ScopeRaw && v2ScopeRaw !== V2_PROFILE && v2ScopeRaw !== V2_LEGACY_PROFILE) {
+    reject('provider_v2_scope_invalid', 'provider.v2Scope 只能是 ' + V2_PROFILE + ' / ' + V2_LEGACY_PROFILE + '：' + String(input.v2Scope))
+  }
+  if (v2ScopeRaw && kind !== 'opencode-go') {
+    reject('provider_v2_scope_kind_unsupported', 'v2Scope 只对 kind=opencode-go 有意义：' + kind)
+  }
+  const v2Scope = kind === 'opencode-go' ? (v2ScopeRaw || V2_PROFILE) : null
   const api = input.api == null || input.api === '' ? 'openai' : String(input.api)
   if (api !== 'openai' && api !== 'responses') {
     reject('provider_api_unsupported', 'provider.api 只能是 openai/responses：' + api)
@@ -167,8 +188,23 @@ export function normalizeProviderConfig(input, cfg = {}) {
       pagination,
       enabled: input.enabled !== false,
       host,
+      ...(v2Scope ? { v2Scope } : {}),
     },
   }
+}
+
+// GUI / 文档共用的 provider 模板：只返回已登记位形与 V2 profile，不读凭据。
+export const PROVIDER_PRESETS = Object.freeze({
+  'opencode-go': providerPreset(),
+})
+
+export function presetFor(id) {
+  const key = lower(id)
+  return Object.prototype.hasOwnProperty.call(PROVIDER_PRESETS, key) ? PROVIDER_PRESETS[key] : null
+}
+
+export function listPresets() {
+  return Object.values(PROVIDER_PRESETS).map((p) => Object.freeze(Object.assign({}, p)))
 }
 
 function defaultName(kind) {
@@ -220,6 +256,8 @@ export function recordOf(id, entry) {
     pagination: agg.pagination || { style: 'auto' },
     enabled: agg.enabled !== false,
     host: agg.host || null,
+    // V2 单模型作用域 profile（Go 记录必有；其它 kind 为 null）。
+    v2Scope: agg.v2Scope || null,
     addedAt: agg.addedAt || null,
     updatedAt: agg.updatedAt || null,
     configured: true,
