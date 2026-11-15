@@ -230,7 +230,8 @@ export function invalidateProductStatus(reason) {
 
 export function setProductPhase(phase) {
   const next = phase == null ? null : String(phase)
-  if (next !== null && next !== 'conflict' && next !== 'write_in_progress') {
+  // 允许的写相位：冲突、写入中、等待授权确认（428 预览态由投影进入 preview_pending）。
+  if (next !== null && next !== 'conflict' && next !== 'write_in_progress' && next !== 'preview_pending') {
     throw new Error('unknown product phase: ' + phase)
   }
   productState.phase = next
