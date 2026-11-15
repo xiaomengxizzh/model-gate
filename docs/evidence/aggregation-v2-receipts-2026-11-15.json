@@ -131,5 +131,26 @@
       }
     },
     "note": "parent spawn_agent=1 / turn_aborted=1; 2 rollout files (parent+child); resume after interrupt OK"
+  },
+  "MG-R004": {
+    "status": "PASS_REAL",
+    "commitSha": "fb986eeb7341877c8e8017918abf2f2b90cd95bb",
+    "command": "MG_DESKTOP_SUBSCRIPTION_MODE=auto node bin/mg-desktop.mjs configure && node bin/mg-desktop.mjs launch  # 原版 GUI 内选 6 Luna / deepseek-v4.1-flash 各发一次",
+    "receipt": {
+      "traceId": "desktop-gui-2026-11-15-luna-fixed"
+    },
+    "realTarget": true,
+    "passedAllOnRealTarget": true,
+    "cases": {
+      "desktop-picker-gpt": {
+        "passed": true,
+        "receipt": "screenshot 06-luna-fixed-ok.png + SSE model=\"gpt-6-luna\""
+      },
+      "desktop-picker-deepseek": {
+        "passed": true,
+        "receipt": "screenshot + byModel mg-opencodego-deepseek-v4-1-flash 34,879 tokens"
+      }
+    },
+    "note": "原版桌面选择器双方可见；官方 gpt-6-luna 与 Go 模型各一次真实请求；历史 403 已修复（0c867fd）"
   }
 }

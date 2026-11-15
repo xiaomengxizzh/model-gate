@@ -1,4 +1,4 @@
-# ModelGate V2｜发布裁决（2026-11-15 深夜更新，被测树 `754a687`）
+# ModelGate V2｜发布裁决（2026-11-15 收尾，被测树 `75270d3`+GUI 复测 `fb986ee`）
 
 > **两个结论必须分开读**：门禁迁移（V2-00）**PASS**；产品发布**FAIL / 不可签收**。
 > 本文件是 Lead 对 A5 第五轮独立复核（`3dfd44a`）的登记，不替代 A5 原始证据，也不改变任何 `MG-R` 口径。
@@ -9,7 +9,7 @@
 | 维度 | 结论 | 依据 |
 | --- | --- | --- |
 | V2 门禁迁移（V2-00） | **PASS** | A5 第四轮复核：`gate:audit-diff --base main` 真实 PASS、空 diff fail-closed、`--replay` 不得放行、门禁模块/状态表哈希二次确认、`gate-weakened` 登记与单测 |
-| 产品发布 | **FAIL（不可签收）** | 见 §3 阻断清单（N04 已由所有者书面例外移出阻断） |
+| 产品发布 | **仍不可签收（但已无 FAIL 用例）** | 12 项中 6 项 `PASS_REAL`、6 项 `PASS_MOCK`；见 §3 |
 
 ## 2. 本轮实测结果（被测树 `754a687e11ac8c891ea14bb2d6cc8830f10eb089`）
 
@@ -28,8 +28,9 @@
 ## 3. 发布阻断（不得删除）
 
 1. **真实原生父生子已成立（已关闭）**：网关新增受限订阅承载（复用本机 Codex 登录 → `chatgpt.com/backend-api/codex`，仅显式 `gatewaySubscription` + loopback + 官方 host），真实 `gpt-6-luna` 父通过 `[agents.go_deepseek]` 派生真实 Go 子代理并执行工具；R002/R003/R005/R012 均已 `PASS_REAL`（绑 `754a687`）。
-2. **MG-R006 仍 `FAIL`**：`same-child-followup` 与 `post-compact-followup`/`context-proof` 已真实成立，但 `interrupt` 与 `no-duplicates` 未做真机用例。
-3. **原版 Desktop GUI 选模/启停/回滚未执行**（MG-R001/R004/R007 real `NOT_TESTED`/`BLOCKED`）：本轮为 CLI 驱动同一份产品配置，未打开 GUI、未做选择器操作。
+2. **MG-R006 已 `PASS_REAL`（已关闭）**：`interrupt`（工具执行中 SIGINT，父/子 `turn_aborted:1`、工具未完成、`spawn_agent:1`）与 `no-duplicates`（2 个会话来回复用、无第三个子会话）真机成立；`resume` 后继续用同一子代理。
+3. **原版 Desktop GUI 已真机验收（R004 `PASS_REAL`）**：隔离实例窗口 + 选择器双方可见（截图/DOM）+ 官方 `gpt-6-luna` 与 Go 模型各一次真实请求；官方路径 403 已由 `0c867fd`（仅 app 模式注入 chatgptPlan）修复并复测通过。
+4. **剩余 6 项 `PASS_MOCK`**：R001（Web 一键启停未操作，本轮走 launcher）、R007/R010（经 desktop-integration activate/deactivate 的导入/回滚链路未走）、R008/R009/R011（真实负向与双身份未执行）。
 4. **结构性残余**：伪造 evidence 绑当前 HEAD + 布尔批准仍可过门禁；真实性由 A5 真实回执与所有者审批兜底。
 4. **结构性残余（不可由仓库脚本消除）**：伪造 evidence 绑当前 HEAD + 所有者布尔批准仍可过门禁；真实性只能由 A5 真实回执与所有者审批兜底。哈希钉死与 `gate-approvals.json` 都是“可见的二次确认”，不是防篡改金库。
 
