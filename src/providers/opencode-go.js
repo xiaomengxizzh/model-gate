@@ -378,6 +378,238 @@ function redactBody(text) {
   return trimmed.replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-***').replace(/Bearer\s+[A-Za-z0-9._-]{8,}/gi, 'Bearer ***').replace(/eyJ[A-Za-z0-9._-]{8,}/g, '***')
 }
 
+// ===========================================================================
+// V2 单模型作用域（所有者 2026-11-14 决议：只强制支持 deepseek-v4.1-flash）
+//
+// 边界：
+//   - 本段只做**策略与身份判定**（纯函数），不发请求、不读文件、不写日志。
+//   - 「V2 profile」= `aggregation.v2Scope === 'go-single-model'`。GUI/注册表新增的 Go
+//     provider 默认写入该 profile；登记为 `legacy-full` 的历史记录保持 V1 全量目录行为
+//     （仅为兼容既有测试/历史配置，不是新交付路径，也不对外宣称支持）。
+//   - 越界模型**不静默丢弃**：一律进 `outOfScope` 显式清单并生成诊断，最终由目录发布层
+//     写进 `diagnostics`，可被 GUI/运维读到。
+// ===========================================================================
+
+export const V2_SCOPE_SCHEMA = 'modelgate.opencode-go.v2-scope/1'
+export const V2_PROFILE = 'go-single-model'
+export const V2_LEGACY_PROFILE = 'legacy-full'
+export const V2_TARGET_UPSTREAM_MODEL = DEFAULT_VENDOR_MODEL // 'deepseek-v4.1-flash'
+export const V2_TARGET_PUBLIC_ID = DEFAULT_ALIAS // 'mg-opencodego-deepseek-v4-1-flash'
+export const V2_TARGET_PROVIDER_SEGMENT = 'opencodego'
+export const V2_PUBLISHED_MODEL_LIMIT = 1
+// Go 入口位形默认值（与 ENTRIES.RESPONSES 同一绑定；GUI preset 不猜第三方形状）。
+export const GO_PRESET_BASE_URL = 'https://opencode.ai/inference/go/openai/v1'
+export const GO_PRESET_VERSION = 'go-v1'
+
+export const GO_READY_CODES = Object.freeze({
+  OK: null,
+  ENTRY: 'opencodego_entry_invalid',
+  HOST: 'opencodego_host_not_allowlisted',
+  CREDENTIAL: 'opencodego_credential_missing',
+  MODEL_OUT_OF_SCOPE: 'opencodego_model_out_of_scope',
+  MODEL_UNMAPPED: 'opencodego_model_unmapped',
+  SESSION: 'opencodego_session_missing',
+})
+
+// 稳定的 typed error：调用方按 `code` 分支，绝不靠 message 文本匹配。
+export class GoError extends Error {
+  constructor(code, message, details = {}) {
+    super(message)
+    this.name = 'GoError'
+    this.code = code
+    this.retryable = details.retryable === true
+    // V2 硬约束：Go 请求失败**绝不**换成别的模型或别的供应商（含 GPT）。
+    this.allowModelSwitch = false
+    this.allowProviderSwitch = false
+    this.details = Object.freeze(Object.assign({}, details))
+  }
+}
+
+export function typedError(code, message, details = {}) {
+  return new GoError(code, message, details)
+}
+
+// provider 记录（注册表 record 或运行时 buildProvider 产物）→ V2 profile 判定。
+export function v2ScopeOf(provider) {
+  const p = provider || {}
+  const agg = (p.aggregation && typeof p.aggregation === 'object' ? p.aggregation : null) ||
+    (p._def && p._def.aggregation && typeof p._def.aggregation === 'object' ? p._def.aggregation : null) || {}
+  const raw = lower(agg.v2Scope || p.v2Scope || (p._def && p._def.v2Scope) || '')
+  const enforced = raw === V2_PROFILE
+  return Object.freeze({
+    schema: V2_SCOPE_SCHEMA,
+    profile: enforced ? V2_PROFILE : V2_LEGACY_PROFILE,
+    enforced,
+    providerId: p.id == null ? null : String(p.id),
+    providerSegment: String(agg.providerSegment || p.providerSegment || V2_TARGET_PROVIDER_SEGMENT),
+    targetUpstreamModel: V2_TARGET_UPSTREAM_MODEL,
+    targetPublicId: V2_TARGET_PUBLIC_ID,
+    maxPublishedModels: enforced ? V2_PUBLISHED_MODEL_LIMIT : null,
+  })
+}
+
+// 快照模型列表 → 可发布子集 + **显式**越界清单。enforced=false 时原样返回（V1 历史行为）。
+export function applyV2ModelScope(models, provider) {
+  const scope = v2ScopeOf(provider)
+  const list = Array.isArray(models) ? models : []
+  const targetOf = (m) => String((m && m.upstreamId) || (m && m.id) || '')
+  if (!scope.enforced) {
+    return Object.freeze({ scope, enforced: false, published: list, outOfScope: [], targetPresent: list.some((m) => targetOf(m) === V2_TARGET_UPSTREAM_MODEL) })
+  }
+  const published = []
+  const outOfScope = []
+  for (const m of list) {
+    const upstreamId = targetOf(m)
+    if (upstreamId === V2_TARGET_UPSTREAM_MODEL) published.push(m)
+    else outOfScope.push(Object.freeze({ upstreamId, publicId: (m && m.publicId) || null }))
+  }
+  return Object.freeze({
+    scope,
+    enforced: true,
+    published,
+    outOfScope,
+    targetPresent: published.length === V2_PUBLISHED_MODEL_LIMIT,
+  })
+}
+
+// 公共 ID ↔ 真实模型 ↔ 出站 model 三者一致（请求级身份）。
+// 任何一项不一致都返回 ok:false；不“自愈”成别的名字。
+export function identityOf(model) {
+  const upstreamId = String((model && (model.upstreamId || model.model || model.id)) || '').trim()
+  const publicId = String((model && (model.publicId || model.slug)) || '').trim()
+  const expectedPublicId = upstreamId ? V2_TARGET_PUBLIC_ID : null
+  if (!upstreamId) return Object.freeze({ ok: false, code: GO_READY_CODES.MODEL_UNMAPPED, message: '缺少真实模型名' })
+  if (upstreamId !== V2_TARGET_UPSTREAM_MODEL) {
+    return Object.freeze({
+      ok: false,
+      code: GO_READY_CODES.MODEL_OUT_OF_SCOPE,
+      upstreamId,
+      publicId: publicId || null,
+      message: 'V2 只支持 ' + V2_TARGET_UPSTREAM_MODEL + '，收到 ' + upstreamId + '：不扩范围、不静默改走其他模型',
+    })
+  }
+  if (publicId && publicId !== expectedPublicId) {
+    return Object.freeze({
+      ok: false,
+      code: 'opencodego_public_id_mismatch',
+      upstreamId,
+      publicId,
+      expectedPublicId,
+      message: '公共 ID 与真实模型不一致：' + publicId + ' ≠ ' + expectedPublicId,
+    })
+  }
+  return Object.freeze({ ok: true, code: null, upstreamId, publicId: expectedPublicId, outboundModel: upstreamId })
+}
+
+// GUI「添加 Go Provider」的 provider 模板：只给已登记位形与 V2 profile，不猜形状。
+export function providerPreset(overrides = {}) {
+  return Object.freeze(Object.assign({
+    kind: 'opencode-go',
+    baseUrl: GO_PRESET_BASE_URL,
+    api: 'openai',
+    name: 'OpenCode Go',
+    opencodeGoVersion: GO_PRESET_VERSION,
+    v2Scope: V2_PROFILE,
+  }, overrides || {}))
+}
+
+// 目标模型在 `config.models` 里的条目模板（Codex 原生 Responses 路径）。
+// maxContext 不在这里编造：由发现快照/目录投影提供。
+export function targetModelConfig(overrides = {}) {
+  return Object.freeze(Object.assign({
+    provider: PROVIDER_ID,
+    api: 'responses',
+    upstreamModel: V2_TARGET_UPSTREAM_MODEL,
+    providerModels: Object.freeze({ [PROVIDER_ID]: V2_TARGET_UPSTREAM_MODEL }),
+    alias: Object.freeze([V2_TARGET_PUBLIC_ID]),
+  }, overrides || {}))
+}
+
+// 请求前就绪判定（纯函数，不读环境）：返回稳定 code，供 GUI/诊断显式呈现。
+//   input: { provider, cfg, grant, model, request, sessionPolicy }
+//   grant: { keyRef, hasCredential }（只判存在性，绝不回显值）
+//   sessionPolicy: 'derive'（默认）| 'client-required'
+export function readiness(input = {}) {
+  const p = input.provider || {}
+  const def = p._def || p
+  const cfg = input.cfg || {}
+  const scope = v2ScopeOf(p)
+  const entry = entryOf(def)
+  const fail = (code, message, details = {}) => Object.freeze(Object.assign({
+    ok: false, ready: false, code, message, scope,
+    retryable: false, allowModelSwitch: false, allowProviderSwitch: false,
+    checks: Object.freeze(Object.assign({}, details)),
+  }))
+  if (!entry.ok) return fail(entry.code, entry.message, { entry: entry.code })
+  const host = entry.host
+  const hostAllowed = isOpencodeGoHost(host, cfg) ||
+    (input.allowLoopback === true && (host === '127.0.0.1' || host === 'localhost' || host === '::1'))
+  if (!hostAllowed) return fail(GO_READY_CODES.HOST, 'Go 入口 host 不在白名单：' + String(host || '?'), { host })
+  if (entry.entry.legacy && input.allowLegacy !== true) {
+    return fail('opencodego_legacy_entry_denied', '遗留 Go 入口 /zen/go 与被授权的新绑定不是同一入口', { entry: entry.entry.binding })
+  }
+  const grant = input.grant || null
+  const hasCredential = !!(grant && (grant.hasCredential === true ||
+      (typeof grant.keyRef === 'string' && grant.keyRef && grant.keyRef !== 'none'))) ||
+    (typeof def.apiKey === 'string' && def.apiKey.length > 0) ||
+    (typeof def.apiKeyEnv === 'string' && def.apiKeyEnv.length > 0) ||
+    (def.keyRef !== undefined && def.keyRef !== null && def.keyRef !== '' && def.keyRef !== 'none')
+  if (!hasCredential) {
+    return fail(GO_READY_CODES.CREDENTIAL,
+      '没有任何 Go 凭据引用（keyRef/apiKeyEnv/apiKey）：不继承客户端/ChatGPT 凭据，也不静默换供应商',
+      { credential: 'missing' })
+  }
+  if (input.model !== undefined && input.model !== null) {
+    const id = identityOf({ upstreamId: String(input.model), publicId: input.publicId })
+    if (!id.ok) return fail(id.code, id.message, { model: id.upstreamId, expected: V2_TARGET_UPSTREAM_MODEL })
+  }
+  if (lower(input.sessionPolicy) === 'client-required') {
+    const req = input.request || {}
+    const headers = (req.headers && typeof req.headers === 'object') ? req.headers : {}
+    const pick = (name) => { const v = headers[name]; return Array.isArray(v) ? v[0] : v }
+    const thread = String(pick('thread-id') || pick('session-id') || pick('x-session-id') || pick('x-conversation-id') || '').trim()
+    if (!thread) {
+      return fail(GO_READY_CODES.SESSION, '会话策略要求客户端提供线程引用，但请求里没有：拒绝用跨请求常量冒充会话', { session: 'missing' })
+    }
+  }
+  return Object.freeze({
+    ok: true,
+    ready: true,
+    code: null,
+    message: null,
+    scope,
+    entry: Object.freeze({ binding: entry.entry.binding, path: entry.entry.path, kind: entry.entry.kind, url: entry.url }),
+    credential: Object.freeze({ present: true }),
+    checks: Object.freeze({ host, credential: 'present' }),
+    retryable: false,
+    allowModelSwitch: false,
+    allowProviderSwitch: false,
+  })
+}
+
+// 断言版：调用方需要“不满足就中止”时用。抛 GoError（带 code），不返回半可用状态。
+export function assertReady(input = {}) {
+  const r = readiness(input)
+  if (r.ok) return r
+  throw new GoError(r.code, r.message, { retryable: r.retryable, checks: r.checks })
+}
+
+// 上游失败策略：4xx 一律终结、不换模型/供应商；5xx 只允许同模型重试。
+// 与 decodeError 的输出合并，保证「错误可归因 + 无静默降级」同时成立。
+export function failurePolicy(status, bodyText, headers, opts = {}) {
+  const mapped = decodeError(status, bodyText, headers, opts)
+  const code = Number(status) || 0
+  const terminal = code >= 400 && code < 500 && code !== 408 && code !== 429
+  return Object.freeze(Object.assign({}, mapped, {
+    terminal,
+    allowModelSwitch: false,
+    allowProviderSwitch: false,
+    allowRetrySameModel: !mapped.retryable ? false : code >= 500 || code === 408 || code === 429,
+    fallback: 'forbidden',
+    model: opts.model || V2_TARGET_UPSTREAM_MODEL,
+  }))
+}
+
 // 流式终止判定：EOF 不能冒充成功；工具/正文已出帧后也不能当「未发送」。
 export function classifyStreamTerminal(events) {
   let sawFinish = false
