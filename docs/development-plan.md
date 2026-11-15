@@ -295,3 +295,10 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 - 真机缺陷与修复：Codex 发 `reasoning.context` / `text.verbosity` / `include:reasoning.encrypted_content` → Go 400；新增 `projectThirdPartyResponsesParams()`（仅非官方目标剔除 + 诊断），修复后通过。
 - 未通过：Codex 对第三方模型不下发工具（`tools: None`），模型输出 `<|DSML|>` 文本、工具未执行 → MG-R005 与 MG-R006 其余用例 FAIL；MG-R003 升 `PASS_REAL`。
 - 结论：`npm test` 114 套件 / 1110 用例；`gate:v2` 9/9；`matrix-v2 --check` PASS；独立套件 11/12（N04 已由所有者书面例外覆盖，下一轮复核应为 12/12）。
+
+### 真机工具下发修复与复测（2026-11-15 12:45）
+
+- A1 用真实 Codex 二进制 + 本地 mock 定位：`use_responses_lite:true` ⇒ 完全无 tools；`shell_type:disabled` ⇒ 无 `exec_command`；`tool_mode:"code_mode_only"` ⇒ 只有 code-cell exec/wait。三者均来自"抄官方 GPT 目录"。
+- 修复：`buildCatalog()` 对第三方 Responses 路由默认 `shell_type=unified_exec`，绝不写 `use_responses_lite`/`code_mode_only`，冲突 fail-closed，meta 记 `toolAccess` 证据；新增 `agg-v2-tool-declaration.test.mjs`（10 项）。
+- 真机复测（生成目录 + 真实 Go + `--sandbox workspace-write`）：`exec_command` 真实执行，`marker-real.txt=TOOL_REAL_OK`，0 行 DSML。压缩仍出现 `context compacted`；但 4000 token 夹具导致重复压缩与超时，压缩后追派未成立。
+- 状态：R003 `PASS_REAL`；R005/R006 仍 `FAIL`（缺真实父子 spawn 与压缩后追派证据）。

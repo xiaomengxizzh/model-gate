@@ -92,3 +92,38 @@ OpenCode Go 上游直接 400：`reasoning.context: this reasoning option require
 
 - 本轮真实调用：Go 推理 4 次（含 1 次截断探针与 1 次工具探针）+ Codex 四轮会话（1 轮工具形状排查）；GPT 调用 0 次。
 - 未下载/安装任何资源；未改 `~/.codex` 与生产服务；凭据未打印、未入库；`/tmp/mg-real-accept` 为一次性隔离目录。
+
+
+## 6. 追加实测：用 ModelGate **生成目录**修复工具下发（2026-11-15 12:35–12:45）
+
+### 6.1 根因（A1 用真实 Codex 二进制 + 本地 mock 定位，零付费）
+
+| ModelInfo 声明 | Codex 请求里的 tools |
+| --- | --- |
+| `use_responses_lite: true` | **完全没有 tools**（真机 `tools: None` 的根因）|
+| `shell_type: "disabled"` | 有 tools，但无 `exec_command` |
+| `tool_mode: "code_mode_only"` | 只有 code-cell `exec/wait`，无 `exec_command` |
+| `shell_type: "unified_exec"`（不写 tool_mode） | 9 个 tools，含 `exec_command` + `write_stdin` |
+
+这三个字段都是从**官方 GPT 目录抄 ModelInfo** 带进来的；本节起改用 `buildCatalog()` 生成目录。
+
+### 6.2 实测结果（真实 Go 上游 + 真实 Codex + 生成目录）
+
+| 步骤 | 结果 |
+| --- | --- |
+| `buildCatalog()` 生成的 Go 条目 | `slug=mg-opencodego-deepseek-v4-1-flash`、`shell_type=unified_exec`、`apply_patch_tool_type=freeform`、`auto_compact_token_limit=4000`（夹具）、无 `use_responses_lite`/`tool_mode` |
+| Codex 工具调用 | **成功**：`exec_command` 真实执行，`/tmp/mg-real-accept/marker-real.txt` 内容 `TOOL_REAL_OK`，输出 **0 行 DSML** |
+| 沙箱前提 | `codex exec --sandbox workspace-write`（默认 read-only 会拒绝写文件；这是客户端沙箱语义，不是网关缺陷）|
+| 压缩 | 第 2 轮出现 `context compacted`（Codex 自己压缩）；但夹具阈值 4000 过低时该轮出现**重复压缩（20 次）**并超时 —— 说明阈值必须取真实模型能力值，不可用过小夹具 |
+| 压缩后追派 / context-proof | **未成立**：该轮超时，未产出 `marker-after-compact.txt` |
+
+### 6.3 结论边界
+
+- `MG-R005 native-tools` / `MG-R006 native-tool`：真实目标上**工具执行成立**（有文件与命令回执）。
+- `MG-R005 native-child-thread-not-mcp`：仍需真实父 GPT 子 Go 的 spawn 回执，未测。
+- `MG-R006` 其余用例（`same-child-followup` / `interrupt` / `resume` / `post-compact-followup` / `context-proof` / `no-duplicates`）：未成立，整体仍 `FAIL`。
+- 下一次真机复测必须：① 用生成目录；② `auto_compact_token_limit` 取真实能力值（不要 4000 这类夹具）；③ `--sandbox workspace-write`；④ 两轮带工具 + 压缩 + 复述标记。
+
+### 6.4 本轮真机附加调用
+
+Go 推理：生成目录工具测试 1 次 + shell 变体 1 次 + workspace-write 工具测试 1 次 + 压缩复测 1 轮（超时）；GPT：0 次。
