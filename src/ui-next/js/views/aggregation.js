@@ -1,4 +1,8 @@
-// A3 / P03：聚合模式视图——一键接入原版 Codex Desktop、供应商与模型授权、诊断与无损退出。
+// A3 / P03 + A2 / UX-03：聚合详情视图——一键启停原版 Codex Desktop 接入、诊断与无损退出。
+//
+// UX-03（A2）整理：默认页面只保留结论、主操作与重启提示；SHA/备份/版本/原生压缩/
+// 供应商/模型/诊断长表统一收进「高级详情」折叠区（深链 #/aggregation 不变），
+// 并去掉 V1 的 Console 全量/自动发现全部模型话术——Go 默认 preset=opencode-go + DeepSeek V4.1 Flash。
 //
 // 约束（与 views/codex.js 一致）：
 //  * 纯前端、零依赖、不 import 后端模块；不读本地文件、不写 cookie/localStorage。
@@ -8,13 +12,17 @@
 //  * 409 冲突只展示三方差异，不覆盖用户改动；接口返回 404 时提示版本/实例原因，不假装成功。
 import { h } from '../dom.js'
 import {
-  pageHead, card, metric, tag, callout, empty, field, dialog, confirmDialog, toast, table, kvList,
+  pageHead, card, metric, tag, callout, empty, field, dialog, confirmDialog, toast, table, kvList, codeBlock,
 } from '../components.js'
 import { state } from '../store.js'
 import { request } from '../api.js'
 import { fmtTime, fmtInt, safeHost } from '../format.js'
 
 export const AGGREGATION_VIEW_CONTRACT = 'mg-ui-aggregation/1'
+
+// V2 唯一交付目标（来自产品契约）：面向用户只显示模型名，不要求理解公共 ID。
+export const GO_TARGET_LABEL = 'DeepSeek V4.1 Flash'
+export const GO_PROVIDER_PRESET = 'opencode-go'
 
 // ADR-0003 §5 的冻结 HTTP 面（本视图只使用这些路径）。
 export const AGGREGATION_ENDPOINTS = Object.freeze({
@@ -127,6 +135,7 @@ export function describeThreeWay (conflict) {
   return {
     available: true,
     rows,
+    raw: tw,
     summary: '接入后配置被外部修改：ModelGate 保留你的改动，不覆盖。基准 ' + (tw.base ? tw.base.sha256.slice(0, 8) : '—') +
       ' · 我们写入 ' + (tw.ours ? tw.ours.sha256.slice(0, 8) : '—') + ' · 当前 ' + (tw.theirs ? tw.theirs.sha256.slice(0, 8) : '—'),
     guidance: tw.guidance || '保持现状，先手工合并。',
@@ -248,7 +257,7 @@ function routeNotice (ctx) {
       h('button', { class: 'btn btn-sm', type: 'button', text: '重新探测', onclick: () => reload(ctx) })))
 }
 
-function statusCard (ctx) {
+function overviewCard (ctx) {
   const health = AGG.health || {}
   const detect = health.detect || health.desktop || {}
   const activation = health.activation || {}
@@ -256,14 +265,11 @@ function statusCard (ctx) {
   const m = modeLabel(mode)
   const restart = health.restart || activation.restart || null
   const rn = restartNotice(restart, mode)
-  const needsRestart = rn.needed
-  const compaction = health.nativeCompaction || detect.nativeCompaction || activation.nativeCompaction || null
-  const cn = nativeCompactionNotice(compaction)
   const backup = health.backup || activation.backup || { available: false }
   const canToggle = !AGG.routeMissing
   const button = mode === 'aggregated'
-    ? h('button', { class: 'btn btn-danger', type: 'button', disabled: !canToggle, text: '退出聚合模式', onclick: () => beginDeactivate(ctx) })
-    : h('button', { class: 'btn btn-primary', type: 'button', disabled: !canToggle, text: '进入聚合模式', onclick: () => beginActivate(ctx) })
+    ? h('button', { class: 'btn btn-danger', type: 'button', disabled: !canToggle, text: '退出并恢复', onclick: () => beginDeactivate(ctx) })
+    : h('button', { class: 'btn btn-primary', type: 'button', disabled: !canToggle, text: '启用聚合', onclick: () => beginActivate(ctx) })
 
   const body = h('div', null,
     callout('info',
@@ -273,6 +279,31 @@ function statusCard (ctx) {
       tag(m.label, m.kind),
       tag(AGG.health ? '网关 ' + (health.gateway && health.gateway.status ? 'HTTP ' + health.gateway.status : (health.gateway && health.gateway.ok ? '健康' : '未返回')) : '健康接口未返回', health.gateway && (health.gateway.ok !== false) ? 'good' : 'warn'),
       tag(rn.label, rn.tone)),
+    h('p', { class: 'hint', text: '目标模型固定为 ' + GO_TARGET_LABEL + '；日常接入请到「模型与账号」只填一个 OpenCode Go API Key，本页保留一键启停与高级诊断。' }),
+    h('p', { class: 'hint', text: '接入前备份：' + (backup.available ? ('可用 · ' + (backup.matches ? '与接入前快照一致' : '快照不一致（不可回滚）')) : '无（尚未接入，或接入前文件不存在）') }),
+    rn.needed
+      ? callout('warn', h('strong', { text: rn.label + '：' }), ' ' + rn.detail)
+      : callout('good', h('strong', { text: rn.label + '：' }), ' ' + rn.detail),
+    h('div', { class: 'toolbar', style: { marginTop: '10px' } },
+      button,
+      h('button', { class: 'btn', type: 'button', text: '模型与账号', onclick: () => { location.hash = '#/connections' } }),
+      h('button', { class: 'btn btn-sm', type: 'button', text: '重新检测', onclick: () => { AGG.fetched = false; loadAggregation(ctx) } })))
+
+  return card('聚合模式与 Desktop 接入',
+    '选择聚合模式后由 ModelGate 自动完成配置、备份与验证；退出时只回滚它自己改过的字节。',
+    body,
+    { foot: '契约 mg-codex-desktop/1 · 写入 = config.js 事务（sha256 + 备份 + 原子写 + 写后校验）· 浏览器不接触本地文件' })
+}
+
+// 技术长表（SHA / 备份 / 版本 / 原生压缩 / 上次结果）只在「高级详情」展开区渲染。
+function technicalDetails () {
+  const health = AGG.health || {}
+  const detect = health.detect || health.desktop || {}
+  const activation = health.activation || {}
+  const compaction = health.nativeCompaction || detect.nativeCompaction || activation.nativeCompaction || null
+  const cn = nativeCompactionNotice(compaction)
+  const backup = health.backup || activation.backup || { available: false }
+  return card('接入技术详情', 'SHA、备份、版本探测与原生压缩字段只在高级详情里展示。',
     kvList([
       ['配置路径', h('span', { class: 'mono-break', text: detect.configPath || health.configPath || '未返回' })],
       ['Codex CLI', h('div', { class: 'flex flex-wrap' }, versionCell(detect.cli), h('span', { class: 'hint', text: detect.cli && detect.cli.path ? detect.cli.path : '未检测到 codex 可执行文件' }))],
@@ -283,15 +314,7 @@ function statusCard (ctx) {
       ['接入前备份', backup.available ? h('span', { class: 'mono-break', text: (backup.path || '') + ' · ' + (backup.matches ? '与接入前快照一致' : '快照不一致（不可回滚）') }) : h('span', { class: 'muted', text: '无（尚未接入，或接入前文件不存在）' })],
       ['最近一次结果', activation.lastApply ? h('span', { text: (activation.lastApply.ok ? '成功' : '失败 · ' + (activation.lastApply.code || '未知')) + (activation.lastApply.at ? ' · ' + fmtTime(activation.lastApply.at) : '') }) : h('span', { class: 'muted', text: '尚无记录' })],
     ]),
-    needsRestart
-      ? callout('warn', h('strong', { text: rn.label + '：' }), ' ' + rn.detail)
-      : callout('good', h('strong', { text: rn.label + '：' }), ' ' + rn.detail),
-    h('div', { class: 'toolbar', style: { marginTop: '10px' } }, button))
-
-  return card('聚合模式与 Desktop 接入',
-    '选择聚合模式后由 ModelGate 自动完成配置、备份与验证；退出时只回滚它自己改过的字节。',
-    body,
-    { foot: '契约 mg-codex-desktop/1 · 写入 = config.js 事务（sha256 + 备份 + 原子写 + 写后校验）· 浏览器不接触本地文件' })
+    { foot: '来源 GET /api/aggregation/health · 原始投影与诊断长表仅在展开后出现' })
 }
 
 function providerRowActions (provider, ctx) {
@@ -313,7 +336,7 @@ function providersCard (ctx) {
     state: p.discoveryState || p.state || 'unknown',
     actions: providerRowActions(p, ctx),
   }))
-  const add = h('button', { class: 'btn btn-primary', type: 'button', text: '添加 OpenCode 供应商', onclick: () => openProviderDialog(ctx) })
+  const add = h('button', { class: 'btn btn-primary', type: 'button', text: '手工注册供应商（高级）', onclick: () => openProviderDialog(ctx) })
   const body = rows.length
     ? h('div', null,
       table([
@@ -327,9 +350,10 @@ function providersCard (ctx) {
       ], rows),
       h('div', { class: 'toolbar', style: { marginTop: '10px' } }, add))
     : h('div', null,
-      empty('还没有添加聚合供应商', '添加 OpenCode Console 或 OpenCode Go 后，ModelGate 会自动发现该账号授权范围内的全部模型。',
-        h('button', { class: 'btn btn-primary', type: 'button', text: '添加第一个供应商', onclick: () => openProviderDialog(ctx) })))
-  return card('聚合供应商', '每个供应商独立授权域；同步只读取目录，不发起推理。',
+      empty('还没有注册聚合供应商', '在「模型与账号」只填一个 OpenCode Go API Key 即可自动注册并同步目标模型 ' + GO_TARGET_LABEL + '；这里是高级手工入口。',
+        h('button', { class: 'btn btn-primary', type: 'button', text: '去连接 OpenCode Go', onclick: () => { location.hash = '#/connections' } }),
+        h('button', { class: 'btn', type: 'button', text: '手工注册供应商（高级）', onclick: () => openProviderDialog(ctx) })))
+  return card('聚合供应商', '每个供应商独立授权域；同步只读取目录，不发起推理。目标模型固定为 ' + GO_TARGET_LABEL + '。',
     AGG.providersError ? callout('danger', h('strong', { text: '供应商列表读取失败：' }), AGG.providersError.message || '未知错误') : body,
     { foot: '来源 GET /api/aggregation/providers · ' + (AGG.loadedAt ? '读取于 ' + fmtTime(AGG.loadedAt) : '尚未读取') })
 }
@@ -402,55 +426,70 @@ function diagnosticsCard () {
 }
 
 // —— 交互 ——
+// 高级手工入口：默认 Go preset（普通用户请走「模型与账号」的单 Key 向导）。
 function openProviderDialog (ctx) {
-  const idInput = h('input', { type: 'text', autocomplete: 'off', placeholder: '例如 opencode-console' })
   const kindSelect = h('select', null,
-    h('option', { value: 'console', text: 'OpenCode Console' }),
-    h('option', { value: 'go', text: 'OpenCode Go' }))
+    h('option', { value: 'opencode-go', text: 'OpenCode Go（默认，' + GO_TARGET_LABEL + '）' }),
+    h('option', { value: 'opencode-console', text: 'OpenCode Console（历史授权域）' }))
+  const idInput = h('input', { type: 'text', autocomplete: 'off', placeholder: '留空由 preset 生成' })
   const baseInput = h('input', { type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: 'https://…（供应商端点，不含 Key）' })
   const envInput = h('input', { type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: '例如 OPENCODE_API_KEY（只填变量名）' })
   const err = h('p', { class: 'field-error', role: 'alert' })
-  const save = h('button', { class: 'btn btn-primary', type: 'button', text: '添加并发现' })
+  const save = h('button', { class: 'btn btn-primary', type: 'button', text: '注册并同步' })
+  const idField = field('供应商 ID', idInput, { help: 'Go preset 会生成固定段；自定义 ID 必须与类型匹配。' })
+  const baseField = field('端点', baseInput, { help: '必须是 http(s) 且属于 OpenCode 白名单；不要把 Key 写进 URL。' })
+  const envField = field('apiKeyEnv', envInput, { help: '环境变量名，不是 Key 值。' })
+  const syncFields = () => {
+    const isGo = kindSelect.value === 'opencode-go'
+    idField.hidden = isGo
+    baseField.hidden = isGo
+  }
+  kindSelect.addEventListener('change', syncFields)
+  syncFields()
   const content = h('div', null,
-    callout('info', h('strong', { text: '授权仍由你完成：' }), ' 这里只登记供应商与凭据变量名，不会代你登录，也不会回显 Key。'),
-    field('供应商 ID', idInput, { help: '唯一配置键；保存后作为 providerId。' }),
-    field('类型', kindSelect, { help: 'Console 与 Go 使用不同的授权域，不能互相替代。' }),
-    field('端点', baseInput, { help: '必须是 http(s) 地址；不要把 Key 写进 URL。' }),
-    field('apiKeyEnv', envInput, { help: '环境变量名，不是 Key 值。' }),
+    callout('info', h('strong', { text: '这是高级手工入口：' }), ' 普通接入请到「模型与账号」只填一个 OpenCode Go API Key。这里只登记供应商与凭据变量名，不会代你登录，也不会回显 Key。'),
+    callout('warn', h('strong', { text: '默认 Go 位形：' }), ' 选择 OpenCode Go 时使用已登记 preset（端点 / 名称 / 单模型作用域由服务端补全），不需要手填 URL。目标模型固定为 ' + GO_TARGET_LABEL + '。'),
+    field('类型', kindSelect, { help: 'Go 与 Console 使用不同的授权域，不能互相替代。' }),
+    idField,
+    baseField,
+    envField,
     err)
-  const d = dialog({ title: '添加 OpenCode 供应商', desc: '保存会推进 configVersion；冲突返回 409，不会覆盖其它窗口的修改。', content, actions: [
+  const d = dialog({ title: '手工注册聚合供应商（高级）', desc: '保存会推进 configVersion；冲突返回 409，不会覆盖其它窗口的修改。', content, actions: [
     h('button', { class: 'btn', type: 'button', text: '取消', onclick: () => d.close() }), save,
   ] })
   save.addEventListener('click', async () => {
     err.textContent = ''
-    const id = idInput.value.trim()
-    const baseUrl = baseInput.value.trim()
-    const problems = []
-    if (!id) problems.push('供应商 ID 不能为空')
-    if (!/^https?:\/\//i.test(baseUrl)) problems.push('端点必须以 http:// 或 https:// 开头')
-    if (problems.length) { err.textContent = problems.join('；'); return }
+    const isGo = kindSelect.value === 'opencode-go'
+    const body = { configVersion: Number(state.config && state.config.configVersion) || 0 }
+    if (isGo) {
+      body.preset = GO_PROVIDER_PRESET
+      if (idInput.value.trim()) body.id = idInput.value.trim()
+      if (baseInput.value.trim()) body.baseUrl = baseInput.value.trim()
+    } else {
+      const id = idInput.value.trim()
+      const baseUrl = baseInput.value.trim()
+      const problems = []
+      if (!id) problems.push('供应商 ID 不能为空')
+      if (!/^https?:\/\//i.test(baseUrl)) problems.push('端点必须以 http:// 或 https:// 开头')
+      if (problems.length) { err.textContent = problems.join('；'); return }
+      body.id = id
+      body.kind = 'opencode-console'
+      body.baseUrl = baseUrl
+    }
+    if (envInput.value.trim()) body.apiKeyEnv = envInput.value.trim()
     save.disabled = true
-    save.textContent = '保存中…'
+    save.textContent = '注册中…'
     try {
-      await request(AGGREGATION_ENDPOINTS.providers, {
-        method: 'POST',
-        body: {
-          id,
-          kind: kindSelect.value,
-          baseUrl,
-          apiKeyEnv: envInput.value.trim(),
-          configVersion: Number(state.config && state.config.configVersion) || 0,
-        },
-      })
+      await request(AGGREGATION_ENDPOINTS.providers, { method: 'POST', body })
       d.close()
-      toast('供应商已添加，正在发现模型', 'success')
+      toast('供应商已注册；可以同步模型目录了', 'success')
       await reload(ctx)
     } catch (e) {
       save.disabled = false
-      save.textContent = '添加并发现'
-      if (e && e.status === 409) err.textContent = '配置版本冲突（服务端版本 ' + (e.currentVersion == null ? '未知' : e.currentVersion) + '）：请刷新后重试，本页不会覆盖。'
-      else if (e && e.status === 428) err.textContent = '添加供应商需要一次显式确认；请刷新后重试。'
-      else err.textContent = '添加失败：' + (e && e.message ? e.message : '未知错误')
+      save.textContent = '注册并同步'
+      if (e && e.status === 409) err.textContent = '配置版本冲突或供应商已存在（服务端版本 ' + (e.currentVersion == null ? '未知' : e.currentVersion) + '）：请刷新后重试，本页不会覆盖。'
+      else if (e && e.status === 428) err.textContent = '注册供应商需要一次显式确认；请刷新后重试。'
+      else err.textContent = '注册失败：' + (e && e.message ? e.message : '未知错误')
     }
   })
 }
@@ -588,6 +627,9 @@ function showThreeWay (conflict, ctx) {
         { label: '当前内容', render: (r) => h('span', { class: 'mono-break', text: r.text || '' }) },
       ], tw.rows)
       : empty('没有可展示的行级差异', tw.summary),
+    h('details', { class: 'advanced' },
+      h('summary', { text: '三方差异原始投影（技术）' }),
+      codeBlock(JSON.stringify(tw.raw || {}, null, 2))),
     h('p', { class: 'hint', text: tw.guidance }))
   const d = dialog({ title: '配置冲突（409）· 未写入', desc: '先手工合并，再重新检测；本对话框没有“强制覆盖”。', wide: true, content: body, actions: [
     h('button', { class: 'btn', type: 'button', text: '关闭', onclick: () => d.close() }),
@@ -619,14 +661,24 @@ async function beginDeactivate (ctx) {
   }
 }
 
+function advancedSection (ctx) {
+  return h('details', { class: 'advanced' },
+    h('summary', { text: '高级详情（技术长表与诊断）' }),
+    h('p', { class: 'hint', text: '默认页面只给结论与下一步；SHA、备份路径、版本探测、原生压缩字段、供应商/模型/诊断长表都在这里展开。' }),
+    technicalDetails(),
+    providersCard(ctx),
+    modelsCard(),
+    diagnosticsCard())
+}
+
 export function render (root, ctx = {}) {
   if (!AGG.fetched && !AGG.loading) loadAggregation(ctx)
   const loading = !AGG.fetched && AGG.loading
-  root.append(pageHead('聚合模式', '一次点击把官方 Codex 与 OpenCode 模型放进同一个 Desktop 模型选择器；自动配置、备份、验证与无损退出。', {
-    eyebrow: 'AGGREGATION / DESKTOP',
+  root.append(pageHead('聚合详情', '高级诊断与一键启停。日常接入请到「模型与账号」只填一个 OpenCode Go API Key；本页保留完整技术证据与无损退出。', {
+    eyebrow: 'AGGREGATION / ADVANCED',
     actions: [
       h('button', { class: 'btn', type: 'button', text: '重新检测', onclick: () => { AGG.fetched = false; loadAggregation(ctx) } }),
-      h('button', { class: 'btn', type: 'button', text: '上游供应商', onclick: () => { location.hash = '#/providers' } }),
+      h('button', { class: 'btn btn-primary', type: 'button', text: '模型与账号', onclick: () => { location.hash = '#/connections' } }),
     ],
   }))
   if (loading) {
@@ -643,12 +695,10 @@ export function render (root, ctx = {}) {
     metric('供应商', AGG.providers ? fmtInt((Array.isArray(AGG.providers) ? AGG.providers : (AGG.providers.providers || [])).length) : '未知', '来自聚合注册表', 'plus'),
     metric('模型（口径见下）', summarizeDiscovery(AGG.diagnostics, AGG.models).countText || '未知', '部分/失败时不显示为全量', 'probe'),
     metric('备份', AGG.health && AGG.health.backup && AGG.health.backup.available ? '可用' : '无', '接入前字节快照', 'key')))
-  root.append(statusCard(ctx))
-  root.append(providersCard(ctx))
-  root.append(modelsCard())
-  root.append(diagnosticsCard())
+  root.append(overviewCard(ctx))
   root.append(callout('warn',
     h('strong', { text: '本页不冒充真实验收：' }),
     ' UI 只能证明接口返回与配置事务成功；原版 Desktop 模型选择器是否出现全部模型、每个模型是否落到正确供应商，必须在真实 GUI 中按交付报告的手动脚本核对（PASS_MOCK ≠ PASS_REAL）。'))
+  root.append(advancedSection(ctx))
   root.append(h('p', { class: 'page-note', text: '数据来源：' + AGGREGATION_ENDPOINTS.health + ' / providers / models / diagnostics；操作走 activate / deactivate。读取于 ' + (AGG.loadedAt ? fmtTime(AGG.loadedAt) : '—') + '。' }))
 }
