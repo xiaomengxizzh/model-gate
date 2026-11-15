@@ -11,6 +11,17 @@
 - **真实客户端压缩实测（回环上游，零额度）**：用原版 Desktop 捆绑的 `codex-cli 0.167.0-alpha.3.2` 在隔离 `CODEX_HOME` 下实测——声明 `remote_compaction="unsupported"` 时 Codex 走自己的本地压缩（`CONTEXT CHECKPOINT COMPACTION` 提示原样到达上游、压缩后追派成功）；声明 `"v2"` 时发 `{type:"compaction_trigger"}` 并要求上游返回 `compaction` 输出项。据此网关显式识别 `compaction_trigger`：仅 `codex-owned-remote` 路由透传，其余 `native_compaction_route_not_ready`。证据 `docs/evidence/aggregation-v2-native-compaction-real-client-2026-11-15.md`，回放回归 `agg-v2-real-client-compaction.test.mjs`。
 - **原生压缩归属声明**（A1）：`codex.nativeCompaction ∈ {codex-owned-local, codex-owned-remote, unsupported}` 与 `history.compaction:"preserve"`；密文压缩项仅在声明支持时原样透传，未声明/不匹配返回 typed 错误，`drop` 仍是显式有损路径；`context_compaction` 显式分类；目录支持 `auto_compact_token_limit` 且拒绝超过上下文窗口的取值。
 
+### Added — 真实验收首轮（所有者授权，2026-11-15）
+
+- **真实 Go 推理 PASS_REAL**：真实 `OPENCODE_API_KEY` + `deepseek-v4.1-flash` 经网关 HTTP 200（`model` 回写、`billing_source=go`、usage 71 tokens）；公共别名 `mg-opencodego-deepseek-v4-1-flash` 同样可路由并按别名回写。
+- **真实 Codex 原生压缩（Go 模型）**：真实 `codex exec` + `exec resume` 两轮，客户端输出 `context compacted`，压缩由 Codex 自己执行、网关只转发。
+- **`projectThirdPartyResponsesParams()`**：对非官方 Responses 目标剔除 ChatGPT 专属参数 `reasoning.context`、`text.verbosity`、`include:reasoning.encrypted_content`（真机 400 实测），并写诊断；官方目标逐字节透传。回归 `agg-v2-third-party-params.test.mjs`。
+- **N04 所有者书面例外**：所有者批准保留 `history/export` 迁移导出（非压缩/摘要、不参与请求组装、原件不变、不得用于满足 MG-R006），边界写入 V2 契约。
+
+### Known Issue — 真实工具未执行（阻断 MG-R005/R006）
+
+- 真机实测：Codex 对第三方 Go 模型**不下发工具定义**（请求体 `tools: None`，三种 catalog `tool_mode` 变体一致），模型因无工具而输出 `<|DSML| invoke …>` 文本，客户端不执行。网关直连 Go 的 `function_call` 翻译本身正常（探针返回结构化 `exec_command`）。定位下一步：ModelGate 生成目录需给出正确的 `tool_mode`/工具能力声明。
+
 ### Security — 门禁反降级（A5 最终复核 N1/N2/N4/N5）
 
 > 追加修复（A5 复核 `d41da77` 后在 `gate:audit-diff` 上实测到自注释误报）：`skipped-as-passed` 排除注释/纯字符串行；`audit-diff` 拒绝空变更集（base 解析到 HEAD 即失败）并打印 finding 的 `subject`；`--replay` 结果显式带 `replay:true` + `releaseEligible:false` 且永不 `ready:true`；门禁模块整体与 V2 状态表逐行钉 sha256（等行数改写必须二次确认）。

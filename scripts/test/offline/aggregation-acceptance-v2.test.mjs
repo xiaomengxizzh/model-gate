@@ -188,7 +188,7 @@ test('历史迁移导出不得进入模型请求路径（非压缩/摘要路径�
 // 这里分别钉住「整个门禁模块」与「状态表逐行内容」的 sha256：
 // 任何语义改动都必须同时改这两个哈希，形成两次可见的修改，而不是悄悄换一个 true/false。
 const PINNED_GATE_MODULE_SHA = 'c6fe1ef39596a8c68b6d492f4b4fdf2038a018fb6a5d9c352b5ed63f46d4b31a'
-const PINNED_STATUS_TABLE_SHA = '6f29fa9e597a6fda69beac63857860c2d8faab76925f003f86c2ceb22305600b'
+const PINNED_STATUS_TABLE_SHA = '26232a111a7f1689b0474fe8b1738d16f81aac74de534abaab2c872ec7b4a4d1'
 
 test('门禁模块整体钉死 sha256（等行数语义削弱必须显式二次确认）', () => {
   const src = readFileSync(new URL('scripts/test/offline/aggregation-gate-v2.js', ROOT), 'utf8')

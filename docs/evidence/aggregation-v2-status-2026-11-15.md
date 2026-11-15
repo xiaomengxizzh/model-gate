@@ -20,10 +20,10 @@
 | --- | --- | --- |
 | MG-R001 | `PASS_MOCK` | 一键接入/退出、写前预览、409 冲突、回滚、重启判定、客户端版本探测均有离线测试（`agg-desktop-activate.test.mjs`、`agg-desktop-rollback.test.mjs`、`agg-desktop-ui.test.mjs`、`agg-v2-desktop-detect.test.mjs`、`agg-v2-desktop-restart.test.mjs`、`agg-v2-desktop-ui.test.mjs`）；V2 当前树未在真实 Desktop 执行 |
 | MG-R002 | `PASS_MOCK` | 授权域隔离与订阅收据离线通过（`agg-auth-resolve.test.mjs`、`agg-auth-subscription.test.mjs`、`agg-auth-receipt.test.mjs`、`codex-target-authz.test.mjs`）；真实 Desktop 登录/登出切换未执行 |
-| MG-R003 | `PASS_MOCK` | V2 只要求 OpenCode Go `deepseek-v4.1-flash`：目录只发布该模型、越界模型进 outOfScope 诊断、公共 ID↔出站 model 请求级身份、SSE/工具保真由 `agg-v2-go-catalog.test.mjs`、`agg-v2-go-routing.test.mjs`、`agg-v2-go-stream.test.mjs` 与 `agg-discovery-catalog.test.mjs` 覆盖；真实 Go 授权与推理未在 V2 当前树执行 |
+| MG-R003 | `PASS_REAL` | 真实 Go 授权 + `deepseek-v4.1-flash` 推理 HTTP 200（`model` 回写、`billing_source=go`、usage 71 tokens）；公共别名 `mg-opencodego-deepseek-v4-1-flash` 也在同一实测中路由成功并按别名回写；离线目录/请求身份回归由 `agg-v2-go-catalog.test.mjs`、`agg-v2-go-routing.test.mjs` 覆盖。回执与被测树见 [真实验收记录](aggregation-v2-real-acceptance-2026-11-15.md)，绑定树 `2645b8f29d2a5ac31302300f56830d3222ae349c`；取代 PASS_MOCK @ docs/evidence/aggregation-integration-2026-11-14.md；取代 PASS_MOCK @ docs/evidence/agg-p01-opencode-discovery-2026-11-14.md |
 | MG-R004 | `NOT_TESTED` | 原版 Codex Desktop 模型选择器未实际操作；不得用本项目 Web 控制台或 CLI 结果冒充 |
 | MG-R005 | `PASS_REAL` | 真实原生父子代理（父 GPT、子 Go DeepSeek）回执见于旧树 `67b97354ad28a3924607b35a663801f417f14b8e`；**V2 当前树未复测**；离线协议侧由 `agg-native-invariants.test.mjs`、`agg-native-wait.test.mjs` 覆盖；取代 PASS_MOCK @ docs/evidence/aggregation-integration-2026-11-14.md |
-| MG-R006 | `FAIL` | 真实触发 Codex 原生压缩时返回 `unsupported_input_item`（compaction）；离线协议侧已实现「声明支持才原样透传，否则 typed 拒绝」（`agg-v2-compaction-protocol.test.mjs`）且 Desktop 配置已能声明 provider 级 `remote_compaction=unsupported`（`agg-v2-desktop-compaction.test.mjs`），真实 Codex 客户端（0.167.0-alpha.3.2）+ 回环上游已证明 Codex 会走自己的本地压缩且网关只透传（`agg-v2-real-client-compaction.test.mjs`，PASS_MOCK），但 V2 的 `native-compaction` / `post-compact-followup` / `context-proof` 仍需在**真实 Go DeepSeek 子代理**上通过，故旧树 PASS_REAL 不得继承；保留原失败记录不删改；取代 PASS_REAL @ docs/evidence/aggregation-native-real-2026-11-14.md；取代 NOT_TESTED @ docs/evidence/aggregation-integration-2026-11-14.md |
+| MG-R006 | `FAIL` | `native-compaction` 子用例已在真实 Go 模型上观测到 `context compacted`（原生压缩 native compaction 由 Codex 自己执行）；但 Codex 未向该模型下发工具定义（`tools: None`），工具/追派/压缩后上下文用例无法成立 → 整体 `FAIL`。历史失败 `unsupported_input_item` 保留不删改。离线协议与配置声明见 `agg-v2-compaction-protocol.test.mjs`、`agg-v2-desktop-compaction.test.mjs`；真实客户端 + 回环上游回放见 `agg-v2-real-client-compaction.test.mjs`（PASS_MOCK）；真实缺口见 [真实验收记录](aggregation-v2-real-acceptance-2026-11-15.md) §2.4。旧树 PASS_REAL 不得继承；保留原失败记录不删改；取代 PASS_REAL @ docs/evidence/aggregation-native-real-2026-11-14.md；取代 NOT_TESTED @ docs/evidence/aggregation-integration-2026-11-14.md |
 | MG-R007 | `PASS_MOCK` | 预览/备份/原子写/回滚/选择性与完整撤销离线通过（`agg-desktop-activate.test.mjs`、`agg-desktop-rollback.test.mjs`、`agg-v2-desktop-restore.test.mjs`、`config-transaction.test.mjs`）；provider 级 `remote_compaction=unsupported` 声明与 reserved 身份拒绝由 `agg-v2-desktop-compaction.test.mjs` 覆盖；空白安装与已有配置的真实 GUI 演练未做 |
 | MG-R008 | `PASS_MOCK` | 无静默降级反向用例离线通过（`agg-auth-leak.test.mjs`、`agg-native-invariants.test.mjs`、`agg-discovery-sync.test.mjs`）；401/402/403/配额型 429 按真实授权域返回终态信封、跨授权域 429 回退被阻断（`agg-v2-auth-domains.test.mjs`）、压缩项不静默丢弃（`agg-v2-compaction-protocol.test.mjs`）；`no-silent-compaction-drop` 的真实负向验收仍依赖 MG-R006 修复 |
 | MG-R009 | `PASS_MOCK` | 租户原语与隔离用例通过（`agg-tenant-isolation.test.mjs`、`agg-v2-auth-isolation.test.mjs`、`agg-discovery-catalog.test.mjs`）；第二真实身份未创建（授权项） |
@@ -41,7 +41,7 @@
 ## 4. 本轮明确未解决项（不得因门禁迁移而消失）
 
 - **MG-R006 真实 native compaction**：真实 Codex 上仍未通过（历史失败保留）；离线协议与配置声明只到 `PASS_MOCK`。恢复条件：所有者授权的 Codex 时间窗/额度，A5 用 `gpt-6-luna` 父模型 + `deepseek-v4.1-flash` 子模型实测。
-- **N04（`history/export` 迁移导出）**：A5 独立门禁按契约绝对条款判 `FAIL`；当前仍未获所有者裁决，本文件不记录任何减免。两种处理方式见 [V2 集成证据](aggregation-v2-integration-2026-11-15.md) §5。
+- **N04（`history/export` 迁移导出）：所有者已批准书面例外（2026-11-15）**。授权来源：所有者在本轮对话中明确指令"保留并书面登记例外"。例外边界写在 [V2 产品契约](../product/2026-11-14-owner-scope-v2.md) 「明确取消与明确保留」段：非压缩/摘要器、不调用 LLM、不参与模型请求组装（有守卫断言）、原件逐字节不变、不得用于满足 `MG-R006`。超出该边界的任何摘要/压缩实现仍按绝对条款禁止。
 - **managed provider 运行时登录复用**：`requires_openai_auth` 仅经 serde 解析验证，运行时是否复用 ChatGPT 登录为 `UNVERIFIED`，默认关闭（保持内置 `openai` 身份）。
 
 ## 5. 关联证据

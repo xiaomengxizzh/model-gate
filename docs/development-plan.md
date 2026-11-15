@@ -287,3 +287,11 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 - 已执行：`npm run check` / `npm test`（114 套件 1107 用例）/ `check-metadata` / `docs:check` / `contract:check` / `gate:v2`（9/9）/ `matrix-v2 --check` / `gate:audit-diff --base main`（PASS）/ `gate:v2:independent`（11/12）。
 - 发布动作（PR #7 转 Ready、合并 main、发版）在所有者裁决 N04 并批准真实验收额度前不执行。
 - 裁决登记：[V2 发布裁决](evidence/aggregation-v2-release-verdict-2026-11-15.md)
+
+### 真实验收首轮（所有者授权，2026-11-15）
+
+- 隔离实例（`MG_CONFIG_DIR=/tmp/mg-real-accept/state`、127.0.0.1:8891）+ 真实 `OPENCODE_API_KEY`；`CODEX_HOME` 全新隔离；零 GPT 调用（本轮）。
+- 实测：Go `deepseek-v4.1-flash` 推理 HTTP 200（两条回执，含公共别名）；真实 Codex 两轮出现 `context compacted`（Codex 自己压缩）。
+- 真机缺陷与修复：Codex 发 `reasoning.context` / `text.verbosity` / `include:reasoning.encrypted_content` → Go 400；新增 `projectThirdPartyResponsesParams()`（仅非官方目标剔除 + 诊断），修复后通过。
+- 未通过：Codex 对第三方模型不下发工具（`tools: None`），模型输出 `<|DSML|>` 文本、工具未执行 → MG-R005 与 MG-R006 其余用例 FAIL；MG-R003 升 `PASS_REAL`。
+- 结论：`npm test` 114 套件 / 1110 用例；`gate:v2` 9/9；`matrix-v2 --check` PASS；独立套件 11/12（N04 已由所有者书面例外覆盖，下一轮复核应为 12/12）。

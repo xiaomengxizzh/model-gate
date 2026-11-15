@@ -603,6 +603,46 @@ function providerAuthDomain(prov) {
   return 'api-key'
 }
 
+// V2 真机实测（MG-R003/R008，2026-11-15）：Codex 0.167.0-alpha.3.2 会发 ChatGPT 专属参数，
+// 第三方 Responses 上游直接 400：
+//   reasoning.context（如 "all_turns"）、text.verbosity、include 里的 reasoning.encrypted_content。
+// 只对**非官方** Responses 目标按能力剔除，并把剔除项写进诊断（不是静默改写，也不碰官方目标）。
+function isOfficialResponsesProvider(prov) {
+  const base = String((prov && (prov.baseUrl || (prov._def && prov._def.baseUrl))) || '')
+  try {
+    const host = new URL(base).hostname
+    return host === 'api.openai.com' || host === 'chatgpt.com' || host.endsWith('.chatgpt.com')
+  } catch { return false }
+}
+
+export function projectThirdPartyResponsesParams(body, prov) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { body, dropped: [] }
+  if (isOfficialResponsesProvider(prov)) return { body, dropped: [] }
+  const out = Object.assign({}, body)
+  const dropped = []
+  if (out.reasoning && typeof out.reasoning === 'object' && Object.prototype.hasOwnProperty.call(out.reasoning, 'context')) {
+    const reasoning = Object.assign({}, out.reasoning)
+    delete reasoning.context
+    if (Object.keys(reasoning).length) out.reasoning = reasoning
+    else delete out.reasoning
+    dropped.push('reasoning.context')
+  }
+  if (out.text && typeof out.text === 'object' && Object.prototype.hasOwnProperty.call(out.text, 'verbosity')) {
+    const text = Object.assign({}, out.text)
+    delete text.verbosity
+    if (Object.keys(text).length) out.text = text
+    else delete out.text
+    dropped.push('text.verbosity')
+  }
+  if (Array.isArray(out.include) && out.include.includes('reasoning.encrypted_content')) {
+    const kept = out.include.filter((v) => v !== 'reasoning.encrypted_content')
+    if (kept.length) out.include = kept
+    else delete out.include
+    dropped.push('include:reasoning.encrypted_content')
+  }
+  return { body: out, dropped }
+}
+
 // V2-08（A2 实测缺陷）：429 时按 models.*.fallbacks 换到**另一个授权域**的供应商 = 静默换供应商/套餐。
 // 同域 fallback 保留既有行为；只要后续存在跨域候选就按真实 429 返回。
 function crossDomainFallbackBlocked(state, candidates, pid, prov) {
@@ -1742,7 +1782,9 @@ async function proxyNativeResponses(state, budget, log, opts) {
     if (!healthy(ensureHst(state, pid), Date.now())) { lastErr = new Error('provider ' + pid + ' 熔断中'); continue }
     if (prov._def.apiKeyEnv && !prov.keyOk) { lastErr = new Error('provider ' + pid + ' 未配置 Key'); continue }
     const target = modelTarget(state.cfg, modelName, pid)
-    const payload = Buffer.from(JSON.stringify(Object.assign({}, body, { model: target.servingName })))
+    const projected = projectThirdPartyResponsesParams(body, prov)
+    if (projected.dropped.length) log && log.info('Codex 参数按目标能力剔除', pid, projected.dropped.join(','))
+    const payload = Buffer.from(JSON.stringify(Object.assign({}, projected.body, { model: target.servingName })))
     // Native third-party requests still need the provider protocol headers, including
     // OpenCode Go's x-opencode-session; videoJsonHeaders only supplies media headers.
     const headers = buildHeaders(req, prov, payload, state.cfg, 'responses', body, { identity: classifyTarget(prov, state.cfg), log })
