@@ -193,7 +193,8 @@ function extractData(ev) {
   let out = []
   for (const line of ev.split('\n')) if (line.startsWith('data:')) out.push(line.slice(5).trim())
   return out.join('\n')
-}function extractOpenAIContent(dataStr) {
+}
+function extractOpenAIContent(dataStr) {
   try { const obj = JSON.parse(dataStr); const c = obj && obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content; return typeof c === 'string' ? c : '' } catch { return '' }
 }
 function parseDataLine(s) { try { return JSON.parse(s) } catch { return null } }
