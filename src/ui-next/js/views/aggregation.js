@@ -134,11 +134,71 @@ function shaShort (sha) {
   return sha ? String(sha).slice(0, 12) : '—'
 }
 
+export function versionLabel (info) {
+  if (!info) return { text: '未知', kind: 'muted' }
+  if (!info.found) return { text: '未检测到', kind: 'muted' }
+  if (info.versionState === 'known' && info.version) return { text: info.version, kind: 'info' }
+  if (info.versionState === 'not_probed') return { text: '未探测（不执行该二进制）', kind: 'muted' }
+  if (info.versionState === 'unknown') return { text: '版本未知', kind: 'muted' }
+  return { text: '未探测', kind: 'muted' }
+}
+
 function versionCell (info) {
-  if (!info) return tag('未知', 'muted')
-  if (!info.found) return tag('未检测到', 'muted')
-  if (info.versionState === 'known' && info.version) return tag(info.version, 'info')
-  return tag(info.versionState === 'unknown' ? '版本未知' : '未探测', 'muted')
+  const v = versionLabel(info)
+  return tag(v.text, v.kind)
+}
+
+// 重启提示判定（纯函数，可在无 DOM 环境测试）：
+// 服务端用只读的客户端进程启动时间与写入时间比对，重启后提示自动消失。
+export function restartNotice (restart, mode) {
+  if (mode !== 'aggregated') {
+    return { needed: false, tone: 'muted', label: '无需重启', detail: '当前不是聚合模式，配置未改向 ModelGate。' }
+  }
+  const r = restart && typeof restart === 'object' ? restart : null
+  if (!r) {
+    return { needed: true, tone: 'warn', label: '需要重启 Codex 生效', detail: '服务端未返回重启判定；配置在客户端下次启动后生效，请完全退出并重新打开 Codex Desktop。' }
+  }
+  if (r.reason === 'client_restarted_after_apply') {
+    return { needed: false, tone: 'good', label: '已检测到客户端重启', detail: '原版 Desktop 在写入后启动过，新配置已加载；请在新会话的模型选择器里核对官方模型与聚合模型。' }
+  }
+  if (r.reason === 'client_running_with_old_config') {
+    return { needed: true, tone: 'warn', label: '需要重启 Codex 生效', detail: '检测到 Codex 仍是写入前启动的进程，运行中的会话继续使用旧配置。请完全退出 Codex Desktop（不是只关窗口）再重新打开。' }
+  }
+  if (r.reason === 'client_not_running') {
+    return { needed: true, tone: 'warn', label: '需要重新打开 Codex', detail: '当前没有检测到运行中的原版 Desktop；下次启动会自动读取新配置，启动后本页会按客户端启动时间自动消除该提示。' }
+  }
+  if (r.reason === 'client_restart_unverified') {
+    return { needed: true, tone: 'warn', label: '无法确认是否已重启', detail: '未取得客户端进程启动时间（探测不可用，不猜成功）。请完全退出并重新打开 Codex Desktop 后核对。' }
+  }
+  if (r.reason === 'applied_at_unknown') {
+    return { needed: true, tone: 'warn', label: '需要重启 Codex 生效', detail: '接入状态缺少写入时间；请完全退出并重新打开 Codex Desktop。' }
+  }
+  return {
+    needed: r.needed !== false,
+    tone: r.needed === false ? 'good' : 'warn',
+    label: r.needed === false ? '配置已生效' : '需要重启 Codex 生效',
+    detail: r.needed === false ? '服务端判定新配置已生效。' : '请完全退出并重新打开 Codex Desktop。',
+  }
+}
+
+export function nativeCompactionNotice (nativeCompaction) {
+  const n = nativeCompaction && typeof nativeCompaction === 'object' ? nativeCompaction : null
+  if (!n) return { tone: 'muted', label: '未知', detail: '服务端未返回原生压缩声明状态。' }
+  if (n.mode === 'managed-provider') {
+    if (n.declared) {
+      return {
+        tone: 'info',
+        label: 'provider 级声明：remote_compaction = ' + (n.remoteCompaction || '?'),
+        detail: '字段 ' + (n.field || 'model_providers.<id>.capabilities.remote_compaction') + '，让 Codex 对 DeepSeek 走它自己的本地自动压缩。配置解析已离线校验；运行时认证复用仍为 ' + (n.runtimeAuth || 'UNVERIFIED') + '。',
+      }
+    }
+    return { tone: 'warn', label: 'provider 段存在但未声明能力', detail: '未发现 remote_compaction 声明；当前不会强制本地压缩路径。' }
+  }
+  return {
+    tone: 'muted',
+    label: '内置 openai 身份不可声明 capability',
+    detail: (n.detail || 'Codex 拒绝 [model_providers.openai*] 覆盖。') + ' 这不是配置损坏：provider 级压缩能力只能在 ModelGate 自有 provider 段声明。',
+  }
 }
 
 // —— 数据加载 ——
@@ -191,7 +251,11 @@ function statusCard (ctx) {
   const activation = health.activation || {}
   const mode = health.mode || (detect.config && detect.config.mode) || 'unknown'
   const m = modeLabel(mode)
-  const needsRestart = !!(health.needsRestart || activation.needsRestart)
+  const restart = health.restart || activation.restart || null
+  const rn = restartNotice(restart, mode)
+  const needsRestart = rn.needed
+  const compaction = health.nativeCompaction || detect.nativeCompaction || activation.nativeCompaction || null
+  const cn = nativeCompactionNotice(compaction)
   const backup = health.backup || activation.backup || { available: false }
   const canToggle = !AGG.routeMissing
   const button = mode === 'aggregated'
@@ -205,18 +269,20 @@ function statusCard (ctx) {
     h('div', { class: 'toolbar', style: { margin: '4px 0 10px' } },
       tag(m.label, m.kind),
       tag(AGG.health ? '网关 ' + (health.gateway && health.gateway.status ? 'HTTP ' + health.gateway.status : (health.gateway && health.gateway.ok ? '健康' : '未返回')) : '健康接口未返回', health.gateway && (health.gateway.ok !== false) ? 'good' : 'warn'),
-      needsRestart ? tag('需要重启 Codex 生效', 'warn') : null),
+      tag(rn.label, rn.tone)),
     kvList([
       ['配置路径', h('span', { class: 'mono-break', text: detect.configPath || health.configPath || '未返回' })],
       ['Codex CLI', h('div', { class: 'flex flex-wrap' }, versionCell(detect.cli), h('span', { class: 'hint', text: detect.cli && detect.cli.path ? detect.cli.path : '未检测到 codex 可执行文件' }))],
-      ['Codex Desktop', h('div', { class: 'flex flex-wrap' }, versionCell(detect.desktop), h('span', { class: 'hint', text: detect.desktop && detect.desktop.path ? detect.desktop.path : '未检测到 Desktop 可执行文件' }))],
+      ['Codex Desktop', h('div', { class: 'flex flex-wrap' }, versionCell(detect.desktop), h('span', { class: 'hint', text: detect.desktop && detect.desktop.path ? detect.desktop.path + (detect.desktop.versionKind === 'package-metadata' ? ' · 包元数据' : '') : '未检测到 Desktop 可执行文件' }))],
+      ['Desktop 捆绑 Codex', h('div', { class: 'flex flex-wrap' }, versionCell(detect.bundledCli || (detect.desktop && detect.desktop.bundledCodex)), h('span', { class: 'hint', text: (detect.bundledCli && detect.bundledCli.path) || (detect.desktop && detect.desktop.bundledCodex && detect.desktop.bundledCodex.path) || '未检测到（PATH 里的 CLI 不等于 Desktop 引擎）' }))],
+      ['原生压缩（Codex 自有）', h('div', { class: 'flex flex-wrap' }, tag(cn.label, cn.tone), h('span', { class: 'hint', text: cn.detail }))],
       ['配置状态', h('span', { text: (detect.config && detect.config.reason) || health.reason || '未知' })],
       ['接入前备份', backup.available ? h('span', { class: 'mono-break', text: (backup.path || '') + ' · ' + (backup.matches ? '与接入前快照一致' : '快照不一致（不可回滚）') }) : h('span', { class: 'muted', text: '无（尚未接入，或接入前文件不存在）' })],
       ['最近一次结果', activation.lastApply ? h('span', { text: (activation.lastApply.ok ? '成功' : '失败 · ' + (activation.lastApply.code || '未知')) + (activation.lastApply.at ? ' · ' + fmtTime(activation.lastApply.at) : '') }) : h('span', { class: 'muted', text: '尚无记录' })],
     ]),
     needsRestart
-      ? callout('warn', h('strong', { text: '需要重启 Codex：' }), ' 配置在客户端下次启动或重载时生效；运行中的会话仍使用旧配置。请先完全退出 Codex Desktop，再重新打开，然后在新会话的模型选择器里核对官方模型与聚合模型。')
-      : null,
+      ? callout('warn', h('strong', { text: rn.label + '：' }), ' ' + rn.detail)
+      : callout('good', h('strong', { text: rn.label + '：' }), ' ' + rn.detail),
     h('div', { class: 'toolbar', style: { marginTop: '10px' } }, button))
 
   return card('聚合模式与 Desktop 接入',
@@ -433,7 +499,8 @@ function showRestartPrompt (extra) {
         h('li', { text: '完全退出 Codex Desktop（不是只关窗口）。' }),
         h('li', { text: '重新打开 Codex Desktop，进入一个新会话。' }),
         h('li', { text: '在模型选择器里依次核对官方模型与每个 OpenCode 模型都能被选中。' }),
-        h('li', { text: '各发一条最小消息，回到「监控与诊断」核对请求落到正确供应商。' }))),
+        h('li', { text: '各发一条最小消息，回到「监控与诊断」核对请求落到正确供应商。' })),
+      h('p', { class: 'hint', text: '重启完成后本页会自动比对客户端启动时间并撤掉重启提示；如果一直提示，说明检测到的仍是旧进程。' })),
     actions: [h('button', { class: 'btn btn-primary', type: 'button', text: '我知道了', onclick: () => d.close() })],
   })
 }
@@ -537,8 +604,10 @@ async function beginDeactivate (ctx) {
   })
   if (!ok) return
   try {
-    await request(AGGREGATION_ENDPOINTS.deactivate, { method: 'POST', body: { expectedSha }, timeoutMs: 60000 })
-    toast('已退出聚合模式，配置已恢复到接入前', 'success')
+    const res = await request(AGGREGATION_ENDPOINTS.deactivate, { method: 'POST', body: { expectedSha }, timeoutMs: 60000 })
+    toast(res && res.preservedUserEdits
+      ? '已退出聚合模式：只撤销了 ModelGate 自有键，接入后你新增/修改的其它配置已保留'
+      : '已退出聚合模式，配置已恢复到接入前', 'success')
     await reload(ctx)
   } catch (e) {
     if (e && e.status === 409 && e.data && e.data.detail && e.data.detail.threeWay) { showThreeWay(e, ctx); return }
