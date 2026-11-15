@@ -70,6 +70,11 @@ export function classifyAggregationError (error) {
     return { kind: 'unsupported', status, code: code || 'aggregation_route_unknown', message }
   }
   if (status === 401 || status === 403) return { kind: 'denied', status, code, message }
+  if (status === 429) {
+    // 限流既不是"连不上"也不是"配置错误"：单独分类，保留 Retry-After 供 UI 如实提示。
+    const retryAfter = Number(data.retryAfter ?? data.retry_after ?? e.retryAfter)
+    return { kind: 'throttled', status, code: code || 'rate_limited', message, retryAfter: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null }
+  }
   if (status === 409 || code === 'version_conflict' || code === 'config_conflict') {
     return { kind: 'conflict', status, code, message }
   }
@@ -93,6 +98,16 @@ export function deriveOfficial (status) {
   }
   const credential = str(official.credential)
   const reason = str(official.reason)
+  if (credential === 'detected' && str(official.expiry) === 'expired') {
+    return {
+      state: 'blocked',
+      level: 'detected',
+      reason: 'access_token_expired',
+      label: '登录已过期',
+      detail: '本机登录文件存在，但访问令牌已过期（只读解析 exp，未刷新、未发请求）。请在原版 Codex 中重新登录。',
+      source: '/api/status.official → probeLocalCodexAuth + readSubscriptionCredential（只读）',
+    }
+  }
   if (credential === 'detected') {
     return {
       state: 'detected',
@@ -285,6 +300,13 @@ export function deriveCodex (aggregation) {
     })
   }
   const detect = obj(health.detect) || obj(health.desktop) || {}
+  // 只有部分探测对象时不能断言"未安装"：缺 detect 就是 unknown（未知不等于未安装）。
+  if (!obj(detect.desktop) && !obj(detect.bundledCli) && !obj(detect.bundledCodex) && !obj(detect.cli)) {
+    return Object.assign(base, {
+      mode: str(health.mode) || 'unknown',
+      detail: '服务端没有返回 Codex 探测明细（detect）；这是"未知"，不是"未安装"。请重新检测或查看高级诊断。',
+    })
+  }
   const desktop = obj(detect.desktop) || {}
   const bundled = obj(detect.bundledCli) || obj(detect.bundledCodex) || {}
   const cli = obj(detect.cli) || {}
@@ -354,8 +376,10 @@ export function deriveAggregation (aggregation) {
   const activation = obj(health.activation) || {}
   const nativeCompaction = obj(health.nativeCompaction) || obj(detect.nativeCompaction) || null
   const compactionBlocked = !!(nativeCompaction && nativeCompaction.blocked === true)
+  const modeKnown = mode === 'aggregated' || mode === 'official'
   return Object.assign(base, {
     mode: mode || 'unknown',
+    modeKnown,
     configSha: str(activation.appliedSha || state.appliedSha) || null,
     backupAvailable: backup.available === true,
     needsRestart: health.needsRestart === true || activation.needsRestart === true,
@@ -363,6 +387,7 @@ export function deriveAggregation (aggregation) {
     label: mode === 'aggregated' ? '聚合模式已启用' : mode === 'official' ? '官方模式（未聚合）' : '状态未知',
     detail: mode === 'aggregated'
       ? 'Codex 配置已指向 ModelGate；官方 GPT 与 ' + GO_TARGET_MODEL + ' 都通过原版 Codex 使用。'
+        + (compactionBlocked ? ' 原生压缩状态：尚未验证/存在阻断（不声称已通过，详见高级诊断）。' : '')
       : mode === 'official'
         ? '当前是原版 Codex 官方模式，未启用聚合。'
         : '后端没有返回可识别模式；不把它当成"已启用"或"未启用"。',
@@ -412,8 +437,19 @@ export function nextPrimaryAction (ps) {
       return { id: 'wait-write', label: '正在写入配置…', kind: 'wait', route: null, detail: '不要关闭页面；失败会回滚。' }
     case 'ready':
       return { id: 'use-codex', label: '在 Codex 中使用', kind: 'route', route: '#/connections?step=use', detail: '打开原版 Codex Desktop 的模型选择器。' }
-    case 'recoverable_error':
-      return { id: 'retry', label: '重试连接', kind: 'retry', route: null, detail: '上一次读取失败；不显示旧的成功状态。' }
+    case 'recoverable_error': {
+      const err = obj(p.error)
+      const throttled = !!(err && err.kind === 'throttled')
+      return {
+        id: throttled ? 'retry-later' : 'retry',
+        label: throttled ? '稍后重试' : '重试连接',
+        kind: 'retry',
+        route: null,
+        detail: throttled
+          ? '管理接口当前限流；' + (err.retryAfter ? '约 ' + err.retryAfter + ' 秒后' : '稍后') + '再试，不会自动改写配置。'
+          : '上一次读取失败；不显示旧的成功状态。',
+      }
+    }
     default:
       return aggregation.mode === 'aggregated' || codex.restartNeeded === false
         ? { id: 'use-codex', label: '在 Codex 中使用', kind: 'route', route: '#/connections?step=use', detail: '' }
@@ -433,10 +469,17 @@ export function homeStateOf (ps) {
     if (p.error.kind === 'conflict') return 'conflict'
     return 'recoverable_error'
   }
-  if (!p.codex.found) return 'cannot_detect_codex'
+  if (p.phase === 'preview_pending') return 'preview_pending'
+  if (!p.codex.found) {
+    // 探测不可用（缺 detect / 没有快照）时不能要求用户"去安装 Codex"。
+    if (p.codex.detectionLevel === 'unknown') return 'recoverable_error'
+    return 'cannot_detect_codex'
+  }
   if (p.go.state === 'error') return 'go_key_invalid'
   if (!p.go.credentialPresent) return 'needs_go_key'
   if (!p.go.targetModelConfigured) return 'ready_to_enable'
+  // 聚合模式未知时不得提示"启用聚合"：那可能在不确定的情况下二次写入。
+  if (p.aggregation.modeKnown === false || p.aggregation.mode === 'unknown') return 'recoverable_error'
   if (p.aggregation.mode !== 'aggregated') return 'ready_to_enable'
   if (p.codex.restartNeeded === true) return 'needs_codex_restart'
   if (p.aggregation.mode === 'aggregated' && p.codex.restartNeeded === false) return 'ready'
@@ -445,6 +488,10 @@ export function homeStateOf (ps) {
 
 export function overallOf (ps) {
   const p = obj(ps) || {}
+  if (p.error && p.error.kind === 'throttled') {
+    const wait = p.error.retryAfter ? '（Retry-After ' + p.error.retryAfter + ' 秒）' : ''
+    return { level: 'error', label: '当前受限，请稍后重试', detail: '管理接口返回 429' + wait + '；没有显示任何旧的成功状态。' }
+  }
   switch (str(p.state)) {
     case 'ready':
       return { level: 'ready', label: '准备就绪', detail: '官方套餐与 ' + GO_TARGET_MODEL + ' 都可在原版 Codex 中使用。' }
