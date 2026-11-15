@@ -18,12 +18,14 @@
 //   node scripts/test/offline/aggregation-gate-v2.js --assert-native-compaction-blocking
 //
 // 零依赖、离线；只读仓库内文件。
+import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { evaluateGate, evaluateRelease, STATUS_VOCABULARY } from './aggregation-gate.js'
 import {
   NATIVE_COMPACTION_CASES,
+  ROOT as ROOT_DIR,
   V2_BASELINE_SHA,
   V2_CANCELLED_CASES,
   buildV2Matrix,
@@ -33,6 +35,14 @@ import {
 export const V2_REQUIREMENT_IDS = Object.freeze(
   Array.from({ length: 12 }, (_, i) => 'MG-R' + String(i + 1).padStart(3, '0')),
 )
+
+// 门禁默认被测树必须是**当前 HEAD**（A5 F2）：状态文档里的基线 SHA 只用于展示矩阵标题，
+// 不能当成"当前被测树"，否则旧树证据会被当成当前证据。取不到 HEAD 就 fail-closed。
+export function currentHeadSha() {
+  const out = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT_DIR, encoding: 'utf8' }).trim()
+  if (!/^[0-9a-f]{40}$/.test(out)) throw new Error('cannot resolve current HEAD sha for the V2 gate')
+  return out
+}
 
 export function v2CaseIndex() {
   return buildV2Matrix(loadV2Sources()).caseIndex
@@ -57,7 +67,7 @@ export function v2EvidenceFromStatus(rows) {
   return evidence
 }
 
-export function gateV2({ sha = V2_BASELINE_SHA, ownerApproval = false, evidence = null, caseIndex = null } = {}) {
+export function gateV2({ sha = null, ownerApproval = false, evidence = null, caseIndex = null } = {}) {
   const sources = loadV2Sources()
   const matrix = buildV2Matrix(sources)
   const cases = caseIndex || matrix.caseIndex
@@ -66,13 +76,13 @@ export function gateV2({ sha = V2_BASELINE_SHA, ownerApproval = false, evidence 
   return evaluateGate({
     evidence: records,
     ownerApproval,
-    headSha: sha,
+    headSha: sha || currentHeadSha(),
     requirementIds: V2_REQUIREMENT_IDS,
     caseIndex: cases,
   })
 }
 
-export function releaseV2({ sha = V2_BASELINE_SHA, ownerApproval = false, evidence = null, diff = '' } = {}) {
+export function releaseV2({ sha = null, ownerApproval = false, evidence = null, diff = '' } = {}) {
   const sources = loadV2Sources()
   const matrix = buildV2Matrix(sources)
   const statusDoc = sources.evidence[0]
@@ -80,7 +90,7 @@ export function releaseV2({ sha = V2_BASELINE_SHA, ownerApproval = false, eviden
   return evaluateRelease({
     evidence: records,
     ownerApproval,
-    headSha: sha,
+    headSha: sha || currentHeadSha(),
     requirementIds: V2_REQUIREMENT_IDS,
     caseIndex: matrix.caseIndex,
     diff,
@@ -233,7 +243,7 @@ if (entry === import.meta.url) {
       }
       if (!result.ok) process.exitCode = 1
     } else {
-      const sha = argOf('--sha') || V2_BASELINE_SHA
+      const sha = argOf('--sha') || currentHeadSha()
       const ownerApproval = argv.includes('--owner-approval')
       const evidencePath = argOf('--evidence')
       const diffPath = argOf('--diff')

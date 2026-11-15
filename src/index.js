@@ -26,7 +26,7 @@ import { readNativeUsage, nativeUsageConfig } from './native-usage.js'
 import { classifyTarget, isLoopbackHost } from './codex/identity.js'
 import { restoreResponseJson, detectOpaqueV2Task, detectEncryptedToolSchema } from './codex/interop.js'
 import { readSubscriptionCredential, isGatewaySubscriptionTarget, SubscriptionCredentialError } from './codex/local-subscription.js'
-import { isTargetAuthzError, resolveUpstream, assertResolvedUpstream, assertNoSubscriptionCredentialToThirdParty, authFailureReceipt } from './codex/target-authz.js'
+import { isTargetAuthzError, resolveUpstream, assertResolvedUpstream, assertNoSubscriptionCredentialToThirdParty, authFailureReceipt, authFailureResponse } from './codex/target-authz.js'
 import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
 import { createObservability, hashId } from './observability/events.js'
 import { buildCatalog } from './codex/catalog.js'
@@ -594,6 +594,34 @@ function reservedKeyIn(obj, label) {
   for (const k of Object.keys(obj || {})) if (RESERVED_KEYS.has(k)) return { error: label + ' 含保留键名：' + k }
   return null
 }
+// V2-03（A4 F1）：上游授权域失败的**域内终态**。授权域由该候选自己的 provider 配置判定，
+// 不靠调用方猜测；命中后按真实状态码返回，绝不 continue 到下一个候选（否则会静默换域/换套餐，
+// 最终吞成 502 all_providers_failed 丢掉真实 403）。速率型 429 不在此列（它仍走既有重试通道）。
+function providerAuthDomain(prov) {
+  if (prov && prov.gatewaySubscription && prov.gatewaySubscription.enabled === true) return 'codex-subscription'
+  if (prov && prov.siwcApp === true) return 'siwc-app'
+  return 'api-key'
+}
+
+// V2-08（A2 实测缺陷）：429 时按 models.*.fallbacks 换到**另一个授权域**的供应商 = 静默换供应商/套餐。
+// 同域 fallback 保留既有行为；只要后续存在跨域候选就按真实 429 返回。
+function crossDomainFallbackBlocked(state, candidates, pid, prov) {
+  const idx = candidates.indexOf(pid)
+  if (idx < 0) return false
+  const domain = providerAuthDomain(prov)
+  return candidates.slice(idx + 1).some((nid) => {
+    const nd = state.cfg.providers[nid]
+    return nd && providerAuthDomain(nd) !== domain
+  })
+}
+
+function authTerminalResponse(prov, up, bodyText) {
+  return authFailureResponse(up && up.status, { authDomain: providerAuthDomain(prov), bodyText })
+}
+
+// 原生压缩能力声明（V2-04）。压缩内容由 Codex 生成与执行，网关只声明能否原样回放/交由客户端本地压缩。
+const NATIVE_COMPACTION_CAPABILITIES = Object.freeze(['codex-owned-local', 'codex-owned-remote', 'unsupported'])
+
 function validateConfigShape(body) {
   if (!isPlainObject(body)) return { error: '请求体必须为 JSON 对象' }
   for (const f of ['providers', 'models', 'defaults']) {
@@ -704,7 +732,10 @@ async function doSaveConfig(state, body) {
         const h = m.codex.history
         if (h.agentMessage != null && !['preserve', 'project', 'reject'].includes(h.agentMessage)) return { error: '模型「' + mn + '」的 codex.history.agentMessage 仅支持 preserve/project/reject' }
         if (h.reasoning != null && !['preserve', 'drop', 'reject'].includes(h.reasoning)) return { error: '模型「' + mn + '」的 codex.history.reasoning 仅支持 preserve/drop/reject' }
-        if (h.compaction != null && !['reject', 'drop'].includes(h.compaction)) return { error: '模型「' + mn + '」的 codex.history.compaction 仅支持 reject/drop' }
+        // V2-04：preserve 只对显式声明 codex.nativeCompaction 的路由生效（压缩仍由 Codex 自己执行）；
+        // 未声明能力的路由收到压缩项仍按 typed 拒绝，绝不静默丢弃。
+        if (h.compaction != null && !['reject', 'drop', 'preserve'].includes(h.compaction)) return { error: '模型「' + mn + '」的 codex.history.compaction 仅支持 reject/drop/preserve' }
+        if (m.codex.nativeCompaction != null && m.codex.nativeCompaction !== '' && !NATIVE_COMPACTION_CAPABILITIES.includes(String(m.codex.nativeCompaction))) return { error: '模型「' + mn + '」的 codex.nativeCompaction 仅支持 ' + NATIVE_COMPACTION_CAPABILITIES.join('/') }
         if (h.controls != null && !['drop', 'preserve', 'reject'].includes(h.controls)) return { error: '模型「' + mn + '」的 codex.history.controls 仅支持 drop/preserve/reject' }
       }
     }
@@ -1146,6 +1177,17 @@ async function handleMediaProxy(state, budget, log, opts) {
       }
       const ebuf = await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
       const mapped = mapErrorEnvelope(target.api, up.status, ebuf) || ebuf
+      const authTerminal = authTerminalResponse(prov, up, ebuf.toString('utf8'))
+      if (authTerminal) {
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        markFail(state, pid, prov.circuit)
+        return { status: authTerminal.status, contentType: authTerminal.contentType, buf: authTerminal.buf }
+      }
+      if (up.status === 429 && crossDomainFallbackBlocked(state, candidates, pid, prov)) {
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        markFail(state, pid, prov.circuit)
+        return jsonError(429, 'cross_domain_fallback_blocked', '上游限流且存在跨授权域候选：按真实授权域返回，不换供应商/不换套餐', 'auth_domain_failure')
+      }
       if (up.status === 402 || up.status === 403 || up.status === 404 || up.status === 429 || up.status >= 500) {
         lastErr = new Error('upstream ' + up.status)
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1
@@ -1250,6 +1292,12 @@ async function createVideoTask(state, budget, log, opts) {
         return { ok: true, task }
       }
       const mapped = mapErrorEnvelope(target.api, up.status, outBuf) || outBuf
+      const authTerminal = authTerminalResponse(prov, up, outBuf.toString('utf8'))
+      if (authTerminal) {
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        markFail(state, pid, prov.circuit)
+        return { ok: false, status: authTerminal.status, contentType: authTerminal.contentType, buf: authTerminal.buf }
+      }
       if (up.status === 402 || up.status === 403 || up.status === 404 || up.status === 429 || up.status >= 500) {
         lastErr = new Error('upstream ' + up.status)
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1
@@ -1516,7 +1564,7 @@ export function verifyCodexAuthReceipt({ pid, modelName, target, identity, prov,
         env: process.env,
       },
     })
-    assertResolvedUpstream(resolved, outbound.href)
+    assertResolvedUpstream(resolved, outbound.href, { model: target.servingName })
     assertNoSubscriptionCredentialToThirdParty(headers, resolved.upstreamHost, { credentialSource: resolved.authDomain, cfg })
     return { resolved }
   } catch (error) {
@@ -1743,6 +1791,18 @@ async function proxyNativeResponses(state, budget, log, opts) {
       const mapped = scrubBody(mapErrorEnvelope(target.api, up.status, ebuf) || ebuf)
       if (singleShot) {
         return { status: up.status || 502, contentType: 'application/json; charset=utf-8', buf: mapped }
+      }
+      const authTerminal = authTerminalResponse(prov, up, ebuf.toString('utf8'))
+      if (authTerminal) {
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        markFail(state, pid, prov.circuit)
+        return { status: authTerminal.status, contentType: authTerminal.contentType, buf: authTerminal.buf }
+      }
+      if (up.status === 429 && crossDomainFallbackBlocked(state, candidates, pid, prov)) {
+        agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+        markFail(state, pid, prov.circuit)
+        const body = { error: { code: 'cross_domain_fallback_blocked', type: 'auth_domain_failure', kind: 'rate_limited', authDomain: providerAuthDomain(prov), status: 429, terminal: true, fallbackAllowed: false, message: '上游限流且存在跨授权域候选：按真实授权域返回，不换供应商/不换套餐' } }
+        return { status: 429, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify(body)) }
       }
       if (up.status === 402 || up.status === 403 || up.status === 404 || up.status === 429 || up.status >= 500) {
         lastErr = new Error('upstream ' + up.status)
@@ -2119,6 +2179,12 @@ function makeHandler(state) {
               res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(norm)); return
             }
             const mapped = mapErrorEnvelope(target.api, up.status, outBuf) || outBuf
+            const authTerminal = authTerminalResponse(prov, up, outBuf.toString('utf8'))
+            if (authTerminal) {
+              agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+              markFail(state, pid, prov.circuit)
+              res.writeHead(authTerminal.status, { 'content-type': authTerminal.contentType }); res.end(authTerminal.buf); return
+            }
             // 402/403/404/429/5xx 视为该上游不可用 → 记录并切 fallback；其余 4xx 是请求参数/模型级确定性错误，直接回
             if (up.status === 402 || up.status === 403 || up.status === 404 || up.status === 429 || up.status >= 500) {
               lastErr = new Error('upstream ' + up.status)
@@ -2182,6 +2248,12 @@ function makeHandler(state) {
               res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(norm)); return
             }
             const mapped = mapErrorEnvelope(target.api, up.status, outBuf) || outBuf
+            const authTerminal = authTerminalResponse(prov, up, outBuf.toString('utf8'))
+            if (authTerminal) {
+              agg(state, pid, 'errors', 1); state.st.counters.errors += 1
+              markFail(state, pid, prov.circuit)
+              res.writeHead(authTerminal.status, { 'content-type': authTerminal.contentType }); res.end(authTerminal.buf); return
+            }
             if (up.status === 402 || up.status === 403 || up.status === 404 || up.status === 429 || up.status >= 500) {
               rLastErr = new Error('upstream ' + up.status)
               agg(state, pid, 'errors', 1); state.st.counters.errors += 1

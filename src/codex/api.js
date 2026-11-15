@@ -119,8 +119,8 @@ export const CODEX_API_ROUTES = Object.freeze([
   { method: 'GET', path: '/api/codex/emergency', name: 'emergency_plan', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '应急试算：范围/影响/planId；绝不写盘、不改身份' },
   { method: 'POST', path: '/api/codex/emergency', name: 'emergency_apply', kind: CODEX_ROUTE_KIND.MANAGEMENT, write: true, explicitAdmin: true, desc: '按 planId 进入/退出应急态（只配置新 profile，恢复对称）' },
   { method: 'GET', path: '/api/codex/history/diagnose', name: 'history_diagnose', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '已登记历史根的有界只读诊断（版本/opaque 计数，不读正文）' },
-  { method: 'GET', path: '/api/codex/history/export/plan', name: 'history_export_plan', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '最小明文摘要导出试算：选择/边界/planId，零写入' },
-  { method: 'POST', path: '/api/codex/history/export', name: 'history_export', kind: CODEX_ROUTE_KIND.MANAGEMENT, write: true, explicitAdmin: true, desc: '按 planId 导出最小明文摘要到独立文件；原件不变、历史零改写' },
+  { method: 'GET', path: '/api/codex/history/export/plan', name: 'history_export_plan', kind: CODEX_ROUTE_KIND.READONLY, write: false, explicitAdmin: true, desc: '历史迁移导出试算（只读；非压缩/摘要路径，不参与任何模型请求组装）：选择/边界/planId，零写入' },
+  { method: 'POST', path: '/api/codex/history/export', name: 'history_export', kind: CODEX_ROUTE_KIND.MANAGEMENT, write: true, explicitAdmin: true, desc: '按 planId 导出历史摘录到独立文件（迁移用途；非压缩/摘要路径，不参与任何模型请求组装）；原件不变、历史零改写' },
 ])
 
 export const EXPLICIT_ADMIN_OPERATIONS = Object.freeze(CODEX_API_ROUTES.map((r) => r.name))

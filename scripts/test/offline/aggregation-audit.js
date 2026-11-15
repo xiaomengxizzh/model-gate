@@ -23,6 +23,9 @@ export const AUDIT_RULE_IDS = Object.freeze([
   'assertions-weakened', 'skipped-as-passed', 'requirement-reworded',
 ])
 
+// 门禁定义文件（V2-00 / A5 F1）：改它们等于改门禁，必须显式人工复核，不能靠"改实现时顺手删断言"过关。
+const GATE_FILES = /^(?:scripts\/(?:check-product-contract\.mjs|test\/offline\/aggregation-(?:matrix|gate|audit)(?:-v2)?\.js|test\/offline\/aggregation-acceptance-v2\.test\.mjs|test\/offline\/aggregation-v2-independent-qa\.test\.mjs))$/
+
 // 仓库内脚本无法证明的部分：必须由人类复核并在 PR 里附证据。
 export const MANUAL_AUDIT_STEPS = Object.freeze([
   '核对 GUI 截图/录屏确实来自原版 ChatGPT Desktop 窗口（窗口标题、进程、非浏览器 mock 页）',
@@ -153,12 +156,32 @@ export function auditCandidate({
     add('assertions-weakened', 'diff', 'src/** changed while a test file was deleted: ' + testFiles.filter((f) => f.status === 'deleted').map((f) => f.file).join(','))
   }
 
+  // 5b. 门禁自身被削弱（V2-00 修复自 A5 F1）：不依赖 src/** 是否被改，
+  //     只要同一 diff 在门禁文件里净删行/删断言/删文件，就必须人工复核。
+  //     这些文件是"门禁的定义"，改它们等于改门禁，不能与"改实现"混为一谈。
+  const gateFiles = files.filter((f) => GATE_FILES.test(f.file))
+  const gateRemoved = gateFiles.reduce((n, f) => n + f.removed.length, 0)
+  const gateAdded = gateFiles.reduce((n, f) => n + f.added.length, 0)
+  const gateRemovedAssertions = gateFiles.reduce((n, f) => n + f.removed.filter((l) => ASSERTION.test(l)).length, 0)
+  if (gateFiles.length && gateRemoved > gateAdded) {
+    add('gate-weakened', 'diff', 'gate file(s) removed more lines than added (' + gateRemoved + ' > ' + gateAdded + '): ' +
+      gateFiles.map((f) => f.file).join(','))
+  }
+  if (gateFiles.length && gateRemovedAssertions > 0) {
+    add('gate-weakened', 'diff', 'gate file(s) removed ' + gateRemovedAssertions + ' assertion line(s); gate assertions may only be moved or strengthened')
+  }
+  if (gateFiles.some((f) => f.status === 'deleted')) {
+    add('gate-weakened', 'diff', 'gate file deleted: ' + gateFiles.filter((f) => f.status === 'deleted').map((f) => f.file).join(','))
+  }
+
   // 6b. 测试里新增 skip
   const skipAdded = testFiles.flatMap((f) => f.added.filter((l) => /\.skip\s*\(|skip\s*:\s*true|\{\s*skip\s*:/.test(l)).map((l) => f.file))
   for (const file of skipAdded) add('skipped-as-passed', file, 'diff adds skip to a test; a skipped case cannot be counted passed')
 
-  // 7. 契约/路线图被改
-  const protectedDiff = files.filter((f) => f.file.startsWith('docs/product/') || /^docs\/roadmap\/2026-11-14-aggregation/.test(f.file))
+  // 7. 契约/路线图/门禁矩阵被改（V2 计划与 V2 矩阵同样受保护）
+  const protectedDiff = files.filter((f) => f.file.startsWith('docs/product/') ||
+    /^docs\/roadmap\/2026-11-14-(aggregation|go-deepseek-native-compact)/.test(f.file) ||
+    /^docs\/evidence\/aggregation-acceptance-(matrix|matrix-v2|verdict)/.test(f.file))
   for (const f of protectedDiff) add('requirement-reworded', f.file, 'contract/roadmap file modified; only the owner may approve requirement changes')
 
   if (pinned.contractSha256) {

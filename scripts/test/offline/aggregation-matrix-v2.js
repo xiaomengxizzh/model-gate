@@ -223,6 +223,17 @@ function countStatuses(rows) {
   return counts
 }
 
+// 状态单元格：PASS_REAL 必须显示它**实际绑定的树**（A5 F4：旧树回执不得显示成当前树）。
+function statusCell(row, short) {
+  if (row.status !== 'PASS_REAL') return row.status + ' @ `' + short + '`'
+  const pinned = (String(row.statusBasis).match(/\b[0-9a-f]{40}\b/) || [])[0]
+  if (!pinned) return row.status + ' @ `' + short + '`（未绑定树）'
+  const label = pinned.slice(0, 8)
+  return pinned.slice(0, 8) === short
+    ? row.status + ' @ `' + label + '`'
+    : row.status + ' @ `' + label + '`（旧树回执，当前树未复测）'
+}
+
 export function renderV2Markdown({ contractText, planText, matrix }) {
   const counts = countStatuses(matrix.rows)
   const caseCount = Object.values(matrix.caseIndex).flat().length
@@ -248,7 +259,7 @@ export function renderV2Markdown({ contractText, planText, matrix }) {
   for (const row of matrix.rows) {
     const tests = row.tests.map((t) => '`' + t + '`').join('<br>')
     const evidence = row.evidence.map((e) => '**`' + e.case + '`**：' + e.requires).join('<br>')
-    lines.push('| ' + [row.id, row.behavior, row.realAcceptance, tests, evidence, row.status + ' @ `' + short + '`', row.statusBasis].join(' | ') + ' |')
+    lines.push('| ' + [row.id, row.behavior, row.realAcceptance, tests, evidence, statusCell(row, short), row.statusBasis].join(' | ') + ' |')
   }
   lines.push('')
   lines.push('## 2. 汇总')

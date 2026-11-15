@@ -170,3 +170,15 @@ test('网关侧不得出现自建压缩/摘要实现（压缩归 Codex）', () =
   assert.match(interop, /'compaction'/, 'interop 必须显式识别 compaction item')
   assert.match(interop, /compaction_dropped/, '丢弃 compaction 必须记 lossy，不得静默')
 })
+
+test('历史迁移导出不得进入模型请求路径（非压缩/摘要路径，A5 N04 裁决）', () => {
+  // 结论：/api/codex/history/export* 是用户显式触发、写独立文件的迁移导出，
+  // 不是压缩器/摘要器，也绝不能把摘录喂回模型历史。用户请求路径文件不得引用它。
+  for (const rel of ['src/responses.js', 'src/codex/interop.js', 'src/router.js']) {
+    const text = readFileSync(new URL(rel, ROOT), 'utf8')
+    assert.ok(!/from\s+['"][^'"]*codex\/history\.js['"]/.test(text), rel + ' 不得引用 history 导出模块（防止摘要进入请求组装）')
+  }
+  const api = readFileSync(new URL('src/codex/api.js', ROOT), 'utf8')
+  assert.match(api, /history_export(?:_plan)?'/)
+  assert.match(api, /非压缩\/摘要路径/, '导出路由说明必须明确它不是压缩/摘要路径')
+})
