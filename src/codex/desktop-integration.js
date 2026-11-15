@@ -9,15 +9,18 @@
 //  * 绝不读写 auth.json；只接受显式绝对 config.toml 路径（不猜 HOME，detect 负责解析）。
 //  * 写盘不算成功：写后必须通过"配置解析 + 目录存在且包含目标模型 + 网关健康"三项验证。
 //  * 失败/崩溃只回滚"仍然属于我们"的字节；用户或第三方改过就返回三方差异，绝不覆盖。
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import {
   ConfigError,
+  MANAGED_PROVIDER_ID,
+  MANAGED_PROVIDER_SECTIONS,
   OWNED_SECTIONS,
   OWNED_TOP_LEVEL,
+  REMOTE_COMPACTION_LITERALS,
   RESERVED_OVERRIDE_SECTIONS,
   SENSITIVE_FIELD_RE,
   buildDesiredCodexConfig,
@@ -337,6 +340,93 @@ function restoreIfOurs (paths, journal) {
   }
 }
 
+// —— 重启提示状态机（V2-01）——
+// 原版 Desktop 不会热加载模型目录：写入后必须重启/重开。旧实现把 needsRestart 固定成
+// "只要处于聚合模式就是 true"，重启后仍永远提示。这里改为只读地比对客户端进程启动时间
+// 与本次写入时间：客户端在写入之后启动过 → 已生效；仍在用旧进程 → 明确要求重启。
+// 只读 /proc（Linux），不发送信号、不影响用户运行中的 Codex；探测失败时如实标未验证。
+const CLIENT_PROBE_TTL_MS = 5000
+const clientProbeCache = new Map()
+
+function readProcStartTicks (pid) {
+  const stat = readFileSync('/proc/' + pid + '/stat', 'utf8')
+  const close = stat.lastIndexOf(')')
+  const parts = stat.slice(close + 2).split(' ')
+  const starttime = Number(parts[19])
+  return Number.isFinite(starttime) ? starttime : null
+}
+
+function readProcBootTimeMs () {
+  const stat = readFileSync('/proc/stat', 'utf8')
+  const m = /^btime\s+(\d+)/m.exec(stat)
+  return m ? Number(m[1]) * 1000 : null
+}
+
+export function probeDesktopClient (desktopPath, opts = {}) {
+  if (!desktopPath) return { running: null, startedAt: null, pid: null, matches: 0, source: 'desktop_not_found' }
+  if (process.platform !== 'linux') return { running: null, startedAt: null, pid: null, matches: 0, source: 'unsupported_platform' }
+  const key = 'client:' + desktopPath
+  const cached = clientProbeCache.get(key)
+  if (cached && Date.now() - cached.at < CLIENT_PROBE_TTL_MS) return cached.value
+  let value
+  try {
+    const target = realpathSync(desktopPath)
+    const dir = dirname(target)
+    const boot = opts.bootTimeMs !== undefined ? Number(opts.bootTimeMs) : readProcBootTimeMs()
+    let earliest = null
+    let earliestPid = null
+    let matches = 0
+    for (const name of readdirSync('/proc')) {
+      if (!/^\d+$/.test(name)) continue
+      let cmdline = ''
+      try { cmdline = readFileSync('/proc/' + name + '/cmdline', 'utf8') } catch { continue }
+      const argv0 = cmdline.split('\0')[0]
+      if (!argv0 || !(argv0 === target || argv0 === desktopPath || argv0.startsWith(dir + '/'))) continue
+      matches++
+      const ticks = readProcStartTicks(name)
+      if (ticks == null || !Number.isFinite(boot)) continue
+      // Linux USER_HZ 默认 100；starttime 是自开机起的时钟滴答数。
+      const startedAt = boot + Math.round((ticks * 1000) / 100)
+      if (earliest == null || startedAt < earliest) { earliest = startedAt; earliestPid = Number(name) }
+    }
+    value = { running: matches > 0, startedAt: earliest, pid: earliestPid, matches, source: 'proc' }
+  } catch {
+    value = { running: null, startedAt: null, pid: null, matches: 0, source: 'proc_unavailable' }
+  }
+  clientProbeCache.set(key, { at: Date.now(), value })
+  return value
+}
+
+export function computeRestartState (opts = {}) {
+  const mode = opts.mode === 'aggregated' ? 'aggregated' : 'official'
+  const appliedAt = Number.isFinite(Number(opts.appliedAt)) && Number(opts.appliedAt) > 0 ? Number(opts.appliedAt) : null
+  const client = opts.client && typeof opts.client === 'object' ? opts.client : { running: null, startedAt: null, source: 'unknown' }
+  const base = { client, appliedAt, evidenceAt: Number.isFinite(Number(opts.now)) ? Number(opts.now) : Date.now() }
+  if (mode !== 'aggregated') return Object.assign({ needed: false, reason: 'not_aggregated' }, base)
+  if (!appliedAt) return Object.assign({ needed: true, reason: 'applied_at_unknown' }, base)
+  if (client.running === true && Number.isFinite(Number(client.startedAt))) {
+    if (Number(client.startedAt) >= appliedAt) return Object.assign({ needed: false, reason: 'client_restarted_after_apply' }, base)
+    return Object.assign({ needed: true, reason: 'client_running_with_old_config' }, base)
+  }
+  if (client.running === false) return Object.assign({ needed: true, reason: 'client_not_running' }, base)
+  return Object.assign({ needed: true, reason: 'client_restart_unverified' }, base)
+}
+
+function resolveDesktopForProbe (opts) {
+  const envPath = String(opts.desktopPath || process.env.MG_DESKTOP_EXECUTABLE || '').trim()
+  return existingPath(envPath ? [envPath, ...DESKTOP_CANDIDATES] : DESKTOP_CANDIDATES)
+}
+
+function resolveClientRuntime (opts, desktopInfo) {
+  if (opts.clientProbe === false) return { running: null, startedAt: null, pid: null, matches: 0, source: 'disabled' }
+  if (typeof opts.clientProbe === 'function') {
+    try { return Object.assign({ source: 'injected' }, opts.clientProbe(desktopInfo || null) || {}) } catch { return { running: null, startedAt: null, pid: null, matches: 0, source: 'probe_failed' } }
+  }
+  const desktopPath = (desktopInfo && desktopInfo.found && desktopInfo.path) || null
+  if (!desktopPath) return { running: null, startedAt: null, pid: null, matches: 0, source: 'desktop_not_found' }
+  return probeDesktopClient(desktopPath, opts)
+}
+
 // —— 探测：CLI / Desktop / 配置 / 备份 ——
 const CLI_CANDIDATES = ['~/.local/bin/codex', '/usr/local/bin/codex', '/usr/bin/codex', '/opt/homebrew/bin/codex']
 // Linux 包布局：/usr/lib/chatgpt/ChatGPT（Electron 主体）优先于 /usr/bin/chatgpt（launcher 脚本），
@@ -527,6 +617,10 @@ export function detect (opts = {}) {
     desktopInfo.bundledCodex = bundledInfo
   }
 
+  const appliedAt = state && state.mode === 'aggregated' && Number(state.appliedAt) > 0 ? Number(state.appliedAt) : null
+  const clientRuntime = resolveClientRuntime(opts, desktopInfo)
+  const restart = computeRestartState({ mode: classification.mode, appliedAt, client: clientRuntime })
+  const nativeCompaction = nativeCompactionSummary(opts, classification)
   return {
     contract: DESKTOP_CONTRACT,
     ok: true,
@@ -568,7 +662,10 @@ export function detect (opts = {}) {
     backup: backupSummary(paths, state, current),
     lock: { present: lock.present, stale: !!lock.stale },
     journal: journalPhase(paths) ? { present: true } : { present: false },
-    needsRestart: classification.mode === 'aggregated',
+    clientRuntime,
+    restart,
+    nativeCompaction,
+    needsRestart: restart.needed,
   }
 }
 
@@ -584,6 +681,27 @@ function consentTokenFor (target, beforeSha, afterSha) {
   return sha256Hex(DESKTOP_CONTRACT + '\n' + target + '\n' + beforeSha + '\n' + afterSha)
 }
 
+// Managed Provider（provider 级原生压缩能力）默认关闭：它会切换 Codex provider 身份，
+// 依赖 requires_openai_auth 复用 ChatGPT 登录，尚未经原版 Desktop 真机验收。
+function managedProviderGuard (opts) {
+  if (opts.managedProvider === undefined || opts.managedProvider === null) return null
+  if (opts.experimentalManagedProvider === true) return null
+  return {
+    code: 'managed_provider_unverified',
+    message: 'Managed Provider 模式会切换 Codex provider 身份，并依赖 requires_openai_auth 复用 ChatGPT 登录；' +
+      '该运行时路径尚未经原版 Desktop 真机验收（UNVERIFIED_LOCAL_STATE）。' +
+      '确认为所有者授权且有 A5 真机方案后，显式传入 experimentalManagedProvider=true；' +
+      '默认保持内置 openai 身份（Codex 拒绝任何 [model_providers.openai*] 覆盖，因此该身份无法声明 provider capability）。',
+    evidence: {
+      capabilityField: 'model_providers.' + MANAGED_PROVIDER_ID + '.capabilities.remote_compaction',
+      literals: REMOTE_COMPACTION_LITERALS.slice(),
+      requiresOpenAiAuth: true,
+      configParse: 'PASS_MOCK (codex-cli 0.167.0-alpha.3.2 serde validation)',
+      runtimeAuth: 'UNVERIFIED',
+    },
+  }
+}
+
 function buildDesired (opts) {
   try {
     const built = buildDesiredCodexConfig({
@@ -591,10 +709,66 @@ function buildDesired (opts) {
       model: opts.model,
       modelCatalogJsonPath: opts.catalogPath,
       features: opts.features,
+      managedProvider: opts.managedProvider,
     })
     return built.desired
   } catch (e) {
     throw asDesktopError(e, 'invalid_desired')
+  }
+}
+
+// 只读审计：当前配置里 ModelGate provider 段是否声明了原生压缩能力。
+export function readNativeCompactionBinding (text, opts = {}) {
+  const providerId = String(opts.providerId || MANAGED_PROVIDER_ID)
+  const providerSectionName = 'model_providers.' + providerId
+  const capsSectionName = providerSectionName + '.capabilities'
+  const doc = parseConfigDocument(String(text == null ? '' : text))
+  const providerSection = doc.sections.find((sec) => sec.name === providerSectionName && !sec.isArray)
+  const capability = doc.meta.find((m) => m.kind === 'entry' && m.sectionName === capsSectionName && m.key === 'remote_compaction')
+  const requiresAuth = doc.meta.find((m) => m.kind === 'entry' && m.sectionName === providerSectionName && m.key === 'requires_openai_auth')
+  const remote = capability ? String(capability.value).trim().replace(/^"|"$/g, '') : null
+  return {
+    providerId,
+    providerDeclared: !!providerSection,
+    providerSection: providerSection ? providerSectionName : null,
+    requiresOpenAiAuth: requiresAuth ? /^true$/i.test(String(requiresAuth.value).trim()) : null,
+    remoteCompaction: remote,
+    declarable: providerSection ? true : false,
+  }
+}
+
+function nativeCompactionSummary (opts, classification) {
+  let binding = { providerId: MANAGED_PROVIDER_ID, providerDeclared: false, remoteCompaction: null, requiresOpenAiAuth: null }
+  let configText = ''
+  try {
+    const paths = resolveDesktopPaths(opts)
+    if (classification.mode !== 'official') configText = readFileSync(paths.configPath, 'utf8')
+  } catch { configText = '' }
+  try { binding = readNativeCompactionBinding(configText, { providerId: (opts.managedProvider && opts.managedProvider.id) || MANAGED_PROVIDER_ID }) } catch { /* 配置不可解析时按未声明处理 */ }
+  if (binding.providerDeclared || opts.managedProvider != null) {
+    return {
+      mode: 'managed-provider',
+      providerId: binding.providerId,
+      declarable: true,
+      declared: binding.remoteCompaction === 'unsupported' || binding.remoteCompaction === 'v2',
+      remoteCompaction: binding.remoteCompaction,
+      requiresOpenAiAuth: binding.requiresOpenAiAuth,
+      field: 'model_providers.' + binding.providerId + '.capabilities.remote_compaction',
+      literals: REMOTE_COMPACTION_LITERALS.slice(),
+      evidence: 'codex-cli 0.167.0-alpha.3.2 config serde validation (offline)',
+      runtimeAuth: 'UNVERIFIED',
+      note: '让 Codex 对 Go DeepSeek 走它自己的本地自动压缩；退出聚合时随自有段一并撤销。',
+    }
+  }
+  return {
+    mode: 'builtin-openai',
+    providerId: 'openai',
+    declarable: false,
+    declared: false,
+    reason: 'reserved_builtin_provider',
+    detail: 'Codex 拒绝任何 [model_providers.openai*] 覆盖（reserved built-in provider ID）；内置身份无法声明 provider capability。',
+    evidence: 'codex-cli 0.167.0-alpha.3.2: model_providers contains reserved built-in provider IDs: openai',
+    runtimeAuth: 'NOT_APPLICABLE',
   }
 }
 
@@ -660,7 +834,46 @@ function blockedFromConfigError (error) {
 export function preview (opts = {}) {
   const paths = resolveDesktopPaths(opts)
   const gatewayBaseUrl = String(opts.baseUrl || process.env.MG_DESKTOP_GATEWAY || DEFAULT_GATEWAY_BASE_URL).replace(/\/+$/, '')
-  const desired = buildDesired({ baseUrl: gatewayBaseUrl, model: opts.model, catalogPath: opts.catalogPath, features: opts.features })
+  const guard = managedProviderGuard(opts)
+  if (guard) {
+    let snap = { exists: false, size: 0, sha256: '', mtimeMs: 0 }
+    try { snap = snapshotConfigFile(paths.configPath) } catch { /* 保持空快照 */ }
+    let mode = 'unknown'
+    try { mode = classifyConfigState({ configPath: paths.configPath, baseUrl: gatewayBaseUrl }).mode } catch { /* unknown */ }
+    return {
+      contract: DESKTOP_CONTRACT,
+      ok: false,
+      state: 'blocked',
+      mode,
+      configPath: paths.configPath,
+      before: { exists: snap.exists, size: snap.size, sha256: snap.sha256, mtimeMs: snap.mtimeMs },
+      expectedSha: snap.exists ? snap.sha256 : '',
+      after: { exists: false, size: 0, sha256: '' },
+      desired: null,
+      rows: [],
+      changed: [],
+      conflicts: [],
+      blocked: [{ code: guard.code, message: guard.message }],
+      warnings: [guard.message],
+      preserved: null,
+      consentRequired: false,
+      consentToken: null,
+      firstRun: false,
+      alreadyAggregated: false,
+      catalog: catalogSummary(opts.catalogPath, opts.model, opts),
+      nativeCompaction: {
+        mode: 'managed-provider',
+        providerId: (opts.managedProvider && opts.managedProvider.id) || MANAGED_PROVIDER_ID,
+        declarable: true,
+        declared: false,
+        reason: 'experimental_flag_required',
+        field: 'model_providers.' + ((opts.managedProvider && opts.managedProvider.id) || MANAGED_PROVIDER_ID) + '.capabilities.remote_compaction',
+        literals: REMOTE_COMPACTION_LITERALS.slice(),
+        runtimeAuth: 'UNVERIFIED',
+      },
+    }
+  }
+  const desired = buildDesired({ baseUrl: gatewayBaseUrl, model: opts.model, catalogPath: opts.catalogPath, features: opts.features, managedProvider: opts.managedProvider })
   let before
   let beforeText = ''
   let existing
@@ -716,8 +929,8 @@ export function preview (opts = {}) {
     if (row.kind !== 'replace') continue
     conflicts.push({ path: row.path, from: row.from, to: row.to, reason: 'overwrite' })
   }
-  if (preserved.sections.some((n) => n === 'model_providers.modelgate')) {
-    warnings.push('检测到 [model_providers.modelgate]（可能来自早期原型）：本产品使用内置 openai 身份，不写入该段，原样保留。')
+  if (!opts.managedProvider && existing.sections && existing.sections['model_providers.' + MANAGED_PROVIDER_ID] && existing.sections['model_providers.' + MANAGED_PROVIDER_ID].present) {
+    warnings.push('检测到 [model_providers.' + MANAGED_PROVIDER_ID + ']（早期原型或自定义段）：默认仍使用内置 openai 身份，本次不修改该段；如需 provider 级原生压缩声明（remote_compaction）请显式启用 Managed Provider 模式。')
   }
   const catalog = catalogSummary(opts.catalogPath, opts.model, opts)
   if (!String(opts.catalogPath || '').trim()) blocked.push({ code: 'catalog_path_required', message: '必须先由网关生成聚合模型目录（model_catalog_json 绝对路径），否则客户端会回落到不完整目录。' })
@@ -744,6 +957,7 @@ export function preview (opts = {}) {
     firstRun: !before.exists,
     alreadyAggregated: rows.every((r) => r.kind === 'same'),
     catalog,
+    nativeCompaction: nativeCompactionSummary(opts, classifyConfigState({ configPath: paths.configPath, baseUrl: gatewayBaseUrl })),
   }
 }
 
@@ -818,6 +1032,8 @@ export async function activate (opts = {}) {
     throw asDesktopError(e, 'lock_failed')
   }
   try {
+    const guard = managedProviderGuard(opts)
+    if (guard) throw new DesktopError(guard.code, guard.message, guard.evidence, 422)
     const recovery = recoverInterruptedApply({ configPath: paths.configPath })
     const before = snapshotConfigFile(paths.configPath)
     const beforeText = before.exists ? readFileSync(paths.configPath, 'utf8') : ''
@@ -828,7 +1044,7 @@ export async function activate (opts = {}) {
     }
     let desired
     try {
-      desired = buildDesired({ baseUrl: gatewayBaseUrl, model: opts.model, catalogPath: opts.catalogPath, features: opts.features })
+      desired = buildDesired({ baseUrl: gatewayBaseUrl, model: opts.model, catalogPath: opts.catalogPath, features: opts.features, managedProvider: opts.managedProvider })
     } catch (e) { throw asDesktopError(e, 'invalid_desired') }
     let merged
     try {
@@ -862,6 +1078,7 @@ export async function activate (opts = {}) {
       // 幂等：保留第一次接入时记录的 before/backup，绝不用"聚合后的文件"覆盖回滚基线。
       const previous = loadState(paths)
       const keepBaseline = previous && previous.mode === 'aggregated' && previous.before
+      const appliedAt = keepBaseline && previous.appliedAt ? Number(previous.appliedAt) : Date.now()
       saveState(paths, {
         mode: 'aggregated',
         before: keepBaseline ? previous.before : stateBefore,
@@ -870,10 +1087,25 @@ export async function activate (opts = {}) {
         beforeSha: keepBaseline ? previous.beforeSha : stateBefore.sha256,
         backupPath: keepBaseline ? previous.backupPath || null : null,
         desired,
-        appliedAt: keepBaseline && previous.appliedAt ? previous.appliedAt : Date.now(),
+        appliedAt,
         lastApply: { ok: true, idempotent: true, at: Date.now(), verification: summarizeVerification(verification) },
       })
-      return { ok: true, changed: false, idempotent: true, sha: afterSha, backupPath: keepBaseline ? previous.backupPath || null : null, verification, recovery, mode: 'aggregated' }
+      const desktop = resolveDesktopForProbe(opts)
+      const clientRuntime = resolveClientRuntime(opts, { found: desktop.found, path: desktop.path })
+      const restart = computeRestartState({ mode: 'aggregated', appliedAt, client: clientRuntime })
+      return {
+        ok: true,
+        changed: false,
+        idempotent: true,
+        sha: afterSha,
+        backupPath: keepBaseline ? previous.backupPath || null : null,
+        verification,
+        recovery,
+        mode: 'aggregated',
+        clientRuntime,
+        restart,
+        needsRestart: restart.needed,
+      }
     }
     const journalBase = {
       schema: JOURNAL_SCHEMA,
@@ -936,6 +1168,7 @@ export async function activate (opts = {}) {
     journalBase.phase = 'verified'
     journalBase.lastApply = { ok: true, idempotent: false, at: Date.now(), verification: summarizeVerification(verification) }
     writeAtomicJson(paths.journalPath, journalBase, 0o600)
+    const appliedAt = Date.now()
     saveState(paths, {
       mode: 'aggregated',
       before: stateBefore,
@@ -944,10 +1177,13 @@ export async function activate (opts = {}) {
       beforeSha: stateBefore.sha256,
       backupPath: journalBase.backupPath,
       desired,
-      appliedAt: Date.now(),
-      lastApply: { ok: true, at: Date.now(), verification: summarizeVerification(verification) },
+      appliedAt,
+      lastApply: { ok: true, at: appliedAt, verification: summarizeVerification(verification) },
     })
     try { unlinkSync(paths.journalPath) } catch {}
+    const desktop = resolveDesktopForProbe(opts)
+    const clientRuntime = resolveClientRuntime(opts, { found: desktop.found, path: desktop.path })
+    const restart = computeRestartState({ mode: 'aggregated', appliedAt, client: clientRuntime })
     return {
       ok: true,
       changed: true,
@@ -957,6 +1193,9 @@ export async function activate (opts = {}) {
       verification,
       recovery,
       mode: 'aggregated',
+      clientRuntime,
+      restart,
+      needsRestart: restart.needed,
     }
   } finally {
     lock.release()
@@ -1017,7 +1256,7 @@ export function buildOwnedRestore (opts = {}) {
   const baseOwned = readOwnedFields(baseText)
   const currentOwned = readOwnedFields(currentText)
   const baseTop = (key) => baseOwned.topLevel[key] || { present: false, raw: '', multiline: false }
-  const baseFeature = (key) => ((baseOwned.sections.features && baseOwned.sections.features.keys[key]) || { present: false, raw: '', multiline: false })
+  const baseSectionKey = (name, key) => ((baseOwned.sections[name] && baseOwned.sections[name].keys[key]) || { present: false, raw: '', multiline: false })
   const conflicts = []
   const changedKeys = []
   const judge = (path, cur, base, want) => {
@@ -1046,13 +1285,15 @@ export function buildOwnedRestore (opts = {}) {
   const doc = parseConfigDocument(currentText)
   const out = []
   for (const m of doc.meta) {
-    if (m.kind === 'entry' && m.sectionName === '' && OWNED_TOP_LEVEL.includes(m.key)) {
+    // 只处理"我们写入过的键"（projection 覆盖的键）；基线里其它自有键属于用户，原样保留。
+    if (m.kind === 'entry' && m.sectionName === '' && Object.prototype.hasOwnProperty.call(projection.topLevel, m.key)) {
       const base = baseTop(m.key)
       if (base.present) out.push(withIndentOf(m.raw, m.key + ' = ' + base.raw))
       continue
     }
-    if (m.kind === 'entry' && m.sectionName === 'features' && (OWNED_SECTIONS.features || []).includes(m.key)) {
-      const base = baseFeature(m.key)
+    const sectionProjection = projection.sections[m.sectionName]
+    if (m.kind === 'entry' && sectionProjection && Object.prototype.hasOwnProperty.call(sectionProjection, m.key)) {
+      const base = baseSectionKey(m.sectionName, m.key)
       if (base.present) out.push(withIndentOf(m.raw, m.key + ' = ' + base.raw))
       continue
     }
@@ -1060,14 +1301,17 @@ export function buildOwnedRestore (opts = {}) {
   }
   // 接入前文件不存在时，撤掉自有行后不留前导空行（用户内容从第一行开始）。
   if (!baseExists) { while (out.length && out[0].trim() === '') out.shift() }
-  // 接入时由我们新建的 [features] 段，在自有键全部撤掉后不应留下空段头。
-  if (!(baseOwned.sections.features && baseOwned.sections.features.present)) {
-    for (let i = 0; i < out.length; i++) {
-      if (!/^\s*\[features\]\s*$/.test(out[i])) continue
-      let j = i + 1
-      while (j < out.length && !/^\s*\[\[?[^\[\]]+\]\]?\s*$/.test(out[j])) j++
-      if (out.slice(i + 1, j).every((line) => line.trim() === '')) { out.splice(i, j - i); i-- }
-    }
+  // 接入时由我们新建、且自有键全部撤掉后变空的段（[features] / [model_providers.*]）不留空段头。
+  for (let i = 0; i < out.length; i++) {
+    const header = /^\s*\[([^\[\]]+)\]\s*$/.exec(out[i])
+    if (!header) continue
+    const name = header[1].trim()
+    if (!Object.prototype.hasOwnProperty.call(projection.sections, name)) continue
+    const baseSection = baseOwned.sections[name]
+    if (baseSection && baseSection.present) continue
+    let j = i + 1
+    while (j < out.length && !/^\s*\[\[?[^\[\]]+\]\]?\s*$/.test(out[j])) j++
+    if (out.slice(i + 1, j).every((line) => line.trim() === '')) { out.splice(i, j - i); i-- }
   }
   const text = out.join(doc.eol)
   if (unmanagedFingerprint(currentText) !== unmanagedFingerprint(text)) {
@@ -1081,10 +1325,14 @@ export function buildOwnedRestore (opts = {}) {
     const got = afterOwned.topLevel[key]
     if (base.present !== got.present || (base.present && base.raw !== got.raw)) mismatch.push(key)
   }
-  for (const name of Object.keys(baseOwned.sections || {})) {
-    const keys = (baseOwned.sections[name] && baseOwned.sections[name].keys) || {}
-    for (const key of Object.keys(keys)) {
-      const base = keys[key]
+  const sectionNames = new Set([...Object.keys(baseOwned.sections || {}), ...Object.keys(projection.sections)])
+  for (const name of sectionNames) {
+    const keys = new Set([
+      ...Object.keys((baseOwned.sections[name] && baseOwned.sections[name].keys) || {}),
+      ...Object.keys(projection.sections[name] || {}),
+    ])
+    for (const key of keys) {
+      const base = baseSectionKey(name, key)
       const got = (afterOwned.sections[name] && afterOwned.sections[name].keys[key]) || { present: false, raw: '' }
       if (base.present !== got.present || (base.present && base.raw !== got.raw)) mismatch.push(name + '.' + key)
     }
@@ -1322,6 +1570,11 @@ export function status (opts = {}) {
   const current = snapshotConfigFile(paths.configPath)
   const classification = classifyConfigState({ configPath: paths.configPath, baseUrl: opts.baseUrl })
   const fresh = loadState(paths)
+  const desktop = resolveDesktopForProbe(opts)
+  const clientRuntime = resolveClientRuntime(opts, { found: desktop.found, path: desktop.path })
+  const appliedAt = fresh && fresh.mode === 'aggregated' && Number(fresh.appliedAt) > 0 ? Number(fresh.appliedAt) : null
+  const restart = computeRestartState({ mode: classification.mode, appliedAt, client: clientRuntime })
+  const nativeCompaction = nativeCompactionSummary(opts, classification)
   return {
     contract: DESKTOP_CONTRACT,
     ok: true,
@@ -1335,7 +1588,10 @@ export function status (opts = {}) {
     lock: { present: readLock(paths.lockPath, Date.now()).present },
     journal: { present: !!journalPhase(paths) },
     recovery,
-    needsRestart: classification.mode === 'aggregated',
+    clientRuntime,
+    restart,
+    nativeCompaction,
+    needsRestart: restart.needed,
   }
 }
 
@@ -1345,6 +1601,18 @@ export const DESKTOP_POLICY = Object.freeze({
   ownedTopLevel: OWNED_TOP_LEVEL.slice(),
   ownedSections: Object.fromEntries(Object.entries(OWNED_SECTIONS).map(([k, v]) => [k, v.slice()])),
   reservedOverrideSections: RESERVED_OVERRIDE_SECTIONS.slice(),
+  // Provider 级原生压缩声明（A1 结论的落点）。默认不写：GitHub 内置 openai 身份不可覆盖。
+  managedProvider: Object.freeze({
+    id: MANAGED_PROVIDER_ID,
+    sections: Object.freeze(Object.fromEntries(Object.entries(MANAGED_PROVIDER_SECTIONS).map(([k, v]) => [k, v.slice()]))),
+    capabilityField: 'model_providers.' + MANAGED_PROVIDER_ID + '.capabilities.remote_compaction',
+    literals: REMOTE_COMPACTION_LITERALS.slice(),
+    requiresOpenAiAuth: true,
+    experimentalFlag: 'experimentalManagedProvider',
+    configParseEvidence: 'codex-cli 0.167.0-alpha.3.2 serde validation: enum accepts unsupported | v2; requires_openai_auth accepted',
+    reservedBuiltinEvidence: 'codex-cli 0.167.0-alpha.3.2 rejects any [model_providers.openai*] as reserved built-in provider ID',
+    runtimeAuth: 'UNVERIFIED',
+  }),
   maxCatalogBytes: MAX_CATALOG_BYTES,
   verification: ['config-parse-owned-fields', 'catalog-present-and-parseable', 'gateway-health'],
   forbidden: ['auth.json', 'model_providers.openai', 'default_subagent_model（不在所有权声明内）'],

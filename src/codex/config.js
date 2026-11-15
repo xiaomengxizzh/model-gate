@@ -17,13 +17,29 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 
 export const CONFIG_CONTRACT = 'mg-codex-config/1'
 export const OWNED_TOP_LEVEL = Object.freeze(['model_provider', 'openai_base_url', 'model', 'model_catalog_json'])
-// 只声明 features 的白名单键；其它 feature 一律视为外部所有。
+// Codex 内置 provider 不可覆盖：0.167.0-alpha.3.2 实测任何 [model_providers.openai*] 都会让
+// 配置加载失败（reserved built-in provider IDs）。能力声明只能落在 ModelGate 自有的 provider 段。
+export const RESERVED_BUILTIN_PROVIDER_IDS = Object.freeze(['openai'])
+export const MANAGED_PROVIDER_ID = 'modelgate'
+// Provider 级原生压缩能力（A1 结论的落点）：
+//   [model_providers.modelgate.capabilities]
+//   remote_compaction = "unsupported"   # RemoteCompactionSupport 枚举，仅 unsupported | v2
+// 该字面量由捆绑 Codex 0.167.0-alpha.3.2 的 serde 解析器实证（错误信息给出枚举候选），
+// 不是猜测；requires_openai_auth 同样由该版本配置解析器接受。
+export const REMOTE_COMPACTION_LITERALS = Object.freeze(['unsupported', 'v2'])
+export const MANAGED_PROVIDER_SECTIONS = Object.freeze({
+  'model_providers.modelgate': Object.freeze(['name', 'base_url', 'wire_api', 'requires_openai_auth']),
+  'model_providers.modelgate.capabilities': Object.freeze(['remote_compaction']),
+})
+// 只声明 ModelGate 自有段/键的白名单；其它 feature、其它 provider 一律视为外部所有。
 export const OWNED_SECTIONS = Object.freeze({
   features: Object.freeze(['multi_agent', 'multi_agent_v2']),
+  'model_providers.modelgate': MANAGED_PROVIDER_SECTIONS['model_providers.modelgate'],
+  'model_providers.modelgate.capabilities': MANAGED_PROVIDER_SECTIONS['model_providers.modelgate.capabilities'],
 })
 const OWNED_SECTION_NAMES = Object.keys(OWNED_SECTIONS)
 // 这些段会让 Codex 启动失败（reserved built-in provider ID）：只检测、告警，绝不自动删改。
-export const RESERVED_OVERRIDE_SECTIONS = Object.freeze(['model_providers.openai'])
+export const RESERVED_OVERRIDE_SECTIONS = Object.freeze(['model_providers.openai', 'model_providers.openai.capabilities'])
 export const MAX_CONFIG_BYTES = 512 * 1024
 const MAX_DIFF_CELLS = 4000000
 
@@ -1081,19 +1097,85 @@ export function normalizeGatewayBaseUrl (raw) {
   return u.origin + path
 }
 
+// Managed Provider 模式（默认关闭）：
+//   model_provider = "modelgate"
+//   [model_providers.modelgate] name/base_url/wire_api/requires_openai_auth
+//   [model_providers.modelgate.capabilities] remote_compaction = "unsupported"
+// 目的：让 Codex 对 Go DeepSeek 走它自己的本地自动压缩，不把 GPT 侧 opaque compaction item 发出去。
+// 该模式会切换 provider 身份；ChatGPT 登录复用（requires_openai_auth）尚未经原版 Desktop 真机验收，
+// 因此只能由调用方显式请求，默认仍使用内置 openai 身份（内置身份无法声明 provider capability）。
+export function buildManagedProviderSection (opts = {}) {
+  const origin = normalizeGatewayBaseUrl(opts.openaiBaseUrl || opts.gatewayBaseUrl)
+  const rawId = String(opts.providerId || MANAGED_PROVIDER_ID).trim()
+  if (!/^[a-z][a-z0-9_-]{1,63}$/.test(rawId)) {
+    throw new ConfigError('invalid_provider_id', 'provider id 只允许小写字母开头、字母/数字/_/-：' + rawId)
+  }
+  if (RESERVED_BUILTIN_PROVIDER_IDS.includes(rawId)) {
+    throw new ConfigError('reserved_provider_id',
+      'Codex 把 "' + rawId + '" 列为 reserved built-in provider ID：覆盖它会让客户端配置加载失败。' +
+      'provider capability 不能写在 [model_providers.' + rawId + ']；请使用非内置的 ModelGate provider id。')
+  }
+  if (rawId !== MANAGED_PROVIDER_ID) {
+    throw new ConfigError('unsupported_provider_id',
+      '当前只声明 ' + MANAGED_PROVIDER_ID + ' 这一个自有 provider 段；收到 ' + rawId + '。新增 id 需要同步所有权声明与回滚测试。')
+  }
+  const remote = opts.remoteCompaction === undefined ? 'unsupported' : String(opts.remoteCompaction)
+  if (!REMOTE_COMPACTION_LITERALS.includes(remote)) {
+    throw new ConfigError('invalid_compaction_capability',
+      'remote_compaction 只接受 ' + REMOTE_COMPACTION_LITERALS.join(' | ') + '（RemoteCompactionSupport 枚举）：' + remote)
+  }
+  const name = String(opts.name || 'ModelGate').trim() || 'ModelGate'
+  return {
+    providerId: rawId,
+    remoteCompaction: remote,
+    sections: {
+      ['model_providers.' + rawId]: {
+        name,
+        base_url: origin,
+        wire_api: 'responses',
+        requires_openai_auth: true,
+      },
+      ['model_providers.' + rawId + '.capabilities']: {
+        remote_compaction: remote,
+      },
+    },
+  }
+}
+
 export function buildDesiredCodexConfig (opts = {}) {
   const origin = normalizeGatewayBaseUrl(opts.openaiBaseUrl || opts.gatewayBaseUrl)
   const model = String(opts.model || '').trim()
   if (!model) throw new ConfigError('invalid_desired', '必须提供聚合模型名（model）。')
   const catalog = String(opts.modelCatalogJsonPath || '').trim()
   const topLevel = { model_provider: 'openai', openai_base_url: origin, model }
+  const sections = {}
+  if (opts.features && typeof opts.features === 'object') sections.features = opts.features
+  let managedProvider = null
+  if (opts.managedProvider !== undefined && opts.managedProvider !== null) {
+    if (typeof opts.managedProvider !== 'object' || Array.isArray(opts.managedProvider)) {
+      throw new ConfigError('invalid_provider', 'managedProvider 必须是对象（{ id?, name?, remoteCompaction? }）。')
+    }
+    managedProvider = buildManagedProviderSection({
+      openaiBaseUrl: origin,
+      providerId: opts.managedProvider.id,
+      name: opts.managedProvider.name,
+      remoteCompaction: opts.managedProvider.remoteCompaction,
+    })
+    topLevel.model_provider = managedProvider.providerId
+    // 自定义 provider 用自身的 base_url；移除内置 openai 的改向键，避免身份语义混淆。
+    delete topLevel.openai_base_url
+    Object.assign(sections, managedProvider.sections)
+  }
   if (catalog) topLevel.model_catalog_json = catalog
   const desired = { topLevel }
-  if (opts.features && typeof opts.features === 'object') desired.sections = { features: opts.features }
+  if (Object.keys(sections).length) desired.sections = sections
   return {
     desired,
     openaiBaseUrl: origin,
     catalogPath: catalog || null,
+    providerMode: managedProvider ? 'managed-provider' : 'builtin-openai',
+    providerId: managedProvider ? managedProvider.providerId : 'openai',
+    remoteCompaction: managedProvider ? managedProvider.remoteCompaction : null,
     risks: [
       'D1-A：沿用内置 openai 身份（model_provider="openai"）+ 官方登录；客户端版本/账号能力必须真实验证，未验证前不得宣称已兼容。',
       'Codex 0.167 把 openai 列为 reserved built-in provider ID：不要写 [model_providers.openai]，那会让客户端直接启动失败；改向只经顶层 openai_base_url。',

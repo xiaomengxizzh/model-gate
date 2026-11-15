@@ -105,9 +105,12 @@ function expectCode (fn, code) {
 test('契约与所有权声明：只含 D1-A 可写字段，明确拒绝内置 provider 覆盖', () => {
   assert.equal(CONFIG_CONTRACT, 'mg-codex-config/1')
   assert.deepEqual([...OWNED_TOP_LEVEL].sort(), ['model', 'model_catalog_json', 'model_provider', 'openai_base_url'])
-  assert.deepEqual(Object.keys(OWNED_SECTIONS), ['features'])
+  assert.deepEqual(Object.keys(OWNED_SECTIONS), ['features', 'model_providers.modelgate', 'model_providers.modelgate.capabilities'])
   assert.deepEqual([...OWNED_SECTIONS.features].sort(), ['multi_agent', 'multi_agent_v2'])
-  assert.deepEqual([...RESERVED_OVERRIDE_SECTIONS], ['model_providers.openai'])
+  assert.deepEqual([...OWNED_SECTIONS['model_providers.modelgate']].sort(), ['base_url', 'name', 'requires_openai_auth', 'wire_api'])
+  assert.deepEqual([...OWNED_SECTIONS['model_providers.modelgate.capabilities']], ['remote_compaction'])
+  // V2-01：provider 级原生压缩能力只能落在自有 provider 段；内置 openai 的覆盖（含子表）仍被拒绝。
+  assert.deepEqual([...RESERVED_OVERRIDE_SECTIONS], ['model_providers.openai', 'model_providers.openai.capabilities'])
   const policy = describeConfigPolicy()
   assert.equal(policy.requiredBasename, 'config.toml')
   assert.ok(policy.forbiddenBasenames.includes('auth.json'))
