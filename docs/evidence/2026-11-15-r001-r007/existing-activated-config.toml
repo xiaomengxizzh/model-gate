@@ -1,0 +1,20 @@
+# 用户手写配置（已有配置用户场景，含注释 / MCP / projects / 自定义 provider）
+model = "gpt-6-luna"
+model_reasoning_effort = "medium"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+model_provider = "openai"
+openai_base_url = "http://127.0.0.1:18881"
+model_catalog_json = "/tmp/mg-r007-existing-state/aggregation/catalog/local/current.json"
+[mcp_servers.docs]
+command = "node"
+args = ["docs.js"]
+
+[projects."/home/dev/proj"]
+trust_level = "trusted"
+
+[model_providers.custom]
+name = "Custom"
+base_url = "https://example.invalid/v1"
+wire_api = "responses"
