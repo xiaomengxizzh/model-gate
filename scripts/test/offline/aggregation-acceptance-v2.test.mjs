@@ -104,17 +104,27 @@ test('V2 矩阵文件与生成器逐字节一致（禁止手改）', () => {
   assert.equal(generateV2().markdown, readV2MatrixFile(), MATRIX_PATH_V2 + ' 与生成器不一致')
 })
 
-test('V2 状态证据：12 条齐全，MG-R006 是 FAIL（原生压缩未通过）', () => {
+test('V2 状态证据：12 条齐全，MG-R006 的状态必须与证据一致（不得无据升级）', () => {
   const { evidence } = loadV2Sources()
   const statusDoc = evidence.find((e) => e.docPath === STATUS_PATH_V2)
   assert.ok(statusDoc, '缺少 V2 状态文档')
   assert.deepEqual(statusDoc.rows.map((r) => r.id), REQUIREMENT_IDS)
   const r006 = statusDoc.rows.find((r) => r.id === 'MG-R006')
-  assert.equal(r006.status, 'FAIL', 'MG-R006 不得在原生压缩未通过时标为通过')
   assert.match(r006.basis, /native-compaction|原生压缩/)
-  // 旧 PASS_REAL 必须被显式取代，不能静默继承。
-  assert.match(r006.basis, /取代\s*PASS_REAL\s*@\s*docs\/evidence\/aggregation-native-real-2026-11-14\.md/)
-  assert.match(r006.basis, /取代\s*NOT_TESTED\s*@\s*docs\/evidence\/aggregation-integration-2026-11-14\.md/)
+  if (r006.status !== 'PASS_REAL') {
+    // 未通过时必须保留历史失败与显式取代，不能静默继承旧 PASS_REAL。
+    assert.match(r006.basis, /unsupported_input_item|FAIL|未通过/)
+    assert.match(r006.basis, /取代\s*PASS_REAL\s*@\s*docs\/evidence\/aggregation-native-real-2026-11-14\.md/)
+    return
+  }
+  // 升级为 PASS_REAL 时：必须覆盖全部 V2 用例、绑定完整 40 位新树、声明压缩后继续。
+  const expected = ['native-tool', 'same-child-followup', 'interrupt', 'native-compaction', 'post-compact-followup', 'context-proof', 'resume', 'no-duplicates']
+  for (const c of expected) assert.ok(r006.basis.includes(c), 'PASS_REAL 的 MG-R006 缺少用例 ' + c)
+  assert.match(r006.basis, /压缩后|post-compact/)
+  const shas = r006.basis.match(/\b[0-9a-f]{40}\b/g) || []
+  assert.ok(shas.length > 0, 'PASS_REAL 必须绑定完整 40 位被测树 SHA')
+  const V1 = ['67b97354ad28a3924607b35a663801f417f14b8e', '4feafe0e51dc02d48c45734df5b34e70d3679bd5']
+  assert.ok(shas.some((x) => !V1.includes(x)), '不得只绑 V1 旧树')
 })
 
 test('V2 门禁：当前状态 ready:false，且不因所有者批准而放行', () => {
@@ -188,7 +198,7 @@ test('历史迁移导出不得进入模型请求路径（非压缩/摘要路径�
 // 这里分别钉住「整个门禁模块」与「状态表逐行内容」的 sha256：
 // 任何语义改动都必须同时改这两个哈希，形成两次可见的修改，而不是悄悄换一个 true/false。
 const PINNED_GATE_MODULE_SHA = 'c6fe1ef39596a8c68b6d492f4b4fdf2038a018fb6a5d9c352b5ed63f46d4b31a'
-const PINNED_STATUS_TABLE_SHA = '9e6d43c1eb6c8161fed3d0fb5918478b7b3b76183d195ac92263815fc057afea'
+const PINNED_STATUS_TABLE_SHA = '61be7cdee2424359e4d178cd017517e6173f72ee6bbe621b38a81189a248aea9'
 
 test('门禁模块整体钉死 sha256（等行数语义削弱必须显式二次确认）', () => {
   const src = readFileSync(new URL('scripts/test/offline/aggregation-gate-v2.js', ROOT), 'utf8')

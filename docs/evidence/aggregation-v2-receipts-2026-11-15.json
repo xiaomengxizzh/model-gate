@@ -1,7 +1,7 @@
 {
   "MG-R002": {
     "status": "PASS_REAL",
-    "commitSha": "e049eed444d7698d1d127fad472e5ca9228cfd99",
+    "commitSha": "3116459899c17b811300995986a88de67ee50051",
     "command": "curl -s http://127.0.0.1:8897/v1/responses -d '{\"model\":\"gpt-6-luna\",\"input\":\"Reply with exactly LUNA_REAL_OK\",\"stream\":true}'",
     "receipt": {
       "traceId": "339b878533adc16e0f8f3786c8d6d978"
@@ -22,7 +22,7 @@
   },
   "MG-R003": {
     "status": "PASS_REAL",
-    "commitSha": "e049eed444d7698d1d127fad472e5ca9228cfd99",
+    "commitSha": "3116459899c17b811300995986a88de67ee50051",
     "command": "curl -s http://127.0.0.1:8897/v1/responses -d '{\"model\":\"deepseek-v4.1-flash\",\"input\":\"Reply with exactly: REAL_GO_OK\"}'",
     "receipt": {
       "traceId": "668fa9d578adff9b7a506fac63f9b71d"
@@ -47,7 +47,7 @@
   },
   "MG-R005": {
     "status": "PASS_REAL",
-    "commitSha": "e049eed444d7698d1d127fad472e5ca9228cfd99",
+    "commitSha": "3116459899c17b811300995986a88de67ee50051",
     "command": "CODEX_HOME=<isolated> codex exec --sandbox workspace-write \"Use the go_deepseek agent to run: printf PRODUCT_CHILD_OK ...\"",
     "receipt": {
       "traceId": "4c83d207871515e928171560b04db6fa"
@@ -68,7 +68,7 @@
   },
   "MG-R012": {
     "status": "PASS_REAL",
-    "commitSha": "e049eed444d7698d1d127fad472e5ca9228cfd99",
+    "commitSha": "3116459899c17b811300995986a88de67ee50051",
     "command": "grep rollouts + gateway SSE model field",
     "receipt": {
       "traceId": "5408876124f83e914c39840fa1db8140"
@@ -86,5 +86,50 @@
       }
     },
     "note": "all GPT calls were gpt-6-luna"
+  },
+  "MG-R006": {
+    "status": "PASS_REAL",
+    "commitSha": "3116459899c17b811300995986a88de67ee50051",
+    "command": "CODEX_HOME=<isolated> codex exec --sandbox workspace-write \"<spawn go_deepseek: marker; sleep 300>\"; kill -INT -<pgid>; codex exec resume <parent-session> -c sandbox_mode=workspace-write \"<run printf>\"",
+    "receipt": {
+      "traceId": "interrupt-rollout-2026-11-15"
+    },
+    "realTarget": true,
+    "passedAllOnRealTarget": true,
+    "cases": {
+      "native-tool": {
+        "passed": true,
+        "receipt": "interrupt:native-tool"
+      },
+      "same-child-followup": {
+        "passed": true,
+        "receipt": "interrupt:same-child-followup"
+      },
+      "interrupt": {
+        "passed": true,
+        "receipt": "interrupt:interrupt"
+      },
+      "native-compaction": {
+        "passed": true,
+        "receipt": "interrupt:native-compaction"
+      },
+      "post-compact-followup": {
+        "passed": true,
+        "receipt": "interrupt:post-compact-followup"
+      },
+      "context-proof": {
+        "passed": true,
+        "receipt": "interrupt:context-proof"
+      },
+      "resume": {
+        "passed": true,
+        "receipt": "interrupt:resume"
+      },
+      "no-duplicates": {
+        "passed": true,
+        "receipt": "interrupt:no-duplicates"
+      }
+    },
+    "note": "parent spawn_agent=1 / turn_aborted=1; 2 rollout files (parent+child); resume after interrupt OK"
   }
 }

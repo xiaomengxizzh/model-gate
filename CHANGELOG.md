@@ -18,6 +18,12 @@
 - **`projectThirdPartyResponsesParams()`**：对非官方 Responses 目标剔除 ChatGPT 专属参数 `reasoning.context`、`text.verbosity`、`include:reasoning.encrypted_content`（真机 400 实测），并写诊断；官方目标逐字节透传。回归 `agg-v2-third-party-params.test.mjs`。
 - **N04 所有者书面例外**：所有者批准保留 `history/export` 迁移导出（非压缩/摘要、不参与请求组装、原件不变、不得用于满足 MG-R006），边界写入 V2 契约。
 
+### Added — 订阅默认策略 A + 原生中断验收（V2-REAL，2026-11-15）
+
+- **订阅模式（策略 A）**：`MG_DESKTOP_SUBSCRIPTION_MODE=auto|local|app|off`（默认 `auto`）。auto 检测本机 Codex 登录（auth_mode=chatgpt + access_token）→ local（chatgpt.com + `/backend-api/codex/responses` + `gatewaySubscription`），否则 app（api.openai.com + 应用自有 OAuth）。local 无登录 → typed `subscription_login_missing` 且不写配置，绝不静默切 app；off → 不写订阅字段，官方请求 403 `official_no_gateway_key`。
+- **token 过期 CAS 刷新**（桌面启动器）：读取记录内容 sha256 → `oauth.js` refresh → 写前复核（并发改动/删除/符号链接即放弃回写）→ 同目录 `0600` + `fsync` + 原子 `rename`；网关请求路径仍只读。token/refresh token 不进日志/配置/收据。
+- **原生中断/派单去重真机成立**（MG-R006 升 `PASS_REAL`）：真实父 `gpt-6-luna` + 子 `go_deepseek`，子代理执行工具中 `SIGINT` → 父/子 rollout 各 `turn_aborted:1`、工具未完成、`spawn_agent:1`、会话文件 2 个无重复派单；中断后 `resume` 成功并继续用同一子代理。证据 `docs/evidence/aggregation-v2-interrupt-2026-11-15.md`。
+
 ### Security — PR 内门禁弱化审计（A5 P1）
 
 - `gate:audit-diff` 新增 `--all-commits`：对 `base..HEAD` 每个提交的自身 diff 跑反降级审计，堵住"同一 PR 内新增门禁/测试文件后再弱化"的 main-based 盲区。CI 已改用该模式。
