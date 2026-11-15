@@ -271,7 +271,10 @@ test('Desktop 接入：detect 不执行 Desktop 二进制，版本未知时明�
   assert.equal(before.configPath, f.configPath)
   assert.equal(['known', 'unknown', 'not_found'].includes(before.cli.versionState), true)
   assert.equal(['known', 'unknown', 'not_found'].includes(before.desktop.versionState), true)
-  assert.equal(before.desktop.versionState === 'not_found' ? true : before.desktop.version === null, true, '不执行 Desktop 时不得伪造版本')
+  // V2-01：Desktop 版本只允许来自文件（version/包元数据），不允许通过执行 GUI 得到；
+  // disableExec 关闭的是 --version 执行，不是元数据读取。
+  assert.equal(before.desktop.versionState === 'not_found' ? true : (before.desktop.version === null || before.client.versionEvidence.desktop.executed === false), true, '不执行 Desktop 时版本只能来自文件')
+  assert.equal(before.cli.version, null, 'disableExec 下不得执行 PATH 里的 CLI')
 
   const p = preview(f.opts)
   const activated = await activate(Object.assign({}, f.opts, { consentToken: p.consentToken, expectedSha: p.expectedSha }))
