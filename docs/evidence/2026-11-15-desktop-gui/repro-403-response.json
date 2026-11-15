@@ -1,0 +1,4 @@
+{
+  "status": 403,
+  "body": "{\"error\":{\"message\":\"ChatGPT 应用授权只允许指定的本机入口与 OpenAI Responses 目标\",\"code\":\"chatgpt_plan_target_denied\",\"type\":\"official_target_rejected\"}}"
+}
