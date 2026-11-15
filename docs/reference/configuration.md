@@ -184,9 +184,28 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `providers.<id>.gatewaySubscription.enabled` | `false` | 显式允许网关承载本机 Codex 订阅凭据，只用于官方 host 的父模型请求。只读 `CODEX_HOME/auth.json`（未设置时 `~/.codex/auth.json`）的 `tokens.access_token`/`account_id`；不刷新、不写入、不持久化到配置/统计/收据。必须 loopback 监听 + loopback 客户端；目标只允许官方 host 白名单 + `/backend-api/codex`（本机 mock 可用 loopback 例外）。 |
+| `providers.<id>.gatewaySubscription.enabled` | `false` | 显式允许网关承载本机 Codex 订阅凭据，只用于官方 host 的父模型请求。只读 `CODEX_HOME/auth.json`（未设置时 `~/.codex/auth.json`）的 `tokens.access_token`/`account_id`；**网关请求路径自身不刷新、不写入**、不持久化到配置/统计/收据（过期 token 的刷新只发生在桌面启动器，见下文「Desktop 订阅模式」的 CAS 语义）。必须 loopback 监听 + loopback 客户端；目标只允许官方 host 白名单 + `/backend-api/codex`（本机 mock 可用 loopback 例外）。 |
 | 失败语义 | — | 非官方目标/路径 → 403 `gateway_subscription_target_not_allowed`；非 loopback → 403 `gateway_subscription_not_loopback`；凭据缺失/过期/API Key 模式 → 401 `subscription_credential_unavailable`。全部零上游、不重试、不换账号。 |
 | 凭据隔离 | — | token 只进官方请求的 `authorization` 与可选 `chatgpt-account-id`；不写日志/错误体/事件/收据，不发送给第三方。审计只记 provider/target/来源。未开启该键时保持 F01 的 `official_no_gateway_key` fail-closed。 |
+
+#### Desktop 订阅模式（`MG_DESKTOP_SUBSCRIPTION_MODE`，所有者策略 A）
+
+`bin/mg-desktop.mjs` 在写 `gateway.json` 前先解析订阅模式，默认 **`auto`**：父模型默认复用本机 Codex 登录，但可控、可解释、可回滚。
+
+| 模式 | 判定 | 生成的官方父 provider | 凭据来源 | 失败语义 |
+| --- | --- | --- | --- | --- |
+| `auto`（默认） | `CODEX_HOME/auth.json`（默认 `~/.codex/auth.json`）满足 `auth_mode=chatgpt` 且 `tokens.access_token` 非空 → `local`；否则 `app` | 同被选中模式 | 同被选中模式 | 判定原因写入 `configure` 输出：`auto_local_login` / `auto_no_local_login` |
+| `local` | 强制订阅入口 | `baseUrl=https://chatgpt.com`、`responsesPath=/backend-api/codex/responses`、`gatewaySubscription:{enabled:true}` | 网关只读本机 Codex 登录 | 无登录 → typed `subscription_login_missing`（非零退出、不写配置）；**绝不静默切 `app`** |
+| `app` | 应用自有 OAuth | `baseUrl=https://api.openai.com`，不写 `responsesPath`/`gatewaySubscription` | `grant.json`（`mg-desktop sign-in`）+ plan token | 未 sign-in → 启动时明确报错并提示 sign-in，不静默降级 |
+| `off` | 关闭订阅入口 | `baseUrl=https://api.openai.com`，不写订阅字段 | 无（需网关自有 key） | 官方请求 → 403 `official_no_gateway_key`，零上游；**不静默换路径/换域** |
+
+凭据边界（`MG-R002`/`MG-R008`/`MG-R009`）：
+
+- **网关请求路径只读**：`readSubscriptionCredential()` 不刷新、不写 `auth.json`；token 只进官方请求的 `authorization` 与可选 `chatgpt-account-id`，不写配置/日志/错误体/事件/收据，不发往第三方。
+- **过期 token 只由桌面启动器显式刷新**：`refreshLocalSubscriptionCredential()` 在内存完成 OAuth refresh（`src/subscription/oauth.js`，`grant_type=refresh_token`，`redirect:'error'`），写前 **compare-and-swap**（复核内容 sha256，文件被并发改写/删除即放弃回写），再以同目录 `0600` 临时文件 + `fsync` + `rename` 原子替换；失败保持只读语义并返回 typed `subscription_credential_unavailable`（reason：`refresh_*`、`auth_file_concurrent_change`、`auth_file_symlink_refused`、`refresh_token_missing`）。token/refresh token 不进日志、收据或配置。
+- **端点与客户端**：`MG_CODEX_OAUTH_TOKEN_ENDPOINT`（必须 `https`）与 `MG_CODEX_OAUTH_CLIENT_ID` 可覆盖；默认使用 `auth.openai.com` 的 Codex 公共 OAuth 客户端（公开标识，非密钥）。
+- **回滚**：`off` 只改 `gateway.json` 的官方 provider 段，不触碰 Codex 登录态、`config.toml` 或 Go Key；任一时刻重新启用 `local`/`app` 都只重写该段。
+- `configure` 的 JSON 输出只含模式、原因与路径，不含任何凭据。
 
 **模型级 Codex V2 能力（`models.<名>.codex`）**（只影响 `/v1/responses` 原生路由）：
 
@@ -326,6 +345,9 @@ model-gateway/
 | `MG_CONFIG_DIR` | keys/local/stats 隔离目录；未指定时为 cwd/config |
 | `MG_GW` | 旧测试目标；需显式指定可丢弃的本地实例，禁用生产端口 8787 |
 | `MG_CODEX_OFFICIAL_PASSTHROUGH` | **已退役（F01）**：客户端官方凭据透传与 `/backend-api/codex` 已移除，置任何值都不会启用。启动时写一条迁移警告；官方目标若无网关自有 key 则 403 `official_passthrough_retired`。请删除该变量并为官方 provider 配置 `apiKeyEnv`/面板 Key |
+| `MG_DESKTOP_SUBSCRIPTION_MODE` | `bin/mg-desktop.mjs` 的订阅模式：`auto`（默认，按本机 Codex 登录自动选 `local`/`app`）、`local`（强制订阅入口，无登录 fail-closed）、`app`（应用自有 OAuth）、`off`（不写订阅字段，官方请求需网关自有 key）。见「Desktop 订阅模式」 |
+| `MG_CODEX_OAUTH_CLIENT_ID` | 可选：刷新本机 Codex token 用的 OAuth 公开客户端 ID（非密钥）；默认 Codex 公共客户端 |
+| `MG_CODEX_OAUTH_TOKEN_ENDPOINT` | 可选：刷新用 token 端点（必须 `https`）；默认 `https://auth.openai.com/oauth/token` |
 
 **`apiKeyEnv` 的解析顺序**（`resolveKey`，转发/探测/预热/回切与 `/api/status` 同源）：① 面板 Key（加密 `keys.local.json`）→ ② **网关进程**环境变量 → ③ **用户级**环境变量。③ 在 Linux/POSIX 上先查 `systemctl --user show-environment`（其中已含 `~/.config/environment.d/*.conf`），未命中再直接解析 `~/.config/environment.d/*.conf`（按文件名排序，后者覆盖前者，支持双引号转义），因此改完环境变量最多约 60s 生效，无需重启网关或 `daemon-reload`；Windows 对应 `HKCU\Environment`。读取结果按变量名带 **60s TTL 正/负缓存**（避免每请求 `spawnSync` 空查），变量名先过标识符白名单（防注入）。
 
