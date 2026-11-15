@@ -327,7 +327,11 @@ test('证据等级：go.level=configured 不出现"已验证"，并显示 DeepSe
   assert.equal(dashboard.GO_MODEL_DISPLAY, 'DeepSeek V4.1 Flash')
 })
 
-test('三条状态行：ChatGPT 套餐 / OpenCode Go / Codex Desktop 都渲染且带证据标签', () => {
+function elementsWithClass (node, cls) {
+  return walk(node, [node]).filter((n) => classesOf(n).includes(cls))
+}
+
+test('三条状态行：ChatGPT 套餐 / OpenCode Go / Codex Desktop 都渲染，名称与模型名分行', () => {
   const product = derive(STATES.find((s) => s.name === 'ready').input)
   const rows = dashboard.buildStatusRows(product)
   assert.equal(rows.length, 3)
@@ -336,11 +340,79 @@ test('三条状态行：ChatGPT 套餐 / OpenCode Go / Codex Desktop 都渲染�
   assert.match(rows[1].textContent, /OpenCode Go/)
   assert.match(rows[1].textContent, /DeepSeek V4\.1 Flash/)
   assert.match(rows[2].textContent, /Codex Desktop/)
-  assert.match(rows[0].textContent, /已检测/, '证据等级必须用中文标签可见，而不是只有一个绿点')
+  assert.match(rows[0].textContent, /已检测到/, 'detected 的事实仍要出现在状态值里（只是不再重复出徽章）')
+
+  // 缺陷 2：名称/模型名必须是独立元素，且模型名不能使用带 nowrap/ellipsis 的 secondary 类。
+  const label = elementsWithClass(rows[1], 'status-row-label')[0]
+  assert.ok(label, '每行必须有独立的名称元素')
+  assert.equal(label.textContent, 'OpenCode Go', '名称必须独立成行，不能与模型名拼成一段')
+  const modelNodes = elementsWithClass(rows[1], 'home-status-model')
+  assert.equal(modelNodes.length, 1, '模型名必须单独一行')
+  assert.equal(modelNodes[0].textContent, 'DeepSeek V4.1 Flash')
+  assert.equal(classesOf(modelNodes[0]).includes('primary'), false, '模型名不得套用 .primary（nowrap/ellipsis）')
+  assert.equal(classesOf(modelNodes[0]).includes('secondary'), false, '模型名不得套用 .secondary（nowrap/ellipsis）')
+  assert.equal(classesOf(modelNodes[0]).includes('status-row-detail'), true, '模型名使用可换行的 muted 小字样式')
+  assert.equal(elementsWithClass(rows[1], 'status-row-value')[0].textContent.includes('DeepSeek V4.1 Flash'), false, '模型名不得塞进状态值')
+
+  // 证据徽章：configured 显示"已配置"；detected 不再重复出徽章。
+  assert.deepEqual(elementsWithClass(rows[1], 'tag').map((n) => n.textContent), ['已配置'])
+  assert.deepEqual(elementsWithClass(rows[0], 'tag').map((n) => n.textContent), [])
 
   const root = renderHome(product)
   const rendered = walk(root, [root]).filter((n) => ['official', 'go', 'codex'].includes(n.getAttribute('data-status')))
   assert.equal(rendered.length, 3, '首页必须渲染三条状态行')
+})
+
+test('缺陷修复 1：待登录/待连接行不得同时出现"已检测/已配置/已实测"徽章', () => {
+  const product = derive({
+    authenticatedAdmin: true,
+    loading: false,
+    status: statusWith({
+      official: { credential: 'missing', reason: 'auth_file_missing', level: 'detected' },
+      providers: [],
+    }),
+    aggregation: aggregation(),
+  })
+  assert.equal(product.state, 'needs_go_key')
+  const rows = dashboard.buildStatusRows(product)
+  const officialBadges = elementsWithClass(rows[0], 'tag').map((n) => n.textContent)
+  const goBadges = elementsWithClass(rows[1], 'tag').map((n) => n.textContent)
+  assert.match(rows[0].textContent, /待登录/)
+  assert.match(rows[1].textContent, /待连接/)
+  assert.deepEqual(officialBadges, [], '待登录行不得出现"已检测"徽章')
+  assert.deepEqual(goBadges, [], '待连接行不得出现"已检测"徽章')
+  for (const text of [...officialBadges, ...goBadges]) {
+    assert.equal(['已检测', '已配置', '已实测'].includes(text), false, '待处理状态行不得并排成功徽章：' + text)
+  }
+
+  // unknown 只能显示"未知"，不得显示成任何成功词。
+  const unknown = derive({
+    authenticatedAdmin: true,
+    loading: false,
+    status: statusWith(),
+    aggregation: null,
+    aggregationError: { status: 404, code: 'aggregation_route_unknown', message: 'not mounted' },
+  })
+  const unknownRows = dashboard.buildStatusRows(unknown)
+  const unknownBadges = unknownRows.flatMap((row) => elementsWithClass(row, 'tag').map((n) => n.textContent))
+  for (const text of unknownBadges) {
+    assert.equal(['已检测', '已配置', '已实测', '已验证'].includes(text), false, 'unknown 不得显示成成功词：' + text)
+  }
+  assert.equal(unknownBadges.includes('未知'), true, 'unknown 必须显示"未知"')
+})
+
+test('缺陷修复 3：主 CTA 位于总体状态之后、连接状态/聚合之前（360×800 首屏）', () => {
+  const product = derive(STATES.find((s) => s.name === 'needs_go_key').input)
+  const root = renderHome(product)
+  const nodes = walk(root, [root])
+  const ctaIndex = nodes.findIndex((n) => classesOf(n).includes('btn-primary'))
+  const firstStatusIndex = nodes.findIndex((n) => n.getAttribute('data-status') === 'official')
+  const aggregationIndex = nodes.findIndex((n) => n.getAttribute('data-status') === 'aggregation')
+  assert.ok(ctaIndex > 0, '首页必须有主 CTA')
+  assert.ok(firstStatusIndex > 0, '首页必须有连接状态行')
+  assert.ok(ctaIndex < firstStatusIndex, '主 CTA 必须排在连接状态之前，避免窄屏首屏看不到')
+  assert.ok(firstStatusIndex < aggregationIndex, '连接状态在聚合摘要之前')
+  assert.ok(root.textContent.indexOf(product.primary.label) < root.textContent.indexOf('ChatGPT 套餐'), 'DOM 文本顺序同样是 CTA 先于状态行')
 })
 
 test('router：旧 7 个 id 全部保留，connections 为新增 primary，查询串不参与匹配', () => {
@@ -440,6 +512,7 @@ test('index.html：分层导航、关键 id、无内联脚本/外部 URL/CSP 风
     assert.match(html, new RegExp('data-route="' + route + '"[^>]*>'), '导航项必须保留 data-route')
   }
   assert.match(html, /class="nav-link"/, '导航按钮必须保留 class="nav-link"（app.js 依赖）')
+  assert.match(html, /data-route="overview" aria-current="page"/, '默认首页导航项必须带 aria-current="page"（A5 静态验收）')
   assert.equal((html.match(/class="nav-link"/g) || []).length, ROUTES.length)
 
   // app.js / app shell 依赖的 id 必须齐全
