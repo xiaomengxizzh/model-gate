@@ -299,6 +299,42 @@ test('visual: components.js 保留全部既有导出并新增 statusRow/primaryA
 })
 
 // ---------- 6. statusRow：label/value/detail 与 level 映射 ----------
+// ---------- 11. 横向溢出回归防线（静态不变量；真实 reflow 数字见提交说明） ----------
+test('visual: 关键容器可收缩（min-width:0 / border-box / 无 100vw），且不靠 overflow-x 掩盖', () => {
+  assert.match(CSS_NO_COMMENTS, /\*\{box-sizing:border-box\}/, 'border-box reset is required for width+padding containers')
+  assert.match(rule(CSS, '.app-shell'), /grid-template-columns:\s*var\(--sidebar-w\)\s+minmax\(0,\s*1fr\)/)
+  // flex/grid 子项默认 min-width:auto，会把不可换行的内容顶破父容器（实测 360px 下 advanced 导航曾溢出 +319px）
+  for (const sel of ['.workspace', '.main', '.card', '.card-body', '.grid', '.list', '.table-wrap',
+    '.page-stack', '.layout-split', '.topbar', '.brand', '.brand-copy', '.nav', '.nav-group', '.home-cta']) {
+    assert.match(rule(CSS, sel), /min-width:\s*0/, sel + ' must be allowed to shrink (min-width:0)')
+  }
+  // 侧栏品牌行：副标题必须可换行，而不是 nowrap 顶出 250px 轨道
+  assert.match(rule(CSS, '.brand-copy small'), /white-space:\s*normal/, 'rail subtitle must wrap instead of overflowing')
+  assert.match(rule(CSS, '.brand-copy small'), /overflow-wrap:\s*anywhere/)
+  // 折叠顶栏里的高级导航分组必须可收缩，否则打开分组时整页被撑宽
+  const tablet = mediaBlock(CSS, '(max-width:960px)')
+  assert.match(tablet, /\.nav-group\{[^}]*flex:\s*0 1 auto/)
+  assert.match(tablet, /\.nav-group\{[^}]*min-width:\s*0/)
+  assert.match(tablet, /\.nav-group-items\{[^}]*min-width:\s*0/)
+  assert.match(tablet, /\.nav-advanced:not\(\[open\]\)>\.nav-group-items\{display:\s*none\}/)
+  // 不能靠隐藏页面横向滚动"修"溢出：内容会变得不可达
+  assert.ok(!/width:\s*100vw/.test(CSS_NO_COMMENTS), 'no 100vw sizing (scrollbar double count)')
+  for (const sel of ['html', 'body']) {
+    assert.ok(!/overflow-x:\s*(hidden|clip)/.test(rule(CSS, sel)), sel + ' must not mask overflow with overflow-x')
+  }
+  // 长表格仍然在容器内横向滚动（可达、可聚焦），而不是被裁掉
+  assert.match(rule(CSS, '.table-wrap'), /overflow-x:\s*auto/)
+  // 折叠导航/技术折叠区的可点击高度仍 >= 40px
+  assert.match(rule(CSS, '.nav-group-summary'), /min-height:\s*var\(--control-h\)/)
+  assert.match(rule(CSS, '.advanced>summary'), /min-height:\s*var\(--control-h\)/)
+  // A1/A2 新 class 必须有设计系统样式（否则就是浏览器默认排版）
+  for (const sel of ['.overall-card .card-body', '.home-overall-title', '.home-cta', '.home-status-list',
+    '.home-status-tags', '.home-status-model', '.home-tech-note', '.advanced']) {
+    assert.ok(rule(CSS, sel).length > 0, 'missing design-system rule for ' + sel)
+  }
+})
+
+// ---------- 6b. statusRow：label/value/detail 与 level 映射 ----------
 test('visual: statusRow 渲染 label/value/detail，且证据等级映射不为“已验证”假绿', () => {
   const row = statusRow({ label: 'OpenCode Go', value: '已检测', detail: '只读取本地登录文件，未做推理', level: 'detected' })
   assert.equal(row.getAttribute('role'), 'group')
