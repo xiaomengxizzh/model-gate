@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- **V2-04 原生压缩协议保真（A1）**：`codex.history.compaction` 新增 `preserve` 模式；密文 `compaction`/`context_compaction` 项仅在路由声明 `codex.nativeCompaction=codex-owned-remote` 时原样透传，未声明/不匹配分别返回 `native_compaction_route_not_ready` / `native_compaction_route_mismatch` / `native_compaction_item_malformed`，缺 `encrypted_content` 不补造密文；`drop` 仍是显式配置下的有损路径并记 `compaction_dropped`/`context_compaction_marker_dropped`，不伪装压缩成功。压缩执行归属仍是 Codex。
 - Codex 原生 Responses 投影等待流完成后释放请求预算和上游并发槽位，避免上游延迟发送终态时被网关提前取消。
 - 第三方收到只有 Codex 协作信封和密封正文的任务时，发送前返回 `opaque_agent_message`。混合消息仍支持投影已有的可读正文。
 - Codex 聚合别名沿同一供应商绑定读取原模型的能力和报价，避免丢失工具能力后返回 `MG_FB_NO_CANDIDATE`。
@@ -30,6 +31,7 @@
 - **显式清单型离线门禁**：`scripts/test/run.mjs` 扩至 70 套件，新增 `native-boundary`、`codex-role-provider`、`codex-v2-responses`、`codex-v2-stream`、`codex-v2-lifecycle`、`p03-opencode-go`、`n01-catalog-authz`、`n02-routing-budget`、`n03-cli-contract`、`siwc-preview`，并把经隔离审计的 legacy `circuit.mjs` 纳入默认回归（`affinity.mjs` 因夹具过期未纳入，待重写）。
 - **管理 CLI `bin/mg.mjs` 与 `mg-management/1`（N03）**：`doctor`/`provider`/`model`/`config`/`client` 子命令；`doctor --json` 纯检出可跑且 `noNetwork:true`；统一错误信封带 `code`/`requestId`/`nextAction`；写操作绑定 `planId`，缺失/错误返回 `409 plan_id_mismatch`。
 - **V2 协议移植（P01/P02/P04/P05/P07）**：envelope 校验 + 有序历史投影 + 控制项/加密项分类（不可读密文与未支持关键工具发送前拒绝）、工具 namespace/identity 恢复、原生 Responses SSE 适配器（终态归因、usage once、EOF→`STREAM_INTERRUPTED`）、真实 CLI 离线 V2 生命周期清单（13 case，`FIXTURE_PREPARED`，真实运行仍需 egress 隔离）、合成 SIWC/OIDC 预览（默认 off）。
+- **V2-04 目录压缩元数据**：第三方模型可经 `codex.capabilities.autoCompactTokenLimit` + evidence 写入 Codex `ModelInfo.auto_compact_token_limit`（越界拒绝）；`codex.nativeCompaction` 运行时声明与 provider 级 `capabilities.remote_compaction` 落点写入目录 meta，`remote_compaction` 不写入模型目录（0.167.0 官方目录无该模型字段）。本机依据为 0.167.0 / 0.167.0-alpha.3.2 二进制 serde 元数据与本机官方目录快照，非源码取证；枚举字面量 `UNVERIFIED_LOCAL_STATE`。
 - **目录世代与同代授权（N01）**：快照 pin、证据来源/过期、同代别名、墓碑、只读客户端模板与 drift。
 - **CLI 原生角色边界（P01）**：ADR-0003 锁定 CLI 0.167.0 的 role 不应用 `model_provider`，附四矩阵 fixture（证据边界 `UNKNOWN_PRIMARY_SOURCE`：本机无该版本源码）。
 - **收工证据包**：`docs/evidence/2026-11-12-closure/`（环境实测与 Q02 隔离判决、Q03/Q04 续跑手册、交付报告）。

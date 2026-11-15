@@ -50,7 +50,18 @@ Codex 0.167 的 `model_catalog_json` 是**整体替换**语义：文件里的 `m
 - 重复 `slug` 解析器接受，但选择器会歧义 → 生成器 fail-closed。
 - 缺模型元数据时客户端运行时告警 "Model metadata for … not found. Defaulting to fallback metadata"，这正是 M1 里"列表可见但能力退化"的根源。
 
-### 2.3 两条消费路径是同一个结构
+### 2.3 压缩相关字段（V2-04）
+
+| 字段 | 层级 | 本机依据 |
+| --- | --- | --- |
+| `auto_compact_token_limit` | 模型（`ModelInfo`） | 本机官方模型快照（`~/.codex/cc-switch-model-catalog.json`、`~/.cc-switch/codex-official-models.json`）逐模型携带；例如 OpenCode 目录条目 `deepseek-v4.1-flash` 为 `943718 / context_window 1048576`。Codex 用它决定何时开始**客户端自己的**自动压缩。 |
+| `model_messages.token_budget.auto_compact_fallback_*` | 模型（`ModelInfo`） | 同上快照可见 `auto_compact_fallback_buffer_tokens: 16384` 与 `auto_compact_fallback_prompt`；属 Codex 自己的上下文耗尽提醒，网关不写。 |
+| `capabilities.remote_compaction`（`RemoteCompactionSupport`） | **provider**（`model_providers.<id>`） | `codex-cli 0.167.0-alpha.3.2` 二进制 serde 元数据：`ModelProviderCapabilities with 3 elements` = `cyber_access_programs / external_web_access / remote_compaction`；另有 `remote_compaction_v2` 实验特性与 `compact_remote_v2` 源码名。**非源码取证**。 |
+| `model_auto_compact_token_limit` / `model_auto_compact_token_limit_scope` | 用户配置（config.toml） | Desktop 资源包内 app-server `config/read` 形状字符串可见；scope 取值 `total / body_after_prefix`（v2 协议 schema `AutoCompactTokenLimitScope`）。 |
+
+**边界**：`ModelInfo` 没有 `remote_compaction` 字段（本机官方目录逐键核对无此键；未知字段会被 Codex 忽略）。因此“让第三方模型走 Codex 本地压缩”的落点是 provider 级 `capabilities.remote_compaction` + 模型级 `auto_compact_token_limit` 两段式，不能只写模型目录。精确的 TOML 枚举字面量未从脱符号二进制恢复，标记 `UNVERIFIED_LOCAL_STATE`。
+
+### 2.4 两条消费路径是同一个结构
 
 - 本地文件：`-c model_catalog_json="<abs file>"`；
 - 远端列表：官方身份下 Codex 会先 `GET {base_url}/v1/models?client_version=0.167.0`，返回 `{"models":[完整 ModelInfo…]}` 时客户端不再告警 fallback metadata（Lead 实测，mock 返回 1 条）。

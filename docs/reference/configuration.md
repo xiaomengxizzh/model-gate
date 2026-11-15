@@ -195,9 +195,14 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 | `plaintextTools` | `true` 时扁平化 `collaboration` namespace，并删除三个消息工具 `message.encrypted` 标记；父官方 GPT 不声明。子 Go/DeepSeek 必须显式设为 `true`。 |
 | `history.agentMessage` | `preserve`（官方默认）、`project`（投影可读正文，只有信封或密文的任务返回 400）、`reject`。 |
 | `history.reasoning` | `preserve`（官方默认）、`drop`（第三方默认）、`reject`。 |
-| `history.compaction` | `reject`（默认）或 `drop`。 |
+| `history.compaction` | `reject`（默认）、`drop`（显式有损，记 `compaction_dropped`）或 `preserve`。`preserve` 只在该模型声明了 `codex.nativeCompaction` 时可用：密文 `compaction` 项仅在 `codex-owned-remote` 路由原样透传；`codex-owned-local` 收到密文项返回 `native_compaction_route_mismatch`；未声明/`unsupported` 返回 `native_compaction_route_not_ready`。网关不解密、不摘要、不补造 `encrypted_content`。 |
 | `history.controls` | `drop`（默认）、`preserve`、`reject`。 |
+| `nativeCompaction` | `codex-owned-local` / `codex-owned-remote` / `unsupported`。声明该路由的原生压缩归属（压缩始终由 Codex 执行）。`codex-owned-local` 表示只能走 Codex 本地压缩（明文 `context_compaction` 标记），此时 provider 段应关闭远程压缩；`codex-owned-remote` 表示上游自身支持 Responses 远程压缩，密文项可回放。仅运行时字段，不写入 Codex 模型目录。 |
 | `namespace` | 仅支持 `collaboration`。 |
+
+**压缩触发阈值（可选，需证据）**：`capabilities.autoCompactTokenLimit` 会写入 Codex 目录的 `auto_compact_token_limit`（正整数且必须 ≤ `contextWindow`，否则压缩永不触发，生成器返回 `auto_compact_token_limit_exceeds_context`）。该字段与其它能力声明一样必须带 `evidence.<key> = { source, observedAt }`，缺证据返回 `capability_evidence_missing`；不写则由 Codex 使用自己的默认阈值。
+
+**原生压缩路径的落点（0.167.0 二进制取证，非源码）**：远程压缩是 **provider 级**能力，位于 `model_providers.<id>.capabilities.remote_compaction`（密钥类型名 `RemoteCompactionSupport`，并受实验特性 `remote_compaction_v2` 影响）；Codex 模型目录 `ModelInfo` 没有该字段（本机官方目录 15 条模型逐键核对无 `remote_compaction`，未知名会被忽略）。因此“让 Go DeepSeek 走本地压缩”必须由配置写入方在 provider 段声明不支持远程压缩，网关不能靠模型目录字段实现。精确 TOML 枚举字面量未能在脱符号二进制中恢复，标记 `UNVERIFIED_LOCAL_STATE`，写入前需实机确认。
 
 **不可读密文（P0/P1）**。第三方原生路由发送前检查密文任务。只在显式声明 `plaintextTools:true` 和 `history.agentMessage:"project"` 时，才从混合 `agent_message` 提取可读正文，省略同项里的密文片段。只有信封或密文时返回 400 `opaque_agent_message`，零上游请求。工具参数里的非空密封参数仍显式拒绝。官方保留模式原样交给官方后端。
 
