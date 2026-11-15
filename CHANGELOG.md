@@ -4,6 +4,15 @@
 
 ## [Unreleased] —— 2026-11-12 收工闭环 (`integration/modelgate-release`)
 
+### Security —— V2-03 订阅保留、凭据域隔离与流式终态（2026-11-15，A4）
+
+- **授权域内失败归因（新增 `classifyAuthDomainFailure` / `authFailureOfResolved`）**：上游 401/402/403 与配额型 429 是**该授权域**的终态（`terminal=true`、`fallbackAllowed=false`、不改写模型/状态码）；速率型 429 允许同域按 `Retry-After` 重试但同样禁止跨域回退。`authFailureReceipt()` 升级为带 `authDomain` 的收据，语义仍向后兼容（200/5xx 与非授权域状态返回 `null`）。
+- **请求身份收据（新增 `assertResolvedModel` / `verifyRequestIdentity`）**：发送前一次核对 host + path + **模型名**；模型名漂移给稳定 `send_model_drift`，公共/聚合模型 ID 不得作为上游模型名。`assertResolvedUpstream(resolved, urlUsed, { model })` 为可选扩展，旧调用不变。
+- **凭据来源域租约（新增 `src/subscription/isolation.js`）**：订阅 token（本机 Codex 登录 / SIWC 应用授权）与 api-key（OpenCode Go / 官方 Key）按来源域绑定，跨域使用在**出站前**typed 拒绝（`credential_domain_mismatch`，403），租约 `toJSON` 与拒绝消息均不含 token/账号 id；loopback 例外仅限订阅域离线 mock。`buildDomainHeaders`、`assertNoSubscriptionCredentialToThirdParty`、`tenancy/policy` 复用同一比较点 `assertCredentialOriginDomain`。
+- **SSE 单一终态**：新增连接级终态门（`STREAM_TERMINAL` / `claimStreamTerminal`），`relayStream` 与 `endInterruptedStream` 共用；完成帧与中断收尾都只写一次，`relayStream` 结果新增 `terminal` 与 `duplicateTerminalBlocked`，取消/预算中止不抢先写 `[DONE]`。`endInterruptedStream` 现在返回是否真的写出终态。
+- 回归：`scripts/test/offline/agg-v2-auth-{domains,isolation,stream-terminal}.test.mjs`（纯模块/临时 HOME 合成凭据，零网络、零真实凭据；真实双用户与真实登录验收仍为 BLOCKED，见各任务报告）。
+
+
 - 增加隔离的 Codex Desktop 启动入口 `bin/mg-desktop.mjs`，使用应用独立 ChatGPT 套餐授权和 OpenCode Go Key。套餐请求固定发往 OpenAI 公开 Responses API；真实桌面双上游验收以实际回执为准。
 
 > 本段记录从 A1 基线 `2a735fb` 起的新集成线：G0 冻结 + G1 后端/协议/控制面的定向移植与收紧。**CLI 原生门（Q03/Q04）与正式 GUI（U01–U07）未开始**，本段不表示发布就绪。
