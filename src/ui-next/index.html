@@ -15,11 +15,9 @@
     <aside class="sidebar" aria-label="主导航">
       <a class="brand" href="#/overview" aria-label="ModelGate 总览">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-        <span class="brand-copy"><strong>ModelGate</strong><small>MODEL CONTROL PLANE</small></span>
-        <span class="brand-tag">NEXT</span>
+        <span class="brand-copy"><strong>ModelGate</strong><small>网关控制台</small></span>
       </a>
       <nav class="nav" aria-label="功能分区">
-        <p class="nav-label">工作区</p>
         <button class="nav-link" type="button" data-route="overview">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3h6v6H3zM11 3h6v4h-6zM11 9h6v8h-6zM3 11h6v6H3z"/></svg><span>总览</span>
         </button>
@@ -46,9 +44,8 @@
       <div class="sidebar-status" id="sidebar-status">
         <div class="sidebar-status-head"><span class="pulse" id="side-pulse"></span><strong id="side-status">尚未连接</strong></div>
         <p id="side-detail">正在读取本地控制面…</p>
-        <a class="sidebar-link" href="/" target="_blank" rel="noopener noreferrer">旧管理台（保留）<span aria-hidden="true">↗</span></a>
+        <a class="sidebar-link" href="/admin" target="_blank" rel="noopener noreferrer">旧版管理台<span aria-hidden="true">↗</span></a>
       </div>
-      <p class="sidebar-foot">MG / LOCAL FIRST <span id="side-version">—</span></p>
     </aside>
 
     <div class="workspace">
@@ -67,21 +64,19 @@
       <main class="main" id="view-root" tabindex="-1" aria-live="polite">
         <div class="boot"><span class="spinner" aria-hidden="true"></span><p>正在连接本地控制面…</p></div>
       </main>
-      <footer class="page-footer"><span id="foot-note">只读与写入均通过同源管理 API；令牌仅保存在本标签页内存。</span><span id="foot-time"></span></footer>
+      <footer class="page-footer"><span id="foot-time"></span></footer>
     </div>
   </div>
 
   <div class="auth-overlay" id="auth-overlay" hidden>
     <form class="auth-card" id="auth-form" aria-labelledby="auth-title">
       <div class="auth-glyph" aria-hidden="true">▦</div>
-      <p class="eyebrow">SECURE ACCESS</p>
       <h1 id="auth-title">解锁管理控制面</h1>
       <p class="muted">当前实例启用了管理员令牌。令牌只保存在本标签页内存，刷新页面后需重新输入；不会写入 localStorage。</p>
       <label for="admin-token">管理员令牌</label>
       <input id="admin-token" type="password" required autocomplete="off" spellcheck="false" placeholder="输入 MG_ADMIN_TOKEN">
       <p class="field-error" id="auth-error" role="alert" aria-live="assertive"></p>
       <button class="btn btn-primary btn-block" type="submit">解锁控制面</button>
-      <p class="auth-foot">也可以通过 <code>Authorization: Bearer</code> 在本机 CLI 调用管理 API。</p>
     </form>
   </div>
 

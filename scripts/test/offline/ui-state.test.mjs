@@ -323,7 +323,9 @@ test('loading 骨架：首屏/刷新/切路由在数据到达前可达，旧数�
   releaseStatus()
   releaseConfig()
   await booting
-  assert.ok(root.textContent.includes('一切模型，尽在掌控。'), '数据到达后应切换为真实视图')
+  assert.equal(phaseOf('status'), 'ready')
+  assert.ok(root.textContent.includes('网关总览'), '数据到达后应切换为总览')
+  assert.equal(root.textContent.includes('正在读取控制面'), false)
 })
 
 test('clients：功能级 403 只做局部提示，页面正常渲染、会话与其它数据保留', async () => {

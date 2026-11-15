@@ -2,7 +2,7 @@
 import { h } from '../dom.js'
 import { state, deriveWarnings } from '../store.js'
 import { fmtInt, fmtCompact, fmtMs, fmtPct, fmtAgo, fmtDuration, fmtTime, safeOrigin } from '../format.js'
-import { pageHead, card, metric, tag, statusTag, callout, empty, table, lineChart, barChart, kvList } from '../components.js'
+import { pageHead, card, metric, tag, statusTag, callout, empty, table, lineChart, kvList } from '../components.js'
 
 // 未知计数绝不渲染为 0/null%：缺字段时给出显式“未知”。
 export function errorRateText(g) {
@@ -29,8 +29,6 @@ export function render(root) {
   const s = state.status || {}
   const g = s.global || {}
   const providers = Array.isArray(s.providers) ? s.providers : []
-  const models = Array.isArray(s.models) ? s.models : []
-  const virtualModels = Array.isArray(s.virtualModels) ? s.virtualModels : []
   const health = healthSummary(s)
   const warnings = deriveWarnings()
 
@@ -38,28 +36,28 @@ export function render(root) {
     root.append(callout('warn', h('strong', { text: '配置投影未知：' }), '尚未读取 /api/config；本页不会把缺失的额度、路由或目录显示为 0/正常。'))
   }
 
-  root.append(pageHead('一切模型，尽在掌控。', '本地优先的模型网关控制面：查看真实请求指标、上游健康、路由结果与需要关注的配置问题。', {
-    eyebrow: 'GATEWAY / OVERVIEW',
+  root.append(pageHead('网关总览', '请求表现、供应商健康与最近路由。', {
     actions: [
-      h('button', { class: 'btn', type: 'button', text: '查看监控与诊断', onclick: () => { location.hash = '#/observability' } }),
-      h('button', { class: 'btn btn-primary', type: 'button', text: '管理上游供应商', onclick: () => { location.hash = '#/providers' } }),
+      h('button', { class: 'btn', type: 'button', text: '监控与诊断', onclick: () => { location.hash = '#/observability' } }),
+      h('button', { class: 'btn btn-primary', type: 'button', text: '配置聚合', onclick: () => { location.hash = '#/aggregation' } }),
     ],
   }))
 
-  root.append(h('section', { class: 'hero' },
-    h('div', null,
-      h('div', { class: 'hero-badge' }, h('span', { class: 'pulse is-' + (health.kind === 'good' ? 'good' : health.kind === 'bad' ? 'bad' : 'warn') }), h('span', { text: health.label })),
-      h('h2', { text: 'ModelGate · 本地控制面' }),
-      h('p', { text: health.detail + ' · 配置版本 ' + (s.configVersion ?? '—') + ' · 已运行 ' + fmtDuration(s.uptimeMs) })),
-    h('div', { class: 'text-right' },
-      h('div', { class: 'mono', style: { fontSize: '12px', color: '#cfe9e4' }, text: safeOrigin(location.origin) }),
-      h('div', { style: { marginTop: '8px', fontSize: '11px', color: '#9fc3c6' }, text: providers.length + ' 个上游 · ' + models.length + ' 个真实模型 · ' + virtualModels.length + ' 个虚拟入口' }))))
+  root.append(h('section', { class: 'gateway-summary', 'aria-label': '实例状态' },
+    h('div', { class: 'gateway-health' },
+      tag(health.label, health.kind),
+      h('span', { class: 'gateway-detail', text: health.detail })),
+    h('div', { class: 'gateway-instance' },
+      h('code', { class: 'gateway-address', text: safeOrigin(location.origin) }),
+      h('span', { text: '已运行 ' + fmtDuration(s.uptimeMs) }))))
 
-  root.append(h('div', { class: 'grid grid-4' },
-    metric('累计请求', fmtInt(g.requests), '数据来自进程内真实计数', 'probe'),
-    metric('错误请求', fmtInt(g.errors), errorRateText(g), 'warn'),
-    metric('累计 Token', fmtCompact(g.tokenCount), '来自上游 usage 的真实累计', 'plus'),
-    metric('P95 延迟', fmtMs(g.p95), '按已确认完成的请求样本', 'refresh')))
+  root.append(h('section', { class: 'overview-metrics', 'aria-labelledby': 'overview-metrics-title' },
+    h('h2', { id: 'overview-metrics-title', text: '请求概况' }),
+    h('div', { class: 'grid grid-4' },
+      metric('累计请求', fmtInt(g.requests), '当前网关进程', 'probe'),
+      metric('错误请求', fmtInt(g.errors), errorRateText(g), 'warn'),
+      metric('累计 Token', fmtCompact(g.tokenCount), '上游返回的用量', 'plus'),
+      metric('P95 延迟', fmtMs(g.p95), '已完成请求', 'refresh'))))
 
   const trendCard = card('请求延迟趋势', '最近的真实延迟采样，单位毫秒',
     g.latTrend && g.latTrend.length ? lineChart(g.latTrend, { label: '最近请求延迟趋势', format: fmtMs }) : empty('暂无延迟趋势', '网关尚未累积足够的完成请求样本。'))
@@ -93,7 +91,6 @@ export function render(root) {
 
   root.append(h('div', { class: 'grid grid-main' }, routeCard, noticeCard))
 
-  const providerRows = providers.map((p) => ({ id: p.id, requests: p.st?.requests || 0, errors: p.st?.errors || 0 }))
   const requestCard = card('上游请求分布', '按 Provider 的真实累计请求量', providers.length
     ? h('div', null,
       h('div', { class: 'list' }, providers.map((p) => {

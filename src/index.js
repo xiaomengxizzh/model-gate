@@ -41,8 +41,8 @@ import { registerConfigRoot, sha256Hex } from './codex/config.js'
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
 const RESPONSES_PATHS = new Set(['/v1/responses', '/responses'])
 const ADMIN_PAGE = new URL('./admin.html', import.meta.url)
-// Isolated /ui-next console: serve only the frozen asset tree, no directory listing,
-// no path traversal, no symlink following. Old '/' and '/admin' remain unchanged.
+// Isolated /ui-next console: the root serves the same assets and CSP.
+// The legacy console remains at /admin.
 const UI_NEXT_TYPES = Object.freeze({
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml',
@@ -50,7 +50,7 @@ const UI_NEXT_TYPES = Object.freeze({
 })
 function uiNextAsset(path) {
   let rel
-  if (path === '/ui-next' || path === '/ui-next/') rel = 'index.html'
+  if (path === '/' || path === '/ui-next' || path === '/ui-next/') rel = 'index.html'
   else if (path.startsWith('/ui-next/')) rel = path.slice('/ui-next/'.length)
   else return null
   try { rel = decodeURIComponent(rel) } catch { return null }
@@ -1985,7 +1985,7 @@ function makeHandler(state) {
         denyOrigin(res, path, '跨源请求被拒绝：' + String(req.headers.origin || '') + '（同源或 server.allowedOrigins 白名单之外）')
         return
       }
-      if ((req.method === 'GET' || req.method === 'HEAD') && (path === '/ui-next' || path.startsWith('/ui-next/'))) {
+      if ((req.method === 'GET' || req.method === 'HEAD') && (path === '/' || path === '/ui-next' || path.startsWith('/ui-next/'))) {
         const asset = uiNextAsset(path)
         let data = null
         if (asset) { try { data = readFileSync(new URL('./ui-next/' + asset.rel, import.meta.url)) } catch { data = null } }
@@ -2003,7 +2003,7 @@ function makeHandler(state) {
       }
       if ((req.method === 'GET' || req.method === 'HEAD') && path === '/healthz') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok'); return }
       if (req.method === 'GET' && path === '/favicon.ico') { res.writeHead(204); res.end(); return }
-      if (req.method === 'GET' && (path === '/' || path === '/admin' || path === '/admin.html')) {
+      if (req.method === 'GET' && (path === '/admin' || path === '/admin.html')) {
         let html
         try { html = readFileSync(ADMIN_PAGE, 'utf8') } catch { html = '<h1>admin 页面缺失：src/admin.html 未找到</h1>' }
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })

@@ -4,6 +4,8 @@
 
 ## [Unreleased] —— 2026-11-15 V2 代码交付（P01–P04，离线可证）
 
+- 默认入口 `/` 切换为 ModelGate 新控制台，沿用 `/ui-next/` 和同源管理 API。更新总览、导航、主题与窄屏布局。旧管理台可从 `/admin` 或 `/admin.html` 打开。
+
 ### Added
 
 - **Go 单模型作用域**（A2）：`preset:'opencode-go'` + `v2Scope=go-single-model`；目录对 Go 只发布 `deepseek-v4.1-flash`，越界模型进 `outOfScope` 诊断，目标缺失 fail-closed；跨供应商 `fallbacks` 在目录层拒绝（`v2_cross_provider_fallback_forbidden`）；readiness/failurePolicy 提供 typed code。

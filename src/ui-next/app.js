@@ -38,17 +38,14 @@ function updateChrome() {
   const chip = document.getElementById('conn-chip')
   const connText = document.getElementById('conn-text')
   const footTime = document.getElementById('foot-time')
-  const sideVersion = document.getElementById('side-version')
   if (s) {
     const providers = Array.isArray(s.providers) ? s.providers : []
     const open = providers.filter((p) => p.st && p.st.state === 'open').length
-    const bad = open > 0 || Number(s.global?.errors) > 0
     statusEl.textContent = open ? '部分上游熔断' : '网关在线'
     detailEl.textContent = providers.length + ' 个上游 · 配置版本 ' + (s.configVersion ?? '—')
     pulse.className = 'pulse ' + (open ? 'is-warn' : 'is-good')
     chip.className = 'conn-chip ' + (open ? 'is-warn' : 'is-good')
     connText.textContent = open ? '降级' : '已连接'
-    sideVersion.textContent = 'v' + (s.configVersion ?? '—')
   } else if (state.auth && state.auth.needAuth) {
     statusEl.textContent = '等待解锁'
     detailEl.textContent = '输入管理令牌后读取本地控制面'
