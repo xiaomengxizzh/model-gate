@@ -1,9 +1,22 @@
 // Application state, data loading, and light pub/sub. Views never fetch directly.
-import { api, ApiError, clearToken, setUnauthorizedHandler } from './api.js'
+//
+// 契约：docs/contracts/ui-v3-product-status.md §5（mg-ui-product-status/1）。
+// 关键点：
+//  * 首页、连接页、聚合页共用同一份只读快照（/api/status + 四个 /api/aggregation/*），
+//    不允许各视图再维护私有缓存，否则会出现“首页未配置、聚合页已启用”。
+//  * 并发刷新用 epoch + AbortController：旧响应绝不覆盖新快照。
+//  * FRESHNESS_BUDGET 内不重复请求；只有可见路由才自动刷新。
+//  * 401 清空快照（含 state.product）；403 只记局部错误，不清 token。
+import { api, clearToken, setUnauthorizedHandler, hasToken } from './api.js'
+import { deriveProductStatus, classifyAggregationError } from './product-status.js'
 
 // 数据阶段：idle / loading / ready / empty / error。unknown 由视图在“字段缺失”时显式渲染，
 // 绝不允许把 unknown 渲染成 0 或“正常”。
 export const DATA_PHASES = ['idle', 'loading', 'ready', 'empty', 'error']
+
+// 自动刷新预算（毫秒）：超过预算且路由可见才重新读取。
+export const FRESHNESS_BUDGET = Object.freeze({ aggregation: 5000, product: 8000 })
+
 export const state = {
   auth: { needAuth: false, startedAt: 0 },
   status: null,
@@ -13,6 +26,12 @@ export const state = {
   loading: false,
   view: 'overview',
   phase: { auth: 'idle', status: 'idle', config: 'idle', logs: 'idle' },
+  // 产品状态投影（唯一快照）与聚合只读快照。
+  product: null,
+  aggregation: null,
+  productPhase: null,
+  productLoadedAt: 0,
+  aggregationLoadedAt: 0,
 }
 
 const listeners = new Map()
@@ -35,6 +54,316 @@ export function setPhase(key, phase) {
   emit('phase', { key, phase })
 }
 
+// —— 共享快照的内部记账（不导出，避免视图直接改）——
+const productListeners = new Set()
+const productState = {
+  epoch: 0,
+  inFlight: null,
+  controller: null,
+  lastProductRefresh: 0,
+  lastAggregationRefresh: 0,
+  stale: true,
+  phase: null,
+  statusError: null,
+  cacheKey: null,
+  cached: null,
+}
+
+function documentVisible() {
+  const doc = typeof document !== 'undefined' ? document : null
+  return !doc || doc.visibilityState !== 'hidden'
+}
+
+// 只有当前路由真正需要的 section 才自动刷新。
+// connections 同时展示官方/Go/Codex/聚合状态，因此同样属于聚合快照的可见范围。
+function isVisible(section) {
+  if (!documentVisible()) return false
+  const view = state.view || 'overview'
+  if (section === 'product') return view === 'overview' || view === 'connections'
+  if (section === 'aggregation') return view === 'aggregation' || view === 'overview' || view === 'connections'
+  return false
+}
+
+function isAuthed() {
+  if (!state.auth) return false
+  return state.auth.needAuth === false || hasToken()
+}
+
+function fulfillment(result) {
+  return result && result.status === 'fulfilled' ? result.value : null
+}
+
+export function freshnessOf(section, now = Date.now()) {
+  const key = section === 'aggregation' ? 'aggregation' : 'product'
+  const loadedAt = key === 'aggregation'
+    ? (state.aggregation && state.aggregation.loadedAt) || 0
+    : productState.lastProductRefresh || 0
+  const budgetMs = FRESHNESS_BUDGET[key]
+  const ageMs = loadedAt ? Math.max(0, now - loadedAt) : null
+  return {
+    section: key,
+    loadedAt,
+    budgetMs,
+    ageMs,
+    fresh: !!loadedAt && ageMs <= budgetMs,
+    stale: !loadedAt || ageMs > budgetMs,
+  }
+}
+
+// 仅当 section 当前可见且超出 freshness 预算时才需要刷新。
+export function shouldRefresh(section, now = Date.now()) {
+  if (section !== 'product' && section !== 'aggregation') return false
+  if (!isVisible(section)) return false
+  if (productState.stale) return true
+  return freshnessOf(section, now).stale
+}
+
+function productInput(now = Date.now()) {
+  const aggregation = state.aggregation || null
+  const aggregationError = (aggregation && aggregation.error) || null
+  return {
+    authenticatedAdmin: isAuthed(),
+    loading: !state.status && !state.lastError && !productState.lastProductRefresh && !productState.statusError,
+    phase: productState.phase,
+    status: state.status,
+    config: state.config,
+    aggregation,
+    aggregationError,
+    // 状态请求自身的失败单独上报，避免把来源混进"聚合不支持"判断。
+    statusError: productState.statusError || null,
+    statusLoadedAt: state.loadedAt,
+    now,
+  }
+}
+
+function cacheKeyOf(input) {
+  return [
+    input.authenticatedAdmin,
+    input.loading,
+    input.phase,
+    input.status,
+    input.config,
+    input.aggregation,
+    input.aggregationError,
+    input.statusError,
+    input.statusLoadedAt,
+  ]
+}
+
+function sameKey(a, b) {
+  return !!a && !!b && a.length === b.length && a.every((v, i) => Object.is(v, b[i]))
+}
+
+// 当前快照的产品投影。同一份快照（字段引用与阶段都没变）不重复派生。
+export function productStatus() {
+  const input = productInput()
+  const key = cacheKeyOf(input)
+  if (productState.cached && sameKey(productState.cacheKey, key)) return productState.cached
+  const value = deriveProductStatus(input)
+  productState.cacheKey = key
+  productState.cached = value
+  state.product = value
+  return value
+}
+
+function notifyProduct() {
+  const ps = productStatus()
+  emit('product', ps)
+  for (const fn of productListeners) { try { fn(ps) } catch (e) { console.error(e) } }
+  return ps
+}
+
+function publishProduct(reason) {
+  productState.cached = null
+  productState.cacheKey = null
+  const ps = productStatus()
+  emit('product', ps)
+  if (reason) emit('product:update', { reason, product: ps })
+  for (const fn of productListeners) { try { fn(ps) } catch (e) { console.error(e) } }
+  return ps
+}
+
+function notifyProductCleared(reason) {
+  emit('product', null)
+  if (reason) emit('product:invalidate', { reason, cleared: true })
+  for (const fn of productListeners) { try { fn(null) } catch (e) { console.error(e) } }
+}
+
+// 每次新快照或 invalidate 后调用；返回取消订阅函数。
+export function onProductStatus(fn) {
+  if (typeof fn !== 'function') return () => {}
+  productListeners.add(fn)
+  return () => { productListeners.delete(fn) }
+}
+
+// 标脏并通知订阅者（路由返回/启停完成/401/online）。数据本身保留，
+// 但下一次 refreshProduct 不再受 freshness 预算限制。
+export function invalidateProductStatus(reason) {
+  productState.stale = true
+  emit('product:invalidate', { reason: reason || 'invalidated' })
+  return notifyProduct()
+}
+
+export function setProductPhase(phase) {
+  const next = phase == null ? null : String(phase)
+  if (next !== null && next !== 'conflict' && next !== 'write_in_progress') {
+    throw new Error('unknown product phase: ' + phase)
+  }
+  productState.phase = next
+  state.productPhase = next
+  return publishProduct('phase')
+}
+
+// 首页/连接页/聚合页共用的聚合只读快照；freshness 由 FRESHNESS_BUDGET 计算。
+export function aggregationState() {
+  const agg = state.aggregation
+  if (!agg) return null
+  return {
+    health: agg.health,
+    providers: agg.providers,
+    models: agg.models,
+    diagnostics: agg.diagnostics,
+    error: agg.error,
+    loadedAt: agg.loadedAt,
+    freshness: freshnessOf('aggregation'),
+  }
+}
+
+function pickAggregationError(errors) {
+  if (!Array.isArray(errors) || !errors.length) return null
+  return errors.find((e) => classifyAggregationError(e).kind === 'unsupported') ||
+    errors.find((e) => e && e.status === 403) ||
+    errors[0]
+}
+
+function cancelProductRequest() {
+  productState.epoch += 1
+  const controller = productState.controller
+  productState.controller = null
+  productState.inFlight = null
+  if (controller) { try { controller.abort() } catch {} }
+}
+
+function startProductRefresh(opts) {
+  const epoch = productState.epoch + 1
+  productState.epoch = epoch
+  if (productState.controller) { try { productState.controller.abort() } catch {} }
+  const controller = new AbortController()
+  productState.controller = controller
+  if (!opts.silent && !opts.reuseStatus) setPhase('status', 'loading')
+
+  const signal = controller.signal
+  const statusPromise = opts.reuseStatus && state.status
+    ? Promise.resolve(state.status)
+    : api.status({ signal })
+
+  const promise = (async () => {
+    try {
+      // 并行读 /api/status 与聚合四接口；单个失败不影响其它结果。
+      const results = await Promise.allSettled([
+        statusPromise,
+        api.aggregationHealth({ signal }),
+        api.aggregationProviders({ signal }),
+        api.aggregationModels({ signal }),
+        api.aggregationDiagnostics({ signal }),
+      ])
+      if (epoch !== productState.epoch) return state.product
+      const [statusResult, healthResult, providersResult, modelsResult, diagnosticsResult] = results
+      const aggregationResults = results.slice(1)
+      const failures = aggregationResults
+        .filter((r) => r.status === 'rejected')
+        .map((r) => r.reason)
+        .filter(Boolean)
+      const statusFailure = statusResult.status === 'rejected' ? statusResult.reason : null
+      const sessionExpired = (statusFailure && statusFailure.status === 401) || failures.some((e) => e && e.status === 401)
+      const cancelled = failures.some((e) => e && e.aborted === true)
+      // 401 已触发 store.handleUnauthorized（快照被清空），旧请求不得写回任何数据。
+      if (sessionExpired || cancelled) return state.product
+
+      const status = statusResult.status === 'fulfilled' ? statusResult.value : null
+      const nextAt = Date.now()
+      if (statusResult.status === 'fulfilled') {
+        state.status = status
+        state.loadedAt = nextAt
+        state.lastError = null
+        productState.statusError = null
+        if (!opts.silent) setPhase('status', status ? 'ready' : 'empty')
+        emit('status', status)
+      } else {
+        // 断网/超时：不保留旧的成功快照，投影进入 recoverable_error（见契约 §8）。
+        state.status = null
+        state.loadedAt = 0
+        state.lastError = statusFailure
+        productState.statusError = statusFailure
+        if (!opts.silent) setPhase('status', 'error')
+      }
+
+      const error = pickAggregationError(failures)
+      const unsupported = !!error && classifyAggregationError(error).kind === 'unsupported'
+      state.aggregation = {
+        health: fulfillment(healthResult),
+        providers: fulfillment(providersResult),
+        models: fulfillment(modelsResult),
+        diagnostics: fulfillment(diagnosticsResult),
+        error,
+        unsupported,
+        loadedAt: nextAt,
+      }
+      state.aggregationLoadedAt = nextAt
+      emit('aggregation', state.aggregation)
+
+      if (!statusFailure) {
+        productState.stale = false
+        productState.lastProductRefresh = nextAt
+        productState.lastAggregationRefresh = nextAt
+        state.productLoadedAt = nextAt
+      } else {
+        productState.stale = true
+        productState.lastProductRefresh = 0
+        productState.lastAggregationRefresh = 0
+      }
+      return publishProduct(opts.reason)
+    } catch (e) {
+      if (epoch !== productState.epoch) return state.product
+      state.lastError = e
+      productState.statusError = e
+      productState.stale = true
+      return publishProduct(opts.reason)
+    } finally {
+      if (epoch === productState.epoch) {
+        productState.inFlight = null
+        productState.controller = null
+      }
+    }
+  })()
+  productState.inFlight = promise
+  return promise
+}
+
+// 刷新产品快照（status + 聚合四接口，共享一次在途请求）。
+// - 并发调用（未 force）合并为同一个 Promise；
+// - force 会递增 epoch 并 abort 被超越的请求；
+// - 预算内且未标脏时直接返回当前投影，不产生新 fetch。
+export function refreshProduct(opts = {}) {
+  const section = opts.section === 'aggregation' ? 'aggregation' : 'product'
+  const force = opts.force === true
+  if (productState.inFlight && !force) return productState.inFlight
+  if (!force) {
+    if (!isVisible(section)) return Promise.resolve(productStatus())
+    if (!productState.stale && freshnessOf(section, Date.now()).fresh) return Promise.resolve(productStatus())
+  }
+  return startProductRefresh({
+    reason: opts.reason || 'manual',
+    reuseStatus: opts.reuseStatus === true,
+    silent: opts.silent === true,
+  })
+}
+
+// 聚合页专用入口：同一份共享快照，按 aggregation 预算判断。
+export function refreshAggregation(opts = {}) {
+  return refreshProduct(Object.assign({}, opts, { section: 'aggregation' }))
+}
+
 export async function loadAuth() {
   setPhase('auth', 'loading')
   try {
@@ -55,12 +384,16 @@ export async function loadStatus(opts = {}) {
     state.status = status
     state.loadedAt = Date.now()
     state.lastError = null
+    productState.statusError = null
     if (!opts.silent) setPhase('status', status ? 'ready' : 'empty')
     emit('status', status)
+    publishProduct()
     return status
   } catch (e) {
     state.lastError = e
+    productState.statusError = e
     if (!opts.silent) setPhase('status', 'error')
+    publishProduct()
     throw e
   }
 }
@@ -72,10 +405,12 @@ export async function loadConfig() {
     state.config = config
     setPhase('config', config ? 'ready' : 'empty')
     emit('config', config)
+    publishProduct()
     return config
   } catch (e) {
     state.lastError = e
     setPhase('config', 'error')
+    publishProduct()
     throw e
   }
 }
@@ -90,17 +425,21 @@ export async function loadAll() {
     state.config = config
     state.loadedAt = Date.now()
     state.lastError = null
+    productState.statusError = null
     setPhase('status', status ? 'ready' : 'empty')
     setPhase('config', config ? 'ready' : 'empty')
     emit('status', status)
     emit('config', config)
     emit('data', { status, config })
+    publishProduct()
     return { status, config }
   } catch (e) {
     state.lastError = e
+    productState.statusError = e
     setPhase('status', 'error')
     setPhase('config', 'error')
     emit('error', e)
+    publishProduct()
     throw e
   } finally {
     state.loading = false
@@ -108,23 +447,37 @@ export async function loadAll() {
 }
 
 export function resetData() {
+  cancelProductRequest()
   state.status = null
   state.config = null
   state.loadedAt = 0
   state.lastError = null
+  state.product = null
+  state.aggregation = null
+  state.productLoadedAt = 0
+  state.aggregationLoadedAt = 0
+  state.productPhase = null
   state.phase = { auth: state.auth ? 'idle' : 'idle', status: 'idle', config: 'idle', logs: 'idle' }
+  productState.stale = true
+  productState.phase = null
+  productState.statusError = null
+  productState.lastProductRefresh = 0
+  productState.lastAggregationRefresh = 0
+  productState.cached = null
+  productState.cacheKey = null
   emit('reset')
+  notifyProductCleared('reset')
 }
 
-// 401/403 的统一收口：清 token、清敏感状态、通知界面跳登录。
-// 不在任何地方保留旧配置/目录/额度/历史快照。
+// 401 的统一收口：清 token、清敏感状态（含产品快照）、通知界面跳登录。
+// 403 不进入这里：功能级权限由视图做局部错误。
 export function handleUnauthorized(info) {
   clearToken()
   resetData()
   emit('unauthorized', info || {})
 }
 
-// api 层一旦遇到 401/403 就调用这里；store 导入即生效，不依赖 app 是否接线。
+// api 层一旦遇到 401 就调用这里；store 导入即生效，不依赖 app 是否接线。
 setUnauthorizedHandler((info) => handleUnauthorized(info))
 
 export function configVersion() {
