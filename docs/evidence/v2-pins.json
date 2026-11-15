@@ -1,0 +1,5 @@
+{
+  "gateModuleSha256": "c6fe1ef39596a8c68b6d492f4b4fdf2038a018fb6a5d9c352b5ed63f46d4b31a",
+  "statusTableSha256": "2df0be528acf6be5bca08a86f9d87725b10573f53162f1c2c7164fdc291b5d96",
+  "note": "门禁模块与 V2 状态表的钉哈希。放在 docs 下（受 GATE_FILES 保护）以便冻结后只改文档即可更新；改动必须与内容同批提交并在提交说明里写明原因。"
+}

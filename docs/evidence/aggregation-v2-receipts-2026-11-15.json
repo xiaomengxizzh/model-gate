@@ -134,7 +134,7 @@
   },
   "MG-R004": {
     "status": "PASS_REAL",
-    "commitSha": "fb986eeb7341877c8e8017918abf2f2b90cd95bb",
+    "commitSha": "1a527c6e0d3217ee008ed7da950e4f297acda604",
     "command": "MG_DESKTOP_SUBSCRIPTION_MODE=auto node bin/mg-desktop.mjs configure && node bin/mg-desktop.mjs launch  # 原版 GUI 内选 6 Luna / deepseek-v4.1-flash 各发一次",
     "receipt": {
       "traceId": "desktop-gui-2026-11-15-luna-fixed"
@@ -151,11 +151,11 @@
         "receipt": "screenshot + byModel mg-opencodego-deepseek-v4-1-flash 34,879 tokens"
       }
     },
-    "note": "原版桌面选择器双方可见；官方 gpt-6-luna 与 Go 模型各一次真实请求；历史 403 已修复（0c867fd）"
+    "note": "原版桌面选择器双方可见；官方 gpt-6-luna 与 Go 模型各一次真实请求；历史 403 已修复（0c867fd）；冻结树复核 1a527c6（A3 冻结树证据）"
   },
   "MG-R001": {
     "status": "PASS_REAL",
-    "commitSha": "77ce5015256bbd08d1f682f0027c808679a536ae",
+    "commitSha": "1a527c6e0d3217ee008ed7da950e4f297acda604",
     "command": "node bin/mg-desktop.mjs configure|launch + Chrome CDP 点击控制台：进入聚合 → 428 预览 → 200 激活 → kill/重启网关 → /api/aggregation/health → 退出",
     "receipt": {
       "traceId": "r001-console-toggle-2026-11-15"
@@ -176,11 +176,11 @@
         "receipt": "r001-console-toggle-2026-11-15:restart"
       }
     },
-    "note": "隔离实例；配置 sha 激活 7a87fc24… / 退出恢复 960e62f6…（cmp 一致）；零推理请求"
+    "note": "隔离实例；配置 sha 激活 7a87fc24… / 退出恢复 960e62f6…（cmp 一致）；零推理请求；冻结树复核 1a527c6（A3 冻结树证据）"
   },
   "MG-R007": {
     "status": "PASS_REAL",
-    "commitSha": "77ce5015256bbd08d1f682f0027c808679a536ae",
+    "commitSha": "1a527c6e0d3217ee008ed7da950e4f297acda604",
     "command": "node bin/mg-desktop.mjs configure + 控制台 activate/deactivate（空白 HOME 与已有手改 config 各一遍，含 409 冲突）",
     "receipt": {
       "traceId": "r007-install-drill-2026-11-15"
@@ -197,7 +197,7 @@
         "receipt": "r007-install-drill-2026-11-15:existing-config-preserve"
       }
     },
-    "note": "空白：零手工 TOML；已有：仅 owned 行变化、退出逐字节恢复；409 保留用户改动"
+    "note": "空白：零手工 TOML；已有：仅 owned 行变化、退出逐字节恢复；409 保留用户改动；冻结树复核 1a527c6（A3 冻结树证据）"
   },
   "MG-R008": {
     "status": "PASS_REAL",

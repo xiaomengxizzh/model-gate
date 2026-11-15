@@ -199,8 +199,9 @@ test('历史迁移导出不得进入模型请求路径（非压缩/摘要路径�
 // A5 N1 / N5-R：门禁自证的期望语义与状态表都可能被**等行数改写**（不触发 gate-weakened）。
 // 这里分别钉住「整个门禁模块」与「状态表逐行内容」的 sha256：
 // 任何语义改动都必须同时改这两个哈希，形成两次可见的修改，而不是悄悄换一个 true/false。
-const PINNED_GATE_MODULE_SHA = 'c6fe1ef39596a8c68b6d492f4b4fdf2038a018fb6a5d9c352b5ed63f46d4b31a'
-const PINNED_STATUS_TABLE_SHA = '2f5132d59146bb140bab0bf51846ba97c11c7c888cd7294120bff76bcd30341d'
+const PINS = JSON.parse(readFileSync(new URL('docs/evidence/v2-pins.json', ROOT), 'utf8'))
+const PINNED_GATE_MODULE_SHA = PINS.gateModuleSha256
+const PINNED_STATUS_TABLE_SHA = PINS.statusTableSha256
 
 test('门禁模块整体钉死 sha256（等行数语义削弱必须显式二次确认）', () => {
   const src = readFileSync(new URL('scripts/test/offline/aggregation-gate-v2.js', ROOT), 'utf8')
