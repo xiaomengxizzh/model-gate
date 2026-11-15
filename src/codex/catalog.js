@@ -117,6 +117,17 @@ export const THIRD_PARTY_CONSERVATIVE_FIELDS = Object.freeze({
   experimental_supported_tools: Object.freeze([]),
 })
 
+// ── 第三方 function tools 声明（V2 真机缺陷修复，2026-11-15，MG-R005/R006）──
+// 本机离线探针（真实 codex-cli 0.167.0-alpha.3.2 + 127.0.0.1 mock，零付费、零真实上游）：
+//   · use_responses_lite=true            → 请求体完全没有 tools（真机 tools:None 的根因）
+//   · shell_type='disabled'              → 有 tools，但没有 exec_command（只有 goal/web_search 等）
+//   · shell_type=unified_exec/shell_command/local/default → tools 含 exec_command + write_stdin
+//   · tool_mode='code_mode_only'         → shell 工具被 code-cell exec/wait 取代，不下发 exec_command
+//   · apply_patch_tool_type='freeform'   → 额外下发 apply_patch
+// 结论：Responses 原生第三方路由应声明 shell_type=unified_exec，且绝不写 use_responses_lite /
+// code_mode_only（官方 ChatGPT 专属）；非 Responses/Chat 路由保持 disabled，不谎报工具能力。
+export const THIRD_PARTY_TOOL_SHELL_TYPE = 'unified_exec'
+
 export class CatalogError extends Error {
   constructor(code, message, details = {}) {
     super(message)
@@ -643,6 +654,11 @@ function buildThirdPartyEntry(name, entry, template, options, warnings) {
   const capability = entry.capability === undefined ? 'chat' : entry.capability
   const providerEntry = options.providerNames ? options.providerNames[provider] : undefined
   const providerName = typeof providerEntry === 'string' ? providerEntry : (providerEntry && typeof providerEntry.name === 'string' ? providerEntry.name : provider)
+  const providerApi = providerEntry && typeof providerEntry === 'object' && typeof providerEntry.api === 'string' ? providerEntry.api : null
+  // 模型级 api 覆盖 provider 级 api（与网关路由规则一致），只有最终落到 responses 才算原生工具路由；
+  // plaintextTools=true 是 Codex 原生子代理路由的既有显式声明，同样触发。
+  const effectiveApi = typeof entry.api === 'string' && entry.api !== '' ? entry.api : providerApi
+  const nativeToolRoute = effectiveApi === 'responses' || override.plaintextTools === true
 
   // 上下文窗口：声明必须可追溯；不允许凭猜测填数。
   const contextWindow = override.contextWindow !== undefined ? override.contextWindow : entry.maxContext
@@ -705,6 +721,26 @@ function buildThirdPartyEntry(name, entry, template, options, warnings) {
     }
   }
 
+  // function tools 声明：Responses 原生第三方默认 unified_exec（本机探针：Codex 会下发
+  // exec_command/write_stdin），允许 capabilities.shellType 显式覆盖（含 'disabled' 退化为无 shell 工具）。
+  const declaredShellType = capabilityDecl.caps.shellType
+  const effectiveShellType = declaredShellType !== undefined
+    ? declaredShellType
+    : (nativeToolRoute ? THIRD_PARTY_TOOL_SHELL_TYPE : THIRD_PARTY_CONSERVATIVE_FIELDS.shell_type)
+  if (capabilityDecl.caps.useResponsesLite === true) {
+    if (nativeToolRoute) {
+      throw new CatalogError('responses_lite_disables_function_tools',
+        'models.' + name + '.codex.capabilities.useResponsesLite=true 会让 Codex 完全不发 tools（本机 0.167.0-alpha.3.2 探针实测 tools:None），与 Responses 原生工具路由冲突；请移除该声明或改用官方 provider',
+        { model: name, provider })
+    }
+    warnings.push({ code: 'responses_lite_disables_function_tools', path: 'models.' + name,
+      message: 'useResponsesLite=true 时本机探针观测到 Codex 不下发 tools；该模型将拿不到 function tools' })
+  }
+  if (nativeToolRoute && typeof capabilityDecl.caps.toolMode === 'string' && /^code_mode/.test(capabilityDecl.caps.toolMode)) {
+    warnings.push({ code: 'code_mode_tool_mode_hides_shell_tools', path: 'models.' + name,
+      message: 'tool_mode=' + JSON.stringify(capabilityDecl.caps.toolMode) + ' 时本机探针观测到不下发 exec_command（被 code-cell exec/wait 取代）；第三方原生工具路由不应声明 code mode' })
+  }
+
   // 原生压缩归属：provider 级能力 + 模型级阈值两段式声明。
   // 不把 remote_compaction 写进 ModelInfo（本机官方目录无该模型字段），只写进网关自己的 meta，
   // 供配置写入方（Desktop 集成/Lead）在 model_providers.<id> 上落地。
@@ -755,7 +791,7 @@ function buildThirdPartyEntry(name, entry, template, options, warnings) {
     context_window: contextWindow,
     max_context_window: maxContextWindow,
     input_modalities: modalities,
-    shell_type: THIRD_PARTY_CONSERVATIVE_FIELDS.shell_type,
+    shell_type: effectiveShellType,
     support_verbosity: THIRD_PARTY_CONSERVATIVE_FIELDS.support_verbosity,
     truncation_policy: { mode: 'tokens', limit: maxContextWindow },
     experimental_supported_tools: [...THIRD_PARTY_CONSERVATIVE_FIELDS.experimental_supported_tools],
@@ -777,7 +813,25 @@ function buildThirdPartyEntry(name, entry, template, options, warnings) {
     baseInstructions: baseInstructionsDeclared
       ? { origin: 'models.' + name + '.codex.baseInstructions', confidence: 'declared' }
       : { origin: 'modelgate:neutral-instructions', confidence: 'conservative' },
-    clientBehavior: { origin: 'modelgate:conservative-defaults', confidence: 'conservative', fields: ['shell_type', 'support_verbosity', 'truncation_policy', 'experimental_supported_tools'] },
+    clientBehavior: {
+      origin: 'modelgate:conservative-defaults',
+      confidence: 'conservative',
+      fields: ['support_verbosity', 'truncation_policy', 'experimental_supported_tools']
+        .concat(declaredShellType === undefined && !nativeToolRoute ? ['shell_type'] : []),
+    },
+    // 本机探针证据：Codex 是否真的下发 function tools 取决于 shell_type / use_responses_lite / tool_mode。
+    toolAccess: {
+      mode: effectiveShellType === 'disabled' ? 'none' : 'function_tools',
+      shellType: effectiveShellType,
+      origin: declaredShellType !== undefined
+        ? 'models.' + name + '.codex.capabilities.shellType'
+        : (nativeToolRoute ? (override.plaintextTools === true ? 'models.' + name + '.codex.plaintextTools' : 'models.' + name + '.api|provider.api') : 'modelgate:conservative-defaults'),
+      confidence: declaredShellType !== undefined ? 'declared' : (nativeToolRoute ? 'protocol-derived' : 'conservative'),
+      evidence: effectiveShellType === 'disabled'
+        ? 'none'
+        : 'local probe: codex-cli 0.167.0-alpha.3.2 + 127.0.0.1 mock → tools 含 exec_command/write_stdin；use_responses_lite=true 时 tools 为空',
+      useResponsesLite: false,
+    },
   }
   if (Object.keys(capabilityDecl.evidence).length) {
     const freshnesses = Object.values(capabilityDecl.evidence)
