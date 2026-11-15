@@ -35,7 +35,7 @@ deriveProductStatus({
 | --- | --- | --- | --- |
 | `official` | `GET /api/status.official`（服务端 `probeLocalCodexAuth`，只读、无 token） | `detected` | 不得标 `runtime-verified`；不得显示账号、token、邮箱 |
 | `go` | `GET /api/aggregation/providers` + `GET /api/status.providers[id].hasKey` + `GET /api/aggregation/models` | `detected` / `configured` / `runtime-verified` | 不得把 `hasKey` 当"已验证"；不得把未同步读成 0 个模型 |
-| `codex` | `GET /api/aggregation/health.detect`（desktop/bundledCli/cli/restart） | `detected` | 不得猜"已重启"；`restart.needed` 缺失时只能说"无法确认" |
+| `codex` | `GET /api/aggregation/health.detect`（desktop/bundledCli/cli/restart） | `detected` | 不得猜"已重启"；`restart.needed` 缺失时只能说"无法确认"。**实测注**：`computeRestartState()` 的所有分支都返回布尔 `needed`，真实响应不会缺该字段；只有手工合成快照可能缺失，此时按"需要重启"提示（附"无法确认"原因），属诚实保守而非缺陷 |
 | `aggregation` | `GET /api/aggregation/health`（mode/backup/activation） | `detected` | 不得把 `unknown` 写成 `official`（未聚合）或反之 |
 
 **公共模型 ID 事实（已核对代码）**：已发布公共 ID 由 `src/codex/catalog.js:stableModelId()` 生成，为 **`mg-opencodego-deepseek-v4-1-flash`**（`AGGREGATED_ID_PREFIX + 段 + '-' + 模型段`）；上游真实模型名是 `deepseek-v4.1-flash`；`/api/status.models[i].name` 与 `lastServing.model` 都是公共 ID。`product-status.js` 的 `matchesGoTargetId()` 容错接受 `mg-opencodego-deepseek-v4-1-flash` / `opencodego/deepseek-v4.1-flash` / `deepseek-v4.1-flash`，并**不**把 `mg-opencodego-gpt-6-luna` 等其它模型算作目标。
