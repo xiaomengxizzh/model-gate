@@ -1,0 +1,1 @@
+[{"url":"/api/aggregation/diagnostics","status":200,"body":"{\"diagnostics\":[{\"level\":\"info\",\"code\":\"catalog_published\",\"message\":\"已发布目录 generation 1 · 2 个模型\",\"at\":null}]}"},{"url":"/api/aggregation/diagnostics","status":200,"body":"{\"diagnostics\":[{\"level\":\"info\",\"code\":\"catalog_published\",\"message\":\"已发布目录 generation 1 · 2 个模型\",\"at\":null}]}"}]
