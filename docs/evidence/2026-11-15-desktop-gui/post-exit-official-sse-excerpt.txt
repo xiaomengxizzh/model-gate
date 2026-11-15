@@ -1,0 +1,9 @@
+# 退出 GUI 实例后的官方 gpt-6-luna 请求（SSE 节选，已截断）
+# POST http://127.0.0.1:18873/v1/responses  {"model":"gpt-6-luna","input":"Reply with exactly MG_OFFICIAL_AFTER_EXIT_OK","stream":true,"max_output_tokens":32}
+event: response.created
+data: {"type":"response.created",...,"response":{...,"model":"gpt-6-luna",...}}
+...
+data: {"type":"response.output_text.delta",...,"delta":"MG_OFFICIAL_AFTER_EXIT_OK",...}
+...
+data: {"type":"response.completed",...,"response":{...,"model":"gpt-6-luna",...,"usage":{"output_tokens":10,...}}}
+# 完整原文保存在 /tmp/mg-desktop-gui-a3/evidence/post-exit-official-sse.txt（未提交，含非敏感 usage 细节）

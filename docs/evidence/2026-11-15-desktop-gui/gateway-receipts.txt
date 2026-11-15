@@ -1,0 +1,30 @@
+# ModelGate 网关回执节选（隔离实例 /tmp/mg-desktop-gui-a3，端口 18873）
+# 来源：gateway/gateway-2026-11-15.log 与 gateway/stats.json（已剔除凭据；日志本身不含 token）
+
+## 1) 产品 launch 路径（bin/mg-desktop.mjs launch）
+[2026-11-15T05:52:44.347Z] [info]  gateway_subscription configured provider=chatgpt-plan scope=loopback+official credential=local_codex_auth
+[2026-11-15T05:52:44.351Z] [info]  model-gateway 已启动: http://127.0.0.1:18873
+
+## 2) GUI 内官方 gpt-6-luna 请求（产品 launch 路径）→ 403，未到上游
+# 无 upstream 日志；GUI 显示：
+unexpected status 403 Forbidden: ChatGPT 应用授权只允许指定的本机入口与 OpenAI Responses 目标, url: http://127.0.0.1:18873/v1/responses
+# 确定性复现（隔离副本端口 18874，providers.chatgpt-plan + start({chatgptPlan})）：
+# HTTP 403 {"error":{"message":"ChatGPT 应用授权只允许指定的本机入口与 OpenAI Responses 目标","code":"chatgpt_plan_target_denied","type":"official_target_rejected"}}
+
+## 3) GUI 内 Go deepseek-v4.1-flash 请求（同一产品 launch 路径）→ 成功
+[2026-11-15T06:03:48.413Z] [info]  codex native lossy include_dropped:reasoning.encrypted_content
+[2026-11-15T06:03:48.414Z] [info]  Codex 参数按目标能力剔除 opencodego include:reasoning.encrypted_content
+[2026-11-15T06:03:48.415Z] [info]  upstream 头策略丢弃 provider=opencodego identity=thirdParty x-codex-beta-features,originator,x-codex-window-id,x-codex-turn-metadata,x-client-request-id,session-id,thread-id
+[2026-11-15T06:03:48.416Z] [info]  send authz generation=config-declared (unscoped) provider=opencodego domain=thirdParty
+# stats.json（累计；Go 请求 1 次）：
+"byModel": { "mg-opencodego-deepseek-v4-1-flash": { "tokens": 34879, "inTokens": 34818, "outTokens": 61 } }
+
+## 4) 诊断性替代接线（隔离 gateway.json 内 provider 改名 chatgpt-local；非产品默认）
+[2026-11-15T06:07:23.337Z] [info]  gateway_subscription configured provider=chatgpt-local scope=loopback+official credential=local_codex_auth
+[2026-11-15T06:08:29.968Z] [info]  gateway_subscription provider=chatgpt-local target=chatgpt.com/backend-api/codex/responses credential=local_codex_auth
+[2026-11-15T06:08:29.969Z] [info]  官方目标丢弃头（仅名称） authorization,host,content-length
+[2026-11-15T06:08:29.969Z] [info]  send authz generation=config-declared (unscoped) provider=chatgpt-local domain=official
+# GUI 回复：MG_GUI_LUNA_OK（截图 05）
+
+## 5) 退出后官方订阅再请求（独立 src/index.js 启动同一隔离 gateway 配置）
+[2026-11-15T06:10:37.585Z] [info]  gateway_subscription provider=chatgpt-local target=chatgpt.com/backend-api/codex/responses credential=local_codex_auth
