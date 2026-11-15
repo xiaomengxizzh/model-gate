@@ -25,6 +25,23 @@
 | 缓存提醒 | `GET /api/status` | `cache.alert` | PASS（有值才显示） |
 | 关注项 | 派生 | 缺 Key、熔断、空目录、未启令牌、错误率 | PASS（页面标注“仅根据当前状态推导，不触发探活”） |
 
+## 2.1 首页 / 模型与账号（V3，2026-11-15）
+
+V3 把首页改为**状态驱动**：技术指标全部移到「监控与诊断」，首页只保留总体结论、三条连接状态与唯一主操作。状态判定不在视图里各自解释，统一走 `src/ui-next/js/product-status.js`（契约 `mg-ui-product-status/1`，见 [ui-v3-product-status.md](ui-v3-product-status.md)）。新增 `#/connections` 单页向导（`views/connections.js`）。
+
+| 首页/向导显示 | API 来源 | 关键字段 | 等级 |
+| --- | --- | --- | --- |
+| ChatGPT 套餐 | `GET /api/status` | `official.credential/expiry/reason` | `detected` 级（只读探测，不含 token） |
+| OpenCode Go | `GET /api/status` + `GET /api/aggregation/{providers,models}` | `providers[].hasKey`、`models[].publicId/upstreamId` | `detected`→`configured`→仅真实 `lastServing` 命中才 `runtime-verified` |
+| Codex Desktop | `GET /api/aggregation/health` | `detect.desktop/bundledCli/cli`、`detect.restart` | `detected`（缺 detect 即 unknown） |
+| 聚合模式 | `GET /api/aggregation/health` | `mode`、`backup.available`、`activation.appliedSha`、`nativeCompaction` | `detected`（不可识别即 unknown，不写成"未启用"） |
+| 连接 Go（单字段） | `POST /api/aggregation/providers` → `POST /api/keys` → `POST /api/aggregation/providers/opencodego/sync` | `{preset:'opencode-go'}` 省略 ID/URL/env；Key 只进 `/api/keys` | 每步可重试；部分成功如实显示 |
+| 启用聚合 | `POST /api/aggregation/activate` | 428 `preview`（`consentToken/expectedSha/blocked`）→ 带 consent 再提交 → 200 回执 `reload/needsRestart` | 409 只展示三方差异，不覆盖 |
+| 退出并恢复 | `POST /api/aggregation/deactivate` | `{expectedSha}` → 200 回执 | 二次确认后执行，失败如实报错 |
+| 刷新/切换页面一致性 | 共享快照（`store.refreshProduct`） | epoch + AbortController + freshness 预算 | 旧响应不覆盖新状态；401 清空、403 局部错误 |
+
+状态：离线/契约层 `PASS(mock)`；真实浏览器 `PASS(browser, mocked gateway)`（见 `docs/evidence/2026-11-15-ux-v3-a5-acceptance.md`）；真实 Go/GPT 推理与真实 Desktop 交互仍 `BLOCKED`（未授权付费调用）。
+
 ## 3. Providers｜上游供应商
 
 | UI 操作 | API | 请求 | 返回 / 错误 | 状态 |

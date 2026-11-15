@@ -6,6 +6,22 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
+## 2026-11-15 前端体验 V3（UX-00…UX-06）
+
+执行计划：[前端体验 V3 执行计划](roadmap/2026-11-15-frontend-experience-v3-execution-plan.md)。契约：[产品状态投影与模块契约](contracts/ui-v3-product-status.md)。基线审计：[UX-00 基线](roadmap/2026-11-15-ux-v3-ux00-baseline.md)。分支 `feat/modelgate-ux-v3`（从 `origin/mg-codex-native@708cf5e` 新建，5 个子代理独立工作树；未合并 `main`、未改 PR #7）。
+
+| 阶段 | 交付 | 状态 |
+| --- | --- | --- |
+| UX-00 | 状态机/证据等级/接口来源/错误矩阵 + 只读 `official` 投影 + 20 例契约测试 | PASS(offline) |
+| UX-01 | 状态驱动首页、唯一主 CTA、三条连接状态、分层导航、旧深链保留 | PASS(offline) / 浏览器见 A5 |
+| UX-02 | 单字段 Go 向导、预设 provider、部分成功如实、Key 不回显 | PASS(offline) |
+| UX-03 | 428 预览→一次确认→consent→回执；409 三方差异不覆盖；退出恢复 | PASS(offline)（真实 Desktop 写链 BLOCKED） |
+| UX-04 | 共享快照、epoch/abort、freshness、401/403/409/断网 | PASS(offline) |
+| UX-05 | 设计令牌、响应式、键盘/读屏、组件语义 | PASS(offline + 浏览器断言) |
+| UX-06 | 独立黑箱验收、CDP 浏览器脚本、证据与反降级审查 | 见 A5 验收记录 |
+
+真实边界：本轮 **0** 次真实 Go/GPT 调用（无付费授权），真实推理/真实 Desktop 交互标 `BLOCKED`；`release:freeze` 属 V2 发布门禁，不因 UI 改动放行；新分支需重新冻结与再验收后才可谈合并。
+
 ## 2026-11-15 V2 收尾复核
 
 裁决与当前发布限制见[ModelGate V2 发布裁决](evidence/aggregation-v2-release-verdict-2026-11-15.md)。PR #7 仍为 Draft；发布审批 JSON 为空，`release:freeze` 仍因待批事项阻断。状态矩阵中的 12 行 `PASS_REAL` 是按各自真实采集树保留的证据状态，不表示最终冻结树 `12cf5d97a60f151af59c731e26b71245a50e5169` 上每个子用例均已重现。不得改回执、审批文件、矩阵、哈希或产品契约来消除阻断。
