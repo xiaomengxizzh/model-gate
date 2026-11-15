@@ -114,6 +114,30 @@
 | A2 真实 `opencode.ai` 同步（真实目录发现） | **BLOCKED** | 需要真实 Go Key 授权；本轮只验证了 HTTP 契约与 mock |
 | 多租户单实例 UI（R009 形态） | **未实现（沿用既有口径）** | 不在前端 V3 范围；R009 仍按双实例隔离形态待所有者批准 |
 
+## 7.1 托盘实例部署与旧前端退役（2026-11-15 23:47）
+
+所有者指令：更新托盘管理的 ModelGate 前端，直接放弃旧的两份前端。
+
+| 项 | 事实 |
+| --- | --- |
+| 部署目标 | 托盘指向的网关工作区 `/home/xiaomengxizi/ai/workplace/idproject/model-gateway`（原 `dev/gateway-audit-20261108@3a4ba89`，仅 V1 代码 + 一段未提交的 ui-next 静态服务补丁） |
+| 部署方式 | 备份后切换工作树到 `deploy/modelgate-ux-v3`（= `feat/modelgate-ux-v3@5b1f5e3`），文件级替换，**未改 `config/`、未改托盘脚本** |
+| 备份 | `.agents/deploy-backup-20261115-234750/`（原 `src/`、旧 `ui-next`、`local-index.patch`、`STATE.txt`；配置副本已删除以免重复存密钥） |
+| 回滚 | `git -C <proj> checkout dev/gateway-audit-20261108 && cp -a .agents/deploy-backup-.../src/. src/`（配置从未被写，无需回滚配置） |
+| 旧前端退役 | `GET /` → `302 /ui-next/`；`/admin`、`/admin.html` → `410 Gone`；`src/admin.html` 不再被服务（仅历史留存）；旧 `/ui-next` 控制台被 V3 控制台替换 |
+| 生效状态 | **前端静态资源已即时生效**（服务端按请求读盘）：23 个新 UI 资产实测全 200，`/ui-next/index.html` 已含新导航标记 |
+| 仍需重启 | 运行中的进程仍是旧代码（`/api/status` 无 `official`、`/api/aggregation/*` 404、`/` 与 `/admin` 仍 200）。**沙箱内无 systemd 用户总线，无法代为重启**；需托盘「重启网关」或 `systemctl --user restart model-gateway.service` |
+
+**影子实例验证**（用真实配置副本在 18799 起新代码，未触碰真实实例、未发真实模型请求）：
+
+- 入口：`/` 302 → `/ui-next/`；`/admin`、`/admin.html` 410；`/ui-next/` 200。
+- `GET /api/status`：`official = {credential:detected, expiry:valid, reason:local_codex_chatgpt, authMode:chatgpt}`（真实本机登录探测，无 token 回显）。
+- `GET /api/aggregation/health`：`mode=official`；Codex Desktop `/usr/lib/chatgpt/ChatGPT 26.1103.32239`、捆绑 codex `0.167.0-alpha.3.2`；`nativeCompaction.mode=builtin-openai`（reserved，不可声明）；`backup.available=false`。
+- `GET /api/aggregation/providers` → `{providers:[]}`；`POST {preset:'opencode-go'}` → **409 `provider_id_in_use`**（既有 `opencodego` 是非聚合上游，占用固定 id）；`POST /providers/opencodego/sync` → 502 `discovery_provider_unknown`；`POST /activate` → **422 `catalog_path_required`**。
+- 真实配置未被写：`configVersion` 仍 393、聚合供应商 0。
+
+结论：**链路组件齐备但尚未打通**——旧代码需重启、实例无管理令牌（`/api/auth needAuth=false`，聚合接口 403）、既有 Go 上游与聚合注册表 id 冲突，三者任一未解决都无法让 Codex 选择 DeepSeek。详见本轮对话答复。
+
 ## 8. 分支、PR 与所有者审批事项
 
 - 集成分支：`feat/modelgate-ux-v3`（工作树 `.agents/worktrees/dsh-21ec827a-8f7c`，**仅本地**）。
