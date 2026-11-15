@@ -1,6 +1,6 @@
 # 前端体验 V3｜开发交付报告（2026-11-15）
 
-> 分支：`feat/modelgate-ux-v3`（从 `origin/mg-codex-native@708cf5e803fed27517caf8639af1bebb28401e04` 新建；**未合并 main、未发版、未把 PR #7 转 Ready**）
+> 分支：`feat/modelgate-ux-v3` → **最终 HEAD `78cef49`**（被测产品 SHA `767866d`；从 `origin/mg-codex-native@708cf5e803fed27517caf8639af1bebb28401e04` 新建；**未合并 main、未发版、未把 PR #7 转 Ready**）
 > 计划：[前端体验 V3 执行计划](2026-11-15-frontend-experience-v3-execution-plan.md) · 契约：[产品状态投影与模块契约](../contracts/ui-v3-product-status.md) · 基线：[UX-00 基线](2026-11-15-ux-v3-ux00-baseline.md) · 独立验收：[A5 验收记录](../evidence/2026-11-15-ux-v3-a5-acceptance.md)
 > 组织方式：主代理集成 + 5 个专职子代理（A1 首页/IA、A2 Go 向导/聚合、A3 状态层、A4 设计/无障碍、A5 独立 QA），每人独立工作树与写集；共享入口（`src/index.js`、`scripts/test/run.mjs`、`ui-next.test.mjs`、`app.js` 集成）由主代理落地。
 
@@ -79,9 +79,11 @@
 
 | 视口 | 截图 |
 | --- | --- |
-| 360×800 | ![360](../evidence/screenshots/ui-v3-360x800-final.png) |
-| 768×900 | ![768](../evidence/screenshots/ui-v3-768x900-final.png) |
-| 1440×900 | ![1440](../evidence/screenshots/ui-v3-1440x900-final.png) |
+| 360×800 | ![360](../evidence/screenshots/ui-v3-360x800-r4.png) |
+| 768×900 | ![768](../evidence/screenshots/ui-v3-768x900-r4.png) |
+| 1440×900 | ![1440](../evidence/screenshots/ui-v3-1440x900-r4.png) |
+
+（`-r3` 为 A5 在最终被测 SHA 上独立复跑的正式证据；`-final` 为主代理同 SHA 前一轮；基线图与 `-integrated` 对比图保留。）
 
 基线（修复前）与 `-integrated` 对比图保留在 `docs/evidence/screenshots/`，可用于复核首屏 CTA 与徽章修复。
 
@@ -90,11 +92,11 @@
 | 命令 | 结果 |
 | --- | --- |
 | `npm run check` | PASS：UI modules 19/19 syntax OK |
-| `npm test` | **125 套件 / 1216 用例**（在 A5 R3 校正 1 条断言后归零；见其 R3 章节） |
+| `npm test` | **PASS：125 套件 / 1217 用例 / 0 失败 / 3 用例 skip**（82.5s；A5 在被测 SHA `767866d` 独立复跑，主代理同 SHA 复跑一致） |
 | `npm run docs:check` | PASS |
 | `npm run contract:check` | PASS |
-| `node --test scripts/test/offline/ui-v3-acceptance.test.mjs` | 9 pass / 1 skip（UI-16 无付费授权） |
-| `node scripts/e2e/ui-v3-browser.mjs` | **11/11 PASS**（真实 Chrome 153）：加载/三条状态行/唯一 CTA/高级分组像素级收起/运行时 aria-current/无伪成功/无凭据持久化/三视口首屏可见/页面错误 0 |
+| `node --test scripts/test/offline/ui-v3-acceptance.test.mjs` | **10 pass / 0 fail / 1 skip**（UI-16 无付费授权；含 `preview_pending` 状态层→投影断言） |
+| `node scripts/e2e/ui-v3-browser.mjs` | **11/11 PASS**（真实 Chrome 153，A5 独立复跑 `--suffix -r4`，未复用 Lead 截图）：加载/三条状态行/唯一 CTA/高级分组像素级收起/运行时 aria-current 三段/无伪成功/无凭据持久化/三视口首屏可见/页面错误 0 |
 | 受影响既有套件 | `ui-next`、`ui-state`、`ui-contract`、`agg-desktop-ui`、`agg-v2-desktop-ui`、`agg-runtime-reload`、`admin-projection` 等全绿 |
 
 **验证口径**：离线断言 = 代码级/契约级；浏览器断言 = 真实 Chrome 渲染（网关为隔离实例 + mock 上游）；**真实 Go/GPT 推理与真实 Desktop 交互未执行**（无付费授权），一律 BLOCKED。
