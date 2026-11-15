@@ -7,6 +7,7 @@
 // - 校验闸门 fail-closed：任何错误在落盘前抛出，不产出半成品。
 // - 聚合 ID 稳定且不可重绑定；历史版本与回滚指针由 state 记录。
 import { createHash } from 'node:crypto'
+import { CODEX_NATIVE_COMPACTION_CAPABILITIES } from './interop.js'
 
 export const CATALOG_SCHEMA = 'modelgate.codex-catalog/1'
 export const META_SCHEMA = 'modelgate.codex-catalog.meta/1'
@@ -54,6 +55,9 @@ export const KNOWN_MODEL_FIELDS = Object.freeze([
   'supports_reasoning_effort_updates', 'node_repl_auto_review_required', 'node_repl_disabled',
   'tool_mode', 'multi_agent_version', 'multi_agent_reasoning_effort', 'base_instructions',
   'default_service_tier', 'model_specialty',
+  // 0.167 官方目录（本机 ~/.codex 官方模型快照）逐模型携带：Codex 用它决定何时触发
+  // **客户端自己**的自动压缩；缺省时 Codex 用默认阈值，不会退回网关侧压缩。
+  'auto_compact_token_limit',
 ])
 
 export const OFFICIAL_PROVIDER_IDS = Object.freeze(['openai', 'chatgpt', 'codex', 'openai-official', 'openai-codex'])
@@ -67,7 +71,9 @@ export const CODEX_OVERRIDE_FIELDS = Object.freeze([
 
 // Runtime-only members of models.<name>.codex. They are consumed by the native
 // Responses route and must not be projected into the client model catalog.
-const CODEX_RUNTIME_FIELDS = Object.freeze(['plaintextTools', 'history', 'namespace'])
+// nativeCompaction（V2-04）：声明该路由的原生压缩归属，供 interop 的压缩项闸门使用；
+// Codex 的 ModelInfo 没有（也不允许臆造）同名目录字段，因此只作运行时能力，不写进目录。
+const CODEX_RUNTIME_FIELDS = Object.freeze(['plaintextTools', 'history', 'namespace', 'nativeCompaction'])
 
 // P1 目录契约：第三方条目默认**不声明**未证实能力。以下能力只能经 codex.capabilities +
 // codex.evidence{source,observedAt} 显式声明；官方模板里的同类字段一律不复制。
@@ -82,10 +88,29 @@ export const CODEX_CAPABILITY_FIELDS = Object.freeze({
   useResponsesLite: 'use_responses_lite',
   supportsReasoningEffortUpdates: 'supports_reasoning_effort_updates',
   modelSpecialty: 'model_specialty',
+  // 0.167 官方目录字段：Codex 在客户端侧据此判断何时开始**自己的**自动压缩。
+  // 只有显式声明 + 可追溯 evidence 才写入，避免编造阈值。
+  autoCompactTokenLimit: 'auto_compact_token_limit',
 })
 
 // 未证实能力的保守默认：Codex serde 必填字段给“关闭”值，可选能力字段不写（= 未知，不冒充支持）。
 export const NEUTRAL_BASE_INSTRUCTIONS = 'You are a helpful assistant. Follow the user request and the API contract. Do not assume tools, search, patching, or agent capabilities that the provider has not declared.'
+
+// —— 原生压缩能力归属（V2-04）——
+// 本机 codex-cli 0.167.0-alpha.3.2 的二进制符号显示：
+//   · `ModelProviderCapabilities with 3 elements` = { cyber_access_programs, external_web_access, remote_compaction }
+//     → 远程压缩是 **provider 级**能力，位于 model_providers.<id>.capabilities.remote_compaction
+//       （类型 RemoteCompactionSupport），还要配合实验特性 remote_compaction_v2；
+//   · 官方目录 15 个模型的 ModelInfo 逐键核对**没有** remote_compaction 字段，
+//     模型级可验证字段是 auto_compact_token_limit（客户端据此触发自己的自动压缩）。
+// 因此网关不把 remote_compaction 塞进 ModelInfo（Codex 没有该模型级契约），而是把它作为
+// provider 配置声明暴露给配置写入方；精确 TOML 枚举字面量未能在脱符号二进制中恢复。
+export const CODEX_PROVIDER_COMPACTION_CAPABILITY = Object.freeze({
+  tomlPath: 'model_providers.<provider>.capabilities.remote_compaction',
+  typeName: 'RemoteCompactionSupport',
+  encoding: 'UNVERIFIED_LOCAL_STATE',
+  evidence: 'codex-cli 0.167.0-alpha.3.2 二进制符号 ModelProviderCapabilities + RemoteCompactionSupport + 特性 remote_compaction_v2；非源码取证',
+})
 export const THIRD_PARTY_CONSERVATIVE_FIELDS = Object.freeze({
   shell_type: 'disabled',
   support_verbosity: false,
@@ -296,6 +321,16 @@ function validateOneModel(model, index, errors, warnings, opts) {
       model.max_context_window < model.context_window) {
     pushError(errors, 'context_window_order', path,
       'max_context_window (' + model.max_context_window + ') 小于 context_window (' + model.context_window + ')')
+  }
+  // 自动压缩阈值是客户端（Codex 自己）的触发点，必须落在窗口内：超过窗口永远不会触发，
+  // 等于把“压缩没发生”伪装成“无需压缩”。
+  if (model.auto_compact_token_limit !== undefined) {
+    if (!isPositiveInt(model.auto_compact_token_limit)) {
+      pushError(errors, 'invalid_type', path + '.auto_compact_token_limit', 'auto_compact_token_limit 必须是正整数（Codex 内部为 i64）')
+    } else if (isPositiveInt(model.context_window) && model.auto_compact_token_limit > model.context_window) {
+      pushError(errors, 'auto_compact_token_limit_exceeds_context', path,
+        'auto_compact_token_limit (' + model.auto_compact_token_limit + ') 超过 context_window (' + model.context_window + ')：压缩永远不会被触发')
+    }
   }
   if (model.visibility === 'list' && model.supported_in_api === false) {
     warnings.push({ code: 'listed_but_not_api', path, message: 'visibility=list 但 supported_in_api=false，客户端可能可选却无法调用' })
@@ -650,6 +685,56 @@ function buildThirdPartyEntry(name, entry, template, options, warnings) {
 
   // 能力：只有显式 capabilities + evidence 才写入；官方模板里的同名字段一律不复制。
   const capabilityDecl = collectCapabilities(name, override, warnings, options)
+  // 原生压缩归属是运行时路由能力，不是 Codex ModelInfo 字段：非法值直接拒绝，避免拼写错误
+  // 悄悄退化成“未声明”而让密文压缩项在别处被误判。
+  if (override.nativeCompaction !== undefined && !CODEX_NATIVE_COMPACTION_CAPABILITIES.includes(override.nativeCompaction)) {
+    throw new CatalogError('invalid_override',
+      'models.' + name + '.codex.nativeCompaction 仅支持 ' + CODEX_NATIVE_COMPACTION_CAPABILITIES.join('/') +
+      '（当前：' + JSON.stringify(override.nativeCompaction) + '）')
+  }
+  // 自动压缩阈值：Codex 用它决定何时开始**客户端自己的**压缩；超过窗口即永不触发，必须拒绝。
+  if (capabilityDecl.caps.autoCompactTokenLimit !== undefined) {
+    const limit = capabilityDecl.caps.autoCompactTokenLimit
+    if (!isPositiveInt(limit)) {
+      throw new CatalogError('invalid_override', 'models.' + name + '.codex.capabilities.autoCompactTokenLimit 必须是正整数')
+    }
+    if (limit > contextWindow) {
+      throw new CatalogError('auto_compact_token_limit_exceeds_context',
+        'models.' + name + '.codex.capabilities.autoCompactTokenLimit (' + limit + ') 超过 contextWindow (' + contextWindow + ')：压缩永远不会被触发',
+        { model: name, provider })
+    }
+  }
+
+  // 原生压缩归属：provider 级能力 + 模型级阈值两段式声明。
+  // 不把 remote_compaction 写进 ModelInfo（本机官方目录无该模型字段），只写进网关自己的 meta，
+  // 供配置写入方（Desktop 集成/Lead）在 model_providers.<id> 上落地。
+  const nativeCompactionOverride = override.nativeCompaction
+  let nativeCompactionDeclaration = null
+  if (nativeCompactionOverride !== undefined) {
+    const remote = nativeCompactionOverride === 'codex-owned-remote'
+    const unsupported = nativeCompactionOverride === 'unsupported'
+    nativeCompactionDeclaration = {
+      owner: 'codex',
+      path: remote ? 'remote' : (unsupported ? 'unsupported' : 'local'),
+      providerCapability: {
+        tomlPath: CODEX_PROVIDER_COMPACTION_CAPABILITY.tomlPath,
+        typeName: CODEX_PROVIDER_COMPACTION_CAPABILITY.typeName,
+        remoteCompactionAllowed: remote,
+        desiredRemoteCompaction: remote,
+        encoding: 'UNVERIFIED_LOCAL_STATE',
+        evidence: CODEX_PROVIDER_COMPACTION_CAPABILITY.evidence,
+      },
+      modelFields: capabilityDecl.caps.autoCompactTokenLimit !== undefined
+        ? { auto_compact_token_limit: capabilityDecl.caps.autoCompactTokenLimit }
+        : {},
+    }
+  } else {
+    warnings.push({
+      code: 'native_compaction_undeclared', path: 'models.' + name,
+      message: '未声明 codex.nativeCompaction：第三方路由收到密文 compaction 项时 interop 会 typed 拒绝；' +
+        '若该模型应由 Codex 本地压缩，请声明 codex-owned-local，并在 provider 段关闭 remote_compaction',
+    })
+  }
   const baseInstructionsDeclared = override.baseInstructions !== undefined
   if (baseInstructionsDeclared && !isNonEmptyString(override.baseInstructions)) {
     throw new CatalogError('invalid_override', 'models.' + name + '.codex.baseInstructions 必须是非空字符串')
@@ -721,6 +806,8 @@ function buildThirdPartyEntry(name, entry, template, options, warnings) {
       inheritedFields: [],
       templateFieldsNotInherited: Object.keys(templateModel),
       sources,
+      // V2-04：原生压缩归属（Codex 所有）+ provider 级能力落点 + 模型级阈值，供配置写入方消费。
+      nativeCompaction: nativeCompactionDeclaration,
       // N01：证据可观察摘要（source/observedAt/expiresAt/freshness），供管理面/CLI 显示「为什么信/不信」。
       evidence: {
         capabilities: capabilityDecl.evidence,
