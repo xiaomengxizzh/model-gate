@@ -156,12 +156,44 @@ export function createSSEFrameDecoder(opts = {}) {
   }
 }
 
+// ── 单一终态门（A4 / V2-03）──
+// 同一条客户端连接上**只允许一个流终态**：正常完成（[DONE]）或中断收尾（错误事件+[DONE]）。
+// 旧实现只靠「写前检查 writableEnded / destroyed」防重复，这对中途换上游、取消与预算中止的交错
+// 并不充分：只要有一次终态不是通过 client.end() 收尾（例如调用方自行 end、或换了实现），
+// 后到的收尾就会写出第二个 [DONE]/第二个错误事件，客户端会看到「结束后又结束」。
+// 这里把终态做成连接上的不可变标记：先到者胜，后到者直接返回 false（调用方可诊断）。
+export const STREAM_TERMINAL = Symbol.for('modelgate.stream.terminal')
+export const STREAM_TERMINALS = Object.freeze({ COMPLETED: 'completed', INTERRUPTED: 'interrupted' })
+
+/** 读取连接上已记录的终态（null = 尚未产生终态）。 */
+export function streamTerminalOf(client) {
+  if (!client || typeof client !== 'object') return null
+  const v = client[STREAM_TERMINAL]
+  return typeof v === 'string' && v !== '' ? v : null
+}
+
+/**
+ * 抢占连接终态：只有第一个调用者成功（返回 true）并写入实际终态帧。
+ * 终态标记不可枚举、不可配置，避免被诊断投影/序列化带出去或中途改写。
+ */
+export function claimStreamTerminal(client, kind) {
+  if (!client || typeof client !== 'object') return false
+  const k = kind === STREAM_TERMINALS.INTERRUPTED ? STREAM_TERMINALS.INTERRUPTED : STREAM_TERMINALS.COMPLETED
+  if (streamTerminalOf(client)) return false
+  try {
+    Object.defineProperty(client, STREAM_TERMINAL, { value: k, enumerable: false, configurable: false, writable: false })
+    return true
+  } catch {
+    // 冻结/代理对象：退回普通属性，仍然只允许一次写入。
+    try { client[STREAM_TERMINAL] = k; return client[STREAM_TERMINAL] === k && streamTerminalOf(client) === k } catch { return false }
+  }
+}
+
 function extractData(ev) {
   let out = []
   for (const line of ev.split('\n')) if (line.startsWith('data:')) out.push(line.slice(5).trim())
   return out.join('\n')
-}
-function extractOpenAIContent(dataStr) {
+}function extractOpenAIContent(dataStr) {
   try { const obj = JSON.parse(dataStr); const c = obj && obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content; return typeof c === 'string' ? c : '' } catch { return '' }
 }
 function parseDataLine(s) { try { return JSON.parse(s) } catch { return null } }
@@ -208,6 +240,15 @@ export async function relayStream(client, firstUpstream, opts) {
   let usageReported = false
   let lastUsage = null
   let finishSent = false   // 非 openai 协议：finish_reason 是否已补发（message_delta 只应转一次）
+  // 单一终态：本次 relay 是否已由本条连接写出终态，以及被终态门挡下的重复收尾次数（可诊断）。
+  let terminalKind = null
+  let duplicateTerminalBlocked = 0
+  const claimTerminal = (kind) => {
+    if (terminalKind) { duplicateTerminalBlocked += 1; return false }
+    if (!claimStreamTerminal(client, kind)) { duplicateTerminalBlocked += 1; return false }
+    terminalKind = kind
+    return true
+  }
   const clientGoneAt = { t: null }   // 下游客户端断线标记（何时检测到，null 表示仍在线）
   let curStream = firstUpstream      // 当前正读取的上游流（首次或续传之后）
   let gen = 0                        // 泵代数：每次换流递增，被换掉的旧泵醒来即静默退场（防旧 iterator 复活双写客户端）
@@ -268,7 +309,12 @@ export async function relayStream(client, firstUpstream, opts) {
   async function handleEvent(ev, dataStr) {
     if (budgetTimedOut()) throw budgetError()
     if (dataStr !== '') { lastDataEventAt = Date.now(); armNoEv() } // 数据事件重置事件看门狗；注释/空事件不重置（半死流判据）
-    if (protocol === 'openai' && dataStr === '[DONE]') { await sendRaw(ev + '\n\n'); done = true; return }
+    if (protocol === 'openai' && dataStr === '[DONE]') {
+      // 终态门：完成帧只写一次。已有终态（例如取消收尾先到）时丢弃本帧而不是写出第二个 [DONE]。
+      if (claimTerminal(STREAM_TERMINALS.COMPLETED)) await sendRaw(ev + '\n\n')
+      done = true
+      return
+    }
     const ct = extract(dataStr)
     if (phaseAsync === 'resume' && !resolved && ct !== '' && !sentOverflow) {
       acc += ct
@@ -399,7 +445,11 @@ export async function relayStream(client, firstUpstream, opts) {
       if (myGen !== gen) { pendReason = null; return } // 已被更代（重连换流掐掉了本流）：续传链由现役泵负责
       const reason = pendReason; pendReason = null
       if (protocol === 'openai') return resume(reason || (pendingError ? ('error:' + (pendingError.code || pendingError.message)) : 'end')) // 必须 await/return 续传链：否则 main 在续传完成前就继续并 end() 掐断
-      else { await sendDone(); done = true } // 非 openai 协议无 [DONE] 结束标记：上游流自然结束即正常完成
+      else {
+        // 非 openai 协议无 [DONE] 结束标记：上游流自然结束即正常完成；终态帧同样只写一次。
+        if (claimTerminal(STREAM_TERMINALS.COMPLETED)) await sendDone()
+        done = true
+      }
     } catch (e) {
       clearIdle(); clearNoEv()
       if (e && e.budget) { budgetHit = true; destroyUpstream(); return }
@@ -451,13 +501,20 @@ export async function relayStream(client, firstUpstream, opts) {
   // 切/不切由调用方（forward 模型链循环）决定：切则下一上游的流继续写同一连接，不切则调 endInterruptedStream 收尾
   if (!client.destroyed && (done || clientGoneAt.t != null)) try { client.end() } catch { }
   // 返回流结局：completed=正常结束；contentSent=是否已向客户端回传过正式回答内容（false 且中断 → 调用方可安全换上游/模型重发，无重复风险）
-  return { completed: done, contentSent: contentChars > 0, interrupted: !done, reconnects: retries, clientGone: clientGoneAt.t != null, timedOut }
+  // terminal：本次 relay 写出的终态（'completed' | null）。中断/取消不写终态，由调用方决定是否收尾；
+  // duplicateTerminalBlocked：被终态门挡下的重复收尾次数（>0 说明接线里有重复终止调用，便于定位）。
+  return { completed: done, contentSent: contentChars > 0, interrupted: !done, reconnects: retries, clientGone: clientGoneAt.t != null, timedOut, terminal: terminalKind, duplicateTerminalBlocked }
 }
 
 // 流中断且调用方决定不切换时的收尾：发 OpenAI 兼容错误事件（客户端可感知，不再静默）+ [DONE] + end。
 // （relayStream 中断时保持客户端连接开启，切/不切由调用方决定——切则继续写流，不切则调用本函数收尾）
+//
+// A4 单一终态：必须先抢到连接终态才写。已完成（[DONE] 已发）或已收尾过的连接直接返回 false，
+// 因此「取消 + 预算中止 + 兜底收尾」多条路径交错时，客户端仍然只看到一个终态。
+// 返回 true = 本次真的写出了终态；false = 已有终态/连接不可写（调用方可据此诊断重复终止）。
 export function endInterruptedStream(client, note, reconnects, opts) {
-  if (!client || client.destroyed || client.writableEnded) return
+  if (!client || client.destroyed || client.writableEnded) return false
+  if (!claimStreamTerminal(client, STREAM_TERMINALS.INTERRUPTED)) return false
   const o = opts || {}
   try {
     client.write('data: ' + JSON.stringify({ error: { message: '上游流式响应中断：' + note + '，已重连 ' + (reconnects || 0) + ' 次仍失败', type: o.type || 'stream_interrupted', code: o.code || 'STREAM_INTERRUPTED' } }) + '\n\n')
@@ -465,4 +522,5 @@ export function endInterruptedStream(client, note, reconnects, opts) {
     client.write('data: [DONE]\n\n')
   } catch { try { client.destroy() } catch { } }
   try { client.end() } catch { }
+  return true
 }
