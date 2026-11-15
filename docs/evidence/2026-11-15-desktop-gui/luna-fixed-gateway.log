@@ -1,0 +1,10 @@
+[2026-11-15T06:19:20.467Z] [info]  gateway_subscription configured provider=chatgpt-plan scope=loopback+official credential=local_codex_auth
+[2026-11-15T06:19:20.468Z] [info]  管理 API 已启用令牌保护（MG_ADMIN_TOKEN）
+[2026-11-15T06:19:20.471Z] [info]  model-gateway 已启动: http://127.0.0.1:18875  (健康检查 /healthz, 控制面板 /)
+[2026-11-15T06:19:58.079Z] [info]  gateway_subscription provider=chatgpt-plan target=chatgpt.com/backend-api/codex/responses credential=local_codex_auth
+[2026-11-15T06:19:58.080Z] [info]  官方目标丢弃头（仅名称） authorization,host,content-length
+[2026-11-15T06:19:58.081Z] [info]  send authz generation=config-declared (unscoped) provider=chatgpt-plan domain=official
+[2026-11-15T06:19:58.121Z] [info]  gateway_subscription provider=chatgpt-plan target=chatgpt.com/backend-api/codex/responses credential=local_codex_auth
+[2026-11-15T06:19:58.123Z] [info]  官方目标丢弃头（仅名称） authorization,host,content-length
+[2026-11-15T06:19:58.123Z] [info]  send authz generation=config-declared (unscoped) provider=chatgpt-plan domain=official
+[2026-11-15T06:20:54.474Z] [info]  model-gateway 已关闭，统计已落盘
