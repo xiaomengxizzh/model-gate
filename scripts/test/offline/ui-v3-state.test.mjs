@@ -374,3 +374,39 @@ test('onProductStatus 新快照/invalidate 通知可取消；setProductPhase 只
   assert.equal(aggregationState().freshness.budgetMs, FRESHNESS_BUDGET.aggregation)
   assert.equal(phaseOf('status'), 'ready')
 })
+
+// 契约 §8：409 冲突进入 conflict 投影，不覆盖、不伪造 ready。
+test('⑨ 409 冲突：投影为 conflict，不进入 ready', async () => {
+  resetEnv()
+  setToken('keep-token')
+  stubFetch((url) => {
+    if (url.includes('/api/status')) return jsonRes(200, statusBody('conflict'))
+    if (url.includes('/api/aggregation/health')) return jsonRes(409, { error: 'conflict', code: 'version_conflict', currentVersion: 9 })
+    return aggregationResponse(url)
+  })
+  await refreshProduct({ force: true })
+  assert.equal(state.aggregation.error && state.aggregation.error.status, 409)
+  const product = productStatus()
+  assert.equal(product.error && product.error.kind, 'conflict')
+  assert.equal(product.state, 'conflict', '409 必须是 conflict，而不是 ready/recoverable')
+  assert.equal(getToken(), 'keep-token', '409 不得清 token')
+})
+
+// 契约 §8：断网/超时不保留旧成功状态，投影进入 recoverable_error。
+test('⑩ 断网：清掉旧成功投影并进入 recoverable_error', async () => {
+  resetEnv()
+  stubFetch(standardRoutes(() => jsonRes(200, statusBody('was-good'))))
+  await refreshProduct({ force: true })
+  assert.notEqual(productStatus().state, 'recoverable_error', '先有真实可用快照')
+  const networkError = () => { throw new Error('fetch failed') }
+  stubFetch((url) => {
+    if (url.includes('/api/status')) return networkError()
+    return networkError()
+  })
+  await refreshProduct({ force: true })
+  assert.equal(state.status, null, '断网不得保留旧 status 快照')
+  const product = productStatus()
+  assert.equal(product.state, 'recoverable_error', '断网必须进入 recoverable_error')
+  assert.ok(product.error && product.error.kind === 'error')
+  assert.equal(state.product, product)
+})
