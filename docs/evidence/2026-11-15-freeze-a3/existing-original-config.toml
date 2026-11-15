@@ -1,0 +1,17 @@
+# 用户手写配置（已有配置用户场景，含注释 / MCP / projects / 自定义 provider）
+model = "gpt-5"
+model_reasoning_effort = "medium"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[mcp_servers.docs]
+command = "node"
+args = ["docs.js"]
+
+[projects."/home/dev/proj"]
+trust_level = "trusted"
+
+[model_providers.custom]
+name = "Custom"
+base_url = "https://example.invalid/v1"
+wire_api = "responses"

@@ -1,0 +1,13 @@
+[2026-11-15T10:54:41.575Z] [info]  gateway_subscription configured provider=chatgpt-plan scope=loopback+official credential=local_codex_auth
+[2026-11-15T10:54:41.575Z] [info]  管理 API 已启用令牌保护（MG_ADMIN_TOKEN）
+[2026-11-15T10:54:41.579Z] [info]  model-gateway 已启动: http://127.0.0.1:18883  (健康检查 /healthz, 控制面板 /)
+[2026-11-15T10:55:23.279Z] [info]  gateway_subscription provider=chatgpt-plan target=chatgpt.com/backend-api/codex/responses credential=local_codex_auth
+[2026-11-15T10:55:23.280Z] [info]  官方目标丢弃头（仅名称） authorization,host,content-length
+[2026-11-15T10:55:23.280Z] [info]  send authz generation=config-declared (unscoped) provider=chatgpt-plan domain=official
+[2026-11-15T10:55:23.322Z] [info]  gateway_subscription provider=chatgpt-plan target=chatgpt.com/backend-api/codex/responses credential=local_codex_auth
+[2026-11-15T10:55:23.323Z] [info]  官方目标丢弃头（仅名称） authorization,host,content-length
+[2026-11-15T10:55:23.323Z] [info]  send authz generation=config-declared (unscoped) provider=chatgpt-plan domain=official
+[2026-11-15T10:56:02.825Z] [info]  codex native lossy include_dropped:reasoning.encrypted_content
+[2026-11-15T10:56:02.825Z] [info]  Codex 参数按目标能力剔除 opencodego include:reasoning.encrypted_content
+[2026-11-15T10:56:02.827Z] [info]  upstream 头策略丢弃 provider=opencodego identity=thirdParty x-codex-beta-features,originator,x-codex-window-id,x-codex-turn-metadata,x-client-request-id,session-id,thread-id
+[2026-11-15T10:56:02.828Z] [info]  send authz generation=config-declared (unscoped) provider=opencodego domain=thirdParty

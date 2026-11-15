@@ -1,0 +1,13 @@
+PASS isolation_paths — /tmp/mg-freeze-a3/existing-state | /tmp/mg-freeze-a3/existing-state/codex
+PASS paths_separated — configDir 与 codexHome 不同（允许隔离内嵌套）
+PASS gateway_config — server.port=18881 bind=127.0.0.1
+PASS catalog_fixture — generation=1 current=1 slugs=gpt-6-luna,mg-opencodego-deepseek-v4-1-flash
+PASS codex_config_mode — mode=aggregated observedOwned=model_provider,openai_base_url,model,model_catalog_json
+PASS expect_mode — expected=aggregated actual=aggregated
+PASS expect_config_sha — expected=7c727edf749816787714c52340d9ce6ecc8bb8d07eb070fbba539733648bd47c actual=7c727edf749816787714c52340d9ce6ecc8bb8d07eb070fbba539733648bd47c
+PASS desktop_state_consistent — state.mode=aggregated fileMode=aggregated
+PASS backup_matches_before — backup sha256=e3ec189d68ed3b4b
+SKIP gateway_health — 未提供 --port
+---
+OK: 无 FAIL（SKIP 项需人工确认）
+exit=0
