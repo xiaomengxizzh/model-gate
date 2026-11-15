@@ -23,7 +23,7 @@ import {
   readV2MatrixFile,
 } from './aggregation-matrix-v2.js'
 import { REQUIREMENT_IDS, generate as generateV1, readMatrixFile as readV1MatrixFile } from './aggregation-matrix.js'
-import { assertNativeCompactionIsBlocking, gateV2, v2CaseIndex } from './aggregation-gate-v2.js'
+import { assertNativeCompactionIsBlocking, gateV2, v2CaseIndex, v2EvidenceFromStatus as v2StatusToRecords } from './aggregation-gate-v2.js'
 import { SUITES } from '../run.mjs'
 
 const ROOT = new URL('../../../', import.meta.url)
@@ -123,6 +123,16 @@ test('V2 门禁：当前状态 ready:false，且不因所有者批准而放行',
   assert.ok(gate.failedRequirements.length > 0)
   assert.ok(gate.failedRequirements.includes('MG-R006'))
   assert.equal(gate.ownerApproval, true)
+})
+
+test('V2 状态文档里写 PASS_REAL 不足以放行（必须给真实回执）', () => {
+  const { evidence } = loadV2Sources()
+  const statusDoc = evidence.find((e) => e.docPath === STATUS_PATH_V2)
+  // 伪造：状态文档每行都写 PASS_REAL，但没有任何 commitSha/command/receipt/realTarget。
+  const forged = statusDoc.rows.map((r) => Object.assign({}, r, { status: 'PASS_REAL' }))
+  const gate = gateV2({ ownerApproval: true, evidence: v2StatusToRecords(forged) })
+  assert.equal(gate.ready, false)
+  assert.ok(gate.requirements.every((r) => r.reason === 'invalid_evidence'), '状态声明不得自证')
 })
 
 test('V2 门禁：native compaction 不可被绕过（缺记录/skipped/旧证据/换树）', () => {

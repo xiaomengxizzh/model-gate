@@ -39,7 +39,7 @@ export function v2CaseIndex() {
 }
 
 // 状态文档 → 门禁输入。只搬运状态与阻断原因；不带任何回执，因此不可能被判成 PASS_REAL。
-export function v2EvidenceFromStatus({ rows }) {
+export function v2EvidenceFromStatus(rows) {
   const evidence = {}
   for (const row of rows) {
     if (!STATUS_VOCABULARY.includes(row.status)) throw new Error('invalid V2 status for ' + row.id + ': ' + row.status)
@@ -62,7 +62,7 @@ export function gateV2({ sha = V2_BASELINE_SHA, ownerApproval = false, evidence 
   const matrix = buildV2Matrix(sources)
   const cases = caseIndex || matrix.caseIndex
   const statusDoc = sources.evidence[0]
-  const records = evidence || v2EvidenceFromStatus({ rows: statusDoc.rows })
+  const records = evidence || v2EvidenceFromStatus(statusDoc.rows)
   return evaluateGate({
     evidence: records,
     ownerApproval,
@@ -76,7 +76,7 @@ export function releaseV2({ sha = V2_BASELINE_SHA, ownerApproval = false, eviden
   const sources = loadV2Sources()
   const matrix = buildV2Matrix(sources)
   const statusDoc = sources.evidence[0]
-  const records = evidence || v2EvidenceFromStatus({ rows: statusDoc.rows })
+  const records = evidence || v2EvidenceFromStatus(statusDoc.rows)
   return evaluateRelease({
     evidence: records,
     ownerApproval,
