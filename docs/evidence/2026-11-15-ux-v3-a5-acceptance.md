@@ -283,3 +283,67 @@ npm run docs:check       # PASS（R3 文档写入后补跑，链接均指向真�
 - 真实旧版本网关实例：**BLOCKED_OLD_INSTANCE**；PR #7 远端：**BLOCKED_REMOTE_PR_STATE**。
 - UI-09 并发/切页与 UI-14 真实退出恢复：A5 本轮 **NOT_TESTED**（A3/既有后端套件在 `npm test` 中全绿，不等同 A5 黑箱验收）。
 
+## 10. R4 复验（被测 SHA `767866d`，A4 R2 CSS 修复）
+
+> 合并：`8eaddf2`（`git merge --no-ff feat/modelgate-ux-v3`）；被测产品代码 = `767866d`（父 `655485a`，合并 A4 R2）。
+> **R3→R4 差异仅限 A4 的 CSS/布局修复**：`src/ui-next/styles.css`（可收缩布局、侧栏/折叠分组、A1/A2 新 class 样式）、`ui-v3-visual.test.mjs`（+36 行量测）、契约 §5 同步 `preview_pending`（A5 R3 遗留小账）、V3 交付报告措辞；**无产品 JS/路由/API/状态机改动**。
+
+### 10.1 命令与真实数字（`767866d`）
+
+```bash
+node scripts/e2e/ui-v3-browser.mjs --suffix -r4   # checks 11 · passed 11 · failed 0 · exit 0
+node --test scripts/test/offline/ui-v3-acceptance.test.mjs
+# tests 11 · pass 10 · fail 0 · skipped 1（UI-16）
+npm test
+# suites: 125 passed / 0 failed / 0 skipped / 0 timed out / 0 not run（manifest 125/125）
+# tests:  1217 passed / 0 failed / 3 skipped；82.5s
+npm run check        # 19/19 syntax OK
+npm run docs:check   # PASS（109 files / 517 links）
+npm run contract:check  # PASS（12 requirements / 7 stages / 5 subagent roles）
+```
+
+### 10.2 浏览器 11 项（A4 改 CSS 后几何未退化）
+
+**11/11 PASS、0 FAIL**。关键几何：
+
+| check | 实测 |
+| --- | --- |
+| UI-15-viewport-360 | CTA `top=425.7 < 800`、`310×46.25`、left/right 25→335 未截断 |
+| UI-15-viewport-768 | CTA `top=386.3 < 900`、`480×46.25` |
+| UI-15-viewport-1440 | CTA `top=347.3 < 900`、`480×46.25` |
+| UI-01-advanced-collapsed | `details.open=false` 且高级 5 项像素级不可见（`pixelVisible=[]`），A4 新样式未把折叠项显示出来 |
+| UI-01-nav-current | overview → `#/connections` → overview 三段，aria-current 始终唯一 |
+| UI-13-no-page-errors | 0 条 |
+
+截图（R4 正式证据，未覆盖 R1/R2/R3 与 Lead 的 `-final`）：`ui-v3-{360x800,768x900,1440x900}-r4.png`。
+
+### 10.3 独立几何量测（补充 A4 的 40/40，不计入 11 项 check）
+
+同一浏览器会话实测 `scrollWidth/clientWidth`：
+
+- overview@360：doc 360/360、brand 47/47、nav 281/281；overview@768：753/753、47/47、674/674；overview@1440：1425/1425、225/225、225/225。
+- connections@360：doc 360/360、brand 47/47、nav 281/281。
+- overview@360 **打开高级分组**：doc 360/360、nav 281/281（A4 报告修复前会被撑到 679）。
+- 侧栏内全部元素 `scrollWidth > clientWidth+1` 计数：**0**（三视口）。
+
+结论：与 A4 的"无内部横滚/无页面横向溢出"一致；具体像素值与 A4 报告因视口/元素状态不同略有差异，但**等式不变量全部成立**。
+
+### 10.4 反降级再确认（`767866d`）
+
+| 检查 | 结论 | 证据 |
+| --- | --- | --- |
+| 冻结证据 | **PASS** | `v2-frozen-sha.txt` blob `a08a2f10…`（内容 `12cf5d9…`）、`v2-release-approvals.json` `5898f53f…`，与 `708cf5e` 一致，diff 为空 |
+| `main` / `mg-codex-native` | **PASS（本地）** | `main` reflog 仍 **2026-09-18**；`main=e746385`、`origin/main=6bc6441`、`mg-codex-native=e337f4a` 均未被触碰 |
+| 导出 | **PASS** | 既有文件导出差集 missing=[]（components 19→25、router 4→6、store 16→29、api 8→8、app 6→10）；`product-status.js` 为 UX-00 新增文件 |
+| 路由/入口/依赖 | **PASS** | 8 个路由 id；`/api/status`、`/admin`、`/ui-next` 仍在；`src/index.js` 仅 1 行 import 改写删除；零新依赖 |
+| PR #7 | **BLOCKED_REMOTE_PR_STATE** | 无 `gh`/未联网 |
+| 新增依赖/真实请求 | **无** | 0 次真实模型请求；无 `PASS_REAL` |
+
+### 10.5 R4 结论
+
+- **无 FAIL**：11 项浏览器全 PASS、acceptance 0 fail、全量 125/1217 全绿。
+- A4 CSS 未造成几何退化；三视口 CTA 仍首屏可见（425.7/386.3/347.3），侧栏与折叠分组无内部横向滚动。
+- 残余 BLOCKED 与 R3 相同：真实 Go/GPT/Desktop（UI-04/06/07/16）= **BLOCKED_NO_PAID_MODEL_AUTH**；完整 428→consent→原子写（UI-05/08）= **BLOCKED**；旧实例 = **BLOCKED_OLD_INSTANCE**；PR #7 = **BLOCKED_REMOTE_PR_STATE**；UI-09/UI-14 = **NOT_TESTED**。
+- A5 R3 遗留小账（契约 §5 未同步 `preview_pending`）已由 `655485a` 修复，复核 PASS。
+
+
