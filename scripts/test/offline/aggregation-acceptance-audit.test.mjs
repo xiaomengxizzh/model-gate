@@ -51,7 +51,7 @@ test('干净候选：七条规则全部不触发', () => {
   const report = auditCandidate({ evidence: allReal(), diff: '', caseIndex })
   assert.equal(report.ok, true)
   assert.deepEqual(report.findings, [])
-  assert.equal(AUDIT_RULE_IDS.length, 7)
+  assert.equal(AUDIT_RULE_IDS.length, 8)
 })
 
 test('规则 mock-as-real：PASS_REAL 但 realTarget 不为 true，或回执标记 mock', () => {
@@ -200,4 +200,60 @@ test('人工审计步骤存在且覆盖离线不可判定的项', () => {
   for (const phrase of ['原版 ChatGPT Desktop', '上游服务端日志', 'GPT-6 Luna', '所有者书面批准', '只读快照']) {
     assert.ok(text.includes(phrase), 'manual audit steps missing: ' + phrase)
   }
+})
+
+test('gate-weakened：门禁文件净删行/删文件即失败，纯新增不误报', () => {
+  const weaken = [
+    'diff --git a/scripts/test/offline/aggregation-gate-v2.js b/scripts/test/offline/aggregation-gate-v2.js',
+    '--- a/scripts/test/offline/aggregation-gate-v2.js',
+    '+++ b/scripts/test/offline/aggregation-gate-v2.js',
+    '@@ -1,3 +1,1 @@',
+    '-const NATIVE_COMPACTION_CASES = ["native-compaction", "post-compact-followup", "context-proof"]',
+    '-  assert.equal(missing.ready, false)',
+    '-  check("native compaction", ok)',
+    '+  // removed',
+  ].join('\n')
+  const bad = auditCandidate({ diff: weaken })
+  assert.equal(bad.ok, false)
+  assert.ok(bad.findings.some((f) => f.rule === 'gate-weakened'), JSON.stringify(bad.findings))
+
+  const add = [
+    'diff --git a/scripts/test/offline/aggregation-gate-v2.js b/scripts/test/offline/aggregation-gate-v2.js',
+    '--- a/scripts/test/offline/aggregation-gate-v2.js',
+    '+++ b/scripts/test/offline/aggregation-gate-v2.js',
+    '@@ -1,1 +1,3 @@',
+    ' // header',
+    '+  assert.equal(missing.ready, false)',
+    '+  assert.equal(skipped.ready, false)',
+  ].join('\n')
+  const good = auditCandidate({ diff: add })
+  assert.equal(good.ok, true, JSON.stringify(good.findings))
+})
+
+test('V2 状态证据属于受保护门禁定义：删行/删文件即 gate-weakened', () => {
+  const shrink = [
+    'diff --git a/docs/evidence/aggregation-v2-status-2026-11-15.md b/docs/evidence/aggregation-v2-status-2026-11-15.md',
+    '--- a/docs/evidence/aggregation-v2-status-2026-11-15.md',
+    '+++ b/docs/evidence/aggregation-v2-status-2026-11-15.md',
+    '@@ -1,3 +1,1 @@',
+    '-| MG-R006 | `FAIL` | 原生压缩未通过 |',
+    '-| MG-R005 | `PASS_REAL` | 旧树 |',
+    '+<!-- trimmed -->',
+  ].join('\n')
+  const out = auditCandidate({ diff: shrink })
+  assert.equal(out.ok, false)
+  assert.ok(out.findings.some((f) => f.rule === 'gate-weakened'), JSON.stringify(out.findings))
+
+  const removed = [
+    'diff --git a/docs/evidence/aggregation-v2-status-2026-11-15.md b/docs/evidence/aggregation-v2-status-2026-11-15.md',
+    'deleted file mode 100644',
+    '--- a/docs/evidence/aggregation-v2-status-2026-11-15.md',
+    '+++ /dev/null',
+    '@@ -1,2 +0,0 @@',
+    '-| MG-R006 | `FAIL` | x |',
+    '-| MG-R005 | `PASS_REAL` | y |',
+  ].join('\n')
+  const gone = auditCandidate({ diff: removed })
+  assert.equal(gone.ok, false)
+  assert.ok(gone.findings.some((f) => f.rule === 'gate-weakened'), JSON.stringify(gone.findings))
 })

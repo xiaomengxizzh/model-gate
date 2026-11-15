@@ -5,6 +5,7 @@
 // 继续存在，只守卫历史快照，不再代表 V2 交付状态。
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -181,4 +182,21 @@ test('历史迁移导出不得进入模型请求路径（非压缩/摘要路径�
   const api = readFileSync(new URL('src/codex/api.js', ROOT), 'utf8')
   assert.match(api, /history_export(?:_plan)?'/)
   assert.match(api, /非压缩\/摘要路径/, '导出路由说明必须明确它不是压缩/摘要路径')
+})
+
+// A5 N1：门禁自证的**期望语义**被等行数改写（例如把 `missing.ready === false` 改成 `true`）
+// 不会触发 gate-weakened（它只看净删行）。所以这里把自证函数体钉成 sha256：
+// 任何语义改动都必须同时更新这个哈希，形成显式的第二次确认（两步修改可见、可审计）。
+const PINNED_SELFCHECK_SHA = 'a00708d557077e6c5054a1aaaba41a7cc75d90167ba27cdef0d5a1f7db4aaec3'
+
+test('门禁自证函数体钉死 sha256（等行数语义削弱必须显式二次确认）', () => {
+  const src = readFileSync(new URL('scripts/test/offline/aggregation-gate-v2.js', ROOT), 'utf8')
+  const start = src.indexOf('export function assertNativeCompactionIsBlocking')
+  assert.ok(start >= 0, '门禁必须保留 assertNativeCompactionIsBlocking 自证')
+  const end = src.indexOf('\nconst entry =', start)
+  assert.ok(end > start, '无法界定自证函数体')
+  const body = src.slice(start, end)
+  const digest = createHash('sha256').update(body, 'utf8').digest('hex')
+  assert.equal(digest, PINNED_SELFCHECK_SHA,
+    '门禁自证函数体被改动：若是有意加强/重构，请更新 PINNED_SELFCHECK_SHA 并在提交说明里写清为什么；若是削弱，禁止合并')
 })

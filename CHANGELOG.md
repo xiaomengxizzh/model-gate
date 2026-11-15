@@ -11,6 +11,15 @@
 - **真实客户端压缩实测（回环上游，零额度）**：用原版 Desktop 捆绑的 `codex-cli 0.167.0-alpha.3.2` 在隔离 `CODEX_HOME` 下实测——声明 `remote_compaction="unsupported"` 时 Codex 走自己的本地压缩（`CONTEXT CHECKPOINT COMPACTION` 提示原样到达上游、压缩后追派成功）；声明 `"v2"` 时发 `{type:"compaction_trigger"}` 并要求上游返回 `compaction` 输出项。据此网关显式识别 `compaction_trigger`：仅 `codex-owned-remote` 路由透传，其余 `native_compaction_route_not_ready`。证据 `docs/evidence/aggregation-v2-native-compaction-real-client-2026-11-15.md`，回放回归 `agg-v2-real-client-compaction.test.mjs`。
 - **原生压缩归属声明**（A1）：`codex.nativeCompaction ∈ {codex-owned-local, codex-owned-remote, unsupported}` 与 `history.compaction:"preserve"`；密文压缩项仅在声明支持时原样透传，未声明/不匹配返回 typed 错误，`drop` 仍是显式有损路径；`context_compaction` 显式分类；目录支持 `auto_compact_token_limit` 且拒绝超过上下文窗口的取值。
 
+### Security — 门禁反降级（A5 最终复核 N1/N2/N4/N5）
+
+- 反降级审计新增 `gate-weakened` 并登记进 `AUDIT_RULE_IDS`：门禁文件净删行、删断言、删文件都被判为降级（不依赖 `src/**` 是否被改）；V2 状态证据纳入受保护门禁定义。
+- `requirement-reworded` 收敛为「删除/改写需求行」才触发：只追加解释或派生映射不误报；V2 矩阵/状态证据改由字节校验与 V2 套件守卫。
+- V2 门禁：带 `--evidence` 时若 `--sha` 不等于当前 HEAD，返回 `non_head_sha_requires_replay_flag`（历史复算必须显式 `--replay`），杜绝「旧树回执 + 当前口径」混用。
+- 门禁自证函数体钉 `sha256`：等行数语义削弱（如把期望值改成 `true`）必须同时改哈希，形成可见的二次确认。
+- CI 新增 `npm run gate:audit-diff`（`git merge-base(base, HEAD)…HEAD` 的 diff 跑审计；取不到 base 即 fail-closed），checkout 改为 `fetch-depth: 0`。
+- `skipped-as-passed` 只拦新增的整条 `test.skip(` 与 `skip: true`：运行期 `t.skip()`（如 root 环境跳过权限用例）如实报告不适用，不误判为把通过当通过。
+
 ### Fixed
 
 - **授权域终态归因**（A4 + Lead 接线）：上游 401/402/403/配额型 429 按候选自身 `authDomain` 返回终态信封，不再被兜底链吞成 `502 all_providers_failed`；存在跨授权域候选时 429 返回 `cross_domain_fallback_blocked`，禁止静默换供应商/换套餐；请求身份校验纳入 `model`。

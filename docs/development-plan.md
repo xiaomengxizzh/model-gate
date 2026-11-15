@@ -261,3 +261,13 @@ G0 契约基线（MG-016）、第一阶段 P1 卡（MG-001/002/003/005）与 MG-
 - 代码：interop 识别 `compaction_trigger`（仅 `codex-owned-remote` 透传，其余 `native_compaction_route_not_ready`）；回放回归 `agg-v2-real-client-compaction.test.mjs`（4 用例）。
 - 状态：`PASS_MOCK`（真实客户端 + mock 上游）。`MG-R006` 仍为 `FAIL`：真实 Go 推理、真实原生父子 + 压缩后追派/中断/恢复未执行（BLOCKED，无额度授权）。
 - 已知 flake：`routing-ledger.test.mjs` 跨进程并发用例在全量并发下偶发失败，单跑 3/3 通过，与本轮改动无关。
+
+### 门禁残余绕过修复（A5 N1/N2/N4/N5，2026-11-15）
+
+- `gate-weakened` 已登记进 `AUDIT_RULE_IDS` 并补单测（净删行 / 删断言 / 删文件三类；纯新增不误报）。
+- V2 状态证据纳入受保护门禁定义；`requirement-reworded` 收敛为删改需求行才触发（避免正常追加误报）。
+- V2 门禁带 `--evidence` 且 `--sha != HEAD` 时 fail-closed（`non_head_sha_requires_replay_flag`，历史复算需显式 `--replay`）。
+- 门禁自证函数体 sha256 钉死（`aggregation-acceptance-v2.test.mjs`），等行数语义削弱必须显式改哈希。
+- CI 新增 `npm run gate:audit-diff`（diff vs base，取不到 base 即失败）；checkout `fetch-depth: 0`。
+- 已执行：`npm run gate:audit-diff --base main` PASS；`npm test` 114 套件 / 1104 用例 / 0 失败；`npm run check`、`check-metadata`、`contract:check`、`gate:v2` 全 PASS。
+- 仍存（结构性，不可用仓库脚本消除）：伪造 evidence 绑当前 HEAD + 所有者批准仍可过门禁——真实性由 A5 真实回执兜底；`routing-ledger` 跨进程并发用例在全量并发下偶发失败（单跑 3/3），登记为发布风险。

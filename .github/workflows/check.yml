@@ -31,6 +31,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          # 反降级审计需要与 base 分支求 merge-base；浅克隆会让 diff 不可核对（A5 复核要求 fail-closed）。
+          fetch-depth: 0
       - name: Runner version receipt
         shell: bash
         run: |
@@ -101,6 +103,12 @@ jobs:
         run: npm run contract:check
       - name: V2 release gate (Codex native compaction is a hard blocker)
         run: npm run gate:v2
+      - name: Anti-downgrade audit of this change set (diff vs base branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${GITHUB_BASE_REF:-main}"
+          node scripts/test/offline/aggregation-audit-diff.mjs --base "$base"
       - name: Isolated mock suites (local mock only, no upstream, no credentials)
         run: npm test
       - name: Documentation link check

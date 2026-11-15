@@ -67,7 +67,16 @@ export function v2EvidenceFromStatus(rows) {
   return evidence
 }
 
-export function gateV2({ sha = null, ownerApproval = false, evidence = null, caseIndex = null } = {}) {
+export function gateV2({ sha = null, ownerApproval = false, evidence = null, caseIndex = null, allowNonHead = false } = {}) {
+  const head = currentHeadSha()
+  const target = sha || head
+  if (evidence && !allowNonHead && target !== head) {
+    return {
+      ready: false, status: 'BLOCKED', failedRequirement: null, failedRequirements: [],
+      reason: 'non_head_sha_requires_replay_flag', canAskOwnerToMerge: false,
+      ownerApproval: ownerApproval === true, headSha: target, requirements: [], unmappedEvidence: [],
+    }
+  }
   const sources = loadV2Sources()
   const matrix = buildV2Matrix(sources)
   const cases = caseIndex || matrix.caseIndex
@@ -76,13 +85,23 @@ export function gateV2({ sha = null, ownerApproval = false, evidence = null, cas
   return evaluateGate({
     evidence: records,
     ownerApproval,
-    headSha: sha || currentHeadSha(),
+    headSha: target,
     requirementIds: V2_REQUIREMENT_IDS,
     caseIndex: cases,
   })
 }
 
-export function releaseV2({ sha = null, ownerApproval = false, evidence = null, diff = '' } = {}) {
+export function releaseV2({ sha = null, ownerApproval = false, evidence = null, diff = '', allowNonHead = false } = {}) {
+  const head = currentHeadSha()
+  const target = sha || head
+  if (evidence && !allowNonHead && target !== head) {
+    return {
+      ready: false, status: 'BLOCKED', failedRequirement: null, failedRequirements: [],
+      reason: 'non_head_sha_requires_replay_flag', canAskOwnerToMerge: false,
+      ownerApproval: ownerApproval === true, headSha: target, requirements: [], unmappedEvidence: [],
+      audit: null, auditFindings: [],
+    }
+  }
   const sources = loadV2Sources()
   const matrix = buildV2Matrix(sources)
   const statusDoc = sources.evidence[0]
@@ -90,7 +109,7 @@ export function releaseV2({ sha = null, ownerApproval = false, evidence = null, 
   return evaluateRelease({
     evidence: records,
     ownerApproval,
-    headSha: sha || currentHeadSha(),
+    headSha: target,
     requirementIds: V2_REQUIREMENT_IDS,
     caseIndex: matrix.caseIndex,
     diff,
@@ -245,6 +264,7 @@ if (entry === import.meta.url) {
     } else {
       const sha = argOf('--sha') || currentHeadSha()
       const ownerApproval = argv.includes('--owner-approval')
+      const allowNonHead = argv.includes('--replay')
       const evidencePath = argOf('--evidence')
       const diffPath = argOf('--diff')
       const diff = diffPath ? readFileSync(resolve(diffPath), 'utf8') : ''
@@ -252,8 +272,8 @@ if (entry === import.meta.url) {
       if (evidencePath) {
         const raw = JSON.parse(readFileSync(resolve(evidencePath), 'utf8'))
         gate = diff
-          ? releaseV2({ sha, ownerApproval, evidence: raw, diff })
-          : gateV2({ sha, ownerApproval, evidence: raw })
+          ? releaseV2({ sha, ownerApproval, evidence: raw, diff, allowNonHead })
+          : gateV2({ sha, ownerApproval, evidence: raw, allowNonHead })
       } else {
         gate = gateV2({ sha, ownerApproval })
       }
