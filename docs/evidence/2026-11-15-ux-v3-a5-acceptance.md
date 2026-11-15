@@ -4,6 +4,7 @@
 > 本文件所在提交即本次证据提交（`git log -1 --format=%H -- docs/evidence/2026-11-15-ux-v3-a5-acceptance.md` 可复核）。
 > 相关：[UX-00 独立审查](2026-11-15-ux-v3-a5-ux00-review.md) · [契约](../contracts/ui-v3-product-status.md) · [执行计划](../roadmap/2026-11-15-frontend-experience-v3-execution-plan.md)
 > **本轮没有任何真实模型请求**（无付费调用授权）；所有网关都是隔离实例 + 本地 mock/临时目录。状态词严格区分 mocked / real / BLOCKED / NOT_TESTED。
+> **R2 复验（集成分支）已追加在 §8**：被测代码 = `1ab9239`（A5 合并提交 `741525c`）；基线截图保留，集成截图带 `-integrated`。
 
 ## 1. 交付物
 
@@ -99,3 +100,81 @@ node scripts/e2e/ui-v3-browser.mjs
 - **A1/A2/A3/A4 集成后的最终 UI**：本记录只对基线 `e1beb85`（+ `90ac729` 静态复核）负责；集成后需重跑三命令。
 - **200% 缩放/键盘环/reduced-motion 的浏览器实测**：NOT_TESTED_UNTIL_A4（只有静态 CSS 事实）。
 - **PR #7 Draft/远端状态**：BLOCKED_REMOTE_PR_STATE。
+
+## 8. R2 复验（集成分支 `1ab9239` + A5 合并 `741525c`）
+
+> 合并：`git merge --no-ff feat/modelgate-ux-v3 -m "test(ux-v3-a5): 合并集成分支复验"` → `741525c`。
+> 被测产品代码 = 集成分支 HEAD `1ab9239`（A1/A2/A3/A4/A5 + 状态诚实性修复）；本文件所在提交为 R2 证据提交。
+> 集成截图：`ui-v3-360x800-integrated.png`、`ui-v3-768x900-integrated.png`、`ui-v3-1440x900-integrated.png`（基线截图未覆盖）。
+
+### 8.1 命令与真实数字（集成后）
+
+```bash
+npm run check
+# exit 0 · UI modules 19/19 syntax OK
+
+node --test scripts/test/offline/ui-v3-acceptance.test.mjs
+# tests 10 · pass 9 · fail 0 · skipped 1（UI-16 BLOCKED_NO_PAID_MODEL_AUTH）
+
+node scripts/e2e/ui-v3-browser.mjs --suffix -integrated
+# exit 1 · checks 11 · passed 8 · failed 3
+# PASS：UI-00-load、UI-01-status-rows、UI-01-single-cta、UI-01-advanced-collapsed（像素级）、
+#       UI-01-nav-current、UI-01-no-fake-success、UI-10-no-credential-persistence、UI-15-viewport-1440
+# FAIL：UI-15-viewport-360、UI-15-viewport-768（A1 已接单）、UI-13-no-page-errors（A3 已接单）
+
+npm test   # 全量（Lead 已允许）
+# suites: 125 passed / 0 failed / 0 skipped / 0 timed out / 0 not run（manifest 125/selected 125）
+# tests:  1212 passed / 0 failed / 3 skipped
+# total:  82.7s
+```
+
+> 清单计数口径：`--list` 共 127 行 = 125 条套件路径 + 空行 + 汇总行（"125 suites (explicit manifest)"），因此实际 manifest 是 **125 套件**（含 `ui-v3-acceptance.test.mjs`，登记在第 120 条）；全量 1212 tests 已包含 5 个新套件。
+
+### 8.2 本次修复的 3 个过期断言（不是产品缺陷）
+
+| 断言 | 失败现象 | 真实原因（实测） | 修复方式（未放宽） |
+| --- | --- | --- | --- |
+| UI-02 | `official` 键集多出 `expiry` | 新增只读有效期校验（与转发链同源 `readSubscriptionCredential`），属增强 | 键集加入 `expiry`；断言 detected→`valid`、missing→`unknown`、过期 JWT→`expired`+UI"登录已过期"，并继续断言 token 零回显 |
+| UI-03 | 显式两步注册收到 409，原断言期望 201 | **不是版本冲突**：`{preset:'opencode-go'}` 现在真实返回 201 并已创建 `opencodego`，随后同 ID 显式注册 → `409 {code:'provider_exists'}`（body 实测）；带过期 `version:0` 才是 `409 {code:'version_conflict'}` | 按真实语义重写：内联 Key→400、preset→201（`baseUrl` 必须来自服务端预设、`v2Scope=go-single-model`）→ 重复注册→409 `provider_exists` 且不覆盖 → 过期 version→409 `version_conflict`；**没有**接受任意状态码 |
+| UI-01 | 静态 HTML 断言 `aria-current` | `aria-current="page"` 由 `app.js` 运行时写入，静态文件本就不该预写 | 离线只断言 index.html 全量 `data-route` + `app.js` 含运行时写入；运行时行为交给浏览器 `UI-01-nav-current`（实测 `{current:['overview'],route:'overview'}`），离线不假装验证 |
+
+### 8.3 浏览器 3 项 FAIL：保持标准、归属明确（当前未放宽）
+
+1. **UI-15-viewport-360 / 768（A1）**：CTA 真实存在（`text='连接 OpenCode Go'`、`height=44px`、左右未截断），但位于折叠线以下：360px `top=961.3 > vh 800`；768px `top=909.3 > vh 900`。1440px PASS（`top=790 < 900`）。
+2. **UI-13-no-page-errors（A3）**：首绘出现 401 `/api/status` 与 403 `/api/aggregation/health`、`/api/aggregation/providers` 网络错误日志。**根因（代码证据）**：`app.js:wire()` 里 `startRouter(...)` 的回调在 `bootstrap()` 鉴权门之前调用 `refreshForRoute(route)`，因此在未解锁时已发出管理面请求。这是真实产品时序缺陷（也是用户在登录前看到 401/403 的原因），**不是测试过严**；A5 不放宽为"忽略 401/403"。
+3. 附加观察（未计入 check，A1 已接单）：1440 集成截图可见 `OpenCode GoDeepSeek V4.1 Flash` 缺分隔、ChatGPT 行同时出现"待登录/已检测"徽章。
+4. 横向溢出实测（`documentElement.scrollWidth - innerWidth`）：360=0、768=-15、1440=-15 → **无横向滚动缺陷**（截图中底部条不是页面横向溢出）。
+
+### 8.4 UI-01..UI-16 集成后状态
+
+| Case | 状态 | 集成后证据 |
+| --- | --- | --- |
+| UI-01 | **PASS** | 浏览器：三条状态行（ChatGPT/OpenCode Go/Codex）、唯一主 CTA"连接 OpenCode Go"、高级分组像素级收起（`pixelVisible=[]`）、运行时 `aria-current=overview`、无伪成功；离线静态职责分离 PASS。 |
+| UI-02 | **PASS** | detected/missing/expired 三态 + 字段白名单 + 零 token 回显（见 §8.2）。 |
+| UI-03 | **PASS** | 单字段 preset 201（服务端提供 baseUrl/ID/v2Scope）；内联 Key 400；重复注册 409 `provider_exists`；过期 version 409 `version_conflict`。 |
+| UI-04 | **BLOCKED（真实上游）+ 投影 FIXED** | 429 投影已为 throttled/"稍后重试"（审查 §7 F-5）；真实 Go 401/429 未调用。 |
+| UI-05 | **部分 PASS / 428 链 BLOCKED** | Key 写入 200 → `hasKey=true`、`keySource` 可追踪、零回显；`activate` 空 body 实测 422 `invalid_desired`（无已发布目录）、未写 `config.toml`、伪造 consent 也 4xx 且 CODEX_HOME 保持空。完整 428→consent→原子写仍 BLOCKED（需先发布目录）。 |
+| UI-06 | **NOT_TESTED（真实重启）** | 投影/检测逻辑已修（缺 detect→unknown），真实"完全退出重开"需真机操作。 |
+| UI-07 | **BLOCKED** | 需要真实"已启用回访"状态；当前隔离实例无已发布目录。 |
+| UI-08 | **PASS（不写入）/ 409 演练 NOT_TESTED** | 未同意/伪造 consent 均不写入（482 字节空目录）；三方 diff 演练需真实外部改配置。 |
+| UI-09 | **NOT_TESTED（A5 黑箱）** | A3 自带 `ui-v3-state` 套件覆盖竞态/草稿；A5 本轮未做并发黑箱。 |
+| UI-10 | **PASS** | 401/403 无敏感字段；浏览器 localStorage 仅 `mg-theme`、sessionStorage 空。A3 修好首绘时序后日志应为 0。 |
+| UI-11 | **PASS + BLOCKED_OLD_INSTANCE** | 404 `aggregation_route_unknown` → `read_only_unknown`；404 后 UI 仍 200；真实旧实例不可得。 |
+| UI-12 | **PASS（静态反降级）** | 后端压缩/路由/既有 API 未删改；`src/index.js` 仅只读投影改动；`npm test` 125 套件全绿。 |
+| UI-13 | **PASS（入口）** | `/ui-next/index.html`、`/`、`/admin`、`/admin.html` 200；7 个旧路由保留；**但首绘网络错误日志 FAIL，归 A3（§8.3）**。 |
+| UI-14 | **NOT_TESTED** | 真实写入后退出恢复/字节对账需真机；既有 `agg-desktop-rollback/restore` 套件在 `npm test` 中通过。 |
+| UI-15 | **静态 PASS / 1440 PASS / 360·768 FAIL（A1）** | 断点/focus-visible/reduced-motion 静态存在；三张集成截图；无横向溢出；窄屏 CTA 折叠线以下（A1 已接单）。 |
+| UI-16 | **BLOCKED_NO_PAID_MODEL_AUTH** | 零真实请求；无 `PASS_REAL`。 |
+
+### 8.5 对 Lead 改动的复核（ui-v3-connections.test.mjs）
+
+Lead 把 `product=null` 的断言从"必须正在读取真实状态"放宽为"正在读取真实状态|读取失败|出现问题，且绝不出现已连接/已启用"。
+**A5 判定：合理，不是降低标准。** 理由：A3 状态层在无真实快照时会给出诚实降级（读取失败也是一种"没有成功状态"），断言仍强制禁止 `已连接/已启用`；真正的不变量（不伪造成功）未变。本轮的浏览器/黑箱也独立验证了"无 Key 时无伪成功"。
+
+### 8.6 R2 剩余 BLOCKED / 未测
+
+- 真实模型/真实原版 Desktop（UI-04/06/07/16）：**BLOCKED_NO_PAID_MODEL_AUTH**，零请求、无 PASS_REAL。
+- 完整 428→preview→consent→原子写→验证（UI-05/08）：**BLOCKED**（隔离实例无已发布聚合目录；仅既有 `agg-desktop-activate` 单测覆盖）。
+- 真实旧版本网关实例：**BLOCKED_OLD_INSTANCE**。
+- PR #7 远端状态：**BLOCKED_REMOTE_PR_STATE**（无 gh/未联网）。
+- 360/768 首屏可见与首绘 401/403：**FAIL，已分派 A1/A3**，修复后重跑本文件 §8.1 两条命令即可更新（截图仍用 `--suffix -integrated`）。
