@@ -1,6 +1,6 @@
 // ModelGate Next bootstrap: auth, routing, shared snapshots, theme.
 import { clear, h } from './js/dom.js'
-import { setToken, hasToken, clearToken } from './js/api.js'
+import { api, setToken, hasToken, clearToken } from './js/api.js'
 import {
   state, loadAuth, loadAll, loadStatus, resetData, on, phaseOf, handleUnauthorized,
   productStatus, aggregationState, refreshProduct, refreshAggregation, shouldRefresh,
@@ -212,6 +212,8 @@ export function renderRoute(route) {
       aggregationState: () => aggregationState(),
       refreshProduct: (opts = {}) => refreshProduct(Object.assign({ reason: 'view' }, opts)),
       refreshAggregation: (opts = {}) => refreshAggregation(Object.assign({ reason: 'view' }, opts)),
+      // P1-04：首页“解锁聚合管理”主操作 → 本机临时管理会话；无此端点时视图降级到设置页。
+      unlockAdmin: (action) => unlockAdminLocal(action),
     })
   } catch (e) {
     console.error(e)
@@ -366,6 +368,31 @@ async function manualRefresh() {
   } finally {
     refreshing = false
     if (btn) btn.disabled = false
+  }
+}
+
+// P1-04：没有全局管理令牌时，聚合 API 返回 403 explicit_admin_required。
+// 通过本机临时管理会话解锁（POST /api/admin/unlock），token 只在模块内存；
+// 端点缺失(404)或被拒(403)时如实提示并降级，不重复轮询造成死循环。
+async function unlockAdminLocal() {
+  try {
+    const res = await api.adminUnlock()
+    if (!res || res.ok !== true || !res.token) throw new Error('解锁响应缺少可用的管理会话令牌')
+    setToken(res.token)
+    await loadAll()
+    await refreshProduct({ reason: 'admin-unlock', force: true, reuseStatus: true })
+    renderRoute(currentRoute)
+    toast('聚合管理已在本机解锁', 'success')
+  } catch (e) {
+    const status = e && e.status
+    if (status === 404) {
+      toast('当前网关版本尚不支持本机解锁；请在「安全与设置」写入 MG_ADMIN_TOKEN', 'error')
+      if (typeof location !== 'undefined') location.hash = '#/settings?section=admin-token'
+    } else if (status === 403) {
+      toast('本机解锁被拒绝（403）：' + ((e && e.message) || '来源或 Host 校验未通过'), 'error')
+    } else {
+      toast('解锁失败：' + ((e && e.message) || '未知错误'), 'error')
+    }
   }
 }
 
