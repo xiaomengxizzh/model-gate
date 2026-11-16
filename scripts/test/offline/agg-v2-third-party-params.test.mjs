@@ -3,7 +3,7 @@
 // 只对非官方目标剔除，并把剔除项写进诊断；官方目标保持逐字节透传。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { projectThirdPartyResponsesParams } from '../../../src/index.js'
+import { projectThirdPartyResponsesParams, firstEmptyToolCallId } from '../../../src/index.js'
 
 const codexBody = () => ({
   model: 'x',
@@ -56,4 +56,16 @@ test('第三方 Responses 目标：剔除 stream_options（OpenCode Go portable 
   const official = projectThirdPartyResponsesParams({ stream_options: { include_usage: true } }, { id: 'chatgptplan', baseUrl: 'https://chatgpt.com', codexIdentity: 'official' })
   assert.deepEqual(official.body.stream_options, { include_usage: true })
   assert.deepEqual(official.dropped, [])
+})
+
+test('工具项 call_id 为空/缺失：第三方 Responses 目标提前给出可操作错误（官方不受影响）', () => {
+  const withEmpty = { input: [{ role: 'user', content: 'hi' }, { type: 'function_call', call_id: '', name: 'exec_command' }] }
+  const bad = firstEmptyToolCallId(withEmpty)
+  assert.deepEqual(bad, { index: 1, type: 'function_call', reason: 'empty' })
+  const missing = firstEmptyToolCallId({ input: [{ type: 'function_call_output', output: 'ok' }] })
+  assert.deepEqual(missing, { index: 0, type: 'function_call_output', reason: 'missing' })
+  // 正常历史 / 非工具项 / 官方目标语义都不受影响
+  assert.equal(firstEmptyToolCallId({ input: [{ role: 'user', content: 'hi' }, { type: 'function_call', call_id: 'call_1' }, { type: 'function_call_output', call_id: 'call_1' }] }), null)
+  assert.equal(firstEmptyToolCallId({ input: [{ type: 'reasoning', summary: [] }, { role: 'assistant', content: 'x' }] }), null)
+  assert.equal(firstEmptyToolCallId(null), null)
 })

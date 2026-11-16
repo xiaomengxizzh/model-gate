@@ -710,6 +710,30 @@ export function projectThirdPartyResponsesParams(body, prov) {
   return { body: out, dropped }
 }
 
+// 2026-11-16 真机实测（OpenCode Go portable Responses 校验）：工具项的 call_id 必须非空，
+// 否则上游只回一句索引式报错「input[4].call_id: expected a non-empty string」。
+// 客户端在跨模型 fork / 压缩后的历史里可能给出空 call_id；网关不做静默改写（无法保证配对），
+// 但要在发往第三方之前给出**可操作**的中文错误与稳定 code。
+const TOOL_CALL_ID_TYPES = Object.freeze(new Set([
+  'function_call', 'function_call_output',
+  'custom_tool_call', 'custom_tool_call_output',
+  'local_shell_call', 'local_shell_call_output',
+  'computer_call', 'computer_call_output',
+]))
+
+export function firstEmptyToolCallId (body) {
+  const items = Array.isArray(body && body.input) ? body.input : []
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index]
+    if (!item || typeof item !== 'object') continue
+    const type = String(item.type || '')
+    if (!TOOL_CALL_ID_TYPES.has(type)) continue
+    const raw = item.call_id
+    if (typeof raw !== 'string' || raw === '') return { index, type, reason: typeof raw === 'string' ? 'empty' : 'missing' }
+  }
+  return null
+}
+
 // V2-08（A2 实测缺陷）：429 时按 models.*.fallbacks 换到**另一个授权域**的供应商 = 静默换供应商/套餐。
 // 同域 fallback 保留既有行为；只要后续存在跨域候选就按真实 429 返回。
 // R008 修复（A4 实测）：forward.js 对 429 以 MG_FB_RATE_LIMITED 抛出，导致 index.js 的
@@ -1885,6 +1909,28 @@ async function proxyNativeResponses(state, budget, log, opts) {
     const target = modelTarget(state.cfg, modelName, pid)
     const projected = projectThirdPartyResponsesParams(body, prov)
     if (projected.dropped.length) log && log.info('Codex 参数按目标能力剔除', pid, projected.dropped.join(','))
+    // 工具项 call_id 为空 → 上游必然 400（且只给索引，不可操作）。这里提前拦截并解释原因。
+    // 注意：官方目标不受影响（isOfficialResponsesProvider 不会走到这里的问题分支）。
+    const badCallId = isOfficialResponsesProvider(prov) ? null : firstEmptyToolCallId(projected.body)
+    if (badCallId) {
+      const shapes = (Array.isArray(projected.body.input) ? projected.body.input : [])
+        .slice(0, 12)
+        .map((it) => (it && typeof it === 'object' ? String(it.type || (it.role ? 'message:' + it.role : 'unknown')) : 'unknown'))
+      log && log.warn('第三方 Responses 历史中工具项缺少 call_id', pid, 'index=' + badCallId.index, 'type=' + badCallId.type, 'shapes=' + shapes.join('|'))
+      return {
+        status: 400,
+        contentType: 'application/json; charset=utf-8',
+        buf: Buffer.from(JSON.stringify({
+          error: {
+            message: '会话历史第 ' + (badCallId.index + 1) + ' 项（' + badCallId.type + '）的工具调用缺少 call_id，第三方便携 Responses 上游拒绝这种历史。'
+              + '这通常来自跨模型 fork 或压缩后的旧工具记录；请在该模型上新开会话后重试，或让父代理以「不继承历史」方式派发子代理。',
+            code: 'third_party_tool_call_id_missing',
+            type: 'invalid_request_error',
+            detail: { index: badCallId.index, itemType: badCallId.type, reason: badCallId.reason },
+          },
+        })),
+      }
+    }
     const payload = Buffer.from(JSON.stringify(Object.assign({}, projected.body, { model: target.servingName })))
     // Native third-party requests still need the provider protocol headers, including
     // OpenCode Go's x-opencode-session; videoJsonHeaders only supplies media headers.
