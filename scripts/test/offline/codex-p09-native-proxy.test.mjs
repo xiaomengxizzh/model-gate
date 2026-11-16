@@ -262,3 +262,92 @@ test('P09 子原生 SSE：adapter 恢复 namespace/marker、单终态、usage on
   assert.match(text2, /STREAM_INTERRUPTED/)
   assert.doesNotMatch(text2, /event: response\.completed/)
 })
+
+test('订阅父代理 SSE 续轮：第一轮登记，第二轮 previous_response_id 重建放行', { timeout: 30000 }, async (t) => {
+  const token = makeToken('P09_CONT_CANARY')
+  const home = await makeAuthHome(token)
+  const officialHits = []
+  let n = 0
+  const official = await startScriptedUpstream(async (req, res) => {
+    officialHits.push(await readBody(req))
+    n++
+    const id = 'resp_sub_' + n
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    const emit = (e, d) => res.write('event: ' + e + '\ndata: ' + JSON.stringify(d) + '\n\n')
+    emit('response.created', { type: 'response.created', response: { id, status: 'in_progress', model: 'codex-gpt', output: [] } })
+    emit('response.output_item.done', { type: 'response.output_item.done', item: { type: 'message', id: 'msg_' + n, role: 'assistant', content: [{ type: 'output_text', text: 'ack' + n }] } })
+    emit('response.completed', { type: 'response.completed', response: { id, status: 'completed', model: 'codex-gpt', output: [{ type: 'message', id: 'msg_' + n, role: 'assistant', content: [{ type: 'output_text', text: 'ack' + n }] }], usage: { input_tokens: 2, output_tokens: 2, total_tokens: 4 } } })
+    res.end()
+  })
+  const go = await startScriptedUpstream(async (req, res) => { res.writeHead(500); res.end('{}') })
+  const gw = await startGateway({ name: 'p09-cont', env: { HOME: home, CODEX_HOME: join(home, '.codex') }, config: config(official.base, go.base) })
+  t.after(async () => { await gw.stop(); await official.stop(); await go.stop(); await rm(home, { recursive: true, force: true }) })
+  const r1 = await gw.post('/v1/responses', PARENT)
+  assert.equal(r1.status, 200)
+  await r1.text()
+  const r2 = await gw.post('/v1/responses', Object.assign({}, PARENT, {
+    previous_response_id: 'resp_sub_1',
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'turn two' }] }],
+  }))
+  assert.equal(r2.status, 200, '订阅父代理续轮不得 continuation_state_missing')
+  await r2.text()
+  assert.equal(officialHits.length, 2)
+  const texts = officialHits[1].input.flatMap((i) => (i.content || []).map((c) => c.text))
+  assert.ok(texts.includes('hi') && texts.includes('ack1') && texts.includes('turn two'), '重建历史含轮1输入/输出与轮2增量')
+  assert.equal(officialHits[1].previous_response_id, undefined)
+})
+
+test('订阅父代理：上游 completed 后不关流（真实 ChatGPT 行为），续轮仍须立即放行', { timeout: 30000 }, async (t) => {
+  const token = makeToken('P09_OPEN_CANARY')
+  const home = await makeAuthHome(token)
+  const officialHits = []
+  let n = 0
+  const openStreams = []
+  const official = await startScriptedUpstream(async (req, res) => {
+    officialHits.push(await readBody(req))
+    n++
+    const id = 'resp_open_' + n
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    const emit = (e, d) => res.write('event: ' + e + '\ndata: ' + JSON.stringify(d) + '\n\n')
+    emit('response.created', { type: 'response.created', response: { id, status: 'in_progress', model: 'codex-gpt', output: [] } })
+    emit('response.completed', { type: 'response.completed', response: { id, status: 'completed', model: 'codex-gpt', output: [{ type: 'message', id: 'm_' + n, role: 'assistant', content: [{ type: 'output_text', text: 'open' + n }] }], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } })
+    // 故意不 end：真实订阅后端在 completed 后保持连接。
+    openStreams.push(res)
+  })
+  const go = await startScriptedUpstream(async (req, res) => { res.writeHead(500); res.end('{}') })
+  const gw = await startGateway({ name: 'p09-open', env: { HOME: home, CODEX_HOME: join(home, '.codex') }, config: config(official.base, go.base) })
+  t.after(async () => { for (const s of openStreams) { try { s.end() } catch {} } await gw.stop(); await official.stop(); await go.stop(); await rm(home, { recursive: true, force: true }) })
+  const r1 = await gw.post('/v1/responses', PARENT)
+  assert.equal(r1.status, 200)
+  // 读到 completed 事件即可（流未结束，不能 await r1.text() 等全量）。
+  const reader = r1.body.getReader()
+  let seen = ''
+  const deadline = Date.now() + 5000
+  while (!seen.includes('response.completed') && Date.now() < deadline) {
+    const { value, done } = await reader.read()
+    if (done) break
+    seen += Buffer.from(value).toString('utf8')
+  }
+  assert.ok(seen.includes('response.completed'), '第一轮应收到终态事件')
+  // 流仍开着，立即续轮——旧实现在此 400 continuation_state_missing。
+  const r2 = await gw.post('/v1/responses', Object.assign({}, PARENT, {
+    previous_response_id: 'resp_open_1',
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] }],
+  }))
+  assert.equal(r2.status, 200, '终态到达即登记，不得等流结束')
+  const reader2 = r2.body.getReader()
+  let seen2 = ''
+  const deadline2 = Date.now() + 5000
+  while (!seen2.includes('response.completed') && Date.now() < deadline2) {
+    const { value, done } = await reader2.read()
+    if (done) break
+    seen2 += Buffer.from(value).toString('utf8')
+  }
+  assert.ok(seen2.includes('response.completed'), '续轮应正常完成')
+  assert.equal(officialHits.length, 2)
+  for (const st of openStreams) { try { st.end() } catch {} }
+  for (const rd of [reader, reader2]) {
+    try { let d = false; while (!d) { const c = await rd.read(); d = c.done } } catch {}
+  }
+
+})
