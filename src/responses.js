@@ -322,7 +322,7 @@ export function bridge(input, opts = {}) {
     // （2026-11-09 实测 DSH 0.2.2-rc.1 因此 400）。因此只接受"丢弃后不影响正确性"的项并记 lossy；
     // 其余（图片/托管产物/未知项）仍旧显式拒绝，避免静默丢掉客户端要求的产物。
     if (!Array.isArray(req.include)) return fail('unsupported_parameter', 'include 必须是字符串数组')
-    const DROPPABLE_INCLUDE = ['reasoning.encrypted_content', 'output_text.logprobs']
+    const DROPPABLE_INCLUDE = ['reasoning.encrypted_content', 'output.encrypted_content', 'output_text.logprobs']
     for (const item of req.include) {
       if (typeof item !== 'string' || !DROPPABLE_INCLUDE.includes(item)) {
         return fail('unsupported_parameter', 'include 不支持: ' + String(item) + '（仅接受可安全丢弃的 ' + DROPPABLE_INCLUDE.join(' / ') + '）')

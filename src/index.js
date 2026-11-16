@@ -743,11 +743,17 @@ export function projectThirdPartyResponsesParams(body, prov) {
     else delete out.text
     dropped.push('text.verbosity')
   }
-  if (Array.isArray(out.include) && out.include.includes('reasoning.encrypted_content')) {
-    const kept = out.include.filter((v) => v !== 'reasoning.encrypted_content')
-    if (kept.length) out.include = kept
-    else delete out.include
-    dropped.push('include:reasoning.encrypted_content')
+  // 加密产物 include（reasoning/output.encrypted_content）：第三方上游不产生密文，
+  // 丢弃不影响正确性；官方目标逐字节保留（2026-11-16 子代理 output.encrypted_content 400 修复）。
+  if (Array.isArray(out.include)) {
+    for (const enc of ['reasoning.encrypted_content', 'output.encrypted_content']) {
+      if (Array.isArray(out.include) && out.include.includes(enc)) {
+        const kept = out.include.filter((v) => v !== enc)
+        if (kept.length) out.include = kept
+        else delete out.include
+        dropped.push('include:' + enc)
+      }
+    }
   }
   // 2026-11-16 真机实测（OpenCode Go /v1/responses）：客户端带 `stream_options` 时上游 400
   // “stream_options: requires a native Responses target; portable routing requires the full

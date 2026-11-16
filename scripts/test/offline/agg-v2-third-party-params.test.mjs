@@ -151,3 +151,53 @@ test('call_id 补齐：Codex 新会话里 call/output 都缺 id 时不丢历史�
   assert.match(e.body.input[0].call_id, /^call_mg_orphan_[a-f0-9]{16}$/)
   assert.equal(firstEmptyToolCallId(e.body), null)
 })
+
+// —— 2026-11-16 真机子代理 400 回归：include output.encrypted_content ——
+test('第三方目标：include output.encrypted_content 与 reasoning.encrypted_content 一并剔除', () => {
+  const body = { model: 'x', input: 'hi', include: ['reasoning.encrypted_content', 'output.encrypted_content'] }
+  const out = projectThirdPartyResponsesParams(body, thirdParty)
+  assert.equal(out.body.include, undefined, '两项都丢弃后 include 整体删除')
+  assert.deepEqual(out.dropped, ['include:reasoning.encrypted_content', 'include:output.encrypted_content'])
+  const only = projectThirdPartyResponsesParams({ model: 'x', input: 'hi', include: ['output.encrypted_content'] }, thirdParty)
+  assert.equal(only.body.include, undefined)
+  assert.deepEqual(only.dropped, ['include:output.encrypted_content'])
+  const mixed = projectThirdPartyResponsesParams({ model: 'x', input: 'hi', include: ['output.encrypted_content', 'output_text.logprobs'] }, thirdParty)
+  assert.deepEqual(mixed.body.include, ['output_text.logprobs'], '非加密项保留')
+})
+
+test('官方目标：include output.encrypted_content 逐字保留', () => {
+  const body = { model: 'x', input: 'hi', include: ['output.encrypted_content'] }
+  const out = projectThirdPartyResponsesParams(body, official)
+  assert.deepEqual(out.body.include, ['output.encrypted_content'])
+  assert.deepEqual(out.dropped, [])
+})
+
+test('集成：Go 模型带 include output.encrypted_content 不再 400，上游收到剔除后的 body', { timeout: 30000 }, async (t) => {
+  const { startGateway, startScriptedUpstream } = await import('./harness.mjs')
+  const bodies = []
+  const up = await startScriptedUpstream(async (req, res) => {
+    const chunks = []
+    for await (const c of req) chunks.push(c)
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.end('data: {"type":"response.created","response":{"id":"resp_inc","status":"in_progress","output":[]}}\n\n' +
+      'data: {"type":"response.completed","response":{"id":"resp_inc","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n')
+  })
+  const gw = await startGateway({
+    config: {
+      defaults: { retry: { maxAttempts: 1 }, timeout: { firstByteMs: 3000, idleMs: 3000, overallMs: 10000 }, proxyMode: 'direct' },
+      providers: { mock: { baseUrl: up.base, api: 'responses' } },
+      models: { 'inc-model': { provider: 'mock', api: 'responses' } },
+    },
+  })
+  t.after(async () => { await gw.stop(); await up.stop() })
+  const r = await gw.post('/v1/responses', {
+    model: 'inc-model', stream: true,
+    include: ['reasoning.encrypted_content', 'output.encrypted_content'],
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+  }, { 'content-type': 'application/json' })
+  assert.equal(r.status, 200, 'include 加密项不得再让子代理请求 400')
+  await r.text()
+  assert.equal(bodies.length, 1)
+  assert.equal(bodies[0].include, undefined, '加密 include 必须在发往第三方上游前剔除')
+})

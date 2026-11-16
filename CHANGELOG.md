@@ -2,6 +2,12 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-16 修复子代理 include output.encrypted_content 400
+
+### Fixed
+
+- **Codex 0.167 多代理子请求带 `include:["output.encrypted_content"]` 被网关 400**（真机取证）。该项请求加密输出产物，第三方便携上游不产生密文，丢弃不影响正确性。原生信封闸门（interop）、Chat 桥（responses）的可丢弃白名单与第三方参数投影（index）同步加入 `output.encrypted_content`；官方目标逐字节保留。回归：信封/投影/集成三层用例（含官方保留对照与未知项仍拒绝）。
+
 ## [Unreleased] —— 2026-11-16 Codex 实际使用严格审计修复（续轮历史/TOML 安全/能力声明/托管生命周期）
 
 ### Fixed
