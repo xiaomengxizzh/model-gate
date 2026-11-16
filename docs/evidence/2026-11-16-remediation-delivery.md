@@ -26,8 +26,9 @@
 | `324952d` | G3 | A3 P1-05 原生多代理配置纳入托管所有权（cherry-pick `85fb47d`） |
 | `c24f829` | G3/G5 | A3 P1-04 前端解锁 CTA + V3 用户旅程（cherry-pick `22162bc`） |
 | `2bdd7b1` | G3 | P1-04 本机管理会话解锁（服务端半）+ P1-03 测试隔离修复 |
-
-> A5 独立审计提交在审计报告完成后追加（见 §6）。
+| `de48b05` | G6 | 交付报告（状态分层/证据/阻断/回滚） |
+| `2ba7d45` | G6 | A5 LOW-1 令牌响应加 `Cache-Control:no-store` |
+| `ee60645` | G6 | A5 独立审计报告（cherry-pick `aa8ba10`） |
 
 ## 2. 问题台账：根因 / 修复 / 回归 / 状态
 
@@ -87,9 +88,13 @@
 > 待 A5 在其独立工作树完成审计后，追加审计报告 SHA 与结论。A5 结论以
 > `docs/evidence/2026-11-16-a5-independent-audit.md` 为准，本节仅引用其 SHA/verdict。
 
-- A5 工作树：`fix/mg-a5-audit` @ 集成 HEAD `2bdd7b1`
-- A5 报告 SHA：_待补_
-- A5 独立结论：_待补_
+- A5 工作树：`fix/mg-a5-audit`（审计对象 HEAD `2bdd7b1`），报告 cherry-pick 到本分支 `ee60645`
+- A5 报告：`docs/evidence/2026-11-16-a5-independent-audit.md`
+- A5 独立结论：离线/源码层 **PASS**（全部门禁与 64 新增用例真实通过，无绕过/无弱化断言）；真实付费/原版 Desktop **BLOCKED**；`release:freeze` **正确 FAIL**（非 cheat）；**无 CRITICAL/HIGH 缺陷**。
+  - 逐项：P0-01 PARTIAL（离线 trace+ID 硬化真实完成；真实 400 关闭 BLOCKED）、P2-07 PASS、P1-03 PASS、P2-08 PASS、P1-04 PASS（含安全边界逐行复核，无提权/跨源/日志泄漏漏洞）、P1-05 PASS、P0-02 BLOCKED。
+  - A5 LOW-1（解锁令牌响应缺 `Cache-Control:no-store`）已由本分支 `2ba7d45` 修复并加断言。
+  - A5 OPEN-1（Go 路由默认 `compaction:'reject'` vs 生产目录声明）支撑 P0-02 BLOCKED，非 FAIL；真实压缩验收前须核对生产 catalog 声明（运行时配置，本轮越界未改）。
+  - A5 独立就绪意见：**可开 Draft PR，不得合并/部署/发布**；审批须所有者真实写入，不强制 `release:freeze` 变绿。
 
 ## 7. 资源费用与回滚
 
