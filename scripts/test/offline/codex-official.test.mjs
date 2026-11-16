@@ -154,8 +154,11 @@ test('订阅官方入口：patchSubscriptionRequestBody 剔除 previous_response
   const patched = patchSubscriptionRequestBody({
     model: 'gpt-6-luna', input: 'continue', stream: false, store: true,
     previous_response_id: 'resp_prev_official', max_output_tokens: 100,
+    access_programs: null, prompt_cache_key: 'abc',
   })
   assert.equal(patched.previous_response_id, undefined, 'previous_response_id 必须在发往订阅后端前剔除')
+  assert.equal(patched.access_programs, undefined, 'access_programs:null 会导致后端 400，必须剔除')
+  assert.equal(patched.prompt_cache_key, undefined, 'prompt_cache_key 非推理必需，必须剔除')
   assert.equal(patched.store, false)
   assert.equal(patched.stream, true)
   assert.equal(patched.max_output_tokens, undefined)

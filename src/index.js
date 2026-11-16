@@ -698,6 +698,10 @@ export function patchSubscriptionRequestBody(body) {
   // Codex WS 持久连接会带此字段串联多轮，但订阅后端按"每轮重放完整 input"工作；网关在发往订阅后端前剔除，
   // 由 nativeContract 在入口按官方能力放行（不误伤其它目标），绝不把不支持的参数透传导致 400。
   delete out.previous_response_id
+  // Codex WS 帧会带 access_programs:null / prompt_cache_key，订阅后端按严格类型校验会 400
+  // （实测 Invalid type for 'access_programs': expected an object, but got null）。二者非推理必需，剔除。
+  delete out.access_programs
+  delete out.prompt_cache_key
   delete out.max_output_tokens
   delete out.max_completion_tokens
   if (Array.isArray(out.tools)) {
