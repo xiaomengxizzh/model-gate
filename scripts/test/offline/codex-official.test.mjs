@@ -5,6 +5,7 @@ import net from 'node:net'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { startGateway, startScriptedUpstream } from './harness.mjs'
+import { patchSubscriptionRequestBody } from '../../../src/index.js'
 
 // E3 / D1-A 离线验收：Codex 内置 openai 身份（openai_base_url 指到网关）与第三方同网关共存。
 // F01 起本套件只验证「官方直连」边界：官方原生凭据透传（客户端 OAuth / chatgpt-account-id →
@@ -149,31 +150,16 @@ function rawRequest(urlStr, headers) {
   })
 }
 
-test('官方目标：previous_response_id 按官方原生能力放行并透传上游', async (t) => {
-  const bodies = []
-  const official = await startScriptedUpstream(async (req, res) => {
-    const chunks = []
-    for await (const c of req) chunks.push(c)
-    bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8')))
-    officialSse(res, 'continued', 'gpt-6-astra')
+test('订阅官方入口：patchSubscriptionRequestBody 剔除 previous_response_id（后端不支持）', () => {
+  const patched = patchSubscriptionRequestBody({
+    model: 'gpt-6-luna', input: 'continue', stream: false, store: true,
+    previous_response_id: 'resp_prev_official', max_output_tokens: 100,
   })
-  const gw = await startGateway({
-    env: { MG_TEST_OFFICIAL_KEY: 'gw-official-test-key' },
-    config: {
-      defaults: { model: '', codexOfficialHosts: ['localhost'] },
-      providers: { 'codex-official': { baseUrl: officialBase(official), codexIdentity: 'official', apiKeyEnv: 'MG_TEST_OFFICIAL_KEY' } },
-      models: { 'gpt-6-astra': { provider: 'codex-official', api: 'responses' } },
-    },
-  })
-  t.after(async () => { await gw.stop(); await official.stop() })
-  const r = await gw.call('/v1/responses', {
-    method: 'POST', headers: OFFICIAL_HEADERS,
-    body: { model: 'gpt-6-astra', input: 'continue', stream: true, store: true, previous_response_id: 'resp_prev_official' },
-  })
-  assert.equal(r.status, 200, '官方后端原生支持 previous_response_id，不应被 nativeGate 拒绝')
-  await r.text()
-  assert.equal(bodies.length, 1)
-  assert.equal(bodies[0].previous_response_id, 'resp_prev_official', 'previous_response_id 原样透传官方上游')
+  assert.equal(patched.previous_response_id, undefined, 'previous_response_id 必须在发往订阅后端前剔除')
+  assert.equal(patched.store, false)
+  assert.equal(patched.stream, true)
+  assert.equal(patched.max_output_tokens, undefined)
+  assert.equal(patched.input[0].role, 'user', '字符串 input 归一化为消息项')
 })
 
 test('第三方目标：previous_response_id 仍被严格 nativeGate 拒绝（不放宽契约）', async (t) => {

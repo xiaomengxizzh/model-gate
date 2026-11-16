@@ -261,16 +261,23 @@ function errorFrame(status, payload, log) {
   let message = 'upstream request failed'
   let type = 'upstream_error'
   let detail = null
-  try {
-    const parsed = JSON.parse(payload)
-    if (parsed && parsed.error) {
-      message = String(parsed.error.message || message)
-      type = String(parsed.error.type || type)
-      detail = parsed.error
-    }
-  } catch {}
+  let parsed = null
+  try { parsed = JSON.parse(payload) } catch {}
+  if (parsed && parsed.error) {
+    message = String(parsed.error.message || message)
+    type = String(parsed.error.type || type)
+    detail = parsed.error
+  } else if (parsed && typeof parsed === 'object') {
+    // 官方后端错误可能不带 error 包裹层；只取安全的消息字段，绝不回显 body 全文/凭据。
+    const code = parsed.code != null ? String(parsed.code) : ''
+    const msg = parsed.message != null ? String(parsed.message) : ''
+    if (msg || code) { message = (code ? code + ': ' : '') + msg.slice(0, 300); detail = { code: code || undefined, message: msg.slice(0, 300), type: 'upstream_error' } }
+  }
   if (status >= 500) message = 'upstream_error: ' + status
-  if (log && log.warn) log.warn('responses-ws internal POST failed', 'status=' + status)
+  if (log && log.warn) {
+    const keys = parsed && typeof parsed === 'object' ? Object.keys(parsed).slice(0, 12).join(',') : ''
+    log.warn('responses-ws internal POST failed', 'status=' + status, 'bodyKeys=' + keys)
+  }
   return { type: 'error', status, error: detail || { message, type } }
 }
 
