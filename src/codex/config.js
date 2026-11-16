@@ -2,7 +2,8 @@
 //
 // 契约（与 docs/reference/codex-config.md 一致）：
 //  * 只改"声明所有权"的字段：顶层 model_provider / openai_base_url / model / model_catalog_json，
-//    以及 [features] 的白名单键（multi_agent / multi_agent_v2）。
+//    [features] 的白名单键（multi_agent / multi_agent_v2），以及原生子代理段
+//    [agents.go_deepseek]（MG-FIX-P1-05）。
 //  * 绝不生成或改写 [model_providers.openai]：Codex 0.167 把 openai 列为 reserved built-in
 //    provider ID，覆盖它会让客户端直接启动失败（E3 实测）。发现已有该段时只告警、不动它。
 //  * 其余行（未知字段、MCP、projects、权限、注释）逐字节保留；写前写后用
@@ -31,9 +32,18 @@ export const MANAGED_PROVIDER_SECTIONS = Object.freeze({
   'model_providers.modelgate': Object.freeze(['name', 'base_url', 'wire_api', 'requires_openai_auth']),
   'model_providers.modelgate.capabilities': Object.freeze(['remote_compaction']),
 })
-// 只声明 ModelGate 自有段/键的白名单；其它 feature、其它 provider 一律视为外部所有。
+// MG-FIX-P1-05：Codex 原生命名子代理（GPT 父 → Go DeepSeek 子）由 ModelGate 托管。
+// 这两个键 + 子配置文件 go-deepseek.toml 一起纳入所有权：启用写入、退出字节兼容回滚；
+// 用户自行改动时给 409 三方差异，绝不覆盖。不是自造 AgentTeam/MCP 调度，仍是 Codex 原生配置。
+export const MANAGED_AGENT_SECTION = 'agents.go_deepseek'
+export const MANAGED_AGENT_FILE = 'go-deepseek.toml'
+export const MANAGED_AGENT_DESCRIPTION = 'OpenCode Go DeepSeek V4.1 Flash child agent (billing on OpenCode Go, separate from ChatGPT plan)'
+export const MANAGED_AGENT_CHILD_EFFORT = 'medium'
+export const MANAGED_AGENT_SECTION_KEYS = Object.freeze(['description', 'config_file'])
+// 只声明 ModelGate 自有段/键的白名单；其它 feature、其它 provider、其它 agent 一律视为外部所有。
 export const OWNED_SECTIONS = Object.freeze({
   features: Object.freeze(['multi_agent', 'multi_agent_v2']),
+  [MANAGED_AGENT_SECTION]: MANAGED_AGENT_SECTION_KEYS,
   'model_providers.modelgate': MANAGED_PROVIDER_SECTIONS['model_providers.modelgate'],
   'model_providers.modelgate.capabilities': MANAGED_PROVIDER_SECTIONS['model_providers.modelgate.capabilities'],
 })
@@ -1186,6 +1196,48 @@ export function buildDesiredCodexConfig (opts = {}) {
       'auth.json 永不由本模块写入；回滚用 config.toml.bak。',
     ],
   }
+}
+
+// MG-FIX-P1-05：ModelGate 托管的原生子代理配置片段（纯函数，不写盘）。
+// 设计要点：
+//  * 这是 Codex 原生配置（[features] multi_agent + [agents.go_deepseek] + 子 toml），
+//    不是第二套 AgentTeam/MCP 调度；父代理仍由 Codex 原生管理。
+//  * 段内只允许 OWNED_SECTIONS 声明的键；子文件内容由 model + 固定 effort 确定性生成，
+//    因此同一目标模型永远得到同一字节，可用于幂等比较与字节兼容回滚。
+//  * model 来自聚合目标（Go 别名），绝不在产物里放任何凭据/token。
+export function buildManagedAgentConfig (opts = {}) {
+  const model = String(opts.model || '').trim()
+  if (!model) throw new ConfigError('invalid_desired', '构建原生子代理配置必须提供目标模型 model。')
+  const effort = String(opts.reasoningEffort || MANAGED_AGENT_CHILD_EFFORT).trim() || MANAGED_AGENT_CHILD_EFFORT
+  const description = String(opts.description || MANAGED_AGENT_DESCRIPTION).trim() || MANAGED_AGENT_DESCRIPTION
+  const configFile = MANAGED_AGENT_FILE
+  return {
+    sections: {
+      features: { multi_agent: true },
+      [MANAGED_AGENT_SECTION]: { description, config_file: configFile },
+    },
+    child: {
+      fileName: configFile,
+      text: 'model = ' + JSON.stringify(model) + '\n' + 'model_reasoning_effort = ' + JSON.stringify(effort) + '\n',
+      model,
+      reasoningEffort: effort,
+    },
+  }
+}
+
+// 把托管子代理片段合并进一个 desired（只补，不覆盖调用方显式传入的 features 键）。
+// 显式 opts.managedAgent === false 可关闭；否则默认开启（普通用户路径零手工 TOML）。
+export function withManagedAgentDesired (desired, opts = {}) {
+  if (opts.managedAgent === false) return desired
+  if (!opts.model) return desired
+  const managed = buildManagedAgentConfig({ model: opts.model, reasoningEffort: opts.agentReasoningEffort })
+  const out = {
+    topLevel: Object.assign({}, desired && desired.topLevel),
+    sections: Object.assign({}, desired && desired.sections),
+  }
+  out.sections.features = Object.assign({ multi_agent: true }, out.sections.features || {})
+  out.sections[MANAGED_AGENT_SECTION] = Object.assign({}, managed.sections[MANAGED_AGENT_SECTION], out.sections[MANAGED_AGENT_SECTION] || {})
+  return out
 }
 
 // —— N01：客户端接入的只读模板 + 可观察 drift ——

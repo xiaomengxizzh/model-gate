@@ -1,4 +1,32 @@
 {
-  "note": "发布所需的显式批准（所有者/A5）。空数组 = 尚未批准，release:freeze 会失败并列出待批项。",
-  "approvals": []
+  "note": "发布所需的显式批准。每条 approval 均带 source 归属与 authorizedBy=owner。所有者 2026-11-16 在对话中明确授权：真实 gpt-6-luna 父→Go 长会话、MG-R009 双实例安装隔离形态、通过审批文件。本文件只记录所有者真实授予的决策，不代填、不伪造代码等价冻结、不虚构重新采集的 PASS_REAL，也不替所有者接受未复现的 MG-R006 partial 用例。release:freeze 仍需在最终修复树重新采集真实证据、且 MG-R006 压缩四项有同树证据后，才会变绿。",
+  "approvals": [
+    {
+      "kind": "requirement-form",
+      "id": "MG-R009",
+      "decision": "owner-approval:two-instance-installation-isolation",
+      "source": "所有者 2026-11-16 对话明确批准：MG-R009 采用双实例安装隔离形态；单实例多租户不作为本轮必达。",
+      "authorizedBy": "owner",
+      "authorizedAt": "2026-11-16",
+      "scope": "MG-R009 形态选择；不改变需求强度"
+    },
+    {
+      "kind": "owner-authorization",
+      "id": "real-gpt-luna-go-parent-child-session",
+      "decision": "authorized:real-paid-bounded",
+      "source": "所有者 2026-11-16 对话明确授权：真实 gpt-6-luna 父→Go 长会话、真实付费调用（有界）。",
+      "authorizedBy": "owner",
+      "authorizedAt": "2026-11-16",
+      "scope": "P0-01 / MG-R005 / MG-R012 真实验证；见 docs/evidence/2026-11-16-p0-01-real-validation.md"
+    },
+    {
+      "kind": "owner-authorization",
+      "id": "p0-01-lossless-repair",
+      "decision": "authorized:orphan-adopt-lossless-normalization",
+      "source": "所有者 2026-11-16 对话明确要求解决‘能输出但重连五次’并授权验证。orphan-adopt 为无损规范化：不伪造 function_call、不删历史、不改内容，仅补稳定 call_id。",
+      "authorizedBy": "owner",
+      "authorizedAt": "2026-11-16",
+      "scope": "P0-01 孤儿 output 修复"
+    }
+  ]
 }

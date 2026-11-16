@@ -6,7 +6,10 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
-import { buildCatalog } from '../src/codex/catalog.js'
+import { buildCatalog, asNativeDelegationParent } from '../src/codex/catalog.js'
+// MG-FIX-P1-05：启动器与控制台的原生子代理配置共用同一 canonical 字节，
+// 避免"启动器写 low、控制台写 medium"导致 409 三方差异（两者都是 Codex 原生配置）。
+import { MANAGED_AGENT_DESCRIPTION, buildManagedAgentConfig } from '../src/codex/config.js'
 import { signIn, createPlanCredential } from '../src/subscription/official.js'
 import {
   resolveSubscriptionMode, buildSubscriptionProviderConfig, refreshLocalSubscriptionCredential,
@@ -56,10 +59,8 @@ async function configure() {
   const models = JSON.parse(await readFile(cachedPath, 'utf8')).models
   const original = models.find((item) => item.slug === parentModel)
   if (!original) throw new Error('The Codex model catalog does not contain ' + parentModel)
-  const parent = { ...original, tool_mode: 'direct', multi_agent_version: 'v1', supports_search_tool: false, use_responses_lite: false }
-  const instructions = original.base_instructions || original.model_messages?.instructions_template
-  parent.base_instructions = instructions
-  delete parent.model_messages
+  // MG-NATIVE-DELEGATION：与聚合目录发布共用同一“原生派单父模型”投影，避免两处漂移。
+  const parent = asNativeDelegationParent(original)
   for (const dir of [appState, codexHome, guiHome, gatewayHome]) await mkdir(dir, { recursive: true, mode: 0o700 })
   const basePath = join(gatewayHome, 'official-models.json')
   await writeFile(basePath, JSON.stringify({ models: [parent] }), { mode: 0o600 })
@@ -102,6 +103,11 @@ async function configure() {
   await writeFile(catalogPath, JSON.stringify(catalog), { mode: 0o600 })
   const configPath = join(gatewayHome, 'gateway.json')
   await writeFile(configPath, JSON.stringify(config), { mode: 0o600 })
+  // MG-P0-01 真机取证：Codex 0.167 原生子代理按目标模型 effortOptions 校验
+  // model_reasoning_effort；Go DeepSeek 只声明 low/high，默认 'medium' 会导致真实 spawn 报
+  // "Reasoning effort `medium` is not supported ... Supported: low, high"。这里显式取 'high'
+  // （与上面子模型 effortOptions 一致），不动全局默认以免影响既有用户的托管配置字节兼容。
+  const managedAgent = buildManagedAgentConfig({ model: alias, reasoningEffort: 'high' })
   const desktopConfig = `model_provider = "modelgate"
 model = "${parentModel}"
 model_catalog_json = ${JSON.stringify(catalogPath)}
@@ -121,10 +127,10 @@ multi_agent_v2 = false
 code_mode = false
 
 [agents.go_deepseek]
-description = "Native Codex worker using OpenCode Go DeepSeek V4.1 Flash"
-config_file = "go-deepseek.toml"
+description = ${JSON.stringify(MANAGED_AGENT_DESCRIPTION)}
+config_file = ${JSON.stringify(managedAgent.child.fileName)}
 `
-  await writeFile(join(codexHome, 'go-deepseek.toml'), `model = "${alias}"\nmodel_reasoning_effort = "low"\n`, { mode: 0o600 })
+  await writeFile(join(codexHome, managedAgent.child.fileName), managedAgent.child.text, { mode: 0o600 })
   await writeFile(join(codexHome, 'config.toml'), desktopConfig, { mode: 0o600 })
   return {
     alias,

@@ -16,6 +16,8 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import {
   ConfigError,
+  MANAGED_AGENT_FILE,
+  MANAGED_AGENT_SECTION,
   MANAGED_PROVIDER_ID,
   MANAGED_PROVIDER_SECTIONS,
   OWNED_SECTIONS,
@@ -24,6 +26,7 @@ import {
   RESERVED_OVERRIDE_SECTIONS,
   SENSITIVE_FIELD_RE,
   buildDesiredCodexConfig,
+  buildManagedAgentConfig,
   commitConfigPlan,
   commitConfigRollback,
   diffConfigText,
@@ -36,6 +39,7 @@ import {
   snapshotConfigFile,
   summarizePreserved,
   unmanagedFingerprint,
+  withManagedAgentDesired,
 } from './config.js'
 
 export const DESKTOP_CONTRACT = 'mg-codex-desktop/1'
@@ -89,6 +93,8 @@ export function resolveDesktopPaths (opts = {}) {
     lockPath: configPath + '.mg-lock',
     journalPath: configPath + '.mg-journal.json',
     statePath: resolve(String(opts.statePath || join(dirname(configPath), '.modelgate-desktop-state.json'))),
+    // MG-FIX-P1-05：Codex 原生命名子代理文件，默认在 codexHome 下；测试可用 managedAgentPath 覆盖到临时目录。
+    managedAgentPath: resolve(String(opts.managedAgentPath || join(codexHome, MANAGED_AGENT_FILE))),
   }
 }
 
@@ -189,6 +195,194 @@ function readConfigText (target) {
   return { snap, text, owned: readOwnedFields(text) }
 }
 
+// —— MG-FIX-P1-05：Codex 原生命名子代理文件（go-deepseek.toml）托管 ——
+// 与 config.toml 的 owned 字段同一事务语义：启用写入规范字节；退出字节兼容恢复（我们新建的
+// 删除、接入前存在的按备份逐字节还原）；用户自行改过 → 409 三方差异，绝不覆盖。
+const AGENT_CHILD_MAX_BYTES = 64 * 1024
+
+function snapshotManagedAgentChild (path) {
+  let st = null
+  try { st = lstatSync(path) } catch { return { exists: false, sha256: '', size: 0, mode: 0, symlink: false } }
+  if (st.isSymbolicLink()) return { exists: true, sha256: '', size: 0, mode: st.mode & 0o777, symlink: true }
+  try {
+    const bytes = readFileSync(path)
+    if (bytes.length > AGENT_CHILD_MAX_BYTES) return { exists: true, sha256: '', size: bytes.length, mode: st.mode & 0o777, symlink: false, oversize: true }
+    return { exists: true, sha256: sha256Hex(bytes), size: bytes.length, mode: st.mode & 0o777, symlink: false, bytes }
+  } catch {
+    return { exists: true, sha256: '', size: st.size, mode: st.mode & 0o777, symlink: false, unreadable: true }
+  }
+}
+
+function agentChildThreeWay (baseText, theirsText, guidance) {
+  return {
+    contract: DESKTOP_CONTRACT + '/three-way/agent-child',
+    base: { sha256: sha256Hex(String(baseText || '')), size: Buffer.byteLength(String(baseText || ''), 'utf8') },
+    ours: { sha256: sha256Hex(String(baseText || '')), size: Buffer.byteLength(String(baseText || ''), 'utf8') },
+    theirs: { sha256: sha256Hex(String(theirsText || '')), size: Buffer.byteLength(String(theirsText || ''), 'utf8') },
+    oursVsTheirs: redactDiffRows(diffConfigText(baseText, theirsText)).slice(0, 400),
+    baseVsTheirs: redactDiffRows(diffConfigText(baseText, theirsText)).slice(0, 400),
+    guidance,
+  }
+}
+
+// 计算启用时的子代理文件计划。不写盘。
+function planManagedAgentChild (paths, opts, desired) {
+  const childPath = paths.managedAgentPath
+  if (opts.managedAgent === false || !String(opts.model || '').trim()) {
+    return { path: childPath, fileName: MANAGED_AGENT_FILE, managed: false, action: 'none', conflict: null,
+      text: '', model: null, reasoningEffort: null,
+      before: { exists: false, sha256: '', size: 0 }, after: { exists: false, sha256: '', size: 0 } }
+  }
+  const built = buildManagedAgentConfig({ model: opts.model, reasoningEffort: opts.agentReasoningEffort })
+  const childText = built.child.text
+  const afterSha = sha256Hex(Buffer.from(childText, 'utf8'))
+  const before = snapshotManagedAgentChild(childPath)
+  const plan = {
+    path: childPath,
+    fileName: MANAGED_AGENT_FILE,
+    managed: true,
+    model: built.child.model,
+    reasoningEffort: built.child.reasoningEffort,
+    text: childText,
+    before: { exists: before.exists, sha256: before.sha256, size: before.size },
+    after: { exists: true, sha256: afterSha, size: Buffer.byteLength(childText, 'utf8') },
+    action: 'create',
+    conflict: null,
+  }
+  if (before.symlink || before.unreadable || before.oversize) {
+    plan.action = 'conflict'
+    plan.conflict = {
+      reason: before.symlink ? 'agent_child_symlink' : (before.oversize ? 'agent_child_oversize' : 'agent_child_unreadable'),
+      path: childPath,
+    }
+    return plan
+  }
+  if (!before.exists) { plan.action = 'create'; return plan }
+  if (before.sha256 === afterSha) { plan.action = 'same'; return plan }
+  // 已存在但内容不是我们写入的规范字节：视为用户/第三方所有，拒绝覆盖。
+  const theirsText = readFileSync(childPath, 'utf8')
+  plan.action = 'conflict'
+  plan.conflict = {
+    reason: 'agent_child_modified',
+    path: childPath,
+    threeWay: agentChildThreeWay(childText, theirsText,
+      'go-deepseek.toml 不是 ModelGate 写入的规范内容；为不覆盖你的修改，本次不写入。请手工合并后重试，或移走该文件。'),
+  }
+  return plan
+}
+
+// 写入子代理文件：先留原始字节备份，再原子替换并写后校验；失败尽量恢复原状。
+function commitManagedAgentChild (childPlan) {
+  const path = childPlan.path
+  const before = childPlan.before
+  let backupPath = null
+  if (before.exists) {
+    backupPath = path + '.mg-bak'
+    try { writeAtomicTextFile(backupPath, readFileSync(path, 'utf8'), 0o600) } catch (e) {
+      throw new DesktopError('agent_child_backup_failed', '子代理文件备份失败：' + (e && e.message ? e.message : '未知错误'), null, 500)
+    }
+  }
+  try { writeAtomicTextFile(path, childPlan.text, 0o600) } catch (e) {
+    throw new DesktopError('agent_child_write_failed', '写入子代理文件失败：' + (e && e.message ? e.message : '未知错误'), null, 500)
+  }
+  const after = snapshotManagedAgentChild(path)
+  if (!after.exists || after.sha256 !== childPlan.after.sha256) {
+    try { if (before.exists && backupPath) writeAtomicTextFile(path, readFileSync(backupPath), 0o600); else unlinkSync(path) } catch {}
+    throw new DesktopError('agent_child_verify_failed', '子代理文件写入后校验失败，已尝试恢复原状。', { expected: childPlan.after.sha256, actual: after.sha256 }, 502)
+  }
+  return { path, backupPath, sha: after.sha256, size: after.size }
+}
+
+function agentChildRecord (childPlan, commit, adopted) {
+  return {
+    path: childPlan.path,
+    fileName: MANAGED_AGENT_FILE,
+    model: childPlan.model,
+    reasoningEffort: childPlan.reasoningEffort,
+    text: childPlan.text,
+    before: childPlan.before,
+    applied: childPlan.after,
+    backupPath: commit ? commit.backupPath : null,
+    // adopted：接入前就存在且恰好等于规范字节；我们没写它，退出时也不动它，只跟踪用户改动。
+    adopted: !!adopted,
+  }
+}
+
+// 退出时先"只检查不写"：返回 conflict / error（备份问题）/ action。任何 conflict/error 都必须在
+// config.toml 回滚之前判定，保证"用户改过子代理文件 → 409 且零写入"。
+function planManagedAgentChildRestore (paths, state) {
+  const rec = state && state.agentChild
+  if (!rec || !rec.path) return { action: 'none', conflict: null, error: null, record: null }
+  const path = rec.path
+  const current = snapshotManagedAgentChild(path)
+  const oursSha = rec.applied && rec.applied.sha256 ? rec.applied.sha256 : ''
+  const canonicalText = rec.text || buildManagedAgentConfig({ model: rec.model, reasoningEffort: rec.reasoningEffort }).child.text
+  const plan = { action: 'none', conflict: null, error: null, record: rec, path, canonicalText }
+  if (rec.adopted) {
+    // 接入前就存在且由我们"认领"的规范文件：我们从未改写，退出时保持原状，不创建也不删除；
+    // 但若用户后来改过它，依然是三方冲突。
+    if (current.exists && current.sha256 !== oursSha) {
+      plan.conflict = {
+        reason: 'agent_child_modified',
+        path,
+        threeWay: agentChildThreeWay(canonicalText, readFileSync(path, 'utf8'),
+          'go-deepseek.toml 在接入后被修改；为不覆盖你的改动，退出已中止。请查看三方差异后手工处理。'),
+      }
+    }
+    return plan
+  }
+  if (current.symlink || current.unreadable || current.oversize) {
+    plan.error = { code: current.symlink ? 'agent_child_symlink' : 'agent_child_unreadable', message: '子代理文件状态异常，拒绝自动恢复，请人工处理。' }
+    return plan
+  }
+  if (!current.exists) {
+    plan.action = (!rec.before || !rec.before.exists) ? 'none' : 'restore'
+  } else if (oursSha && current.sha256 === oursSha) {
+    plan.action = (!rec.before || !rec.before.exists) ? 'remove' : 'restore'
+  } else {
+    plan.conflict = {
+      reason: 'agent_child_modified',
+      path,
+      threeWay: agentChildThreeWay(canonicalText, readFileSync(path, 'utf8'),
+        'go-deepseek.toml 在接入后被修改；为不覆盖你的改动，退出已中止。请查看三方差异后手工处理。'),
+    }
+    return plan
+  }
+  if (plan.action === 'restore') {
+    if (!rec.backupPath || !existsSync(rec.backupPath)) {
+      plan.error = { code: 'agent_child_backup_missing', message: '子代理文件的接入前备份不存在，拒绝自动恢复（未做任何写入）。' }
+    } else {
+      const bytes = readFileSync(rec.backupPath)
+      if (rec.before && rec.before.sha256 && sha256Hex(bytes) !== rec.before.sha256) {
+        plan.error = { code: 'agent_child_backup_mismatch', message: '子代理文件备份与接入前快照不一致，拒绝自动恢复。' }
+      }
+    }
+  }
+  return plan
+}
+
+function applyManagedAgentChildRestore (plan) {
+  if (!plan || plan.action === 'none') return { handled: false }
+  const rec = plan.record
+  const path = plan.path
+  if (plan.action === 'remove') {
+    try { unlinkSync(path) } catch (e) {
+      if (e && e.code === 'ENOENT') return { handled: true, removed: true }
+      throw new DesktopError('agent_child_restore_failed', '删除 ModelGate 新建的子代理文件失败：' + (e && e.message ? e.message : '未知错误'), null, 500)
+    }
+    return { handled: true, removed: true, restored: false }
+  }
+  const bytes = readFileSync(rec.backupPath)
+  try { writeAtomicTextFile(path, bytes, 0o600) } catch (e) {
+    throw new DesktopError('agent_child_restore_failed', '恢复子代理文件原始字节失败：' + (e && e.message ? e.message : '未知错误'), null, 500)
+  }
+  const after = snapshotManagedAgentChild(path)
+  if (rec.before && rec.before.sha256 && after.sha256 !== rec.before.sha256) {
+    throw new DesktopError('agent_child_restore_verify_failed', '子代理文件恢复后 sha256 与接入前不一致。', { expected: rec.before.sha256, actual: after.sha256 }, 502)
+  }
+  return { handled: true, removed: false, restored: true, sha: after.sha256 }
+}
+
 // —— 配置状态分类：official / aggregated / unknown ——
 // official：没有把请求改向任何第三方的 owned 字段（或只存在我们写入前的默认值）。
 // aggregated：openai_base_url 指向本机回环 + 本地目录存在，或状态记录与当前字节一致。
@@ -279,6 +473,7 @@ export function recoverInterruptedApply (opts = {}) {
       beforeSha: journal.before ? journal.before.sha256 : null,
       backupPath: journal.backupPath || null,
       desired: journal.desired || null,
+      agentChild: journal.agentChild || null,
       appliedAt: journal.at || null,
       lastApply: journal.lastApply || { ok: true, recoveredAfterCrash: true, at: Date.now() },
     })
@@ -287,8 +482,17 @@ export function recoverInterruptedApply (opts = {}) {
   }
   // phase === 'applying'
   if (current && current.exists && journal.applied && current.sha256 === journal.applied.sha256) {
+    // MG-FIX-P1-05：子代理文件若已被用户改过，整个恢复判冲突，不覆盖任何一边。
+    let childRestore = null
+    if (journal.agentChild) {
+      childRestore = planManagedAgentChildRestore(paths, { agentChild: journal.agentChild })
+      if (childRestore.conflict || childRestore.error) {
+        return { recovered: 'conflict', reason: 'agent_child_conflict_since_crash', detail: childRestore.conflict || childRestore.error }
+      }
+    }
     const restored = restoreIfOurs(paths, journal)
     if (restored.ok) {
+      if (childRestore) { try { applyManagedAgentChildRestore(childRestore) } catch {} }
       saveState(paths, {
         mode: 'official',
         before: journal.before || null,
@@ -297,6 +501,7 @@ export function recoverInterruptedApply (opts = {}) {
         beforeSha: journal.before ? journal.before.sha256 : null,
         backupPath: journal.backupPath || null,
         desired: null,
+        agentChild: null,
         appliedAt: null,
         lastApply: { ok: false, code: 'interrupted_apply_recovered', recoveredAfterCrash: true, at: Date.now() },
       })
@@ -681,6 +886,13 @@ function consentTokenFor (target, beforeSha, afterSha) {
   return sha256Hex(DESKTOP_CONTRACT + '\n' + target + '\n' + beforeSha + '\n' + afterSha)
 }
 
+// MG-FIX-P1-05：同意令牌同时绑定 config.toml 与子代理文件的 before/after 字节，
+// 保证"同意覆盖写什么"在 UI 与事务两侧完全一致（任一变化都会令令牌失配）。
+function agentConsentToken (target, beforeSha, afterSha, childPlan) {
+  return sha256Hex(DESKTOP_CONTRACT + '\n' + target + '\n' + beforeSha + '\n' + afterSha +
+    '\n' + MANAGED_AGENT_FILE + '\n' + (childPlan ? childPlan.before.sha256 + '\n' + childPlan.after.sha256 : ''))
+}
+
 // Managed Provider（provider 级原生压缩能力）默认关闭：它会切换 Codex provider 身份，
 // 依赖 requires_openai_auth 复用 ChatGPT 登录，尚未经原版 Desktop 真机验收。
 function managedProviderGuard (opts) {
@@ -711,7 +923,13 @@ function buildDesired (opts) {
       features: opts.features,
       managedProvider: opts.managedProvider,
     })
-    return built.desired
+    // MG-FIX-P1-05：普通用户接入即托管原生 [features].multi_agent 与 [agents.go_deepseek]，
+    // 不需要手工编辑 TOML。仅当显式 managedAgent:false 时关闭（用于诊断/回退）。
+    return withManagedAgentDesired(built.desired, {
+      model: opts.model,
+      managedAgent: opts.managedAgent,
+      agentReasoningEffort: opts.agentReasoningEffort,
+    })
   } catch (e) {
     throw asDesktopError(e, 'invalid_desired')
   }
@@ -873,7 +1091,8 @@ export function preview (opts = {}) {
       },
     }
   }
-  const desired = buildDesired({ baseUrl: gatewayBaseUrl, model: opts.model, catalogPath: opts.catalogPath, features: opts.features, managedProvider: opts.managedProvider })
+  const desired = buildDesired({ baseUrl: gatewayBaseUrl, model: opts.model, catalogPath: opts.catalogPath, features: opts.features, managedProvider: opts.managedProvider, managedAgent: opts.managedAgent, agentReasoningEffort: opts.agentReasoningEffort })
+  const childPlan = planManagedAgentChild(paths, opts, desired)
   let before
   let beforeText = ''
   let existing
@@ -907,6 +1126,7 @@ export function preview (opts = {}) {
       consentToken: null,
       firstRun: false,
       alreadyAggregated: false,
+      agentChild: childPlan,
       catalog: catalogSummary(opts.catalogPath, opts.model, opts),
     }
   }
@@ -935,7 +1155,14 @@ export function preview (opts = {}) {
   const catalog = catalogSummary(opts.catalogPath, opts.model, opts)
   if (!String(opts.catalogPath || '').trim()) blocked.push({ code: 'catalog_path_required', message: '必须先由网关生成聚合模型目录（model_catalog_json 绝对路径），否则客户端会回落到不完整目录。' })
   else if (!catalog.ok && catalog.state !== 'missing_file') warnings.push('目录当前不可用（' + catalog.state + '）：' + catalog.reason)
-  const consentRequired = blocked.length === 0 && (firstRun || conflicts.length > 0)
+  if (childPlan.conflict) {
+    const message = '子代理文件 ' + MANAGED_AGENT_FILE + ' 已存在且不是 ModelGate 写入的规范内容；为不覆盖你的修改，本次不接入。' +
+      '请查看三方差异后手工合并或移走该文件，再重新预览。'
+    blocked.push({ code: childPlan.conflict.reason, message })
+    conflicts.push({ path: MANAGED_AGENT_FILE, reason: childPlan.conflict.reason, message })
+    warnings.push(message)
+  }
+  const consentRequired = blocked.length === 0 && (firstRun || conflicts.length > 0 || childPlan.action === 'create')
   return {
     contract: DESKTOP_CONTRACT,
     ok: blocked.length === 0,
@@ -953,9 +1180,18 @@ export function preview (opts = {}) {
     warnings,
     preserved,
     consentRequired,
-    consentToken: blocked.length ? null : consentTokenFor(paths.configPath, expectedSha, afterSha),
+    consentToken: blocked.length ? null : agentConsentToken(paths.configPath, expectedSha, afterSha, childPlan),
     firstRun: !before.exists,
     alreadyAggregated: rows.every((r) => r.kind === 'same'),
+    agentChild: {
+      path: childPlan.path,
+      fileName: MANAGED_AGENT_FILE,
+      managed: childPlan.managed,
+      before: childPlan.before,
+      after: childPlan.after,
+      action: childPlan.action,
+      conflict: childPlan.conflict,
+    },
     catalog,
     nativeCompaction: nativeCompactionSummary(opts, classifyConfigState({ configPath: paths.configPath, baseUrl: gatewayBaseUrl })),
   }
@@ -1044,8 +1280,16 @@ export async function activate (opts = {}) {
     }
     let desired
     try {
-      desired = buildDesired({ baseUrl: gatewayBaseUrl, model: opts.model, catalogPath: opts.catalogPath, features: opts.features, managedProvider: opts.managedProvider })
+      desired = buildDesired({ baseUrl: gatewayBaseUrl, model: opts.model, catalogPath: opts.catalogPath, features: opts.features, managedProvider: opts.managedProvider, managedAgent: opts.managedAgent, agentReasoningEffort: opts.agentReasoningEffort })
     } catch (e) { throw asDesktopError(e, 'invalid_desired') }
+    // MG-FIX-P1-05：用户自行改过 go-deepseek.toml 时在任何写入之前 409，绝不覆盖。
+    const childPlan = planManagedAgentChild(paths, opts, desired)
+    if (childPlan.conflict) {
+      const conflict = childPlan.conflict
+      throw new DesktopError(conflict.reason,
+        '子代理文件 ' + MANAGED_AGENT_FILE + ' 不是 ModelGate 写入的规范内容；为不覆盖你的修改，本次接入已中止，未做任何写入。',
+        { path: conflict.path, threeWay: conflict.threeWay || null }, 409)
+    }
     let merged
     try {
       merged = mergeOwnedFields(beforeText, desired)
@@ -1059,8 +1303,9 @@ export async function activate (opts = {}) {
     const afterText = merged.text
     const afterSha = sha256Hex(Buffer.from(afterText, 'utf8'))
     const noChange = merged.changed.length === 0 && before.exists
-    if (!noChange) {
-      const wantToken = consentTokenFor(paths.configPath, before.exists ? before.sha256 : '', afterSha)
+    const childNeedsWrite = childPlan.action !== 'same' && childPlan.action !== 'none'
+    if (!noChange || childNeedsWrite) {
+      const wantToken = agentConsentToken(paths.configPath, before.exists ? before.sha256 : '', afterSha, childPlan)
       if (!opts.consentToken || String(opts.consentToken) !== wantToken) {
         throw new DesktopError('consent_required', '写入前必须显式确认：请先调用预览并把 consentToken 与 expectedSha 一起回传。', {
           expectedSha: before.exists ? before.sha256 : '', afterSha, consentTokenHint: wantToken,
@@ -1079,6 +1324,14 @@ export async function activate (opts = {}) {
       const previous = loadState(paths)
       const keepBaseline = previous && previous.mode === 'aggregated' && previous.before
       const appliedAt = keepBaseline && previous.appliedAt ? Number(previous.appliedAt) : Date.now()
+      // 幂等激活也要补齐托管子代理文件（如被删），但不得覆盖既有基线记录。
+      let childRecord = previous && previous.agentChild ? previous.agentChild : null
+      if (childNeedsWrite) {
+        const committedChild = commitManagedAgentChild(childPlan)
+        childRecord = agentChildRecord(childPlan, committedChild)
+      } else if (!childRecord && childPlan.action === 'same') {
+        childRecord = agentChildRecord(childPlan, null, true)
+      }
       saveState(paths, {
         mode: 'aggregated',
         before: keepBaseline ? previous.before : stateBefore,
@@ -1087,8 +1340,9 @@ export async function activate (opts = {}) {
         beforeSha: keepBaseline ? previous.beforeSha : stateBefore.sha256,
         backupPath: keepBaseline ? previous.backupPath || null : null,
         desired,
+        agentChild: childRecord,
         appliedAt,
-        lastApply: { ok: true, idempotent: true, at: Date.now(), verification: summarizeVerification(verification) },
+        lastApply: { ok: true, idempotent: true, at: Date.now(), verification: summarizeVerification(verification), agentChild: childRecord ? { action: childPlan.action } : null },
       })
       const desktop = resolveDesktopForProbe(opts)
       const clientRuntime = resolveClientRuntime(opts, { found: desktop.found, path: desktop.path })
@@ -1102,6 +1356,7 @@ export async function activate (opts = {}) {
         verification,
         recovery,
         mode: 'aggregated',
+        agentChild: childRecord ? { action: childPlan.action, path: childPlan.path, managed: true } : null,
         clientRuntime,
         restart,
         needsRestart: restart.needed,
@@ -1164,6 +1419,38 @@ export async function activate (opts = {}) {
         restoreDetail: restored.detail || null,
       }), failure.status)
     }
+    // MG-FIX-P1-05：子代理文件写入纳入同一事务。先记 journal（含子文件计划）再写，
+    // 若写子文件失败则把 config.toml 一并回滚到接入前字节，状态如实记失败。
+    let childRecord = null
+    if (childNeedsWrite) {
+      journalBase.agentChild = agentChildRecord(childPlan, null)
+      writeAtomicJson(paths.journalPath, journalBase, 0o600)
+      try {
+        const committedChild = commitManagedAgentChild(childPlan)
+        childRecord = agentChildRecord(childPlan, committedChild)
+        journalBase.agentChild = childRecord
+      } catch (childError) {
+        const restored = restoreIfOurs(paths, journalBase)
+        try { unlinkSync(paths.journalPath) } catch {}
+        const ce = childError instanceof DesktopError ? childError : null
+        saveState(paths, {
+          mode: restored.ok ? 'official' : 'unknown',
+          before: stateBefore,
+          applied: null,
+          appliedSha: null,
+          beforeSha: stateBefore.sha256,
+          backupPath: journalBase.backupPath,
+          desired: null,
+          agentChild: null,
+          appliedAt: null,
+          lastApply: { ok: false, code: ce ? ce.code : 'agent_child_write_failed', at: Date.now(), restored: restored.ok },
+        })
+        throw new DesktopError(ce ? ce.code : 'agent_child_write_failed', ce ? ce.message : '写入子代理文件失败',
+          Object.assign({}, ce && ce.detail ? ce.detail : {}, { restored: restored.ok }), ce ? ce.status : 500)
+      }
+    } else if (childPlan.action === 'same') {
+      childRecord = agentChildRecord(childPlan, null, true)
+    }
     // 先落"已验证"再落状态：两者之间崩溃由 recoverInterruptedApply 补齐，不会重复写盘。
     journalBase.phase = 'verified'
     journalBase.lastApply = { ok: true, idempotent: false, at: Date.now(), verification: summarizeVerification(verification) }
@@ -1177,8 +1464,9 @@ export async function activate (opts = {}) {
       beforeSha: stateBefore.sha256,
       backupPath: journalBase.backupPath,
       desired,
+      agentChild: childRecord,
       appliedAt,
-      lastApply: { ok: true, at: appliedAt, verification: summarizeVerification(verification) },
+      lastApply: { ok: true, at: appliedAt, verification: summarizeVerification(verification), agentChild: childRecord ? { action: childPlan.action } : null },
     })
     try { unlinkSync(paths.journalPath) } catch {}
     const desktop = resolveDesktopForProbe(opts)
@@ -1193,6 +1481,7 @@ export async function activate (opts = {}) {
       verification,
       recovery,
       mode: 'aggregated',
+      agentChild: childRecord ? { action: childPlan.action, path: childPlan.path, managed: true } : null,
       clientRuntime,
       restart,
       needsRestart: restart.needed,
@@ -1434,6 +1723,17 @@ export async function deactivate (opts = {}) {
     //  3) 用户改过/删除自有键 → 409 + 三方差异，绝不覆盖。
     const stateApplied = String(state.appliedSha || '')
     const fullRestore = current.exists && currentSha === stateApplied
+    // MG-FIX-P1-05：子代理文件的冲突/备份问题必须在任何 config.toml 写入之前判定，
+    // 保证"用户改过 go-deepseek.toml → 409 且零写入"。
+    const childRestore = planManagedAgentChildRestore(paths, state)
+    if (childRestore.conflict) {
+      throw new DesktopError('agent_child_modified',
+        '子代理文件 ' + MANAGED_AGENT_FILE + ' 在接入后被修改；为不覆盖你的改动，退出已中止，未做任何写入。',
+        { path: childRestore.path, threeWay: childRestore.conflict.threeWay, configThreeWay: conflictDetail().threeWay }, 409)
+    }
+    if (childRestore.error) {
+      throw new DesktopError(childRestore.error.code, childRestore.error.message, null, 409)
+    }
     if (fullRestore) {
       let result
       if (!state.before.exists) {
@@ -1456,6 +1756,7 @@ export async function deactivate (opts = {}) {
         }
         result = { sha: committed.after.sha256, restoredFrom: committed.restoredFrom, safetyBackupPath: committed.safetyBackupPath, removed: false }
       }
+      const childApplied = applyManagedAgentChildRestore(childRestore)
       saveState(paths, {
         mode: 'official',
         before: state.before,
@@ -1464,10 +1765,11 @@ export async function deactivate (opts = {}) {
         beforeSha: state.beforeSha || null,
         backupPath: state.backupPath || null,
         desired: null,
+        agentChild: null,
         appliedAt: null,
-        lastApply: { ok: true, action: 'deactivate', scope: 'byte-exact', at: Date.now(), restoredSha: result.sha },
+        lastApply: { ok: true, action: 'deactivate', scope: 'byte-exact', at: Date.now(), restoredSha: result.sha, agentChild: childApplied.handled ? { action: childRestore.action } : null },
       })
-      return { ok: true, mode: 'official', sha: result.sha, restoredFrom: result.restoredFrom, removed: result.removed, selective: false, changed: true, verification: { ok: true, sha: result.sha }, recovery }
+      return { ok: true, mode: 'official', sha: result.sha, restoredFrom: result.restoredFrom, removed: result.removed, selective: false, changed: true, agentChild: childApplied.handled ? { action: childRestore.action, removed: !!childApplied.removed, restored: !!childApplied.restored } : null, verification: { ok: true, sha: result.sha }, recovery }
     }
 
     if (opts.expectedSha !== undefined && opts.expectedSha !== null && String(opts.expectedSha) !== String(currentSha) && !current.exists) {
@@ -1489,6 +1791,7 @@ export async function deactivate (opts = {}) {
         conflictDetail({ restoreConflicts: restore.conflicts }), 409)
     }
     if (!restore.changed && !restore.removeFile) {
+      const childApplied = applyManagedAgentChildRestore(childRestore)
       saveState(paths, {
         mode: 'official',
         before: state.before,
@@ -1497,12 +1800,14 @@ export async function deactivate (opts = {}) {
         beforeSha: state.beforeSha || null,
         backupPath: state.backupPath || null,
         desired: null,
+        agentChild: null,
         appliedAt: null,
-        lastApply: { ok: true, action: 'deactivate', scope: 'already-restored', at: Date.now(), preservedUserEdits: true },
+        lastApply: { ok: true, action: 'deactivate', scope: 'already-restored', at: Date.now(), preservedUserEdits: true, agentChild: childApplied.handled ? { action: childRestore.action } : null },
       })
-      return { ok: true, mode: 'official', sha: currentSha, removed: false, selective: true, changed: false, preservedUserEdits: true, changedKeys: [], verification: { ok: true, sha: currentSha }, recovery }
+      return { ok: true, mode: 'official', sha: currentSha, removed: false, selective: true, changed: false, preservedUserEdits: true, changedKeys: [], agentChild: childApplied.handled ? { action: childRestore.action } : null, verification: { ok: true, sha: currentSha }, recovery }
     }
     const committed = commitOwnedRestore(paths, current, currentText, restore)
+    const childApplied = applyManagedAgentChildRestore(childRestore)
     saveState(paths, {
       mode: 'official',
       before: state.before,
@@ -1511,6 +1816,7 @@ export async function deactivate (opts = {}) {
       beforeSha: state.beforeSha || null,
       backupPath: state.backupPath || null,
       desired: null,
+      agentChild: null,
       appliedAt: null,
       lastApply: {
         ok: true,
@@ -1521,6 +1827,7 @@ export async function deactivate (opts = {}) {
         preservedUserEdits: true,
         changedKeys: restore.changedKeys,
         safetyBackupPath: committed.safetyBackupPath,
+        agentChild: childApplied.handled ? { action: childRestore.action } : null,
       },
     })
     return {
@@ -1533,6 +1840,7 @@ export async function deactivate (opts = {}) {
       preservedUserEdits: true,
       changedKeys: restore.changedKeys,
       safetyBackupPath: committed.safetyBackupPath,
+      agentChild: childApplied.handled ? { action: childRestore.action, removed: !!childApplied.removed, restored: !!childApplied.restored } : null,
       verification: { ok: true, sha: committed.sha },
       recovery,
     }
@@ -1591,6 +1899,18 @@ export function status (opts = {}) {
     clientRuntime,
     restart,
     nativeCompaction,
+    agentChild: (() => {
+      const snap = snapshotManagedAgentChild(paths.managedAgentPath)
+      const rec = fresh && fresh.agentChild ? fresh.agentChild : null
+      return {
+        path: paths.managedAgentPath,
+        fileName: MANAGED_AGENT_FILE,
+        managed: !!rec,
+        current: { exists: snap.exists, sha256: snap.exists ? snap.sha256 : '', size: snap.size },
+        appliedSha: rec && rec.applied ? rec.applied.sha256 : null,
+        modifiedSinceApply: !!(rec && rec.applied && rec.applied.sha256 && snap.exists && snap.sha256 !== rec.applied.sha256),
+      }
+    })(),
     needsRestart: restart.needed,
   }
 }
@@ -1614,6 +1934,14 @@ export const DESKTOP_POLICY = Object.freeze({
     runtimeAuth: 'UNVERIFIED',
   }),
   maxCatalogBytes: MAX_CATALOG_BYTES,
-  verification: ['config-parse-owned-fields', 'catalog-present-and-parseable', 'gateway-health'],
+  // MG-FIX-P1-05：Codex 原生命名子代理由 ModelGate 托管（字段 + 子文件），仍是原生配置。
+  managedAgent: Object.freeze({
+    section: MANAGED_AGENT_SECTION,
+    childFile: MANAGED_AGENT_FILE,
+    sections: Object.freeze({ [MANAGED_AGENT_SECTION]: OWNED_SECTIONS[MANAGED_AGENT_SECTION].slice() }),
+    features: Object.freeze(['multi_agent']),
+    rollback: 'byte-compatible（新建则删除、既有则按接入前备份逐字节还原），用户改动 → 409 三方差异',
+  }),
+  verification: ['config-parse-owned-fields', 'managed-agent-child-file', 'catalog-present-and-parseable', 'gateway-health'],
   forbidden: ['auth.json', 'model_providers.openai', 'default_subagent_model（不在所有权声明内）'],
 })

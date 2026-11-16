@@ -76,7 +76,12 @@ test('Desktop 接入：空白配置首次激活需要一次同意，写后验证
   assert.equal(p.firstRun, true)
   assert.equal(p.consentRequired, true)
   assert.match(p.consentToken, /^[a-f0-9]{64}$/)
-  assert.deepEqual(p.rows.map((r) => r.path), ['model_provider', 'openai_base_url', 'model', 'model_catalog_json', 'features.multi_agent_v2'])
+  // MG-FIX-P1-05：启用即托管原生多代理字段（[features].multi_agent + [agents.go_deepseek]），零手工 TOML。
+  assert.deepEqual(p.rows.map((r) => r.path), [
+    'model_provider', 'openai_base_url', 'model', 'model_catalog_json',
+    'features.multi_agent', 'features.multi_agent_v2',
+    'agents.go_deepseek.description', 'agents.go_deepseek.config_file',
+  ])
   assert.ok(p.rows.every((r) => r.kind === 'add' && r.owner === 'modelgate'))
   assert.equal(p.catalog.ok, true)
   assert.equal(p.catalog.targetPresent, true)

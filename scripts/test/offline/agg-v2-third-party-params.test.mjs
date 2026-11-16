@@ -58,6 +58,29 @@ test('第三方 Responses 目标：剔除 stream_options（OpenCode Go portable 
   assert.deepEqual(official.dropped, [])
 })
 
+test('第三方 Responses 目标：剔除 access_programs / prompt_cache_key（luna 父子派单子请求实测）', () => {
+  const prov = { id: 'opencodego', baseUrl: 'https://opencode.ai/inference/go' }
+  const out = projectThirdPartyResponsesParams({
+    model: 'mg-opencodego-deepseek-v4-1-flash',
+    input: 'hi',
+    access_programs: ['codex'],
+    prompt_cache_key: 'pk_123',
+  }, prov)
+  assert.equal(Object.prototype.hasOwnProperty.call(out.body, 'access_programs'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(out.body, 'prompt_cache_key'), false)
+  assert.ok(out.dropped.includes('access_programs'))
+  assert.ok(out.dropped.includes('prompt_cache_key'))
+  assert.equal(out.body.input, 'hi', '不丢对话内容')
+  // 官方目标逐字节保留（这两项是官方 Responses 专属控制）
+  const official = projectThirdPartyResponsesParams(
+    { access_programs: ['codex'], prompt_cache_key: 'pk_123' },
+    { id: 'chatgptplan', baseUrl: 'https://chatgpt.com', codexIdentity: 'official' },
+  )
+  assert.deepEqual(official.body.access_programs, ['codex'])
+  assert.deepEqual(official.body.prompt_cache_key, 'pk_123')
+  assert.deepEqual(official.dropped, [])
+})
+
 test('工具项 call_id 为空/缺失：第三方 Responses 目标提前给出可操作错误（官方不受影响）', () => {
   const withEmpty = { input: [{ role: 'user', content: 'hi' }, { type: 'function_call', call_id: '', name: 'exec_command' }] }
   const bad = firstEmptyToolCallId(withEmpty)
@@ -102,8 +125,10 @@ test('call_id 补齐：Codex 新会话里 call/output 都缺 id 时不丢历史�
   assert.deepEqual(r.repaired, [])
   assert.equal(r.body, d)
 
-  // 孤儿 output（前面没有 call）：无法配对 → 保持缺失，交给 guard 报可操作错误
+  // 孤儿 output（前面没有 call）：P0-01 无损修复——补稳定关联键 orphan-adopt，
+  // 不伪造 call、不丢历史、不改内容；补齐后 guard 不再拦截（消除反复重连）。
   const e = repairThirdPartyToolCallIds({ input: [{ type: 'function_call_output', output: 'ok' }] })
-  assert.deepEqual(e.repaired, [])
-  assert.deepEqual(firstEmptyToolCallId(e.body), { index: 0, type: 'function_call_output', reason: 'missing' })
+  assert.deepEqual(e.repaired.map((r) => r.action), ['orphan-adopt'])
+  assert.match(e.body.input[0].call_id, /^call_mg_orphan_[a-f0-9]{16}$/)
+  assert.equal(firstEmptyToolCallId(e.body), null)
 })

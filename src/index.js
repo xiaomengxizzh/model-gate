@@ -1,4 +1,5 @@
 import http from 'node:http'
+import { randomBytes } from 'node:crypto'
 import { pipeline } from 'node:stream'
 import { readFileSync, chmodSync, existsSync, copyFileSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -330,10 +331,43 @@ function managementTokenOf(req) {
 // 返回 { explicitAdmin:true, adminSubject } 或 null。adminSubject 是令牌的不可逆短哈希
 // （稳定、便于审计关联；日志/响应永不含令牌本体）。
 function explicitAdminOf(req, state) {
-  if (!state.adminToken) return null
   const supplied = managementTokenOf(req)
-  if (!supplied || !safeTokenCmp(supplied, state.adminToken)) return null
-  return { explicitAdmin: true, adminSubject: 'admin-' + sha256Hex(String(state.adminToken)).slice(0, 16) }
+  if (!supplied) return null
+  if (state.adminToken && safeTokenCmp(supplied, state.adminToken)) {
+    return { explicitAdmin: true, adminSubject: 'admin-' + sha256Hex(String(state.adminToken)).slice(0, 16) }
+  }
+  // MG-FIX-P1-04：本机管理会话令牌——由 POST /api/admin/unlock 在回环+同源校验通过后签发，
+  // 仅存进程内存（重启即失效）、不落盘、不写日志，作用域等效显式管理员但可随时被本地会话丢弃。
+  // 它不是“回环地址=永久管理员”：必须先经解锁端点取得令牌，且仍受下面的 peer/remote 检查约束。
+  if (localAdminSessionValid(state, supplied)) {
+    return { explicitAdmin: true, adminSubject: 'admin-local-session-' + sha256Hex(supplied).slice(0, 16), localSession: true }
+  }
+  return null
+}
+
+// 本机管理会话：token -> expiresAt(ms)。纯内存、重启即失效。
+const LOCAL_ADMIN_SESSION_TTL_MS = 30 * 60 * 1000 // 30 分钟
+function localAdminSessionValid(state, token) {
+  const sessions = state && state.localAdminSessions
+  if (!sessions || !(sessions instanceof Map)) return false
+  const exp = sessions.get(String(token))
+  if (typeof exp !== 'number') return false
+  if (exp <= Date.now()) { sessions.delete(String(token)); return false }
+  return true
+}
+function issueLocalAdminSession(state) {
+  if (!(state.localAdminSessions instanceof Map)) state.localAdminSessions = new Map()
+  // 容量保护：清理过期项，最多保留少量会话，避免内存无限增长。
+  const now = Date.now()
+  for (const [t, exp] of state.localAdminSessions) if (typeof exp !== 'number' || exp <= now) state.localAdminSessions.delete(t)
+  if (state.localAdminSessions.size >= 8) {
+    const oldest = [...state.localAdminSessions.entries()].sort((a, b) => a[1] - b[1])[0]
+    if (oldest) state.localAdminSessions.delete(oldest[0])
+  }
+  const token = randomBytes(32).toString('hex')
+  const expiresAt = now + LOCAL_ADMIN_SESSION_TTL_MS
+  state.localAdminSessions.set(token, expiresAt)
+  return { token, expiresAt }
 }
 
 // 远程管理显式开关：仅 server.allowRemote=true 或 MG_ADMIN_ALLOW_REMOTE=1 时放行非回环 peer。
@@ -707,6 +741,18 @@ export function projectThirdPartyResponsesParams(body, prov) {
     delete out.stream_options
     dropped.push('stream_options')
   }
+  // 2026-11-16 真机（gpt-6-luna 父→Go 子）实测：Codex 原生团队协作会在请求里带
+  // `access_programs` / `prompt_cache_key`，两者都是**官方 Responses 目标专属**的顶层控制，
+  // 不携带任何对话内容；Go 便携 Responses 上游直接报
+  // “access_programs: requires a native Responses target; portable routing requires the full
+  // conversation in input”。与 Chat 兼容桥 responses.js:625 的处理一致：第三方目标显式剔除，
+  // 官方目标逐字节透传。这样原生父子派单的子请求才不会被上游拒绝。
+  for (const key of ['access_programs', 'prompt_cache_key']) {
+    if (Object.prototype.hasOwnProperty.call(out, key)) {
+      delete out[key]
+      dropped.push(key)
+    }
+  }
   return { body: out, dropped }
 }
 
@@ -736,10 +782,28 @@ export function repairThirdPartyToolCallIds (body) {
   if (!items) return { body, repaired: [] }
   const out = items.map((it) => (it && typeof it === 'object' && !Array.isArray(it)) ? Object.assign({}, it) : it)
   const repaired = []
-  const pending = [] // 未闭合的 call 索引（最近的在后）
+  const hasId = (it) => !!(it && typeof it.call_id === 'string' && it.call_id !== '')
+  // MG-FIX-P2-07：先扫描历史里已存在的每一个 call_id，合成 ID 必须避开它们，
+  // 否则输入里本就有 call_mg_1 时会生成重复 ID，造成工具结果错绑/重复。
+  const existingIds = new Set() // 所有已出现的 id（call + output）：合成 id 必须全部避开，防止误配到孤儿 output
+  const callIds = new Set()     // 当前 call 占用的 id：回填时用来检测“另一个 call 已占用该 id”
+  for (const it of out) {
+    if (!hasId(it)) continue
+    existingIds.add(it.call_id)
+    if (TOOL_CALL_TYPES.has(String(it.type || ''))) callIds.add(it.call_id)
+  }
   let seq = 0
-  const nextSyntheticId = () => 'call_mg_' + (++seq)
-  const hasId = (it) => typeof it.call_id === 'string' && it.call_id !== ''
+  const nextSyntheticId = () => {
+    let id
+    do { id = 'call_mg_' + (++seq) } while (existingIds.has(id))
+    existingIds.add(id)
+    return id
+  }
+  const pending = [] // 未闭合 call 的索引栈（最近的在末尾）
+  const consume = (index) => {
+    const at = pending.indexOf(index)
+    if (at >= 0) pending.splice(at, 1)
+  }
   for (let index = 0; index < out.length; index++) {
     const item = out[index]
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue
@@ -747,31 +811,64 @@ export function repairThirdPartyToolCallIds (body) {
     if (TOOL_CALL_TYPES.has(type)) {
       if (!hasId(item)) {
         item.call_id = nextSyntheticId()
+        callIds.add(item.call_id)
         repaired.push({ index, type, action: 'assign' })
       }
       pending.push(index)
       continue
     }
     if (TOOL_OUTPUT_TYPES.has(type)) {
-      const callIndex = pending.length ? pending[pending.length - 1] : null
-      if (!hasId(item)) {
-        if (callIndex != null && hasId(out[callIndex])) {
-          item.call_id = out[callIndex].call_id
-          repaired.push({ index, type, action: 'pair', from: callIndex })
-          pending.pop()
+      if (hasId(item)) {
+        // MG-FIX-P2-07：output 自带 id 时，先在未闭合 call 中按“完全相等的 call_id”精确匹配，
+        // 绝不盲目取栈顶（栈顶可能是另一个真实 call），避免真实 id 被回填/错绑。
+        let callIndex = -1
+        for (let p = pending.length - 1; p >= 0; p--) {
+          const c = out[pending[p]]
+          if (hasId(c) && c.call_id === item.call_id) { callIndex = pending[p]; break }
         }
-        // 无配对 call：保持缺省，交由 guard 报出可操作错误（不静默丢历史）
+        if (callIndex >= 0) { consume(callIndex); continue }
+        // 无精确匹配：仅当栈顶是我们生成的合成 id 时回填真实 id（call 缺 id、output 带 id 的既有语义）。
+        if (pending.length) {
+          const top = pending[pending.length - 1]
+          const call = out[top]
+          if (typeof call.call_id === 'string' && call.call_id.startsWith('call_mg_') && !callIds.has(item.call_id)) {
+            call.call_id = item.call_id
+            callIds.add(item.call_id)
+            repaired.push({ index: top, type: String(call.type || ''), action: 'backfill', from: index })
+            consume(top)
+            continue
+          }
+        }
+        // 无法确认关联：保持原样，交由 guard fail-closed；不吞 output、不伪造 call、不改写真实 id。
         continue
       }
-      // output 自带 id，但对应 call 缺/是合成 id → 回填，保证两端一致
-      if (callIndex != null) {
+      // output 无 id：与栈顶尚未闭合且已有 id 的 call 按位置配对（既有无损语义）。
+      if (pending.length) {
+        const callIndex = pending[pending.length - 1]
         const call = out[callIndex]
-        if (!hasId(call) || (typeof call.call_id === 'string' && call.call_id.startsWith('call_mg_'))) {
-          call.call_id = item.call_id
-          repaired.push({ index: callIndex, type: String(call.type || ''), action: 'backfill', from: index })
+        if (hasId(call)) {
+          item.call_id = call.call_id
+          repaired.push({ index, type, action: 'pair', from: callIndex })
+          consume(callIndex)
+          continue
         }
       }
-      pending.pop()
+      // MG-FIX-P0-01 无损修复：真孤儿 output（前面没有可配对 call）。
+      // third-party portable Responses 上游只要求 call_id 为非空字符串，并不要求同一 input 内
+      // 存在对应的 function_call。这里给这个**真实工具结果**补一个稳定的关联键：
+      //   · 不伪造 function_call（不新增任何 call item）；
+      //   · 不删历史、不改 content/output/name（仅补一个缺失的协议字段 call_id）；
+      //   · 由 output 自身内容确定性派生 → Codex 多次重连拿到同一个 id，不再触发形状漂移；
+      //   · 记 orphan-adopt 诊断，绝不静默。
+      // 这样消除“能正常输出但反复重连五次”的 P0 阻断，同时保持 typed fail-closed 对其它非法输入。
+      const seed = JSON.stringify({ t: type, n: item.name == null ? null : item.name, o: item.output == null ? null : item.output, i: index })
+      let synthetic = 'call_mg_orphan_' + sha256Hex(seed).slice(0, 16)
+      // 极端情况下与现有 id 冲突则加后缀，确保唯一。
+      let suffix = 1
+      while (existingIds.has(synthetic)) synthetic = 'call_mg_orphan_' + sha256Hex(seed + ':' + (++suffix)).slice(0, 16)
+      item.call_id = synthetic
+      existingIds.add(synthetic)
+      repaired.push({ index, type, action: 'orphan-adopt' })
     }
   }
   if (!repaired.length) return { body, repaired }
@@ -789,6 +886,40 @@ export function firstEmptyToolCallId (body) {
     if (typeof raw !== 'string' || raw === '') return { index, type, reason: typeof raw === 'string' ? 'empty' : 'missing' }
   }
   return null
+}
+
+// MG-FIX-P0-01：最小的“仅结构信息”脱敏 trace。只描述 item 的形状（type/role/name/id/call_id
+// 是否存在、是否工具调用/结果），以及请求归属（thread/correlation/route）。绝不输出正文、
+// content、arguments、output、token、authorization 或任何凭据/提示词内容。
+// 用途：当孤立工具输出导致 typed 400 时，运维凭这份 trace 判断历史形状与配对为何失败，
+// 而不必也不允许查看用户的真实对话内容。
+export function toolHistoryShapeTrace (body, meta = {}) {
+  const items = Array.isArray(body && body.input) ? body.input : []
+  const present = (v) => (typeof v === 'string' && v !== '') ? 'set' : (v === '' ? 'empty' : 'absent')
+  const shape = items.slice(0, 24).map((it, index) => {
+    if (!it || typeof it !== 'object' || Array.isArray(it)) return { index, type: 'unknown' }
+    const type = String(it.type || (it.role ? 'message' : 'unknown'))
+    const row = {
+      index,
+      type,
+      callId: present(it.call_id),
+      toolCall: TOOL_CALL_TYPES.has(type),
+      toolOutput: TOOL_OUTPUT_TYPES.has(type),
+    }
+    if (type === 'message' && it.role !== undefined) row.role = String(it.role)
+    if (it.name !== undefined) row.name = String(it.name) // 工具名是协议元数据，不是正文
+    if (it.id !== undefined) row.id = present(it.id)
+    return row
+  })
+  const out = {
+    itemCount: items.length,
+    traced: shape.length,
+    items: shape,
+  }
+  for (const key of ['thread', 'correlation', 'route', 'provider', 'model', 'reason']) {
+    if (meta[key] !== undefined && meta[key] !== null) out[key] = String(meta[key])
+  }
+  return out
 }
 
 // V2-08（A2 实测缺陷）：429 时按 models.*.fallbacks 换到**另一个授权域**的供应商 = 静默换供应商/套餐。
@@ -1979,10 +2110,24 @@ async function proxyNativeResponses(state, budget, log, opts) {
     }
     const badCallId = isOfficialResponsesProvider(prov) ? null : firstEmptyToolCallId(thirdPartyBody)
     if (badCallId) {
-      const shapes = (Array.isArray(thirdPartyBody.input) ? thirdPartyBody.input : [])
-        .slice(0, 12)
-        .map((it) => (it && typeof it === 'object' ? String(it.type || (it.role ? 'message:' + it.role : 'unknown')) : 'unknown'))
-      log && log.warn('第三方 Responses 历史中工具项缺少 call_id', pid, 'index=' + badCallId.index, 'type=' + badCallId.type, 'shapes=' + shapes.join('|'))
+      // MG-FIX-P0-01：补最小“仅结构信息”脱敏 trace（序号/type/role/name/id/call_id 是否存在 +
+      // thread/correlation/route），只写入诊断日志用于定位历史形状；绝不记录正文/凭据。
+      // thread/correlation 先哈希，避免把会话标识明文写进日志；route/model 是协议元数据。
+      const convRaw = (req && req.headers && (req.headers['x-conversation-id'] || req.headers['x-session-id']))
+        || (thirdPartyBody && (thirdPartyBody.conversation_id || thirdPartyBody.session_id))
+      const threadHash = hashId(convRaw, 'mg-p0-thread')
+      const reqHash = hashId(req && req.headers && req.headers['x-request-id'], 'mg-p0-req')
+      const trace = toolHistoryShapeTrace(thirdPartyBody, {
+        route: upstreamPath,
+        provider: pid,
+        model: modelName,
+        reason: badCallId.reason,
+        thread: threadHash || undefined,
+        correlation: reqHash || undefined,
+      })
+      log && log.warn('第三方 Responses 历史中工具项缺少 call_id', pid,
+        'index=' + badCallId.index, 'type=' + badCallId.type,
+        'trace=' + JSON.stringify(trace))
       return {
         status: 400,
         contentType: 'application/json; charset=utf-8',
@@ -1992,7 +2137,14 @@ async function proxyNativeResponses(state, budget, log, opts) {
               + '（前面没有可对应的工具调用）。第三方便携 Responses 上游要求 call_id 非空；请新开会话，或清理这段异常历史后重试。',
             code: 'third_party_tool_call_id_missing',
             type: 'invalid_request_error',
-            detail: { index: badCallId.index, itemType: badCallId.type, reason: badCallId.reason },
+            // detail 只含结构信息（序号/type/role/name/id/call_id 是否存在），不含正文/凭据，
+            // 让客户端与审计能解释“为何无法配对”而不暴露用户对话内容。
+            detail: {
+              index: badCallId.index,
+              itemType: badCallId.type,
+              reason: badCallId.reason,
+              historyShape: trace.items,
+            },
           },
         })),
       }
@@ -2170,6 +2322,37 @@ function makeHandler(state) {
         res.end(req.method === 'HEAD' ? undefined : LEGACY_CONSOLE_RETIRED); return
       }
       if (path === '/api/auth' && req.method === 'GET') { sendJson(res, 200, { needAuth: !!state.adminToken, startedAt: state.st.startedAt }); return }
+
+      // MG-FIX-P1-04：本机管理会话解锁。普通状态（未设置全局管理令牌）下管理面只读且写操作 403；
+      // 用户在本机 GUI 主动点击“解锁聚合管理”后，回环 + 同源/Host（上方已全局校验）取得一个
+      // 短时、纯内存、重启即失效的 local-admin 会话令牌，使 /api/aggregation/* 与 /api/codex/*
+      // 的显式管理员校验通过。绝不把“回环地址”当永久管理员，也不放宽远程/跨源入口。
+      if (path === '/api/admin/unlock' && req.method === 'POST') {
+        // peer 必须是回环（除非所有者显式 allowRemote，语义与其余管理面一致）。
+        if (!isLoopbackPeer(req) && !remoteManagementAllowed(state)) {
+          log && log.warn('admin unlock denied', 'remote_forbidden', path)
+          sendJson(res, 403, { ok: false, code: 'admin_unlock_denied', error: '本机管理会话只允许回环来源；远程管理需显式 allowRemote' })
+          return
+        }
+        // 已设置全局管理令牌时，解锁也必须出示它（未授权者不能仅凭本机连接提权）。
+        if (state.adminToken && !adminOk(req, state)) {
+          log && log.warn('admin unlock denied', 'admin_token_required', path)
+          sendJson(res, 403, { ok: false, code: 'admin_unlock_denied', error: '已设置全局管理令牌：解锁本机管理会话需先提供该令牌' })
+          return
+        }
+        try { await collectBody(req, 64 * 1024) } catch { /* body 无业务语义，仅消费以释放连接 */ }
+        const session = issueLocalAdminSession(state)
+        // A5 LOW-1：令牌承载响应显式禁止缓存/代理存储（纵深防御，浏览器/中间件不得留存会话令牌）。
+        const unlockBody = JSON.stringify({ ok: true, token: session.token, scope: 'local-admin', expiresAt: session.expiresAt })
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'content-length': Buffer.byteLength(unlockBody),
+          'cache-control': 'no-store, no-cache, must-revalidate, private',
+          'pragma': 'no-cache',
+        })
+        res.end(unlockBody)
+        return
+      }
       // E6 管理面：/api/codex/*（P0-2 / M4-1b）。
       // 顺序硬约束：Host/Origin 已在上面全局校验 → 可信 peer → 显式管理员 → 才读 body → 派发。
       // 未设置 adminToken 时这里没有任何 loopback 放行：/api/codex/* 一律 403 explicit_admin_required。
@@ -3035,6 +3218,8 @@ export function start(opts = {}) {
     adapterFactory: opts.adapterFactory,
     chatgptPlan: opts.chatgptPlan,
     adminToken: process.env.MG_ADMIN_TOKEN || (cfg.server && cfg.server.adminToken) || (cfg._keys && cfg._keys.__mg_admin) || '',
+    // MG-FIX-P1-04：本机管理会话令牌仓库，纯内存，重启即失效，永不落盘/写日志。
+    localAdminSessions: new Map(),
     paths: cfg._paths || configPaths(),
     // N06：运行时可观测收据（有界内存 ring；request/attempt/usage 三类事件，终态去重）。
     observability: createObservability({ capacity: (cfg.defaults && cfg.defaults.observability && cfg.defaults.observability.capacity) || undefined }),
