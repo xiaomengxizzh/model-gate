@@ -58,6 +58,29 @@ test('第三方 Responses 目标：剔除 stream_options（OpenCode Go portable 
   assert.deepEqual(official.dropped, [])
 })
 
+test('第三方 Responses 目标：剔除 access_programs / prompt_cache_key（luna 父子派单子请求实测）', () => {
+  const prov = { id: 'opencodego', baseUrl: 'https://opencode.ai/inference/go' }
+  const out = projectThirdPartyResponsesParams({
+    model: 'mg-opencodego-deepseek-v4-1-flash',
+    input: 'hi',
+    access_programs: ['codex'],
+    prompt_cache_key: 'pk_123',
+  }, prov)
+  assert.equal(Object.prototype.hasOwnProperty.call(out.body, 'access_programs'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(out.body, 'prompt_cache_key'), false)
+  assert.ok(out.dropped.includes('access_programs'))
+  assert.ok(out.dropped.includes('prompt_cache_key'))
+  assert.equal(out.body.input, 'hi', '不丢对话内容')
+  // 官方目标逐字节保留（这两项是官方 Responses 专属控制）
+  const official = projectThirdPartyResponsesParams(
+    { access_programs: ['codex'], prompt_cache_key: 'pk_123' },
+    { id: 'chatgptplan', baseUrl: 'https://chatgpt.com', codexIdentity: 'official' },
+  )
+  assert.deepEqual(official.body.access_programs, ['codex'])
+  assert.deepEqual(official.body.prompt_cache_key, 'pk_123')
+  assert.deepEqual(official.dropped, [])
+})
+
 test('工具项 call_id 为空/缺失：第三方 Responses 目标提前给出可操作错误（官方不受影响）', () => {
   const withEmpty = { input: [{ role: 'user', content: 'hi' }, { type: 'function_call', call_id: '', name: 'exec_command' }] }
   const bad = firstEmptyToolCallId(withEmpty)

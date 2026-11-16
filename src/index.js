@@ -741,6 +741,18 @@ export function projectThirdPartyResponsesParams(body, prov) {
     delete out.stream_options
     dropped.push('stream_options')
   }
+  // 2026-11-16 真机（gpt-6-luna 父→Go 子）实测：Codex 原生团队协作会在请求里带
+  // `access_programs` / `prompt_cache_key`，两者都是**官方 Responses 目标专属**的顶层控制，
+  // 不携带任何对话内容；Go 便携 Responses 上游直接报
+  // “access_programs: requires a native Responses target; portable routing requires the full
+  // conversation in input”。与 Chat 兼容桥 responses.js:625 的处理一致：第三方目标显式剔除，
+  // 官方目标逐字节透传。这样原生父子派单的子请求才不会被上游拒绝。
+  for (const key of ['access_programs', 'prompt_cache_key']) {
+    if (Object.prototype.hasOwnProperty.call(out, key)) {
+      delete out[key]
+      dropped.push(key)
+    }
+  }
   return { body: out, dropped }
 }
 
