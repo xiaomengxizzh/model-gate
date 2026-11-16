@@ -165,22 +165,31 @@ test('订阅官方入口：patchSubscriptionRequestBody 剔除 previous_response
   assert.equal(patched.input[0].role, 'user', '字符串 input 归一化为消息项')
 })
 
-test('第三方目标：previous_response_id 仍被严格 nativeGate 拒绝（不放宽契约）', async (t) => {
+test('第三方目标：previous_response_id 在入口剔除后按完整 input 转发（不误报 nativeContract）', async (t) => {
+  const bodies = []
+  const up = await startScriptedUpstream(async (req, res) => {
+    const chunks = []
+    for await (const c of req) chunks.push(c)
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.end('data: {"type":"response.created","response":{"id":"r","status":"in_progress","output":[]}}\n\ndata: {"type":"response.completed","response":{"id":"r","status":"completed","output":[]}}\n\n')
+  })
   const gw = await startGateway({
     config: {
       defaults: {},
-      providers: { go: { baseUrl: 'http://127.0.0.1:1', api: 'responses' } },
+      providers: { go: { baseUrl: up.base + '/v1', api: 'responses' } },
       models: { 'mg-third-responses': { provider: 'go', api: 'responses' } },
     },
   })
-  t.after(async () => { await gw.stop() })
+  t.after(async () => { await gw.stop(); await up.stop() })
   const r = await gw.call('/v1/responses', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: { model: 'mg-third-responses', input: 'x', stream: true, previous_response_id: 'resp_prev' },
   })
-  assert.equal(r.status, 400, '第三方目标未声明 nativeContract，previous_response_id 必须拒绝')
-  const j = await r.json()
-  assert.match(j.error.message, /previous_response_id|nativeContract/)
+  assert.equal(r.status, 200, 'previous_response_id 应在入口剔除而非被 nativeGate 拒绝')
+  await r.text()
+  assert.equal(bodies.length, 1)
+  assert.equal(Object.prototype.hasOwnProperty.call(bodies[0], 'previous_response_id'), false)
 })
 
 test('WS upgrade：网关完成 101 握手，握手阶段零上游命中', async (t) => {

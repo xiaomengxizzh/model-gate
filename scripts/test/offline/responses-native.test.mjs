@@ -71,8 +71,8 @@ test('原生 Responses legacy 拒绝矩阵（无 nativeContract）：明确 unsu
   t.after(async () => { await gw.stop(); await upstream.stop() })
 
   // M1-2：原生分支不再套用 Chat 桥的泛化 rejected；未声明 nativeContract 时
-  // store/previous_response_id/background/truncation 返回明确 typedUnsupported 码。
-  for (const patch of [{ store: true }, { previous_response_id: 'resp_x' }, { background: true }, { truncation: 'auto' }]) {
+  // store/background/truncation 返回明确 typedUnsupported 码。
+  for (const patch of [{ store: true }, { background: true }, { truncation: 'auto' }]) {
     const a = await gw.post('/v1/responses', Object.assign({ model: 'demo', input: 'hi' }, patch), json())
     assert.equal(a.status, 400, JSON.stringify(patch))
     const err = (await a.json()).error
@@ -81,7 +81,7 @@ test('原生 Responses legacy 拒绝矩阵（无 nativeContract）：明确 unsu
   }
   const b = await gw.post('/v1/responses', { model: 'emb', input: 'hi' }, json())
   assert.equal(b.status, 400); assert.equal((await b.json()).error.type, 'unsupported_model')
-  assert.equal(upstream.hits.length, 0)
+  assert.equal(upstream.hits.length, 0, '被拒请求零上游')
 })
 
 test('原生 Responses 错误与预算：上游错误体透传；慢上游 → 504', { timeout: 30000 }, async (t) => {

@@ -81,6 +81,25 @@ test('第三方 Responses 目标：剔除 access_programs / prompt_cache_key（l
   assert.deepEqual(official.dropped, [])
 })
 
+test('第三方 Responses 目标：剔除 previous_response_id（Codex WS 续轮字段，Go portable 不支持服务端续轮）', () => {
+  const prov = { id: 'opencodego', baseUrl: 'https://opencode.ai/inference/go' }
+  const out = projectThirdPartyResponsesParams({
+    model: 'mg-opencodego-deepseek-v4-1-flash',
+    input: [{ type: 'function_call_output', call_id: 'call_x', output: 'R' }],
+    previous_response_id: 'resp_prev',
+  }, prov)
+  assert.equal(Object.prototype.hasOwnProperty.call(out.body, 'previous_response_id'), false)
+  assert.ok(out.dropped.includes('previous_response_id'))
+  assert.equal(out.body.input.length, 1, '不丢对话内容')
+  // 官方目标逐字节保留
+  const official = projectThirdPartyResponsesParams(
+    { previous_response_id: 'resp_prev' },
+    { id: 'chatgptplan', baseUrl: 'https://chatgpt.com', codexIdentity: 'official' },
+  )
+  assert.equal(official.body.previous_response_id, 'resp_prev')
+  assert.deepEqual(official.dropped, [])
+})
+
 test('工具项 call_id 为空/缺失：第三方 Responses 目标提前给出可操作错误（官方不受影响）', () => {
   const withEmpty = { input: [{ role: 'user', content: 'hi' }, { type: 'function_call', call_id: '', name: 'exec_command' }] }
   const bad = firstEmptyToolCallId(withEmpty)

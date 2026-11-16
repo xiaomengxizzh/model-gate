@@ -767,6 +767,14 @@ export function projectThirdPartyResponsesParams(body, prov) {
       dropped.push(key)
     }
   }
+  // Codex WS 持久连接会在续轮帧里带 previous_response_id（官方 Responses API 靠它做
+  // connection-scoped 续轮）。Go 等第三方 portable Responses 上游不支持服务端续轮，
+  // 它按"每轮重放完整 input"工作；previous_response_id 对它是外来控制字段，透传会被拒。
+  // 同 access_programs 的处理：第三方显式剔除，官方目标逐字节保留。
+  if (Object.prototype.hasOwnProperty.call(out, 'previous_response_id')) {
+    delete out.previous_response_id
+    dropped.push('previous_response_id')
+  }
   return { body: out, dropped }
 }
 
@@ -2931,6 +2939,14 @@ function makeHandler(state) {
           }
         }
         if (nProto && nProto.protocol === RESPONSES) {
+          // Codex WS 续轮帧带 previous_response_id（官方 API 的 connection-scoped 续轮字段）。
+          // 第三方 portable Responses 目标不支持服务端续轮、按完整 input 工作，该字段在入口即剔除，
+          // 不进入 nativeGate（避免误报 nativeContract 未声明）；其它 gated 字段仍保持严格门禁。
+          // 官方目标走上面的 official 分支，不受影响。
+          if (body && Object.prototype.hasOwnProperty.call(body, 'previous_response_id')) {
+            body = Object.assign({}, body)
+            delete body.previous_response_id
+          }
           const nconv = responsesToChat(body, { mode: 'native' })
           if (nconv.rejected) { sendJson(res, 400, { error: { message: nconv.rejected.message, type: nconv.rejected.code || 'unsupported_parameter' } }); return }
           if ((nDef.capability || 'chat') !== 'chat') { sendJson(res, 400, { error: { message: '模型 ' + nHit.canonicalName + ' 的能力不是 chat，不能用于 /v1/responses', type: 'unsupported_model' } }); return }
