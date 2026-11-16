@@ -105,7 +105,11 @@ async function configure() {
   await writeFile(catalogPath, JSON.stringify(catalog), { mode: 0o600 })
   const configPath = join(gatewayHome, 'gateway.json')
   await writeFile(configPath, JSON.stringify(config), { mode: 0o600 })
-  const managedAgent = buildManagedAgentConfig({ model: alias })
+  // MG-P0-01 真机取证：Codex 0.167 原生子代理按目标模型 effortOptions 校验
+  // model_reasoning_effort；Go DeepSeek 只声明 low/high，默认 'medium' 会导致真实 spawn 报
+  // "Reasoning effort `medium` is not supported ... Supported: low, high"。这里显式取 'high'
+  // （与上面子模型 effortOptions 一致），不动全局默认以免影响既有用户的托管配置字节兼容。
+  const managedAgent = buildManagedAgentConfig({ model: alias, reasoningEffort: 'high' })
   const desktopConfig = `model_provider = "modelgate"
 model = "${parentModel}"
 model_catalog_json = ${JSON.stringify(catalogPath)}
