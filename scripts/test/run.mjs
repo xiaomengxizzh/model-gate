@@ -128,6 +128,7 @@ export const SUITES = [
   'scripts/test/offline/responses-endpoint.test.mjs',
   'scripts/test/offline/responses-mapping.test.mjs',
   'scripts/test/offline/responses-native.test.mjs',
+  'scripts/test/offline/sse-lifecycle.test.mjs',
   'scripts/test/offline/responses-continuation.test.mjs',
   'scripts/test/offline/responses-ws-bridge.test.mjs',
   'scripts/test/offline/codex-toml-safety.test.mjs',
