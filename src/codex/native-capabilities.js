@@ -11,7 +11,7 @@ export const CAPABILITY_STATUSES = Object.freeze(['PASS_MOCK', 'NOT_ACCEPTED', '
 
 export const NATIVE_CAPABILITY_HEADLINE =
   'V1 原生路径（spawn / 工具轮 / 同子追派 / 正常退出后 resume）离线可复核；' +
-  '原生 Agent Team 未完成：V2 单进程追派与 interrupt 为 NOT_ACCEPTED，真实 GPT-6 Luna 验收为 BLOCKED。'
+  '原生 Agent Team 未完成：V2 单进程追派、interrupt 与中断后同子恢复为 NOT_ACCEPTED，真实 GPT-6 Luna 验收与原生压缩真实触发为 BLOCKED。'
 
 const WAIT_SUITE = 'scripts/test/offline/agg-native-wait.test.mjs'
 const INTERRUPT_SUITE = 'scripts/test/offline/agg-native-interrupt.test.mjs'
@@ -100,6 +100,38 @@ export const NATIVE_CAPABILITIES = Object.freeze([
       why: 'collaboration.interrupt_agent 是 Codex harness 的本地工具调用，网关只看到一次 function_call + 输出；上游协议没有 cancel 帧，也没有 interrupted 终态，网关无法证明“单一中断终态”。',
     },
     notes: '网关侧仍保证：客户端中断时下游 SSE 记录唯一终态（CLIENT_CANCELED），且 interrupt_agent 的身份/关联 ID 原样还原。',
+  },
+  {
+    id: 'native_compaction_codex_owned',
+    version: 'v2',
+    feature: '压缩由 Codex 自身触发并本地执行（remote_compaction="unsupported"），网关只做协议保真与 typed 闸门',
+    status: 'BLOCKED',
+    gatewayRole: 'declares provider remote_compaction=unsupported; relays the local compaction prompt verbatim; rejects/relays compaction items by typed gate, never summarizes or forges ciphertext',
+    evidence: {
+      type: 'evidence-doc',
+      path: 'docs/evidence/2026-11-16-v3-compaction-investigation.md',
+      observation: '真实客户端+回环上游证明协议路径成立（PASS_MOCK）；冻结树 1a527c6 三次未触发压缩，真机压缩证据仅来自 3116459；最终树无真实重测',
+    },
+    blocker: '真实 Go DeepSeek + gpt-6-luna 长会话触发 context compacted 需付费额度与长会话授权；0.167.x 自动压缩按 token 增长触发，20k–32k 短夹具不触发。无授权即 BLOCKED。',
+    notes: '协议保真/能力闸门已离线 PASS_MOCK；真实压缩未通过，不得升级为 PASS_REAL。history/export 迁移导出例外不得与压缩混用。',
+  },
+  {
+    id: 'same_child_resume_after_interrupt',
+    version: 'v2',
+    feature: '中断后 resume 复用同一 childId（同子恢复），工具与上下文连续且不重复派单',
+    status: 'NOT_ACCEPTED',
+    gatewayRole: 'relays collaboration tool items by call_id only; never generates, stores, or maps childId/thread identity — child reuse is client-side',
+    evidence: {
+      type: 'evidence-doc',
+      path: 'docs/evidence/2026-11-16-v3-compaction-investigation.md',
+      observation: '冻结树 1a527c6 两次 resume 均 spawn_agent 新建 childId（01a1deca-…），未复用被中断的 01a1dec9-…；3116459 曾有一次落回原子 rollout，客户端行为跨构建不稳定',
+    },
+    missing: {
+      messageTypes: ['spawn_agent', 'send_input'],
+      fields: ['childId', 'threadId'],
+      why: 'resume 是否复用原子线程由 Codex harness 决定；网关只看到 collaboration 工具项与 call_id，不持有 childId，无法在不自建第二套线程调度（契约禁止）的前提下强制同子恢复。需客户端侧方案或所有者裁决。',
+    },
+    notes: '不是网关可修项；不可为通过而自造线程映射。真实同子恢复验收因缺付费长会话授权 BLOCKED，另见 BLOCKED 项说明。',
   },
   {
     id: 'cross_provider_child',
