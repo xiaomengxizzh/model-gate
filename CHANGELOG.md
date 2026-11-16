@@ -2,6 +2,13 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-16 兼容 Codex 省略 call_id 的工具历史（第三方 Responses）
+
+### Fixed
+
+- **新会话也报 `input[N].call_id: expected a non-empty string`**：真机日志证明 Codex 会发送不带 `call_id` 的 `function_call` / `function_call_output`（官方后端接受"按位置配对"，第三方 portable 上游不接受）。修复：`repairThirdPartyToolCallIds()` 对**非官方** Responses 目标做无损配对补齐——call 缺 id 生成 `call_mg_N`、output 缺 id 沿用最近未闭合 call 的 id、output 自带 id 则回填 call；不增删历史项、不改消息内容，并记录 `index:action` 诊断。无法配对的孤儿 output 仍返回可操作 400（不再把上游索引报错透给用户）。
+- 回归：`agg-v2-third-party-params.test.mjs`（补齐/配对/回填/零改动/孤儿 五个断言组）。
+
 ## [Unreleased] —— 2026-11-16 修复第三方 Responses 目标的 stream_options 400
 
 ### Fixed

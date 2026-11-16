@@ -1988,8 +1988,8 @@ async function proxyNativeResponses(state, budget, log, opts) {
         contentType: 'application/json; charset=utf-8',
         buf: Buffer.from(JSON.stringify({
           error: {
-            message: '会话历史第 ' + (badCallId.index + 1) + ' 项（' + badCallId.type + '）的工具调用缺少 call_id，第三方便携 Responses 上游拒绝这种历史。'
-              + '这通常来自跨模型 fork 或压缩后的旧工具记录；请在该模型上新开会话后重试，或让父代理以「不继承历史」方式派发子代理。',
+            message: '会话历史第 ' + (badCallId.index + 1) + ' 项（' + badCallId.type + '）的工具项缺少 call_id，且网关无法按位置配对'
+              + '（前面没有可对应的工具调用）。第三方便携 Responses 上游要求 call_id 非空；请新开会话，或清理这段异常历史后重试。',
             code: 'third_party_tool_call_id_missing',
             type: 'invalid_request_error',
             detail: { index: badCallId.index, itemType: badCallId.type, reason: badCallId.reason },
