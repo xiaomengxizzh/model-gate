@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import net from 'node:net'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { startGateway, startScriptedUpstream } from './harness.mjs'
@@ -148,9 +149,37 @@ function rawRequest(urlStr, headers) {
   })
 }
 
-test('WS upgrade：网关回 404 让客户端回落，且零上游命中', async (t) => {
+test('WS upgrade：网关完成 101 握手，握手阶段零上游命中', async (t) => {
   const { gw, officialHits } = await setup(t, { mode: 'nokey' })
-  const r = await rawRequest(gw.base + '/v1/responses', { connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==', 'sec-websocket-version': '13', authorization: 'Bearer official-test-token', 'chatgpt-account-id': 'acct-test-123' })
-  assert.equal(r.status, 404)
+  const handshake = await new Promise((resolve, reject) => {
+    const u = new URL(gw.base + '/v1/responses')
+    const socket = net.connect(Number(u.port), u.hostname, () => {
+      socket.write([
+        'GET /v1/responses HTTP/1.1',
+        'Host: ' + u.host,
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+        'Sec-WebSocket-Version: 13',
+        'authorization: Bearer official-test-token',
+        'chatgpt-account-id: acct-test-123',
+        '', '',
+      ].join('\r\n'))
+    })
+    let buf = ''
+    socket.on('data', (d) => {
+      buf += d.toString('utf8')
+      if (buf.includes('\r\n\r\n')) {
+        const status = Number(/HTTP\/1\.1 (\d+)/.exec(buf)?.[1] || 0)
+        const upgraded = /sec-websocket-accept:/i.test(buf)
+        socket.destroy()
+        resolve({ status, upgraded })
+      }
+    })
+    socket.on('error', reject)
+    socket.setTimeout(5000, () => { socket.destroy(); reject(new Error('ws handshake timeout')) })
+  })
+  assert.equal(handshake.status, 101)
+  assert.equal(handshake.upgraded, true)
   assert.equal(officialHits.length, 0)
 })

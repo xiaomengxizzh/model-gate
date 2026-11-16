@@ -127,6 +127,7 @@ export const SUITES = [
   'scripts/test/offline/responses-endpoint.test.mjs',
   'scripts/test/offline/responses-mapping.test.mjs',
   'scripts/test/offline/responses-native.test.mjs',
+  'scripts/test/offline/responses-ws-bridge.test.mjs',
   'scripts/test/offline/retry-governance.test.mjs',
   'scripts/test/offline/routing-decision.test.mjs',
   'scripts/test/offline/routing-ledger.test.mjs',

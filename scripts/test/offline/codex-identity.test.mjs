@@ -4,6 +4,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import net from 'node:net'
 import { readFileSync, readdirSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -66,6 +67,38 @@ function rawRequest(base, path, body, headers, method = 'POST') {
     req.on('error', reject)
     if (payload) req.write(payload)
     req.end()
+  })
+}
+
+// WS 升级握手：101 后立刻关闭 socket，不用 http.request（upgrade 响应没有 end，会挂住）。
+function wsHandshake(base, path, headers) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(base + path)
+    const socket = net.connect(Number(u.port), u.hostname, () => {
+      const lines = [
+        'GET ' + path + ' HTTP/1.1',
+        'Host: ' + u.host,
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        'Sec-WebSocket-Key: ' + (headers['sec-websocket-key'] || 'dGhlIHNhbXBsZSBub25jZQ=='),
+        'Sec-WebSocket-Version: ' + (headers['sec-websocket-version'] || '13'),
+        ...Object.entries(headers).filter(([k]) => !/^sec-websocket|^upgrade$|^connection$/i.test(k)).map(([k, v]) => k + ': ' + v),
+        '', '',
+      ]
+      socket.write(lines.join('\r\n'))
+    })
+    let buf = ''
+    socket.on('data', (d) => {
+      buf += d.toString('utf8')
+      if (buf.includes('\r\n\r\n')) {
+        const status = Number(/HTTP\/1\.1 (\d+)/.exec(buf)?.[1] || 0)
+        const upgraded = /sec-websocket-accept:/i.test(buf)
+        socket.destroy()
+        resolve({ status, upgraded })
+      }
+    })
+    socket.on('error', reject)
+    socket.setTimeout(5000, () => { socket.destroy(); reject(new Error('ws handshake timeout')) })
   })
 }
 
@@ -353,24 +386,19 @@ test('聚合保留 ID：已配置即正常路由，旧接口兜底兼容不变',
   assert.equal(upstream.hits[0].url, '/v1/chat/completions')
 })
 
-test('WS upgrade 的 GET /v1/responses 不得被当普通请求转发', { timeout: 30000 }, async (t) => {
+test('WS upgrade 的 GET /v1/responses 走 WS 桥握手，不被当普通请求转发', { timeout: 30000 }, async (t) => {
   const upstream = await echoUpstream()
   const gw = await startIsolated({ name: 'e1-ws-upgrade', config: thirdPartyConfig(upstream) })
   t.after(async () => { await gw.stop(); await upstream.stop() })
 
-  let errored = false
-  let status = null
-  try {
-    const res = await rawRequest(gw.base, '/v1/responses', undefined, {
-      upgrade: 'websocket', connection: 'Upgrade',
-      'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==', 'sec-websocket-version': '13',
-      authorization: 'Bearer CLIENT-OFFICIAL-TOKEN', 'chatgpt-account-id': 'acct-CLIENT-ACCOUNT',
-      'openai-beta': 'responses=experimental',
-    }, 'GET')
-    status = res.status
-  } catch { errored = true }
-  // E1 契约：404（Codex 收到 404 会回落 HTTPS）；index.js 收口前 405 也证明未被转发。
-  assert.ok(errored || status === 404 || status === 405, '升级请求不得被当普通请求处理（实际 status=' + status + '）')
+  const handshake = await wsHandshake(gw.base, '/v1/responses', {
+    'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==', 'sec-websocket-version': '13',
+    authorization: 'Bearer CLIENT-OFFICIAL-TOKEN', 'chatgpt-account-id': 'acct-CLIENT-ACCOUNT',
+    'openai-beta': 'responses=experimental',
+  })
+  // WS 桥在 101 前完成来源校验，且不在握手阶段触达任何上游；凭据只在后续 create 帧按既有策略处理。
+  assert.equal(handshake.status, 101)
+  assert.equal(handshake.upgraded, true)
   assert.equal(upstream.hits.length, 0, '升级请求零上游命中')
 })
 

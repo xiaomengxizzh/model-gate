@@ -37,6 +37,7 @@ import { planTargetHeaders, targetDeny, legacyPassthroughRequested } from './cod
 import { handleCodexApi, isCodexApiPath } from './codex/api.js'
 import { handleAggregationApi, isAggregationApiPath } from './aggregation/api.js'
 import { registerConfigRoot, sha256Hex } from './codex/config.js'
+import { attachResponsesWebSocket } from './responses-ws.js'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
@@ -2837,9 +2838,9 @@ function makeHandler(state) {
       const isResponses = RESPONSES_PATHS.has(path)
       if (!path.startsWith('/v1') && !isChat && !isResponses) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
       if (isResponses && req.method !== 'POST') {
-        // Codex 0.167 会先尝试 WebSocket（GET /v1/responses + upgrade）。网关不做协议升级：
-        // 必须明确 404 让客户端回落到 HTTPS（实测日志 "unexpected status 404" 后 POST 成功），
-        // 不能 405/挂起，也绝不把 upgrade 帧头转发给任何上游。
+        // Codex 0.167 会先尝试 WebSocket（GET /v1/responses + upgrade）。真正的升级由
+        // server.on('upgrade') 上的 responses-ws 桥处理；此处是"未挂载 WS 桥"时的兜底：
+        // 明确 404 让客户端回落到 HTTPS，不能 405/挂起，也绝不把 upgrade 帧头转发给任何上游。
         if (req.method === 'GET' && String(req.headers.upgrade || '').toLowerCase() === 'websocket') {
           sendJson(res, 404, { error: { message: 'WebSocket transport not supported by gateway; fall back to HTTPS', type: 'ws_not_supported' } })
           return
@@ -3367,6 +3368,11 @@ export function start(opts = {}) {
   const server = opts.server || http.createServer(makeHandler(state))
   const host = (cfg.server && cfg.server.host) || '127.0.0.1'
   const port = (cfg.server && cfg.server.port) || 8787
+  // Responses WebSocket 桥（消除 Codex 首轮 5/7 次 WS 回退重连）：
+  //  每个 response.create 帧重放进本进程 POST /v1/responses，复用同一鉴权/路由/工具修复链路。
+  //  回滚开关：server.responsesWebSocket = false → 不挂载 upgrade 监听，回到"无 WS 支持"行为。
+  const wsBridgeEnabled = cfg.server && cfg.server.responsesWebSocket === false ? false : true
+  attachResponsesWebSocket(server, { state, log, enabled: wsBridgeEnabled })
   server.on('error', (err) => { log.error('server error', err.message); process.exitCode = 1 })
   // 统一关闭接口（MG-007）：停定时器 → 排空连接（带超时兜底）→ 最终原子落盘。
   // 幂等：重复调用返回同一个 promise，SIGTERM 与测试代码可以安全各调一次。
