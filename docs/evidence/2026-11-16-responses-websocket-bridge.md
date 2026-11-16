@@ -8,7 +8,8 @@
   - `d6e01f1` WS 桥主体（握手 + 帧解析 + 重放进 POST + SSE 回帧 + 回滚开关）
   - `1a685b0` 交付/回退说明
   - `53d886d`→`2f9ff2c`→`b5af929` 真机暴露的订阅后端参数剔除（`previous_response_id`、`access_programs`、`prompt_cache_key`）
-  - 末次提交：SSE 正文嗅探（content-type 误标修复）+ status 门禁 + 测试加固
+  - `a2727dd` SSE 正文嗅探（content-type 误标修复）+ status 门禁 + 测试加固
+  - `4ccf70f` connection-scoped function_call 缓存（修复 wait_agent/spawn_agent 孤儿 output）
 - **部署状态**：已部署到生产网关 8787，由 systemd user 单元 `model-gateway.service`（`Restart=always`）托管。
 - **通用 GUI 身份保持不变**：`~/.codex/config.toml` 仍为 `model_provider="openai"` + `openai_base_url="http://127.0.0.1:8787"` + `model="gpt-6-luna"`；未切 named provider，未改 `auth.json`（sha `de7cc6e…` 未变）。
 
@@ -33,7 +34,17 @@
 
 - `scripts/test/offline/responses-ws-bridge.test.mjs`（7/7 PASS）：握手 101、SSE→WS 逐帧、头隔离、`generate:false` 零上游、同 socket 续轮、`response.interrupt` 真中止、401 error 帧、回滚开关、非法帧、SSE 正文嗅探、`application/json` 误标不产生 completed。
 - `codex-official.test.mjs`（7/7 PASS）：订阅后端参数剔除、第三方仍严格拒绝、官方 WS 握手零上游命中。
-- 全量：`npm test` **128 suites / 1240 tests PASS / 0 failed / 3 skipped**；`npm run check`、`contract:check`、`docs:check`、`gate:v2`、`gate:v2:independent`、`gate:audit-diff` 全 PASS。
+- 全量：`npm test` **128 suites / 1244 tests PASS / 0 failed / 3 skipped**；`npm run check`、`contract:check`、`docs:check`、`gate:v2`、`gate:v2:independent`、`gate:audit-diff` 全 PASS。
+
+### 追加：connection-scoped function_call 缓存（4ccf70f）
+
+- 问题：订阅后端不接受 `previous_response_id`（实测 `Unsupported parameter: previous_response_id`），Codex WS 续轮时 `wait_agent`/`spawn_agent` 的 `function_call` 状态无法被后端关联，`function_call_output` 成孤儿 → 400 `No tool call found for function call output`。
+- 方案一（恢复透传）已实测否决：普通推理直接 400，已回退。
+- 方案二（已实施）：WS 桥内建按 thread 隔离、有界（128/会话、128 会话、6h TTL）、进程内的 `function_call` 缓存；从上游 SSE `response.output_item.*` / `response.completed` 捕获**真实** call，新一轮 create 帧发往 POST 前把真实 call 注入到孤儿 output 前。不伪造 call_id、不改 output 内容、不跳过网关链路。等价官方 Responses WS 的 connection-scoped 缓存，但按 thread 键容忍 Codex 每轮重开 WS。
+- 测试：`responses-ws-bridge.test.mjs` 11/11（4 单元 + 1 真机闭环离线：缓存真实 call、下一轮孤儿 output 被注入配对、call 在 output 前、output 未改、跨会话隔离）。
+- **真机双场景（通用身份）**：
+  - A 普通推理 `8*8` → EXIT=0、输出 `64`、0 reconnect、0 错误帧（29s）。
+  - B `spawn_agent`→`wait_agent` → EXIT=0、输出 `The delegated task is complete.`、0 `No tool call found`；网关日志证据：`cached function_call name=spawn_agent`、`cached function_call name=wait_agent`、`injected cached function_call call_Qcaz…`。
 - **真机验收（通用 GUI 身份，`codex exec -m gpt-6-luna`）**：
   - `Compute 2+2…Reply with ONLY the single digit: 4` → EXIT=0，输出 `4`，**0 次 reconnect**，无 error 帧（25s）。
   - 修复前对照：同一命令反复 `Reconnecting 2/5…5/5` + `Falling back from WebSockets to HTTPS`（502），已消失。
