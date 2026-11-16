@@ -272,6 +272,8 @@ export function normalizeProviderInput (body) {
   if (raw.baseUrl != null && String(raw.baseUrl).trim() !== '') out.baseUrl = raw.baseUrl
   if (raw.apiKeyEnv != null && String(raw.apiKeyEnv).trim() !== '') out.apiKeyEnv = raw.apiKeyEnv
   if (raw.apiKey != null) out.apiKey = raw.apiKey
+  // 接管既有非聚合 Go 上游（只补聚合元数据）：仅显式 true 才透传，绝不隐式接管。
+  if (raw.adopt === true) out.adopt = true
   if (version !== undefined) out.version = Number(version)
   return out
 }

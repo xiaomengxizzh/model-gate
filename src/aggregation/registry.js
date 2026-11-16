@@ -53,6 +53,41 @@ function reject(code, message, details) {
   throw new RegistryError(code, message, details)
 }
 
+// 接管既有（非聚合）上游：只补 aggregation 元数据，凭据引用沿用既有 apiKeyEnv。
+// 拒绝条件全部为显式 typed error，绝不静默改写既有形状。
+function adoptionEntry (id, existing, normalized, cfg) {
+  if (!isPlainObject(existing)) reject('provider_adopt_invalid', '既有上游记录不是对象，拒绝接管：' + id)
+  for (const field of SECRET_FIELDS) {
+    if (existing[field] != null && existing[field] !== '') {
+      reject('provider_key_inline_forbidden', '既有上游包含内联凭据字段 `' + field + '`，拒绝接管；请先改为 apiKeyEnv/keys 存储')
+    }
+  }
+  if (existing.aggregation && isPlainObject(existing.aggregation)) {
+    reject('provider_exists', '该上游已带聚合元数据：' + id)
+  }
+  const baseUrl = String(existing.baseUrl == null ? '' : existing.baseUrl).trim()
+  if (!baseUrl) reject('provider_base_url_missing', '既有上游缺少 baseUrl，无法接管：' + id)
+  const { host } = validateBaseUrl(baseUrl, cfg)
+  const kind = String(normalized.aggregation.kind)
+  if (kind === 'opencode-go' && host !== normalized.aggregation.host) {
+    reject('provider_host_not_allowlisted', '既有上游 host 与 preset 目标不一致：' + host)
+  }
+  const apiKeyEnv = existing.apiKeyEnv == null ? '' : String(existing.apiKeyEnv).trim()
+  if (apiKeyEnv && !ENV_NAME_RE.test(apiKeyEnv)) {
+    reject('provider_api_key_env_invalid', '既有上游 apiKeyEnv 不是合法变量名：' + apiKeyEnv)
+  }
+  return {
+    baseUrl,
+    api: existing.api == null || existing.api === '' ? 'openai' : String(existing.api),
+    ...(existing.pathPrefix ? { pathPrefix: String(existing.pathPrefix) } : {}),
+    ...(apiKeyEnv ? { apiKeyEnv } : {}),
+    ...(existing.apiKeyEnvSource ? { apiKeyEnvSource: existing.apiKeyEnvSource } : {}),
+    ...(isPlainObject(existing.extraHeaders) ? { extraHeaders: existing.extraHeaders } : {}),
+    ...(existing.note ? { note: String(existing.note) } : {}),
+    keyRef: apiKeyEnv ? 'env:' + apiKeyEnv : 'provider-key',
+  }
+}
+
 // 删除运行时统计字段：local 只保存配置，不回写 hasKey/probe/st 等内存投影。
 function stripRuntimeProvider(p) {
   const out = {}
@@ -348,11 +383,32 @@ export function createRegistry(options = {}) {
     const normalized = normalizeProviderConfig(input, cfg)
     const expectedVersion = input && input.version !== undefined ? input.version : options.expectedVersion
     const id = normalized.aggregation.id
-    if (cfg.providers && cfg.providers[id] && recordOf(id, cfg.providers[id])) {
+    const adopt = !!(input && input.adopt === true)
+    const existingEntry = cfg.providers && cfg.providers[id] ? cfg.providers[id] : null
+    if (existingEntry && recordOf(id, existingEntry)) {
       reject('provider_exists', '聚合 Provider 已存在：' + id)
     }
-    if (cfg.providers && cfg.providers[id] && !recordOf(id, cfg.providers[id])) {
-      reject('provider_id_in_use', 'provider id 已被非聚合上游占用：' + id)
+    if (existingEntry && !recordOf(id, existingEntry) && adopt) {
+      // 接管（adopt）：把聚合元数据补进既有上游，保留 baseUrl/api/apiKeyEnv/pathPrefix 与模型绑定。
+      // 边界：不接收内联凭据、host 必须在 OpenCode 白名单、绝不改写 models 或其它上游。
+      const adopted = adoptionEntry(id, existingEntry, normalized, cfg)
+      const now = new Date().toISOString()
+      const entry = Object.assign({}, adopted, {
+        aggregation: Object.assign({}, normalized.aggregation, {
+          // 凭据引用必须沿用既有 apiKeyEnv（否则运行时会去 keys 存储找不存在的 provider-key）
+          keyRef: adopted.keyRef,
+          addedAt: now, updatedAt: now, adopted: true, adoptedFrom: 'existing-provider',
+        }),
+      })
+      const { version } = commitProviders(({ providers, removed }) => {
+        providers[id] = entry
+        removed.delete(id)
+        return entry
+      }, expectedVersion)
+      return Object.assign({}, recordOf(id, entry), { version, adopted: true })
+    }
+    if (existingEntry && !recordOf(id, existingEntry)) {
+      reject('provider_id_in_use', 'provider id 已被非聚合上游占用：' + id + '（如确认接管既有上游，传 adopt:true）')
     }
     const sameKind = listProviders().find((p) => p.kind === normalized.aggregation.kind && p.id !== id)
     if (sameKind) {

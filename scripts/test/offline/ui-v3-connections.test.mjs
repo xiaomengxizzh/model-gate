@@ -350,6 +350,39 @@ test('目标模型固定很深：容错接受公共 ID / 上游名 / 旧写法�
 })
 
 // ---------- 7) product 缺失时绝不出现成功状态 ----------
+test('既有非聚合 Go 上游占用 id 时：显式 adopt 重试接管，并保留原端点/Key 语义', async () => {
+  const calls = []
+  let providerAttempt = 0
+  const post = async (path, body) => {
+    calls.push({ path, body })
+    if (path === '/api/aggregation/providers') {
+      providerAttempt += 1
+      if (providerAttempt === 1) {
+        const err = new Error('provider id 已被非聚合上游占用')
+        err.status = 409
+        err.code = 'provider_id_in_use'
+        err.data = { code: 'provider_id_in_use' }
+        throw err
+      }
+      return { ok: true, provider: { id: 'opencodego' }, configVersion: 4 }
+    }
+    if (path === '/api/keys') return { ok: true, version: 5 }
+    if (path.endsWith('/sync')) return { ok: true, applied: true, completeness: 'complete', catalog: { modelCount: 1 } }
+    throw new Error('unexpected path ' + path)
+  }
+  const result = await connections.runConnectFlow({ post, key: 'fixture-key', configVersion: 3 })
+  assert.equal(result.providerAdopted, true)
+  assert.equal(result.providerRegistered, true)
+  assert.equal(result.keySaved, true)
+  const providerCalls = calls.filter((c) => c.path === '/api/aggregation/providers')
+  assert.equal(providerCalls.length, 2, '首次失败 + 一次 adopt 重试')
+  assert.equal(providerCalls[0].body.adopt, undefined, '首次不得隐式接管')
+  assert.equal(providerCalls[1].body.adopt, true, '重试必须显式 adopt:true')
+  assert.equal(providerCalls[1].body.preset, 'opencode-go')
+  assert.ok(!('baseUrl' in providerCalls[1].body))
+  assert.match(result.steps[0].message, /接管/)
+})
+
 test('product=null：只显示"正在读取真实状态"，不出现"已连接/已启用"', () => {
   const overall = connections.describeOverall(null)
   assert.equal(overall.label, '正在读取真实状态')

@@ -202,7 +202,32 @@ export async function runConnectFlow (deps = {}) {
       result.providerRegistered = true
     } catch (error) {
       const info = errorInfo(error)
-      if (info.status === 409 && info.code === 'provider_exists') {
+      // 既有 V1 时代的 providers.opencodego（无聚合元数据）占用固定 id 时，显式接管：
+      // 只补聚合元数据，保留原 baseUrl/apiKeyEnv 与既有模型绑定（不新建第二套凭据）。
+      if (info.status === 409 && info.code === 'provider_id_in_use') {
+        try {
+          await post(AGGREGATION_ENDPOINTS.providers, Object.assign(
+            buildProviderRequest({ configVersion: deps.configVersion, overrides: deps.overrides }),
+            { adopt: true },
+          ))
+          steps[0].status = 'done'
+          steps[0].message = '已接管既有 OpenCode Go 供应商（保留原端点与 Key，仅补聚合元数据）'
+          result.providerRegistered = true
+          result.providerAdopted = true
+        } catch (adoptError) {
+          const ainfo = errorInfo(adoptError)
+          steps[0].status = 'failed'
+          steps[0].code = ainfo.code
+          steps[0].message = '接管既有供应商失败：' + ainfo.code
+          result.failedStep = 'provider'
+          result.failedCode = ainfo.code
+          steps[1].status = 'skipped'
+          steps[1].message = '未执行：供应商接管失败，没有写入任何 Key'
+          steps[2].status = 'skipped'
+          steps[2].message = '未执行：供应商接管失败'
+          return finishConnect(result)
+        }
+      } else if (info.status === 409 && info.code === 'provider_exists') {
         steps[0].status = 'existing'
         steps[0].message = '供应商已存在，继续保存 Key（不重复创建）'
         result.providerRegistered = true
