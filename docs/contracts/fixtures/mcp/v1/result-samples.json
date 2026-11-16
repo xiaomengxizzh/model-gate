@@ -1,0 +1,505 @@
+{
+  "contract": "modelgate-mcp-delegation-v1",
+  "version": 1,
+  "note": "结果为 tools/call 的 result 对象。content[0].text 必须与 structuredContent 是同一份序列化（此处为紧凑 JSON）。resultDigest 按契约 §4.4 由本文件中的字段真实计算，可直接复算校验；artifacts[0].sha256/bytes 是 tools-list.json 的真实 SHA-256 与字节数。",
+  "samples": [
+    {
+      "id": "delegate.admitted",
+      "tool": "modelgate_delegate_task",
+      "note": "派发前的登记结果：turnRef/dispatchedAt/elapsedMs 为空、无结果、无 digest。duplicate:false 表示首次登记。",
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"ok\":true,\"contract\":\"modelgate-mcp-delegation-v1\",\"version\":1,\"tool\":\"modelgate_delegate_task\",\"task\":{\"taskRef\":\"mgtask-0123456789abcdef\",\"state\":\"ADMITTED\",\"provider\":\"opencodego\",\"model\":\"deepseek-v4.1-flash\",\"turnRef\":null,\"turnCount\":1,\"parentThreadId\":\"codex-parent-fixture-01\",\"createdAt\":1763030100000,\"updatedAt\":1763030100000,\"dispatchedAt\":null,\"elapsedMs\":null,\"resultText\":null,\"resultBytes\":0,\"truncated\":false,\"resultDigest\":null,\"toolSummary\":[],\"artifacts\":[],\"lossy\":[],\"delegation\":{\"native\":false,\"degraded\":true,\"kind\":\"external_worker_delegation\",\"proof\":\"modelgate-mcp-delegation-v1\"},\"error\":null,\"cancel\":null,\"acknowledged\":false,\"ackSeq\":0,\"reconcileRequired\":false},\"duplicate\":false}"
+          }
+        ],
+        "structuredContent": {
+          "ok": true,
+          "contract": "modelgate-mcp-delegation-v1",
+          "version": 1,
+          "tool": "modelgate_delegate_task",
+          "task": {
+            "taskRef": "mgtask-0123456789abcdef",
+            "state": "ADMITTED",
+            "provider": "opencodego",
+            "model": "deepseek-v4.1-flash",
+            "turnRef": null,
+            "turnCount": 1,
+            "parentThreadId": "codex-parent-fixture-01",
+            "createdAt": 1763030100000,
+            "updatedAt": 1763030100000,
+            "dispatchedAt": null,
+            "elapsedMs": null,
+            "resultText": null,
+            "resultBytes": 0,
+            "truncated": false,
+            "resultDigest": null,
+            "toolSummary": [],
+            "artifacts": [],
+            "lossy": [],
+            "delegation": {
+              "native": false,
+              "degraded": true,
+              "kind": "external_worker_delegation",
+              "proof": "modelgate-mcp-delegation-v1"
+            },
+            "error": null,
+            "cancel": null,
+            "acknowledged": false,
+            "ackSeq": 0,
+            "reconcileRequired": false
+          },
+          "duplicate": false
+        },
+        "isError": false
+      }
+    },
+    {
+      "id": "get.result_ready",
+      "tool": "modelgate_get_task",
+      "note": "首次读到终态记录：服务端在同一次响应处理内推进 ACK（ackSeq 0→1，状态随后变 ACKNOWLEDGED）。digest 不含 state，因此 ack 前后 digest 不变。",
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"ok\":true,\"contract\":\"modelgate-mcp-delegation-v1\",\"version\":1,\"tool\":\"modelgate_get_task\",\"task\":{\"taskRef\":\"mgtask-0123456789abcdef\",\"state\":\"RESULT_READY\",\"provider\":\"opencodego\",\"model\":\"deepseek-v4.1-flash\",\"turnRef\":\"mgturn-0123456789abcdef\",\"turnCount\":1,\"parentThreadId\":\"codex-parent-fixture-01\",\"createdAt\":1763030000000,\"updatedAt\":1763030062500,\"dispatchedAt\":1763030001200,\"elapsedMs\":61300,\"resultText\":\"核对完成：5 个工具名、annotations 与 inputSchema.required 一致；拒绝矩阵各 case 的 expect.code 全部落在契约 §9.2 内；未发现字段漂移。\\n产物：docs/contracts/fixtures/mcp/v1/tools-list.json（只读，未改动）。\",\"resultBytes\":253,\"truncated\":false,\"resultDigest\":\"7fc76469ca48c7c0b30a3f9c5b1e186f797875b6ecc55c508e6beab20fdc3b72\",\"toolSummary\":[{\"name\":\"read_file\",\"calls\":1,\"failed\":0},{\"name\":\"search\",\"calls\":3,\"failed\":0}],\"artifacts\":[{\"path\":\"docs/contracts/fixtures/mcp/v1/tools-list.json\",\"sha256\":\"cd72d2b166e7f7c49eb48d3a81ee4641a140d27ddbcd6f09e6180ca161068df7\",\"bytes\":8974}],\"lossy\":[],\"delegation\":{\"native\":false,\"degraded\":true,\"kind\":\"external_worker_delegation\",\"proof\":\"modelgate-mcp-delegation-v1\"},\"error\":null,\"cancel\":null,\"acknowledged\":false,\"ackSeq\":0,\"reconcileRequired\":false},\"duplicate\":false}"
+          }
+        ],
+        "structuredContent": {
+          "ok": true,
+          "contract": "modelgate-mcp-delegation-v1",
+          "version": 1,
+          "tool": "modelgate_get_task",
+          "task": {
+            "taskRef": "mgtask-0123456789abcdef",
+            "state": "RESULT_READY",
+            "provider": "opencodego",
+            "model": "deepseek-v4.1-flash",
+            "turnRef": "mgturn-0123456789abcdef",
+            "turnCount": 1,
+            "parentThreadId": "codex-parent-fixture-01",
+            "createdAt": 1763030000000,
+            "updatedAt": 1763030062500,
+            "dispatchedAt": 1763030001200,
+            "elapsedMs": 61300,
+            "resultText": "核对完成：5 个工具名、annotations 与 inputSchema.required 一致；拒绝矩阵各 case 的 expect.code 全部落在契约 §9.2 内；未发现字段漂移。\n产物：docs/contracts/fixtures/mcp/v1/tools-list.json（只读，未改动）。",
+            "resultBytes": 253,
+            "truncated": false,
+            "resultDigest": "7fc76469ca48c7c0b30a3f9c5b1e186f797875b6ecc55c508e6beab20fdc3b72",
+            "toolSummary": [
+              {
+                "name": "read_file",
+                "calls": 1,
+                "failed": 0
+              },
+              {
+                "name": "search",
+                "calls": 3,
+                "failed": 0
+              }
+            ],
+            "artifacts": [
+              {
+                "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                "sha256": "cd72d2b166e7f7c49eb48d3a81ee4641a140d27ddbcd6f09e6180ca161068df7",
+                "bytes": 8974
+              }
+            ],
+            "lossy": [],
+            "delegation": {
+              "native": false,
+              "degraded": true,
+              "kind": "external_worker_delegation",
+              "proof": "modelgate-mcp-delegation-v1"
+            },
+            "error": null,
+            "cancel": null,
+            "acknowledged": false,
+            "ackSeq": 0,
+            "reconcileRequired": false
+          },
+          "duplicate": false
+        },
+        "isError": false
+      }
+    },
+    {
+      "id": "get.acknowledged",
+      "tool": "modelgate_get_task",
+      "note": "ack 之后再读：只有 state/acknowledged/ackSeq/updatedAt 变化，resultDigest 必须与上一条完全一致（父端可据此核对回执未被改写）。",
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"ok\":true,\"contract\":\"modelgate-mcp-delegation-v1\",\"version\":1,\"tool\":\"modelgate_get_task\",\"task\":{\"taskRef\":\"mgtask-0123456789abcdef\",\"state\":\"ACKNOWLEDGED\",\"provider\":\"opencodego\",\"model\":\"deepseek-v4.1-flash\",\"turnRef\":\"mgturn-0123456789abcdef\",\"turnCount\":1,\"parentThreadId\":\"codex-parent-fixture-01\",\"createdAt\":1763030000000,\"updatedAt\":1763030063000,\"dispatchedAt\":1763030001200,\"elapsedMs\":61300,\"resultText\":\"核对完成：5 个工具名、annotations 与 inputSchema.required 一致；拒绝矩阵各 case 的 expect.code 全部落在契约 §9.2 内；未发现字段漂移。\\n产物：docs/contracts/fixtures/mcp/v1/tools-list.json（只读，未改动）。\",\"resultBytes\":253,\"truncated\":false,\"resultDigest\":\"7fc76469ca48c7c0b30a3f9c5b1e186f797875b6ecc55c508e6beab20fdc3b72\",\"toolSummary\":[{\"name\":\"read_file\",\"calls\":1,\"failed\":0},{\"name\":\"search\",\"calls\":3,\"failed\":0}],\"artifacts\":[{\"path\":\"docs/contracts/fixtures/mcp/v1/tools-list.json\",\"sha256\":\"cd72d2b166e7f7c49eb48d3a81ee4641a140d27ddbcd6f09e6180ca161068df7\",\"bytes\":8974}],\"lossy\":[],\"delegation\":{\"native\":false,\"degraded\":true,\"kind\":\"external_worker_delegation\",\"proof\":\"modelgate-mcp-delegation-v1\"},\"error\":null,\"cancel\":null,\"acknowledged\":true,\"ackSeq\":1,\"reconcileRequired\":false},\"duplicate\":false}"
+          }
+        ],
+        "structuredContent": {
+          "ok": true,
+          "contract": "modelgate-mcp-delegation-v1",
+          "version": 1,
+          "tool": "modelgate_get_task",
+          "task": {
+            "taskRef": "mgtask-0123456789abcdef",
+            "state": "ACKNOWLEDGED",
+            "provider": "opencodego",
+            "model": "deepseek-v4.1-flash",
+            "turnRef": "mgturn-0123456789abcdef",
+            "turnCount": 1,
+            "parentThreadId": "codex-parent-fixture-01",
+            "createdAt": 1763030000000,
+            "updatedAt": 1763030063000,
+            "dispatchedAt": 1763030001200,
+            "elapsedMs": 61300,
+            "resultText": "核对完成：5 个工具名、annotations 与 inputSchema.required 一致；拒绝矩阵各 case 的 expect.code 全部落在契约 §9.2 内；未发现字段漂移。\n产物：docs/contracts/fixtures/mcp/v1/tools-list.json（只读，未改动）。",
+            "resultBytes": 253,
+            "truncated": false,
+            "resultDigest": "7fc76469ca48c7c0b30a3f9c5b1e186f797875b6ecc55c508e6beab20fdc3b72",
+            "toolSummary": [
+              {
+                "name": "read_file",
+                "calls": 1,
+                "failed": 0
+              },
+              {
+                "name": "search",
+                "calls": 3,
+                "failed": 0
+              }
+            ],
+            "artifacts": [
+              {
+                "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                "sha256": "cd72d2b166e7f7c49eb48d3a81ee4641a140d27ddbcd6f09e6180ca161068df7",
+                "bytes": 8974
+              }
+            ],
+            "lossy": [],
+            "delegation": {
+              "native": false,
+              "degraded": true,
+              "kind": "external_worker_delegation",
+              "proof": "modelgate-mcp-delegation-v1"
+            },
+            "error": null,
+            "cancel": null,
+            "acknowledged": true,
+            "ackSeq": 1,
+            "reconcileRequired": false
+          },
+          "duplicate": false
+        },
+        "isError": false
+      }
+    },
+    {
+      "id": "wait.timeout",
+      "tool": "modelgate_wait_task",
+      "note": "等待窗口结束：timedOut:true、ok:true、isError:false，任务仍是 RUNNING 且状态未被改写——等待超时不等于任务失败（契约 §5.4）。",
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"ok\":true,\"contract\":\"modelgate-mcp-delegation-v1\",\"version\":1,\"tool\":\"modelgate_wait_task\",\"task\":{\"taskRef\":\"mgtask-0123456789abcdef\",\"state\":\"RUNNING\",\"provider\":\"opencodego\",\"model\":\"deepseek-v4.1-flash\",\"turnRef\":\"mgturn-0123456789abcdef\",\"turnCount\":1,\"parentThreadId\":\"codex-parent-fixture-01\",\"createdAt\":1763030000000,\"updatedAt\":1763030101000,\"dispatchedAt\":1763030001200,\"elapsedMs\":null,\"resultText\":null,\"resultBytes\":0,\"truncated\":false,\"resultDigest\":null,\"toolSummary\":[],\"artifacts\":[],\"lossy\":[],\"delegation\":{\"native\":false,\"degraded\":true,\"kind\":\"external_worker_delegation\",\"proof\":\"modelgate-mcp-delegation-v1\"},\"error\":null,\"cancel\":null,\"acknowledged\":false,\"ackSeq\":0,\"reconcileRequired\":false},\"waitedMs\":15000,\"timedOut\":true,\"duplicate\":false}"
+          }
+        ],
+        "structuredContent": {
+          "ok": true,
+          "contract": "modelgate-mcp-delegation-v1",
+          "version": 1,
+          "tool": "modelgate_wait_task",
+          "task": {
+            "taskRef": "mgtask-0123456789abcdef",
+            "state": "RUNNING",
+            "provider": "opencodego",
+            "model": "deepseek-v4.1-flash",
+            "turnRef": "mgturn-0123456789abcdef",
+            "turnCount": 1,
+            "parentThreadId": "codex-parent-fixture-01",
+            "createdAt": 1763030000000,
+            "updatedAt": 1763030101000,
+            "dispatchedAt": 1763030001200,
+            "elapsedMs": null,
+            "resultText": null,
+            "resultBytes": 0,
+            "truncated": false,
+            "resultDigest": null,
+            "toolSummary": [],
+            "artifacts": [],
+            "lossy": [],
+            "delegation": {
+              "native": false,
+              "degraded": true,
+              "kind": "external_worker_delegation",
+              "proof": "modelgate-mcp-delegation-v1"
+            },
+            "error": null,
+            "cancel": null,
+            "acknowledged": false,
+            "ackSeq": 0,
+            "reconcileRequired": false
+          },
+          "waitedMs": 15000,
+          "timedOut": true,
+          "duplicate": false
+        },
+        "isError": false
+      }
+    },
+    {
+      "id": "delegate.duplicate",
+      "tool": "modelgate_delegate_task",
+      "note": "同 idempotencyKey + 同规范化摘要重放：返回同一 taskRef、duplicate:true，不产生第二次上游派发。",
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"ok\":true,\"contract\":\"modelgate-mcp-delegation-v1\",\"version\":1,\"tool\":\"modelgate_delegate_task\",\"task\":{\"taskRef\":\"mgtask-0123456789abcdef\",\"state\":\"RUNNING\",\"provider\":\"opencodego\",\"model\":\"deepseek-v4.1-flash\",\"turnRef\":\"mgturn-0123456789abcdef\",\"turnCount\":1,\"parentThreadId\":\"codex-parent-fixture-01\",\"createdAt\":1763030000000,\"updatedAt\":1763030101000,\"dispatchedAt\":1763030001200,\"elapsedMs\":null,\"resultText\":null,\"resultBytes\":0,\"truncated\":false,\"resultDigest\":null,\"toolSummary\":[],\"artifacts\":[],\"lossy\":[],\"delegation\":{\"native\":false,\"degraded\":true,\"kind\":\"external_worker_delegation\",\"proof\":\"modelgate-mcp-delegation-v1\"},\"error\":null,\"cancel\":null,\"acknowledged\":false,\"ackSeq\":0,\"reconcileRequired\":false},\"duplicate\":true}"
+          }
+        ],
+        "structuredContent": {
+          "ok": true,
+          "contract": "modelgate-mcp-delegation-v1",
+          "version": 1,
+          "tool": "modelgate_delegate_task",
+          "task": {
+            "taskRef": "mgtask-0123456789abcdef",
+            "state": "RUNNING",
+            "provider": "opencodego",
+            "model": "deepseek-v4.1-flash",
+            "turnRef": "mgturn-0123456789abcdef",
+            "turnCount": 1,
+            "parentThreadId": "codex-parent-fixture-01",
+            "createdAt": 1763030000000,
+            "updatedAt": 1763030101000,
+            "dispatchedAt": 1763030001200,
+            "elapsedMs": null,
+            "resultText": null,
+            "resultBytes": 0,
+            "truncated": false,
+            "resultDigest": null,
+            "toolSummary": [],
+            "artifacts": [],
+            "lossy": [],
+            "delegation": {
+              "native": false,
+              "degraded": true,
+              "kind": "external_worker_delegation",
+              "proof": "modelgate-mcp-delegation-v1"
+            },
+            "error": null,
+            "cancel": null,
+            "acknowledged": false,
+            "ackSeq": 0,
+            "reconcileRequired": false
+          },
+          "duplicate": true
+        },
+        "isError": false
+      }
+    },
+    {
+      "id": "cancel.cancelled",
+      "tool": "modelgate_cancel_task",
+      "note": "cancel.reachedUpstream:true 表示取消已确认到达上游；状态 CANCELLED 之后重复取消返回 duplicate:true 且不再发上游取消。",
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"ok\":true,\"contract\":\"modelgate-mcp-delegation-v1\",\"version\":1,\"tool\":\"modelgate_cancel_task\",\"task\":{\"taskRef\":\"mgtask-0123456789abcdef\",\"state\":\"CANCELLED\",\"provider\":\"opencodego\",\"model\":\"deepseek-v4.1-flash\",\"turnRef\":\"mgturn-0123456789abcdef\",\"turnCount\":1,\"parentThreadId\":\"codex-parent-fixture-01\",\"createdAt\":1763030000000,\"updatedAt\":1763030080000,\"dispatchedAt\":1763030001200,\"elapsedMs\":47000,\"resultText\":null,\"resultBytes\":0,\"truncated\":false,\"resultDigest\":null,\"toolSummary\":[],\"artifacts\":[],\"lossy\":[],\"delegation\":{\"native\":false,\"degraded\":true,\"kind\":\"external_worker_delegation\",\"proof\":\"modelgate-mcp-delegation-v1\"},\"error\":null,\"cancel\":{\"requestedAt\":1763030070000,\"reason\":\"user_request\",\"reachedUpstream\":true},\"acknowledged\":false,\"ackSeq\":0,\"reconcileRequired\":false},\"duplicate\":false}"
+          }
+        ],
+        "structuredContent": {
+          "ok": true,
+          "contract": "modelgate-mcp-delegation-v1",
+          "version": 1,
+          "tool": "modelgate_cancel_task",
+          "task": {
+            "taskRef": "mgtask-0123456789abcdef",
+            "state": "CANCELLED",
+            "provider": "opencodego",
+            "model": "deepseek-v4.1-flash",
+            "turnRef": "mgturn-0123456789abcdef",
+            "turnCount": 1,
+            "parentThreadId": "codex-parent-fixture-01",
+            "createdAt": 1763030000000,
+            "updatedAt": 1763030080000,
+            "dispatchedAt": 1763030001200,
+            "elapsedMs": 47000,
+            "resultText": null,
+            "resultBytes": 0,
+            "truncated": false,
+            "resultDigest": null,
+            "toolSummary": [],
+            "artifacts": [],
+            "lossy": [],
+            "delegation": {
+              "native": false,
+              "degraded": true,
+              "kind": "external_worker_delegation",
+              "proof": "modelgate-mcp-delegation-v1"
+            },
+            "error": null,
+            "cancel": {
+              "requestedAt": 1763030070000,
+              "reason": "user_request",
+              "reachedUpstream": true
+            },
+            "acknowledged": false,
+            "ackSeq": 0,
+            "reconcileRequired": false
+          },
+          "duplicate": false
+        },
+        "isError": false
+      }
+    },
+    {
+      "id": "get.failed",
+      "tool": "modelgate_get_task",
+      "note": "FAILED 是任务级失败（ok:true + state:FAILED + error 非空），与通道 B 参数拒绝（ok:false + isError:true）不是一回事。",
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"ok\":true,\"contract\":\"modelgate-mcp-delegation-v1\",\"version\":1,\"tool\":\"modelgate_get_task\",\"task\":{\"taskRef\":\"mgtask-0123456789abcdef\",\"state\":\"FAILED\",\"provider\":\"opencodego\",\"model\":\"deepseek-v4.1-flash\",\"turnRef\":\"mgturn-0123456789abcdef\",\"turnCount\":1,\"parentThreadId\":\"codex-parent-fixture-01\",\"createdAt\":1763030000000,\"updatedAt\":1763030130000,\"dispatchedAt\":1763030001200,\"elapsedMs\":120000,\"resultText\":null,\"resultBytes\":0,\"truncated\":false,\"resultDigest\":null,\"toolSummary\":[{\"name\":\"read_file\",\"calls\":2,\"failed\":1}],\"artifacts\":[],\"lossy\":[],\"delegation\":{\"native\":false,\"degraded\":true,\"kind\":\"external_worker_delegation\",\"proof\":\"modelgate-mcp-delegation-v1\"},\"error\":{\"code\":\"MCP_UPSTREAM_TIMEOUT\",\"message\":\"worker 超过 maxElapsedMs 限制\",\"retryable\":true},\"cancel\":null,\"acknowledged\":false,\"ackSeq\":0,\"reconcileRequired\":false},\"duplicate\":false}"
+          }
+        ],
+        "structuredContent": {
+          "ok": true,
+          "contract": "modelgate-mcp-delegation-v1",
+          "version": 1,
+          "tool": "modelgate_get_task",
+          "task": {
+            "taskRef": "mgtask-0123456789abcdef",
+            "state": "FAILED",
+            "provider": "opencodego",
+            "model": "deepseek-v4.1-flash",
+            "turnRef": "mgturn-0123456789abcdef",
+            "turnCount": 1,
+            "parentThreadId": "codex-parent-fixture-01",
+            "createdAt": 1763030000000,
+            "updatedAt": 1763030130000,
+            "dispatchedAt": 1763030001200,
+            "elapsedMs": 120000,
+            "resultText": null,
+            "resultBytes": 0,
+            "truncated": false,
+            "resultDigest": null,
+            "toolSummary": [
+              {
+                "name": "read_file",
+                "calls": 2,
+                "failed": 1
+              }
+            ],
+            "artifacts": [],
+            "lossy": [],
+            "delegation": {
+              "native": false,
+              "degraded": true,
+              "kind": "external_worker_delegation",
+              "proof": "modelgate-mcp-delegation-v1"
+            },
+            "error": {
+              "code": "MCP_UPSTREAM_TIMEOUT",
+              "message": "worker 超过 maxElapsedMs 限制",
+              "retryable": true
+            },
+            "cancel": null,
+            "acknowledged": false,
+            "ackSeq": 0,
+            "reconcileRequired": false
+          },
+          "duplicate": false
+        },
+        "isError": false
+      }
+    },
+    {
+      "id": "failure.not_owner",
+      "tool": "modelgate_get_task",
+      "note": "跨 owner 读取：通道 B 拒绝，task 为 null，不回显他人任务的任何字段。",
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"ok\":false,\"contract\":\"modelgate-mcp-delegation-v1\",\"version\":1,\"tool\":\"modelgate_get_task\",\"code\":\"MCP_NOT_OWNER\",\"message\":\"任务不属于当前连接\",\"details\":{\"reason\":\"owner_mismatch\"},\"retryable\":false,\"task\":null}"
+          }
+        ],
+        "structuredContent": {
+          "ok": false,
+          "contract": "modelgate-mcp-delegation-v1",
+          "version": 1,
+          "tool": "modelgate_get_task",
+          "code": "MCP_NOT_OWNER",
+          "message": "任务不属于当前连接",
+          "details": {
+            "reason": "owner_mismatch"
+          },
+          "retryable": false,
+          "task": null
+        },
+        "isError": true
+      }
+    },
+    {
+      "id": "failure.unknown_outcome",
+      "tool": "modelgate_cancel_task",
+      "note": "对 UNKNOWN 任务取消：拒绝并回显状态（便于调用方转为对账），不假装取消成功。",
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"ok\":false,\"contract\":\"modelgate-mcp-delegation-v1\",\"version\":1,\"tool\":\"modelgate_cancel_task\",\"code\":\"MCP_UNKNOWN_OUTCOME\",\"message\":\"任务发送结果未确认，需先对账\",\"details\":{\"reason\":\"unreconciled\"},\"retryable\":false,\"task\":{\"taskRef\":\"mgtask-0123456789abcdef\",\"state\":\"UNKNOWN\",\"provider\":\"opencodego\",\"model\":\"deepseek-v4.1-flash\",\"turnRef\":\"mgturn-0123456789abcdef\",\"turnCount\":1,\"parentThreadId\":\"codex-parent-fixture-01\",\"createdAt\":1763030000000,\"updatedAt\":1763030140000,\"dispatchedAt\":1763030001200,\"elapsedMs\":null,\"resultText\":null,\"resultBytes\":0,\"truncated\":false,\"resultDigest\":null,\"toolSummary\":[],\"artifacts\":[],\"lossy\":[],\"delegation\":{\"native\":false,\"degraded\":true,\"kind\":\"external_worker_delegation\",\"proof\":\"modelgate-mcp-delegation-v1\"},\"error\":null,\"cancel\":null,\"acknowledged\":false,\"ackSeq\":0,\"reconcileRequired\":true}}"
+          }
+        ],
+        "structuredContent": {
+          "ok": false,
+          "contract": "modelgate-mcp-delegation-v1",
+          "version": 1,
+          "tool": "modelgate_cancel_task",
+          "code": "MCP_UNKNOWN_OUTCOME",
+          "message": "任务发送结果未确认，需先对账",
+          "details": {
+            "reason": "unreconciled"
+          },
+          "retryable": false,
+          "task": {
+            "taskRef": "mgtask-0123456789abcdef",
+            "state": "UNKNOWN",
+            "provider": "opencodego",
+            "model": "deepseek-v4.1-flash",
+            "turnRef": "mgturn-0123456789abcdef",
+            "turnCount": 1,
+            "parentThreadId": "codex-parent-fixture-01",
+            "createdAt": 1763030000000,
+            "updatedAt": 1763030140000,
+            "dispatchedAt": 1763030001200,
+            "elapsedMs": null,
+            "resultText": null,
+            "resultBytes": 0,
+            "truncated": false,
+            "resultDigest": null,
+            "toolSummary": [],
+            "artifacts": [],
+            "lossy": [],
+            "delegation": {
+              "native": false,
+              "degraded": true,
+              "kind": "external_worker_delegation",
+              "proof": "modelgate-mcp-delegation-v1"
+            },
+            "error": null,
+            "cancel": null,
+            "acknowledged": false,
+            "ackSeq": 0,
+            "reconcileRequired": true
+          }
+        },
+        "isError": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,1109 @@
+{
+  "contract": "modelgate-mcp-delegation-v1",
+  "version": 1,
+  "channel": "B",
+  "note": "全部为通道 B（工具结果 isError:true + structuredContent.code）的负例。拒绝必须发生在任何提交之前：上游 mock 请求数、任务表条数、幂等登记数均不得增加。expect.details 只断言列出的键（实现可少给不可多给字段值以外的键，见契约 §4.3 白名单）。",
+  "stimulusProtocol": "带 stimulus 的 case 为体积类负例，为保持 fixture 可读不内联超大字符串：发送前把 request 按 stimulus.path 定位到值，替换为 base 字符重复 stimulus.bytes 次（UTF-8 字节）。其它 case 原样发送即可。",
+  "cases": [
+    {
+      "id": "R01-task-too-large",
+      "tool": "modelgate_delegate_task",
+      "given": "任务正文超过 65536 UTF-8 字节上限（正文按派发前 canonical 化计字节）",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r01",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [],
+              "permissionMode": "read_only"
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01"
+          }
+        }
+      },
+      "stimulus": {
+        "apply": "repeat_utf8",
+        "path": "params.arguments.task",
+        "base": "A",
+        "bytes": 65537
+      },
+      "expect": {
+        "code": "MCP_ARGUMENT_TOO_LARGE",
+        "details": {
+          "field": "task",
+          "limit": 65536
+        }
+      }
+    },
+    {
+      "id": "R02-arbitrary-url",
+      "tool": "modelgate_delegate_task",
+      "given": "参数试图自带目标 URL",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r02",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01",
+            "url": "https://example.invalid/v1/chat/completions"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_URL_NOT_ALLOWED",
+        "details": {
+          "field": "url"
+        }
+      }
+    },
+    {
+      "id": "R03-base-url",
+      "tool": "modelgate_delegate_task",
+      "given": "参数试图自带上游 baseUrl（绕过 Go 入口绑定与 host 白名单）",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r03",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01",
+            "baseUrl": "https://example.invalid/inference/go/openai/v1"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_URL_NOT_ALLOWED",
+        "details": {
+          "field": "baseUrl"
+        }
+      }
+    },
+    {
+      "id": "R04-api-key-argument",
+      "tool": "modelgate_delegate_task",
+      "given": "参数携带合成 Key（形状刻意像凭据，但值是虚构的）",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r04",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01",
+            "apiKey": "sk-f1xture-not-a-real-key-000000"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_CREDENTIAL_IN_ARGUMENT",
+        "details": {
+          "field": "apiKey"
+        }
+      }
+    },
+    {
+      "id": "R05-headers-argument",
+      "tool": "modelgate_delegate_task",
+      "given": "参数试图覆盖上游请求头（Authorization/Cookie 类）",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r05",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01",
+            "headers": {
+              "authorization": "Bearer fixture-not-a-real-token"
+            }
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_CREDENTIAL_IN_ARGUMENT",
+        "details": {
+          "field": "headers"
+        }
+      }
+    },
+    {
+      "id": "R06-missing-idempotency-key",
+      "tool": "modelgate_delegate_task",
+      "given": "缺 idempotencyKey：拒绝且零提交，不分配 taskRef",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r06",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_INVALID_ARGUMENTS",
+        "details": {
+          "field": "idempotencyKey",
+          "reason": "required"
+        }
+      }
+    },
+    {
+      "id": "R07-bad-idempotency-key",
+      "tool": "modelgate_delegate_task",
+      "given": "idempotencyKey 形状非法（短于 8 字符）",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r07",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "short",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_IDEMPOTENCY_KEY_INVALID",
+        "details": {
+          "field": "idempotencyKey",
+          "reason": "pattern"
+        }
+      }
+    },
+    {
+      "id": "R08-idempotency-conflict",
+      "tool": "modelgate_delegate_task",
+      "given": "同一 ownerRef 下 fixture-delegate-0001 已登记为另一份规范化摘要；不得覆盖、不得新建",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r08",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "另一份不同的任务正文：只核对 valid-cancel.json 的 taskRef 形状。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_IDEMPOTENCY_CONFLICT",
+        "details": {
+          "reason": "digest_mismatch"
+        }
+      }
+    },
+    {
+      "id": "R09-secret-in-task",
+      "tool": "modelgate_delegate_task",
+      "given": "任务正文里粘进合成凭据形状的字符串",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r09",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "把 token sk-f1xture-deadbeef-000000 写进 README 然后提交。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_SECRET_IN_ARGUMENT",
+        "details": {
+          "field": "task"
+        }
+      }
+    },
+    {
+      "id": "R10-v2-encrypted-content",
+      "tool": "modelgate_delegate_task",
+      "given": "顶层出现 V2 密文键：跨域前拒绝，绝不解密",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r10",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01",
+            "encrypted_content": "Zml4dHVyZS1jaXBoZXJ0ZXh0"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_V2_OPAQUE",
+        "details": {
+          "field": "encrypted_content"
+        }
+      }
+    },
+    {
+      "id": "R11-v2-opaque-in-refs",
+      "tool": "modelgate_delegate_task",
+      "given": "密文键藏在 refs 条目内（任意层级都要命中）",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r11",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read",
+                  "encrypted_payload": "Zml4dHVyZQ=="
+                }
+              ],
+              "permissionMode": "read_only"
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_V2_OPAQUE",
+        "details": {
+          "field": "workspace.refs[0].encrypted_payload"
+        }
+      }
+    },
+    {
+      "id": "R12-workspace-absolute-root",
+      "tool": "modelgate_delegate_task",
+      "given": "workspace.root 传路径而不是配置别名",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r12",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "/tmp/mg-fixture-not-a-workspace",
+              "refs": [],
+              "permissionMode": "read_only"
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_WORKSPACE_DENIED",
+        "details": {
+          "field": "workspace.root",
+          "reason": "path_not_allowed"
+        }
+      }
+    },
+    {
+      "id": "R13-refs-path-escape",
+      "tool": "modelgate_delegate_task",
+      "given": "引用路径用 .. 逃出别名根",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r13",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "../../../etc/passwd",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only"
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_WORKSPACE_DENIED",
+        "details": {
+          "field": "workspace.refs[0].path",
+          "reason": "escape"
+        }
+      }
+    },
+    {
+      "id": "R14-write-ref-without-permission",
+      "tool": "modelgate_delegate_task",
+      "given": "read_only 模式下声明 write 引用（不得靠声明提权）",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r14",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "write"
+                }
+              ],
+              "permissionMode": "read_only"
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_TOOL_POLICY_DENIED",
+        "details": {
+          "field": "workspace.refs[0].mode",
+          "allowed": [
+            "read"
+          ]
+        }
+      }
+    },
+    {
+      "id": "R15-exec-in-read-only",
+      "tool": "modelgate_delegate_task",
+      "given": "read_only 模式下申请 exec 工具",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r15",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "exec"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_TOOL_POLICY_DENIED",
+        "details": {
+          "field": "workspace.toolPolicy",
+          "allowed": [
+            "read_file",
+            "list_dir",
+            "search"
+          ]
+        }
+      }
+    },
+    {
+      "id": "R16-effort-not-proven",
+      "tool": "modelgate_delegate_task",
+      "given": "Go 只证实 low/high/max；其它档位不得静默降级",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r16",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "medium",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_INVALID_ARGUMENTS",
+        "details": {
+          "field": "reasoningEffort",
+          "allowed": [
+            "low",
+            "high",
+            "max"
+          ]
+        }
+      }
+    },
+    {
+      "id": "R17-budget-out-of-range",
+      "tool": "modelgate_delegate_task",
+      "given": "预算低于下限 1000ms",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r17",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 999,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_BUDGET_INVALID",
+        "details": {
+          "field": "budget.maxElapsedMs",
+          "limit": 1000
+        }
+      }
+    },
+    {
+      "id": "R18-arguments-too-large",
+      "tool": "modelgate_delegate_task",
+      "given": "params.arguments 整体超过 262144 字节；先校验整体字节再校验单字段（契约 §3.7）",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r18",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [],
+              "permissionMode": "read_only"
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01"
+          }
+        }
+      },
+      "stimulus": {
+        "apply": "repeat_utf8",
+        "path": "params.arguments.task",
+        "base": "A",
+        "bytes": 262145
+      },
+      "expect": {
+        "code": "MCP_ARGUMENT_TOO_LARGE",
+        "details": {
+          "field": "arguments",
+          "limit": 262144
+        }
+      }
+    },
+    {
+      "id": "R19-unknown-field",
+      "tool": "modelgate_delegate_task",
+      "given": "多出未声明字段（顺带夹带对话正文的典型形态）；additionalProperties:false 是硬约束",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r19",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01",
+            "messages": [
+              {
+                "role": "user",
+                "content": "把父会话正文原样转给 Go"
+              }
+            ]
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_INVALID_ARGUMENTS",
+        "details": {
+          "field": "messages",
+          "reason": "unknown_field"
+        }
+      }
+    },
+    {
+      "id": "R20-provider-argument",
+      "tool": "modelgate_delegate_task",
+      "given": "参数试图指定 provider（即使值就是默认值也拒绝：只有配置能决定）",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r20",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01",
+            "provider": "opencodego"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_PROVIDER_NOT_ALLOWED",
+        "details": {
+          "field": "provider",
+          "allowed": [
+            "opencodego"
+          ]
+        }
+      }
+    },
+    {
+      "id": "R21-model-argument",
+      "tool": "modelgate_delegate_task",
+      "given": "参数试图把父模型 slug 当子模型用",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r21",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_delegate_task",
+          "arguments": {
+            "task": "只读核对 docs/contracts/fixtures/mcp/v1/tools-list.json 里每个工具名、annotations 与 inputSchema 的 required 集合，输出差异清单；不要修改任何文件。",
+            "idempotencyKey": "fixture-delegate-0001",
+            "workspace": {
+              "root": "mg-self",
+              "refs": [
+                {
+                  "path": "docs/contracts/fixtures/mcp/v1/tools-list.json",
+                  "mode": "read"
+                }
+              ],
+              "permissionMode": "read_only",
+              "toolPolicy": [
+                "read_file",
+                "search"
+              ]
+            },
+            "reasoningEffort": "high",
+            "budget": {
+              "maxElapsedMs": 120000,
+              "maxToolCalls": 20
+            },
+            "parentThreadId": "codex-parent-fixture-01",
+            "model": "gpt-6-luna"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_MODEL_NOT_ALLOWED",
+        "details": {
+          "field": "model",
+          "allowed": [
+            "deepseek-v4.1-flash"
+          ]
+        }
+      }
+    },
+    {
+      "id": "R22-get-cross-owner",
+      "tool": "modelgate_get_task",
+      "given": "该 taskRef 属于另一个 ownerRef（另一个配置目录/实例）",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r22",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_get_task",
+          "arguments": {
+            "taskRef": "mgtask-aaaaaaaaaaaaaaaa"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_NOT_OWNER",
+        "details": {
+          "reason": "owner_mismatch"
+        }
+      }
+    },
+    {
+      "id": "R23-cancel-not-owner",
+      "tool": "modelgate_cancel_task",
+      "given": "取消非本人任务：不得回显该任务的任何字段",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r23",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_cancel_task",
+          "arguments": {
+            "taskRef": "mgtask-aaaaaaaaaaaaaaaa",
+            "reason": "user_request"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_NOT_OWNER",
+        "details": {
+          "reason": "owner_mismatch"
+        }
+      }
+    },
+    {
+      "id": "R24-cancel-terminal-task",
+      "tool": "modelgate_cancel_task",
+      "given": "任务已是 RESULT_READY 终态，不可取消（CANCELLED 才允许重复取消）",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r24",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_cancel_task",
+          "arguments": {
+            "taskRef": "mgtask-0123456789abcdef",
+            "reason": "user_request"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_TASK_STATE_INVALID",
+        "details": {
+          "state": "RESULT_READY"
+        }
+      }
+    },
+    {
+      "id": "R25-cancel-unknown-task",
+      "tool": "modelgate_cancel_task",
+      "given": "任务处于 UNKNOWN：发送结果未确认，必须先对账，不得假装取消成功",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r25",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_cancel_task",
+          "arguments": {
+            "taskRef": "mgtask-bbbbbbbbbbbbbbbb",
+            "reason": "parent_abort"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_UNKNOWN_OUTCOME",
+        "details": {
+          "reason": "unreconciled"
+        }
+      }
+    },
+    {
+      "id": "R26-followup-parent-mismatch",
+      "tool": "modelgate_followup_task",
+      "given": "追派声明的 parentThreadId 与原任务记录不一致",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r26",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_followup_task",
+          "arguments": {
+            "taskRef": "mgtask-0123456789abcdef",
+            "task": "在同一会话追加一轮：汇总差异清单。",
+            "idempotencyKey": "fixture-followup-0002",
+            "reasoningEffort": "high"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_FOLLOWUP_CONFLICT",
+        "details": {
+          "reason": "parent_mismatch"
+        }
+      }
+    },
+    {
+      "id": "R27-followup-while-running",
+      "tool": "modelgate_followup_task",
+      "given": "任务仍在 RUNNING：不允许并发追派（也不得静默排队成第二个 turn）",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r27",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_followup_task",
+          "arguments": {
+            "taskRef": "mgtask-cccccccccccccccc",
+            "task": "追加一轮：输出当前差异清单。",
+            "idempotencyKey": "fixture-followup-0003"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_TASK_STATE_INVALID",
+        "details": {
+          "state": "RUNNING"
+        }
+      }
+    },
+    {
+      "id": "R28-wait-timeout-too-large",
+      "tool": "modelgate_wait_task",
+      "given": "等待窗口超过 60000ms 上限",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r28",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_wait_task",
+          "arguments": {
+            "taskRef": "mgtask-0123456789abcdef",
+            "timeoutMs": 60001
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_INVALID_ARGUMENTS",
+        "details": {
+          "field": "timeoutMs",
+          "limit": 60000
+        }
+      }
+    },
+    {
+      "id": "R29-bad-taskref-shape",
+      "tool": "modelgate_get_task",
+      "given": "taskRef 形状非法（旧 task- 前缀），在查表前就拒绝",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "r29",
+        "method": "tools/call",
+        "params": {
+          "name": "modelgate_get_task",
+          "arguments": {
+            "taskRef": "task-0123456789abcdef"
+          }
+        }
+      },
+      "expect": {
+        "code": "MCP_INVALID_ARGUMENTS",
+        "details": {
+          "field": "taskRef",
+          "reason": "pattern"
+        }
+      }
+    }
+  ]
+}

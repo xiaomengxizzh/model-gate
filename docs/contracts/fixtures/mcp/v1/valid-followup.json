@@ -1,0 +1,26 @@
+{
+  "_comment": "合法 modelgate_followup_task 调用：复用同一 taskRef 的 Go 会话，不新建任务、不提权；工作区与工具权限沿用创建时记录（契约 §3.5）。",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "fixture-followup-1",
+    "method": "tools/call",
+    "params": {
+      "name": "modelgate_followup_task",
+      "arguments": {
+        "taskRef": "mgtask-0123456789abcdef",
+        "task": "在同一 Go 会话上追加一轮：核对 rejections.json 里每条 case 的 expect.code 是否都在契约 §9 错误码表内，输出不在表内的码；不要修改文件。",
+        "idempotencyKey": "fixture-followup-0001",
+        "reasoningEffort": "high",
+        "budget": {
+          "maxElapsedMs": 120000,
+          "maxToolCalls": 20
+        }
+      }
+    }
+  },
+  "expect": {
+    "ok": true,
+    "newTaskCreated": false,
+    "turnCount": 2
+  }
+}

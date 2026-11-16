@@ -1,0 +1,19 @@
+{
+  "_comment": "合法 modelgate_cancel_task 调用。对已 CANCELLED 的任务重复取消返回 duplicate:true（契约 §6.4），不会产生第二次上游取消。",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "fixture-cancel-1",
+    "method": "tools/call",
+    "params": {
+      "name": "modelgate_cancel_task",
+      "arguments": {
+        "taskRef": "mgtask-fedcba9876543210",
+        "reason": "user_request"
+      }
+    }
+  },
+  "expect": {
+    "ok": true,
+    "idempotent": true
+  }
+}

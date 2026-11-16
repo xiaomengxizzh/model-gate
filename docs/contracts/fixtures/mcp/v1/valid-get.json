@@ -1,0 +1,20 @@
+{
+  "_comment": "合法 modelgate_get_task 调用。首次返回终态记录时服务端推进 ACK（契约 §5.3），不需要额外交互。",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "fixture-get-1",
+    "method": "tools/call",
+    "params": {
+      "name": "modelgate_get_task",
+      "arguments": {
+        "taskRef": "mgtask-0123456789abcdef",
+        "includeResult": true,
+        "maxResultBytes": 16384
+      }
+    }
+  },
+  "expect": {
+    "ok": true,
+    "acknowledges": true
+  }
+}
