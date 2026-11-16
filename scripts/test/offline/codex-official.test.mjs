@@ -149,6 +149,51 @@ function rawRequest(urlStr, headers) {
   })
 }
 
+test('官方目标：previous_response_id 按官方原生能力放行并透传上游', async (t) => {
+  const bodies = []
+  const official = await startScriptedUpstream(async (req, res) => {
+    const chunks = []
+    for await (const c of req) chunks.push(c)
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+    officialSse(res, 'continued', 'gpt-6-astra')
+  })
+  const gw = await startGateway({
+    env: { MG_TEST_OFFICIAL_KEY: 'gw-official-test-key' },
+    config: {
+      defaults: { model: '', codexOfficialHosts: ['localhost'] },
+      providers: { 'codex-official': { baseUrl: officialBase(official), codexIdentity: 'official', apiKeyEnv: 'MG_TEST_OFFICIAL_KEY' } },
+      models: { 'gpt-6-astra': { provider: 'codex-official', api: 'responses' } },
+    },
+  })
+  t.after(async () => { await gw.stop(); await official.stop() })
+  const r = await gw.call('/v1/responses', {
+    method: 'POST', headers: OFFICIAL_HEADERS,
+    body: { model: 'gpt-6-astra', input: 'continue', stream: true, store: true, previous_response_id: 'resp_prev_official' },
+  })
+  assert.equal(r.status, 200, '官方后端原生支持 previous_response_id，不应被 nativeGate 拒绝')
+  await r.text()
+  assert.equal(bodies.length, 1)
+  assert.equal(bodies[0].previous_response_id, 'resp_prev_official', 'previous_response_id 原样透传官方上游')
+})
+
+test('第三方目标：previous_response_id 仍被严格 nativeGate 拒绝（不放宽契约）', async (t) => {
+  const gw = await startGateway({
+    config: {
+      defaults: {},
+      providers: { go: { baseUrl: 'http://127.0.0.1:1', api: 'responses' } },
+      models: { 'mg-third-responses': { provider: 'go', api: 'responses' } },
+    },
+  })
+  t.after(async () => { await gw.stop() })
+  const r = await gw.call('/v1/responses', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: { model: 'mg-third-responses', input: 'x', stream: true, previous_response_id: 'resp_prev' },
+  })
+  assert.equal(r.status, 400, '第三方目标未声明 nativeContract，previous_response_id 必须拒绝')
+  const j = await r.json()
+  assert.match(j.error.message, /previous_response_id|nativeContract/)
+})
+
 test('WS upgrade：网关完成 101 握手，握手阶段零上游命中', async (t) => {
   const { gw, officialHits } = await setup(t, { mode: 'nokey' })
   const handshake = await new Promise((resolve, reject) => {

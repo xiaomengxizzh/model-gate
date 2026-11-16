@@ -42,6 +42,11 @@ import { attachResponsesWebSocket } from './responses-ws.js'
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
 const RESPONSES_PATHS = new Set(['/v1/responses', '/responses'])
+// 官方 Responses 后端（内置 openai provider + openai_base_url 指回网关，由 classifyTarget=official 判定）
+// 原生支持 store / previous_response_id / background / truncation。Codex 的 WS 持久连接靠
+// previous_response_id 在同一连接内串联多轮，属官方 API 原生能力，按"实际目标能力"如实声明。
+// 第三方目标仍走严格 nativeGate（不声明 → 拒绝），绝不因这条声明而放宽到第三方。
+const OFFICIAL_RESPONSES_NATIVE_CONTRACT = Object.freeze({ store: true, previous_response_id: true, background: true, truncation: true })
 // 2026-11-15 所有者指令：旧管理台（src/admin.html）退役，不再对外提供。
 // 根路径统一跳到 V3 唯一控制台；/admin 与 /admin.html 返回 410 并说明去向。
 // 旧文件保留在仓库中仅作溯源（不参与任何请求处理），不再有 HTML 读取路径。
@@ -2900,7 +2905,7 @@ function makeHandler(state) {
         if (nDef && !nDef.isVirtualModel && !nDef.virtual && nDef.provider && state.cfg.providers[nDef.provider]) {
           const nProv = buildProvider(state.cfg, nDef.provider)
           if (classifyTarget(nProv, state.cfg).kind === 'official') {
-            const nconvOfficial = responsesToChat(body, { mode: 'native' })
+            const nconvOfficial = responsesToChat(body, { mode: 'native', nativeContract: OFFICIAL_RESPONSES_NATIVE_CONTRACT })
             if (nconvOfficial.rejected) { sendJson(res, 400, { error: { message: nconvOfficial.rejected.message, type: nconvOfficial.rejected.code || 'unsupported_parameter' } }); return }
             let codexRoute = null
             let codexPlan = null
