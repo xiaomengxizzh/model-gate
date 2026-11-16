@@ -721,6 +721,63 @@ const TOOL_CALL_ID_TYPES = Object.freeze(new Set([
   'computer_call', 'computer_call_output',
 ]))
 
+// 2026-11-16 真机实测补充：Codex 在**新会话**里也会发送不带 call_id 的
+// function_call / function_call_output（形如 shapes=message:user|function_call，
+// 以及 message×4|function_call_output|message…）。官方后端能接受这种"按位置配对"的历史，
+// 但第三方便携 Responses 上游要求 call_id 非空。
+// 修复策略：不丢弃任何历史，只**补齐配对键**——call 缺 id 就生成 call_mg_N，output 缺 id 就沿用
+// 最近一个尚未闭合的 call 的 id；若 output 自带 id 而 call 缺，则回填到该 call。
+// 记诊断（index/动作），绝不改写消息内容；无法配对的孤儿 output 仍交给下面的 guard 明确报错。
+const TOOL_CALL_TYPES = Object.freeze(new Set(['function_call', 'custom_tool_call', 'local_shell_call', 'computer_call']))
+const TOOL_OUTPUT_TYPES = Object.freeze(new Set(['function_call_output', 'custom_tool_call_output', 'local_shell_call_output', 'computer_call_output']))
+
+export function repairThirdPartyToolCallIds (body) {
+  const items = Array.isArray(body && body.input) ? body.input : null
+  if (!items) return { body, repaired: [] }
+  const out = items.map((it) => (it && typeof it === 'object' && !Array.isArray(it)) ? Object.assign({}, it) : it)
+  const repaired = []
+  const pending = [] // 未闭合的 call 索引（最近的在后）
+  let seq = 0
+  const nextSyntheticId = () => 'call_mg_' + (++seq)
+  const hasId = (it) => typeof it.call_id === 'string' && it.call_id !== ''
+  for (let index = 0; index < out.length; index++) {
+    const item = out[index]
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const type = String(item.type || '')
+    if (TOOL_CALL_TYPES.has(type)) {
+      if (!hasId(item)) {
+        item.call_id = nextSyntheticId()
+        repaired.push({ index, type, action: 'assign' })
+      }
+      pending.push(index)
+      continue
+    }
+    if (TOOL_OUTPUT_TYPES.has(type)) {
+      const callIndex = pending.length ? pending[pending.length - 1] : null
+      if (!hasId(item)) {
+        if (callIndex != null && hasId(out[callIndex])) {
+          item.call_id = out[callIndex].call_id
+          repaired.push({ index, type, action: 'pair', from: callIndex })
+          pending.pop()
+        }
+        // 无配对 call：保持缺省，交由 guard 报出可操作错误（不静默丢历史）
+        continue
+      }
+      // output 自带 id，但对应 call 缺/是合成 id → 回填，保证两端一致
+      if (callIndex != null) {
+        const call = out[callIndex]
+        if (!hasId(call) || (typeof call.call_id === 'string' && call.call_id.startsWith('call_mg_'))) {
+          call.call_id = item.call_id
+          repaired.push({ index: callIndex, type: String(call.type || ''), action: 'backfill', from: index })
+        }
+      }
+      pending.pop()
+    }
+  }
+  if (!repaired.length) return { body, repaired }
+  return { body: Object.assign({}, body, { input: out }), repaired }
+}
+
 export function firstEmptyToolCallId (body) {
   const items = Array.isArray(body && body.input) ? body.input : []
   for (let index = 0; index < items.length; index++) {
@@ -1909,11 +1966,20 @@ async function proxyNativeResponses(state, budget, log, opts) {
     const target = modelTarget(state.cfg, modelName, pid)
     const projected = projectThirdPartyResponsesParams(body, prov)
     if (projected.dropped.length) log && log.info('Codex 参数按目标能力剔除', pid, projected.dropped.join(','))
-    // 工具项 call_id 为空 → 上游必然 400（且只给索引，不可操作）。这里提前拦截并解释原因。
-    // 注意：官方目标不受影响（isOfficialResponsesProvider 不会走到这里的问题分支）。
-    const badCallId = isOfficialResponsesProvider(prov) ? null : firstEmptyToolCallId(projected.body)
+    // 工具项 call_id 为空 → 上游必然 400（且只给索引，不可操作）。
+    // 第三方目标先做**无损配对补齐**（只补 id，不改内容/不丢历史），保持与官方后端一致的"按位置配对"语义；
+    // 仍然无法配对的孤儿 output 才拦截并解释。官方目标完全不动。
+    let thirdPartyBody = projected.body
+    if (!isOfficialResponsesProvider(prov)) {
+      const fixed = repairThirdPartyToolCallIds(projected.body)
+      if (fixed.repaired.length) {
+        thirdPartyBody = fixed.body
+        log && log.info('Codex 工具项 call_id 已按位置补齐', pid, fixed.repaired.map((r) => r.index + ':' + r.action).join(','))
+      }
+    }
+    const badCallId = isOfficialResponsesProvider(prov) ? null : firstEmptyToolCallId(thirdPartyBody)
     if (badCallId) {
-      const shapes = (Array.isArray(projected.body.input) ? projected.body.input : [])
+      const shapes = (Array.isArray(thirdPartyBody.input) ? thirdPartyBody.input : [])
         .slice(0, 12)
         .map((it) => (it && typeof it === 'object' ? String(it.type || (it.role ? 'message:' + it.role : 'unknown')) : 'unknown'))
       log && log.warn('第三方 Responses 历史中工具项缺少 call_id', pid, 'index=' + badCallId.index, 'type=' + badCallId.type, 'shapes=' + shapes.join('|'))
@@ -1931,7 +1997,7 @@ async function proxyNativeResponses(state, budget, log, opts) {
         })),
       }
     }
-    const payload = Buffer.from(JSON.stringify(Object.assign({}, projected.body, { model: target.servingName })))
+    const payload = Buffer.from(JSON.stringify(Object.assign({}, thirdPartyBody, { model: target.servingName })))
     // Native third-party requests still need the provider protocol headers, including
     // OpenCode Go's x-opencode-session; videoJsonHeaders only supplies media headers.
     const headers = buildHeaders(req, prov, payload, state.cfg, 'responses', body, { identity: classifyTarget(prov, state.cfg), log })
