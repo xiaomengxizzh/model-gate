@@ -12,6 +12,15 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import { randomBytes } from 'node:crypto'
 import { startGateway, startScriptedUpstream } from './harness.mjs'
+import { looksLikeSse } from '../../../src/responses-ws.js'
+
+test('SSE 判定按正文前缀，不被 content-type 误标欺骗', () => {
+  assert.equal(looksLikeSse('event: response.created\ndata: {...}'), true)
+  assert.equal(looksLikeSse('data: {"type":"response.created"}'), true)
+  assert.equal(looksLikeSse('  \n data: {...}'), true, '允许前导空白')
+  assert.equal(looksLikeSse('{"id":"resp_1","status":"completed"}'), false, '纯 JSON 不算 SSE')
+  assert.equal(looksLikeSse(''), false)
+})
 
 function sse(events) {
   return events.map((e) => 'data: ' + JSON.stringify(e) + '\n\n').join('')
@@ -204,6 +213,8 @@ test('generate:false 本地预热，零上游调用；同 socket 可续传下一
 
   ws.send(createFrame('turn 1'))
   await ws.until('response.completed')
+  // 真实 Codex 在收到终态后等待服务端收尾再发下一轮；留一个 tick 让 turnActive 复位。
+  await new Promise((r) => setTimeout(r, 30))
   // Codex 续轮在 input 里重放完整历史（而非依赖网关持有 response 状态）。
   ws.send(createFrame('turn 2', {
     input: [
@@ -213,6 +224,9 @@ test('generate:false 本地预热，零上游调用；同 socket 可续传下一
     ],
   }))
   await ws.until('response.completed')
+  // 全量套件高负载下，第二帧可能早于服务端 turnActive 复位到达；轮询等待续轮落地，避免时序假阴性。
+  const deadline = Date.now() + 3000
+  while (n < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
   assert.equal(n, 2)
   assert.deepEqual(inputSizes, [1, 3], '续轮的完整 input 原样重放')
 })

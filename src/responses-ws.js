@@ -26,7 +26,7 @@ const OPCODE = Object.freeze({ CONT: 0x0, TEXT: 0x1, BINARY: 0x2, CLOSE: 0x8, PI
 const STRIP_HEADERS = new Set([
   'host', 'connection', 'upgrade', 'content-length', 'transfer-encoding',
   'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions',
-  'sec-websocket-protocol', 'accept', 'accept-encoding', 'te', 'trailer',
+  'sec-websocket-protocol', 'accept', 'accept-encoding', 'content-encoding', 'te', 'trailer',
 ])
 
 function wsAccept(key) {
@@ -253,6 +253,7 @@ function buildPostHeaders(upgradeReq, targetHost, targetPort, bodyText) {
   headers.host = targetHost + ':' + targetPort
   headers['content-type'] = 'application/json'
   headers.accept = 'text/event-stream'
+  headers['accept-encoding'] = 'identity' // 内部环回不做压缩，避免 SSE 被编码后无法逐事件解析
   headers['content-length'] = Buffer.byteLength(bodyText)
   return headers
 }
@@ -328,15 +329,46 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
       })
       return
     }
-    const isSse = String(upstream.headers['content-type'] || '').toLowerCase().includes('text/event-stream')
-    if (!isSse) {
-      // 非流式 200：Codex 在 WS 上仍期待事件帧。把 JSON 响应合成为 created → completed，
-      // 保留上游 id/status/output，不重新推理、不伪造内容。
-      const chunks = []
-      upstream.on('data', (c) => chunks.push(c))
-      upstream.on('end', () => {
+    // SSE 事件转发（终止事件同步收尾，避免同分块多帧时 end 误判追加 failed）：
+    const onEvent = (text) => {
+      if (finished) return
+      let type = ''
+      try { type = String((JSON.parse(text) || {}).type || '') } catch {}
+      if (TERMINAL_EVENTS.has(type)) finish()
+      peer.sendText(text).catch(() => finish())
+    }
+    const ctype = String(upstream.headers['content-type'] || '').toLowerCase()
+    const chunks = []
+    let parse = ctype.includes('text/event-stream') ? sseParser(onEvent) : null
+    let sniffed = ctype.includes('text/event-stream') // 声明为 SSE 直接按 SSE 走
+    upstream.on('data', (c) => {
+      if (!sniffed) {
+        // 网关部分 Responses 路径把 SSE 字节标成 application/json。按首个分块正文探测：
+        // 以 event:/data: 开头即 SSE（即便 header 说 json）；否则累积为纯 JSON 响应。
+        chunks.push(c)
+        const head = Buffer.concat(chunks).slice(0, 512).toString('utf8').replace(/^\s+/, '')
+        if (looksLikeSse(head) || /^\{/.test(head)) {
+          sniffed = true
+          if (/^\{/.test(head)) {
+            // 纯 JSON：累积完再合成；下方 end 分支处理。
+            parse = false
+          } else {
+            parse = sseParser(onEvent)
+            for (const buffered of chunks) parse(buffered)
+            chunks.length = 0
+          }
+        }
+        return
+      }
+      if (parse === false) { chunks.push(c); return }
+      parse(c)
+    })
+    upstream.on('end', () => {
+      if (finished) return
+      if (parse === false) {
+        const rawText = Buffer.concat(chunks).toString('utf8')
         let response = null
-        try { response = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch {}
+        try { response = JSON.parse(rawText) } catch {}
         if (!response || typeof response !== 'object') {
           peer.sendJson(errorFrame(502, '', log)).finally(finish)
           return
@@ -346,25 +378,10 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
         peer.sendJson({ type: 'response.created', response: base })
           .then(() => peer.sendJson({ type: 'response.completed', response: base }))
           .finally(finish)
-      })
-      return
-    }
-    const onEvent = (text) => {
-      if (finished) return
-      let type = ''
-      try { type = String((JSON.parse(text) || {}).type || '') } catch {}
-      // 终止事件同步收尾：SSE 可能在同一个 data 分块里连续到达多帧，
-      // 若等到 send 完成才收尾，end 事件会误判"无终止帧"而追加 response.failed。
-      if (TERMINAL_EVENTS.has(type)) finish()
-      peer.sendText(text).catch(() => finish())
-    }
-    const parse = sseParser(onEvent)
-    upstream.on('data', parse)
-    upstream.on('end', () => {
-      if (finished) return
-      // 流结束但没有终止事件：明确失败帧，不能让 Codex 无限等待。
-      parse('data: ' + JSON.stringify({ type: 'response.failed', response: { status: 'failed', output: [] } }) + '\n\n')
-      finish()
+        return
+      }
+      if (parse) parse('data: ' + JSON.stringify({ type: 'response.failed', response: { status: 'failed', output: [] } }) + '\n\n')
+      if (!finished) finish()
     })
     upstream.on('error', () => {
       if (!finished) peer.sendJson(errorFrame(502, '', log)).finally(finish)
@@ -404,6 +421,8 @@ function onMessageFactory(ctx, upgradeReq) {
       case 'response.processed':
         return // 消费确认，无需回帧
       case 'response.create':
+        // Codex WS 预热帧的可靠信号是帧内 generate===false（header 的 request_kind=prewarm
+        // 在真实轮次上也会出现，不能用于判断，否则真实推理被短路成空响应 → 0 tokens）。
         if (frame.generate === false) { warmup(ctx.peer, frame); return }
         if (ctx.peer.turnActive) {
           await ctx.peer.sendJson({ type: 'error', error: { message: 'a turn is already in flight on this socket', type: 'busy' } })
@@ -484,6 +503,11 @@ export function attachResponsesWebSocket(server, { state, log = null, enabled = 
   }
   server.on('upgrade', onUpgrade)
   return () => server.off('upgrade', onUpgrade)
+}
+
+// 按正文前缀判定是否为 SSE（网关某些 Responses 路径把 SSE 字节误标为 application/json，不能只信 content-type）。
+export function looksLikeSse (headText) {
+  return /^\s*(event:|data:)/.test(String(headText || ''))
 }
 
 export { WsPeer, sseParser, wsAccept }
