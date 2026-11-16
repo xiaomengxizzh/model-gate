@@ -42,6 +42,24 @@ export const ENTRIES = Object.freeze({
 })
 export const GO_ENTRY_VERSIONS = Object.freeze(['go-v1'])
 export const GO_EFFORTS = Object.freeze(['low', 'high', 'max'])
+// Go DeepSeek 的 Codex 目录证据档位：真机 spawn 实测 medium 被拒
+// （"Reasoning effort `medium` is not supported ... Supported: low, high"，codex-cli 0.167.0，
+// 2026-11-16 取证，见 agg-desktop-child-effort.test.mjs）。目录/子代理只声明 low/high。
+export const GO_NATIVE_EFFORTS = Object.freeze(['low', 'high'])
+// Go V2 目标的原生路由默认声明（与 bin/mg-desktop.mjs 的 PASS_REAL 启动器路径一致，
+// 另加压缩归属：调查 §7.1 要求 codex-owned-local + history.compaction=preserve，
+// 使 Codex 本地压缩标记被原样透传、远程密文压缩被 typed 拒绝而非静默透传给 Go）。
+// 网关配置 models.<id>.codex 的显式覆盖优先于本默认值（所有者控制不变）。
+export const GO_NATIVE_CODEX_DEFAULTS = Object.freeze({
+  plaintextTools: true,
+  history: Object.freeze({ agentMessage: 'project', compaction: 'preserve' }),
+  nativeCompaction: 'codex-owned-local',
+  capabilities: Object.freeze({ shellType: 'unified_exec', applyPatchToolType: 'freeform' }),
+  evidence: Object.freeze({
+    shellType: Object.freeze({ source: 'ModelGate Codex native loopback and Go tool receipt', observedAt: '2026-11-14' }),
+    applyPatchToolType: Object.freeze({ source: 'ModelGate Codex catalog fixture', observedAt: '2026-11-14' }),
+  }),
+})
 export const DEFAULT_ALIAS = 'mg-opencodego-deepseek-v4-1-flash'
 export const DEFAULT_VENDOR_MODEL = 'deepseek-v4.1-flash'
 export const SESSION_HEADER = 'x-opencode-session'

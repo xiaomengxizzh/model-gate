@@ -29,6 +29,7 @@ import { restoreResponseJson, detectOpaqueV2Task, detectEncryptedToolSchema } fr
 import { readSubscriptionCredential, isGatewaySubscriptionTarget, probeLocalCodexAuth, SubscriptionCredentialError } from './codex/local-subscription.js'
 import { isTargetAuthzError, resolveUpstream, assertResolvedUpstream, assertNoSubscriptionCredentialToThirdParty, authFailureReceipt, authFailureResponse } from './codex/target-authz.js'
 import { reconstructContinuation, recordContinuation, createCaptureSink } from './responses-continuation.js'
+import { v2ScopeOf, V2_TARGET_UPSTREAM_MODEL, GO_NATIVE_CODEX_DEFAULTS } from './providers/opencode-go.js'
 import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
 import { createObservability, hashId } from './observability/events.js'
 import { buildCatalog } from './codex/catalog.js'
@@ -1806,16 +1807,28 @@ function defaultCodexCaps(official) {
     ? { multiAgentVersion: 'v2', plaintextTools: false, history: { agentMessage: 'preserve', reasoning: 'preserve', compaction: 'reject' }, namespace: 'collaboration' }
     : { multiAgentVersion: 'v2', plaintextTools: false, history: { agentMessage: 'project', reasoning: 'drop', compaction: 'reject' }, namespace: 'collaboration' }
 }
-function needsCodexProjection(body, def) {
-  return !!(def && def.codex && typeof def.codex === 'object')
+// Go V2 目标的原生路由默认声明（2026-11-16 审计 P0-2/P1-6）：与 PASS_REAL 启动器路径一致，
+// 含压缩归属 codex-owned-local + history.compaction=preserve。显式 models.<id>.codex 优先。
+function goNativeCodexDefaultsFor(def, prov) {
+  if (!def || !prov || !def.provider) return null
+  const scope = v2ScopeOf(prov)
+  if (!scope.enforced) return null
+  const serving = (def.providerModels && def.providerModels[def.provider]) || def.upstreamModel || ''
+  if (serving !== V2_TARGET_UPSTREAM_MODEL) return null
+  return GO_NATIVE_CODEX_DEFAULTS
+}
+function needsCodexProjection(body, def, prov) {
+  if (def && def.codex && typeof def.codex === 'object') return true
+  return !!goNativeCodexDefaultsFor(def, prov)
 }
 function buildCodexRoute(state, hit, def, prov) {
   const target = modelTarget(state.cfg, hit.canonicalName, def.provider)
   const official = !!prov && classifyTarget(prov, state.cfg).kind === 'official'
   const declared = def && def.codex && typeof def.codex === 'object' ? def.codex : null
+  const goDefaults = goNativeCodexDefaultsFor(def, prov)
   const base = defaultCodexCaps(official)
-  const codex = Object.assign({}, base, declared || {})
-  codex.history = Object.assign({}, base.history, (declared && declared.history) || {})
+  const codex = Object.assign({}, base, goDefaults || {}, declared || {})
+  codex.history = Object.assign({}, base.history, (goDefaults && goDefaults.history) || {}, (declared && declared.history) || {})
   codex.official = official
   if (!codex.namespace) codex.namespace = 'collaboration'
   return { alias: hit.canonicalName, provider: def.provider, upstreamModel: target.servingName, api: 'responses', codex }
@@ -3005,7 +3018,7 @@ function makeHandler(state) {
             if (nconvOfficial.rejected) { sendJson(res, 400, { error: { message: nconvOfficial.rejected.message, type: nconvOfficial.rejected.code || 'unsupported_parameter' } }); return }
             let codexRoute = null
             let codexPlan = null
-            if (needsCodexProjection(body, nDef)) {
+            if (needsCodexProjection(body, nDef, nProv)) {
               codexRoute = buildCodexRoute(state, nHit, nDef, nProv)
               const prep = prepareCodexNativeRequest(body, codexRoute)
               if (prep.rejected) { sendJson(res, 400, { error: { message: prep.rejected.message, code: prep.rejected.code, type: prep.rejected.code || 'unsupported_parameter' } }); return }
@@ -3039,7 +3052,7 @@ function makeHandler(state) {
           if (opaqueReject) { sendJson(res, opaqueReject.status, { error: { message: opaqueReject.message, code: opaqueReject.code, type: 'codex_native_rejected' } }); return }
           let codexRoute = null
           let codexPlan = null
-          if (needsCodexProjection(body, nDef)) {
+          if (needsCodexProjection(body, nDef, nProv)) {
             codexRoute = buildCodexRoute(state, nHit, nDef, nProv)
             const prep = prepareCodexNativeRequest(body, codexRoute)
             if (prep.rejected) { sendJson(res, 400, { error: { message: prep.rejected.message, code: prep.rejected.code, type: prep.rejected.code || 'unsupported_parameter' } }); return }

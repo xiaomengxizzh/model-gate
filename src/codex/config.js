@@ -38,7 +38,9 @@ export const MANAGED_PROVIDER_SECTIONS = Object.freeze({
 export const MANAGED_AGENT_SECTION = 'agents.go_deepseek'
 export const MANAGED_AGENT_FILE = 'go-deepseek.toml'
 export const MANAGED_AGENT_DESCRIPTION = 'OpenCode Go DeepSeek V4.1 Flash child agent (billing on OpenCode Go, separate from ChatGPT plan)'
-export const MANAGED_AGENT_CHILD_EFFORT = 'medium'
+// 真机取证（2026-11-16）：Go DeepSeek 拒绝 medium（Supported: low, high）。
+// 产品接入路径与启动器路径统一用受支持的 high；旧托管文件（medium）由状态识别后允许升级。
+export const MANAGED_AGENT_CHILD_EFFORT = 'high'
 export const MANAGED_AGENT_SECTION_KEYS = Object.freeze(['description', 'config_file'])
 // 只声明 ModelGate 自有段/键的白名单；其它 feature、其它 provider、其它 agent 一律视为外部所有。
 export const OWNED_SECTIONS = Object.freeze({
@@ -549,7 +551,7 @@ function rollbackTokenFor (path, currentSha, backupSha) {
   return sha256Hex(CONFIG_CONTRACT + '/rollback\n' + path + '\n' + currentSha + '\n' + backupSha)
 }
 
-function atomicWriteFile (path, text, mode) {
+export function atomicWriteFile (path, text, mode) {
   const dir = dirname(path)
   mkdirSync(dir, { recursive: true })
   const tmp = join(dir, '.' + basename(path) + '.mg-' + process.pid + '-' + randomBytes(6).toString('hex') + '.tmp')

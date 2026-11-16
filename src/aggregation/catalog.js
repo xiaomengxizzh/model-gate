@@ -21,7 +21,7 @@ import {
   recordVersion, resolveRollbackTarget, serializeCatalog, projectNativeDelegationBase,
 } from '../codex/catalog.js'
 import { generationRecordFromBuilt, persistAndSwapValidatedGeneration } from '../codex/catalog-generation.js'
-import { V2_TARGET_UPSTREAM_MODEL as V2_TARGET, v2ScopeOf } from '../providers/opencode-go.js'
+import { V2_TARGET_UPSTREAM_MODEL as V2_TARGET, v2ScopeOf, GO_NATIVE_CODEX_DEFAULTS, GO_NATIVE_EFFORTS } from '../providers/opencode-go.js'
 
 export const AGGREGATED_CATALOG_SCHEMA = 'modelgate.aggregation.catalog/1'
 export const DEFAULT_CATALOG_LIMITS = Object.freeze({ maxModels: 512, maxBytes: 2 * 1024 * 1024 })
@@ -112,8 +112,16 @@ function resolveBaseCatalog(options, cfg) {
 export const DEFAULT_NATIVE_COMPACT_TOKENS = 943718
 
 // 单条快照模型 → buildCatalog 的 models.<name> 条目。name 必须是上游精确 ID。
-// opts.overrides：来自 gateway 配置 models.<id>.codex 的显式覆盖（优先级高于默认值）。
+// opts.overrides：来自 gateway 配置 models.<id> 的显式覆盖（优先级高于默认值）。
+// 2026-11-16 审计 P1-6：投影必须继承显式覆盖（api/effortOptions/reasoning/codex 运行时声明/
+// capabilities/evidence），否则产品目录与真机验证过的启动器声明漂移（shell 被禁用、
+// effort 落到 assumed medium）。Go V2 目标另带证据性默认（GO_NATIVE_CODEX_DEFAULTS）。
 function projectionEntry(model, provider, opts = {}) {
+  const override = opts.overrides || {}
+  const overrideCodex = override.codex || {}
+  const scope = v2ScopeOf(provider)
+  const isGoTarget = scope.enforced && model.upstreamId === V2_TARGET
+  const goDefaults = isGoTarget ? GO_NATIVE_CODEX_DEFAULTS : null
   const codex = {
     displayName: model.displayName || model.upstreamId,
     contextWindow: model.contextWindow,
@@ -131,7 +139,6 @@ function projectionEntry(model, provider, opts = {}) {
   // MG-NATIVE-COMPACT：把原生压缩阈值写进模型级 auto_compact_token_limit。
   // 优先取显式覆盖（models.<id>.codex.capabilities.autoCompactTokenLimit 或顶层同名），
   // 否则用官方签名默认值；且不得超过 contextWindow（Codex 校验，超限=永不触发）。
-  const overrideCodex = (opts.overrides && opts.overrides.codex) || {}
   const overrideCaps = overrideCodex.capabilities || {}
   const requested = overrideCaps.autoCompactTokenLimit !== undefined
     ? overrideCaps.autoCompactTokenLimit
@@ -140,18 +147,45 @@ function projectionEntry(model, provider, opts = {}) {
     ? Math.min(requested, model.contextWindow)
     : Math.min(DEFAULT_NATIVE_COMPACT_TOKENS, model.contextWindow)
   caps.autoCompactTokenLimit = compactTokens
+  // 能力与证据继承：Go 证据性默认 < 显式覆盖（所有者控制优先）。
+  const defaultCaps = (goDefaults && goDefaults.capabilities) || {}
+  for (const [key, value] of Object.entries(Object.assign({}, defaultCaps, overrideCaps))) {
+    if (key === 'autoCompactTokenLimit') continue
+    caps[key] = value
+  }
+  Object.assign(evidence, (goDefaults && goDefaults.evidence) || {})
   evidence.autoCompactTokenLimit = {
     source: Number.isInteger(requested) ? 'gateway_config_override' : 'opencode_official_catalog',
     observedAt: '2026-11-16',
   }
+  Object.assign(evidence, overrideCodex.evidence || {})
   codex.capabilities = caps
   codex.evidence = evidence
-  return {
+  // 运行时路由声明（plaintextTools/history/namespace/nativeCompaction）：Go 默认 + 显式覆盖。
+  for (const field of ['plaintextTools', 'history', 'namespace', 'nativeCompaction']) {
+    const dv = goDefaults ? goDefaults[field] : undefined
+    const ov = overrideCodex[field]
+    if (ov !== undefined) codex[field] = ov
+    else if (dv !== undefined) codex[field] = dv
+  }
+  const entry = {
     provider: provider.providerSegment,
     capability: 'chat',
     maxContext: model.contextWindow,
     codex,
   }
+  // api/effortOptions/reasoning：显式配置优先；Go 目标用证据性默认（responses + low/high + high）。
+  const api = typeof override.api === 'string' && override.api !== '' ? override.api : (isGoTarget ? 'responses' : '')
+  if (api) entry.api = api
+  const efforts = Array.isArray(override.effortOptions) && override.effortOptions.length
+    ? override.effortOptions
+    : (isGoTarget ? Array.from(GO_NATIVE_EFFORTS) : null)
+  if (efforts) entry.effortOptions = efforts
+  const reasoning = override.reasoning !== undefined ? override.reasoning : (isGoTarget ? 'high' : undefined)
+  if (reasoning !== undefined) entry.reasoning = reasoning
+  // 显式别名随投影继承（回滚别名保真的前提：别名必须先进入世代 meta）。
+  if (Array.isArray(override.alias) && override.alias.length) entry.alias = override.alias.slice()
+  return entry
 }
 
 // 按 provider 分层构建：同名的上游 ID 可同时存在于 go 与 console（公共 ID 段不同），
@@ -270,8 +304,10 @@ export function createAggregatedCatalog(options = {}) {
           throw new AggregatedCatalogError('upstream_id_duplicate_in_snapshot',
             '快照内重复 upstreamId：' + model.upstreamId, { providerId: provider.id, upstreamId: model.upstreamId })
         }
-        // 传该上游模型在 gateway 配置里的显式 codex 覆盖（若有），供压缩阈值等能力投影。
-        const modelOverride = (cfg.models && (cfg.models[model.upstreamId] || cfg.models[model.publicId])) || {}
+        // 传该上游模型在 gateway 配置里的显式覆盖（若有），供能力投影。
+        // 聚合公共 ID（mg-…）的定义优先于裸上游 ID 的 V1 定义：公共定义才是聚合路由的
+        // 权威声明（api:"responses" 等）；V1 定义只作回落（2026-11-16 审计 P1-6）。
+        const modelOverride = (cfg.models && (cfg.models[model.publicId] || cfg.models[model.upstreamId])) || {}
         models[model.upstreamId] = projectionEntry(model, provider, { overrides: modelOverride })
       }
       // V2：目标模型必须存在，否则这一层没有可交付能力 → fail-closed（不发布空 Go 层冒充可用）。
@@ -434,6 +470,8 @@ export function createAggregatedCatalog(options = {}) {
       configFingerprint: record.configFingerprint,
       catalogFingerprint: record.catalogFingerprint,
       bindings: layered.meta.bindings,
+      aliases: layered.meta.aliases,
+      officialSlugs: layered.meta.officialSlugs,
       verified: record.verified,
     })
     const next = { generation, key: record.key, digest: record.digest, state: nextState, verified: record.verified, record }
@@ -536,8 +574,9 @@ export function createAggregatedCatalog(options = {}) {
       catalog,
       meta: {
         templateModel: null,
-        aliases: {},
-        officialSlugs: [],
+        // 回滚继承目标版本的别名/官方清单（旧版本记录无此字段时回落空集，行为同旧版）。
+        aliases: target.aliases || {},
+        officialSlugs: target.officialSlugs || [],
         counts: target.counts || { official: 0, thirdParty: catalog.models.length, total: catalog.models.length },
         skipped: [],
         models: [],
@@ -565,6 +604,8 @@ export function createAggregatedCatalog(options = {}) {
       configFingerprint: record.configFingerprint,
       catalogFingerprint: record.catalogFingerprint,
       bindings: target.bindings || {},
+      aliases: built.meta.aliases,
+      officialSlugs: built.meta.officialSlugs,
       verified: record.verified,
     })
     const next = { generation, key: record.key, digest: record.digest, state: nextState, verified: record.verified, record }
