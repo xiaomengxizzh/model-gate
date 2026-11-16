@@ -143,6 +143,7 @@ export function createCaptureSink () {
   const outputNoId = []
   let completedOutput = null
   let sawAny = false
+  let terminal = false
 
   const considerItem = (item) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return
@@ -158,9 +159,11 @@ export function createCaptureSink () {
       if (typeof obj.response.status === 'string') status = obj.response.status
     }
     if (type === 'response.output_item.done' && obj.item) considerItem(obj.item)
-    if ((type === 'response.completed' || type === 'response.failed' || type === 'response.incomplete') &&
-        obj.response && Array.isArray(obj.response.output)) {
-      completedOutput = obj.response.output
+    if (type === 'response.completed' || type === 'response.failed' || type === 'response.incomplete') {
+      if (obj.response && Array.isArray(obj.response.output)) completedOutput = obj.response.output
+      // 真实订阅后端在 completed 后**不关闭 SSE 流**；Codex 收到终态即发下一轮。
+      // 终态到达即视为可登记（2026-11-16 父代理续轮 400 根因），不得等流结束。
+      if (responseId) terminal = true
     }
   }
   const feedSse = (text) => {
@@ -179,6 +182,12 @@ export function createCaptureSink () {
       applyEvent(obj)
     }
   }
+  const snapshot = () => {
+    const output = completedOutput
+      ? cloneItems(completedOutput)
+      : cloneItems(Array.from(outputById.values()).concat(outputNoId))
+    return { responseId, status: status || (sawAny ? 'completed' : null), output, sawAny }
+  }
   return {
     write (chunk) {
       try { feedSse(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)) } catch {}
@@ -190,14 +199,16 @@ export function createCaptureSink () {
       if (typeof obj.id === 'string' && obj.id) responseId = obj.id
       if (typeof obj.status === 'string') status = obj.status
       if (Array.isArray(obj.output)) completedOutput = obj.output
+      if (responseId) terminal = true
+    },
+    // 终态已到达（流可能仍开着）：调用方据此立即登记，不等流结束。
+    terminalSnapshot () {
+      return terminal ? snapshot() : null
     },
     finish () {
       // 尾部可能残留最后一个未以 \n\n 结束的事件块。
       if (buf.trim()) { try { feedSse('\n\n') } catch {} }
-      const output = completedOutput
-        ? cloneItems(completedOutput)
-        : cloneItems(Array.from(outputById.values()).concat(outputNoId))
-      return { responseId, status: status || (sawAny ? 'completed' : null), output, sawAny }
+      return snapshot()
     },
   }
 }

@@ -2,6 +2,12 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-16 修复父代理续轮状态缺失（终态即登记）
+
+### Fixed
+
+- **父代理续轮 400 `continuation_state_missing`（真机取证）**：真实 ChatGPT 订阅后端在 `response.completed` 之后**不关闭 SSE 流**，而续轮登记原发生在流结束（pipeline 回调）；Codex 收到终态即发下一轮，此时登记尚未执行。修复：捕获 sink 在终态事件到达时即产出可登记快照（`terminalSnapshot`），流式消费逐 chunk 检查并立即登记；流结束仍做最终权威登记（同 id 幂等覆盖）。新增"上游 completed 后不关流"复现回归（订阅 SSE 路径）。
+
 ## [Unreleased] —— 2026-11-16 修复子代理 include output.encrypted_content 400
 
 ### Fixed

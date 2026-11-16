@@ -245,3 +245,21 @@ test('WS upgrade：网关完成 101 握手，握手阶段零上游命中', async
   assert.equal(handshake.upgraded, true)
   assert.equal(officialHits.length, 0)
 })
+
+test('官方父代理续轮：第一轮响应被登记，第二轮 previous_response_id 重建放行', { timeout: 30000 }, async (t) => {
+  const { gw, officialHits } = await setup(t, { mode: 'key' })
+  const r1 = await gw.call('/v1/responses', {
+    method: 'POST', headers: OFFICIAL_HEADERS,
+    body: { model: 'gpt-6-astra', stream: true, input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'turn one' }] }] },
+  })
+  assert.equal(r1.status, 200)
+  await r1.text()
+  const r2 = await gw.call('/v1/responses', {
+    method: 'POST', headers: OFFICIAL_HEADERS,
+    body: { model: 'gpt-6-astra', stream: true, previous_response_id: 'r1', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'turn two' }] }] },
+  })
+  assert.equal(r2.status, 200, '官方父代理续轮不得 continuation_state_missing')
+  const text2 = await r2.text()
+  assert.ok(!text2.includes('continuation_state_missing'))
+  assert.equal(officialHits.length, 2)
+})

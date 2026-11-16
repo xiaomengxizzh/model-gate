@@ -1864,6 +1864,15 @@ function restoreCodexJsonBuffer(buf, route, plan) {
 async function streamCodexResponse(state, budget, log, opts) {
   const { up, res, route, plan, model, modelName, pid, sg, prov, continuation } = opts
   const captureSink = continuation ? createCaptureSink() : null
+  let earlyRecorded = false
+  const recordEarly = () => {
+    if (!captureSink || earlyRecorded) return
+    const cap = captureSink.terminalSnapshot()
+    if (cap && cap.responseId) {
+      earlyRecorded = true
+      recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'completed' })
+    }
+  }
   const adapter = createCodexStreamAdapter(res, {
     plan, route, model, log,
     softRestore: !(route && route.codex && route.codex.official === true),
@@ -1877,7 +1886,7 @@ async function streamCodexResponse(state, budget, log, opts) {
   // The caller owns the request budget and provider permit until the relay settles.
   try {
     for await (const chunk of up.stream) {
-      if (captureSink) captureSink.write(chunk)
+      if (captureSink) { captureSink.write(chunk); recordEarly() }
       await adapter.push(chunk)
       if (adapter.terminal) break
     }
@@ -2302,6 +2311,15 @@ function streamRawResponses(res, upstreamStream, budget, continuation) {
   return new Promise((resolve) => {
     let done = false
     const captureSink = continuation ? createCaptureSink() : null
+    let earlyRecorded = false
+    const recordEarly = () => {
+      if (!captureSink || earlyRecorded) return
+      const cap = captureSink.terminalSnapshot()
+      if (cap && cap.responseId) {
+        earlyRecorded = true
+        recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'completed' })
+      }
+    }
     const recordCapture = () => {
       if (!captureSink) return
       const cap = captureSink.finish()
@@ -2323,7 +2341,7 @@ function streamRawResponses(res, upstreamStream, budget, continuation) {
     try { res.once('close', onClose) } catch {}
     if (captureSink) {
       const tap = new Transform({
-        transform (chunk, _enc, cb) { captureSink.write(chunk); cb(null, chunk) },
+        transform (chunk, _enc, cb) { captureSink.write(chunk); recordEarly(); cb(null, chunk) },
       })
       pipeline(upstreamStream, tap, res, () => finish())
     } else {

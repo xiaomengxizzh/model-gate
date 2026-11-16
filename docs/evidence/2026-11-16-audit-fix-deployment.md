@@ -35,3 +35,11 @@
 2. luna→Go 父子派单 + 子代理 shell 工具（目录已声明 unified_exec）。
 3. 原生压缩：Go 子线程受 openai 身份 provider 级 remote_compaction 约束（见审计证据 §4.2），需所有者裁决子代理 provider 方案。
 4. 真实会话验证前不要改回旧目录；回滚用 generation 6 + 服务回退 `git checkout 9a371d3`（备份在 .agents/deploy-backup-*）。
+## 6. 第二轮真机反馈修复（同日晚）
+
+| 反馈 | 根因 | 修复 |
+| --- | --- | --- |
+| 子代理 400 `include 不支持: output.encrypted_content` | Codex 0.167 多代理新 include 项不在可丢弃白名单 | 三层白名单 + 第三方投影剔除（官方保留）；main dbd488d |
+| 父代理 400 `continuation_state_missing` | 真实订阅后端 completed 后不关流；登记原在流结束回调，Codex 收到终态即续轮 → 登记未执行 | 终态事件到达即登记（terminalSnapshot + 逐 chunk 检查）；流结束仍权威覆盖；新增开流复现回归 |
+
+验证：全量 133 suites / 1288 tests PASS；check/docs exit 0。生产重启后冒烟见下。
