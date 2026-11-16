@@ -69,6 +69,52 @@ export const CODEX_OVERRIDE_FIELDS = Object.freeze([
   'capabilities', 'evidence', 'baseInstructions',
 ])
 
+// MG-NATIVE-DELEGATION：原生父子派单能力投影。
+// 真机取证（2026-11-16，gpt-6-luna 父经网关调 Go 子）：
+//   · 官方 baseline 的 luna 条目是 tool_mode="code_mode_only" + use_responses_lite=true
+//     + multi_agent_version="v2"；Codex 在这种声明下**不下发任何 function tools**
+//     （见 docs/evidence/aggregation-v2-real-acceptance §tools:None），于是没有
+//     spawn_agent/collaboration 入口，父代理回报“当前没有可用的子代理调用入口”。
+//   · 唯一被真机证明可派单的父声明是 mg-desktop.mjs configure() 的覆盖：
+//     tool_mode="direct" + use_responses_lite=false + multi_agent_version="v1"。
+// 因此聚合目录/配置写入在发布时必须把“被选作父代理的官方模型”投影成该声明；
+// 仅作用于官方 baseline 模型（绝不改第三方 DeepSeek 的 plaintextTools 原生工具声明）。
+// 这是保真修复：不伪造父模型能力（luna 本就支持原生多代理），只纠正被官方桌面
+// code-mode 默认值误导的工具声明；与 configure() 的语义完全一致。
+export const NATIVE_DELEGATION_PARENT_FIELDS = Object.freeze({
+  tool_mode: 'direct',
+  use_responses_lite: false,
+  multi_agent_version: 'v1',
+  supports_search_tool: false,
+})
+
+// 把单个官方父模型投影成原生派单声明。保留 model_messages→base_instructions 的既有处理。
+export function asNativeDelegationParent (model) {
+  if (!model || typeof model !== 'object' || Array.isArray(model)) return model
+  const out = Object.assign({}, model, NATIVE_DELEGATION_PARENT_FIELDS)
+  const instructions = out.base_instructions || (out.model_messages && out.model_messages.instructions_template)
+  if (instructions) out.base_instructions = instructions
+  delete out.model_messages
+  return out
+}
+
+// 把一份 { models:[...] } 基线目录中的指定父模型投影成原生派单声明。
+// parentSlugs：需要作为父代理的模型 slug（不传则投影所有带 multi_agent_version 的官方模型）。
+// 返回新对象，不改入参。
+export function projectNativeDelegationBase (base, parentSlugs) {
+  if (!base || !Array.isArray(base.models)) return base
+  const wanted = Array.isArray(parentSlugs) && parentSlugs.length
+    ? new Set(parentSlugs)
+    : null
+  return Object.assign({}, base, {
+    models: base.models.map((m) => {
+      if (!m || typeof m !== 'object') return m
+      const isOfficialParent = wanted ? wanted.has(m.slug) : (m.multi_agent_version !== undefined && m.slug && !String(m.slug).startsWith('mg-'))
+      return isOfficialParent ? asNativeDelegationParent(m) : m
+    }),
+  })
+}
+
 // Runtime-only members of models.<name>.codex. They are consumed by the native
 // Responses route and must not be projected into the client model catalog.
 // nativeCompaction（V2-04）：声明该路由的原生压缩归属，供 interop 的压缩项闸门使用；

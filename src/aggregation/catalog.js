@@ -18,7 +18,7 @@ import { join } from 'node:path'
 import { writeFileDurable } from '../config-transaction.js'
 import {
   CatalogError, assertCatalog, assertZeroCollisions, buildCatalog, emptyState, nextVersion,
-  recordVersion, resolveRollbackTarget, serializeCatalog,
+  recordVersion, resolveRollbackTarget, serializeCatalog, projectNativeDelegationBase,
 } from '../codex/catalog.js'
 import { generationRecordFromBuilt, persistAndSwapValidatedGeneration } from '../codex/catalog-generation.js'
 import { V2_TARGET_UPSTREAM_MODEL as V2_TARGET, v2ScopeOf } from '../providers/opencode-go.js'
@@ -352,7 +352,14 @@ export function createAggregatedCatalog(options = {}) {
   async function publish(scopeRef, opts = {}) {
     const scope = scopeOf(scopeRef)
     const collected = collectLayers(scope, opts)
-    const base = resolveBaseCatalog(opts, collected.cfg)
+    let base = resolveBaseCatalog(opts, collected.cfg)
+    // MG-NATIVE-DELEGATION：把可作为原生父子代理父模型的官方模型投影成派单声明，
+    // 否则 Codex 对 code_mode_only/responses_lite 模型不下发 spawn_agent，
+    // 父代理就会回报“当前没有可用的子代理调用入口”。
+    // 父模型由 codex 侧 config.toml 选择（网关 cfg.defaults.model 只是占位符 gatemodel，
+    // 不可靠），因此投影所有带 multi_agent_version 的官方模型；第三方 mg-* 条目跳过，
+    // 不改其 plaintextTools 原生工具声明。projectNativeDelegationBase 不改入参。
+    base = projectNativeDelegationBase(base, null)
     const layered = buildLayeredCatalog({ base, layers: collected.layers, options: opts.buildOptions || {} })
     // 显式再过一次零碰撞/目录校验（buildCatalog 内部已做；这里保证聚合层的身份名也参与）。
     const identityConfig = { models: {} }
