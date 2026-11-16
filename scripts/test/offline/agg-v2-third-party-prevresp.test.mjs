@@ -66,15 +66,16 @@ test('第三方原生 Responses 子代理：续轮重建完整历史，previous_
   assert.ok(input.some((i) => i.type === 'message' && i.content[0].text === 'parent ack'), '轮1 助手输出被重建保留')
   assert.equal(input.find((i) => i.type === 'function_call_output').output, 'child result', '对话内容未被改写')
 
-  // 无状态续轮：typed 400，零上游调用
+  // 无状态续轮：优雅降级——孤儿 output 走 orphan-adopt 补齐 call_id 后转发（真机验证过的形状修复）
   const r3 = await gw.post('/v1/responses', {
     model: V2_TARGET_PUBLIC_ID,
-    input: [],
+    input: [{ type: 'function_call_output', call_id: 'call_orphan_degraded', output: 'degraded result' }],
     stream: true,
     previous_response_id: 'resp_prev_parent_session',
   }, { 'content-type': 'application/json' })
-  assert.equal(r3.status, 400)
-  const e3 = JSON.parse(await r3.text())
-  assert.equal(e3.error.code, 'continuation_state_missing')
-  assert.equal(upstreamBodies.length, 2)
+  assert.equal(r3.status, 200, '状态缺失降级转发，不打断会话')
+  await r3.text()
+  assert.equal(upstreamBodies.length, 3)
+  assert.equal(upstreamBodies[2].previous_response_id, undefined)
+  assert.equal(upstreamBodies[2].input[0].output, 'degraded result', '降级不改写工具结果内容')
 })

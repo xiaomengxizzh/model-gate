@@ -351,3 +351,48 @@ test('订阅父代理：上游 completed 后不关流（真实 ChatGPT 行为）
   }
 
 })
+
+test('订阅父代理：终态事件形状未知（只有 created+done），预登记仍让续轮放行', { timeout: 30000 }, async (t) => {
+  const token = makeToken('P09_SHAPE_CANARY')
+  const home = await makeAuthHome(token)
+  const officialHits = []
+  let n = 0
+  const openStreams = []
+  const official = await startScriptedUpstream(async (req, res) => {
+    officialHits.push(await readBody(req))
+    n++
+    const id = 'resp_shape_' + n
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    const emit = (e, d) => res.write('event: ' + e + '\ndata: ' + JSON.stringify(d) + '\n\n')
+    emit('response.created', { type: 'response.created', response: { id, status: 'in_progress', model: 'codex-gpt', output: [] } })
+    emit('response.output_item.done', { type: 'response.output_item.done', item: { type: 'message', id: 'ms_' + n, role: 'assistant', content: [{ type: 'output_text', text: 'shape' + n }] } })
+    // 故意不发任何可识别终态、也不关流：预登记 + 增量更新必须已让状态可用。
+    openStreams.push(res)
+  })
+  const go = await startScriptedUpstream(async (req, res) => { res.writeHead(500); res.end('{}') })
+  const gw = await startGateway({ name: 'p09-shape', env: { HOME: home, CODEX_HOME: join(home, '.codex') }, config: config(official.base, go.base) })
+  t.after(async () => { for (const st of openStreams) { try { st.end() } catch {} } await gw.stop(); await official.stop(); await go.stop(); await rm(home, { recursive: true, force: true }) })
+  const r1 = await gw.post('/v1/responses', PARENT)
+  assert.equal(r1.status, 200)
+  const reader = r1.body.getReader()
+  let seen = ''
+  const deadline = Date.now() + 5000
+  while (!seen.includes('response.output_item.done') && Date.now() < deadline) {
+    const { value, done } = await reader.read()
+    if (done) break
+    seen += Buffer.from(value).toString('utf8')
+  }
+  assert.ok(seen.includes('response.output_item.done'))
+  const r2 = await gw.post('/v1/responses', Object.assign({}, PARENT, {
+    previous_response_id: 'resp_shape_1',
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] }],
+  }))
+  assert.equal(r2.status, 200, '预登记使未知终态形状下续轮仍放行')
+  const reader2 = r2.body.getReader()
+  try { let d = false; while (!d) { const c = await reader2.read(); d = c.done } } catch {}
+  assert.equal(officialHits.length, 2)
+  const texts = officialHits[1].input.flatMap((i) => (i.content || []).map((c) => c.text))
+  assert.ok(texts.includes('shape1'), '增量登记的输出项进入重建历史')
+  for (const st of openStreams) { try { st.end() } catch {} }
+  try { let d = false; while (!d) { const c = await reader.read(); d = c.done } } catch {}
+})

@@ -2,6 +2,18 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-16 续轮韧性：状态缺失优雅降级 + 全链路诊断
+
+### Changed
+
+- **续轮状态缺失不再硬 400 打断会话**（三轮真机反馈后的韧性修正）：告警 `responses continuation degraded` + 剔除 previous_response_id 后落回既有形状修复链路（第三方 orphan-adopt 真机验证过；官方后端按位置配对）。状态可用时仍走完整历史重建（严格更优）。降级绝不静默：warn 日志含 reason/prev/store 计数。设计依据：Codex 实测保留消息历史、仅省略服务端缓存的工具项，降级转发可继续会话。
+- **续轮全链路结构化诊断**（只记协议元数据，不记正文）：登记成功 `responses continuation recorded id=… items=… recorded=…`；捕获为空 `responses continuation capture empty events=…`（列出到达的事件类型）；重建 `prev=… restored=… delta=…`。
+- 捕获 sink 兼容事件顶层 id 形状（`obj.id` 回落）；终态判定不再依赖 id 存在；快照附 eventTypes 供诊断。
+
+### Fixed
+
+- `streamRawResponses` 诊断行引用未传入的 `log` 导致 ReferenceError 炸管（本轮引入即修，复现脚本+套件锁定）。
+
 ## [Unreleased] —— 2026-11-16 修复父代理续轮状态缺失（终态即登记）
 
 ### Fixed

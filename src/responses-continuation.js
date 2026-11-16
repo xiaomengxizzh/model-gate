@@ -144,6 +144,8 @@ export function createCaptureSink () {
   let completedOutput = null
   let sawAny = false
   let terminal = false
+  let pendingRecord = false
+  const eventTypes = []
 
   const considerItem = (item) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return
@@ -154,16 +156,21 @@ export function createCaptureSink () {
     if (!obj || typeof obj !== 'object') return
     sawAny = true
     const type = String(obj.type || '')
+    if (type && eventTypes.length < 24 && !eventTypes.includes(type)) eventTypes.push(type)
     if (obj.response && typeof obj.response === 'object') {
       if (typeof obj.response.id === 'string' && obj.response.id) responseId = obj.response.id
       if (typeof obj.response.status === 'string') status = obj.response.status
     }
-    if (type === 'response.output_item.done' && obj.item) considerItem(obj.item)
+    // 兼容 id 在事件顶层的形状（不同后端信封差异；只取协议元数据）。
+    if (!responseId && typeof obj.id === 'string' && obj.id && type.startsWith('response.')) responseId = obj.id
+    if (type === 'response.output_item.done' && obj.item) { considerItem(obj.item); if (responseId) pendingRecord = true }
+    if (type === 'response.created' && responseId) pendingRecord = true // 预登记：终态形状未知时续轮也有状态
     if (type === 'response.completed' || type === 'response.failed' || type === 'response.incomplete') {
       if (obj.response && Array.isArray(obj.response.output)) completedOutput = obj.response.output
       // 真实订阅后端在 completed 后**不关闭 SSE 流**；Codex 收到终态即发下一轮。
       // 终态到达即视为可登记（2026-11-16 父代理续轮 400 根因），不得等流结束。
-      if (responseId) terminal = true
+      terminal = true
+      if (responseId) pendingRecord = true
     }
   }
   const feedSse = (text) => {
@@ -186,7 +193,7 @@ export function createCaptureSink () {
     const output = completedOutput
       ? cloneItems(completedOutput)
       : cloneItems(Array.from(outputById.values()).concat(outputNoId))
-    return { responseId, status: status || (sawAny ? 'completed' : null), output, sawAny }
+    return { responseId, status: status || (sawAny ? 'completed' : null), output, sawAny, eventTypes: eventTypes.slice() }
   }
   return {
     write (chunk) {
@@ -199,11 +206,18 @@ export function createCaptureSink () {
       if (typeof obj.id === 'string' && obj.id) responseId = obj.id
       if (typeof obj.status === 'string') status = obj.status
       if (Array.isArray(obj.output)) completedOutput = obj.output
-      if (responseId) terminal = true
+      terminal = true
     },
     // 终态已到达（流可能仍开着）：调用方据此立即登记，不等流结束。
     terminalSnapshot () {
       return terminal ? snapshot() : null
+    },
+    // 增量登记窗口：created 预登记 / output_item.done 更新 / 终态定稿。
+    // 每次返回后清除标记——调用方逐 chunk 取走并登记（同 id 幂等覆盖）。
+    takeRecordable () {
+      if (!pendingRecord || !responseId) return null
+      pendingRecord = false
+      return snapshot()
     },
     finish () {
       // 尾部可能残留最后一个未以 \n\n 结束的事件块。
