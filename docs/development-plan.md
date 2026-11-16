@@ -17,6 +17,8 @@
 | P0/P1 能力声明对齐（shell/effort/压缩归属）+ 目录 gen7 | DONE(offline) + 已发布 |
 | P1/P2 托管生命周期/帧层/守卫等 14 项 | DONE(offline) |
 | 全部支线合并 main + push | DONE（main a36880d，分支逐一核验为祖先） |
+| 真机反馈四轮修复（include/终态时序/韧性+诊断） | DONE(offline+部分真机)；Go 子代理续轮真机证实 |
+| **官方父代理带工具续轮：上游 400 No tool call found** | **未解决（当前唯一阻断）**——官方响应未被捕获登记，见[晚间交接](roadmap/2026-11-16-modelgate-handoff-evening.md) §2.E |
 | 真实长会话/父子派单/原生压缩复验 | **BLOCKED**（需额度与授权） |
 | Go 子线程 provider 级压缩方案 / 父子模型分设 API | **待所有者裁决** |
 
