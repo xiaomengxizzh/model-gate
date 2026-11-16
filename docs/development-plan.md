@@ -6,6 +6,20 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
+## 2026-11-16 Codex 实际使用严格审计修复（已合并 main 并部署）
+
+所有者指令：审计→修复→合并所有支线→push。审计发现与修复清单见[审计修复证据](evidence/2026-11-16-codex-audit-remediation.md)，部署与生产冒烟见[部署记录](evidence/2026-11-16-audit-fix-deployment.md)。
+
+| 项 | 状态 |
+| --- | --- |
+| P0 续轮历史重建（WS/HTTP 共用，fail-closed） | DONE(offline) + 生产冒烟 PASS |
+| P0 TOML 段头注释/多行续行安全 | DONE(offline) |
+| P0/P1 能力声明对齐（shell/effort/压缩归属）+ 目录 gen7 | DONE(offline) + 已发布 |
+| P1/P2 托管生命周期/帧层/守卫等 14 项 | DONE(offline) |
+| 全部支线合并 main + push | DONE（main a36880d，分支逐一核验为祖先） |
+| 真实长会话/父子派单/原生压缩复验 | **BLOCKED**（需额度与授权） |
+| Go 子线程 provider 级压缩方案 / 父子模型分设 API | **待所有者裁决** |
+
 ## 2026-11-15 前端体验 V3（UX-00…UX-06）
 
 执行计划：[前端体验 V3 执行计划](roadmap/2026-11-15-frontend-experience-v3-execution-plan.md)。契约：[产品状态投影与模块契约](contracts/ui-v3-product-status.md)。基线审计：[UX-00 基线](roadmap/2026-11-15-ux-v3-ux00-baseline.md)。分支 `feat/modelgate-ux-v3`（从 `origin/mg-codex-native@708cf5e` 新建，5 个子代理独立工作树；未合并 `main`、未改 PR #7）。

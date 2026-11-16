@@ -1,5 +1,7 @@
 # ModelGate 交接文档（2026-11-16，所有者指令停止排障后如实记录）
 
+> **2026-11-16 晚更新：** 本文记录的"唯一未关闭阻断"（孤儿 function_call_output）及后续审计发现已在 `fix/modelgate-codex-audit-20261116` 修复并合并 main（a36880d）、部署生产。续轮历史重建见 [审计修复证据](../evidence/2026-11-16-codex-audit-remediation.md) 与 [部署记录](../evidence/2026-11-16-audit-fix-deployment.md)。本文保留为时间点记录；真实长会话复验仍待所有者授权。
+
 > 状态：**半可用（PARTIAL）**。网关侧、UI、聚合启用、官方/DeepSeek 双路路由均已就绪并有真实证据；但 **Codex 真实会话里调用 DeepSeek 仍被一个"工具历史形状"问题阻断**（本轮按所有者指令停止修复，未解决即未解决）。
 > 分支：`feat/modelgate-ux-v3`（含 UX-00…UX-06 与后续生产接入修复）· 生产工作树：`/home/xiaomengxizi/ai/workplace/idproject/model-gateway`（分支 `deploy/modelgate-ux-v3`）· 服务：systemd 用户单元 `model-gateway.service`（127.0.0.1:8787）
 
