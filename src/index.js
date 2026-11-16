@@ -2314,7 +2314,15 @@ function makeHandler(state) {
         }
         try { await collectBody(req, 64 * 1024) } catch { /* body 无业务语义，仅消费以释放连接 */ }
         const session = issueLocalAdminSession(state)
-        sendJson(res, 200, { ok: true, token: session.token, scope: 'local-admin', expiresAt: session.expiresAt })
+        // A5 LOW-1：令牌承载响应显式禁止缓存/代理存储（纵深防御，浏览器/中间件不得留存会话令牌）。
+        const unlockBody = JSON.stringify({ ok: true, token: session.token, scope: 'local-admin', expiresAt: session.expiresAt })
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'content-length': Buffer.byteLength(unlockBody),
+          'cache-control': 'no-store, no-cache, must-revalidate, private',
+          'pragma': 'no-cache',
+        })
+        res.end(unlockBody)
         return
       }
       // E6 管理面：/api/codex/*（P0-2 / M4-1b）。

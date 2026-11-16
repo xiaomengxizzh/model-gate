@@ -35,6 +35,8 @@ test('无全局令牌：聚合面 403 → 本机解锁 200 → 会话令牌放�
     assert.equal(body.scope, 'local-admin')
     assert.match(body.token, /^[a-f0-9]{64}$/, '令牌是不透明 32 字节 hex')
     assert.ok(body.expiresAt > Date.now(), 'expiresAt 是未来时间戳')
+    // A5 LOW-1：令牌承载响应禁止缓存。
+    assert.match(String(res.headers.get('cache-control')), /no-store/, '令牌响应必须 Cache-Control:no-store')
 
     // 用令牌访问聚合管理面：不再 403。
     const after = await gw.get('/api/aggregation/health', { authorization: 'Bearer ' + body.token })
