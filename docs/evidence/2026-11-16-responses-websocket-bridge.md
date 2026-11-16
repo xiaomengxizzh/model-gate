@@ -10,6 +10,7 @@
   - `53d886d`→`2f9ff2c`→`b5af929` 真机暴露的订阅后端参数剔除（`previous_response_id`、`access_programs`、`prompt_cache_key`）
   - `a2727dd` SSE 正文嗅探（content-type 误标修复）+ status 门禁 + 测试加固
   - `4ccf70f` connection-scoped function_call 缓存（修复 wait_agent/spawn_agent 孤儿 output）
+  - `b157b18` 第三方原生 Responses 入口剔除 previous_response_id（修复 Go DeepSeek 子代理 nativeContract 400）
 - **部署状态**：已部署到生产网关 8787，由 systemd user 单元 `model-gateway.service`（`Restart=always`）托管。
 - **通用 GUI 身份保持不变**：`~/.codex/config.toml` 仍为 `model_provider="openai"` + `openai_base_url="http://127.0.0.1:8787"` + `model="gpt-6-luna"`；未切 named provider，未改 `auth.json`（sha `de7cc6e…` 未变）。
 
@@ -45,6 +46,13 @@
 - **真机双场景（通用身份）**：
   - A 普通推理 `8*8` → EXIT=0、输出 `64`、0 reconnect、0 错误帧（29s）。
   - B `spawn_agent`→`wait_agent` → EXIT=0、输出 `The delegated task is complete.`、0 `No tool call found`；网关日志证据：`cached function_call name=spawn_agent`、`cached function_call name=wait_agent`、`injected cached function_call call_Qcaz…`。
+
+### 追加：第三方原生 Responses 子代理 previous_response_id（b157b18）
+
+- 问题：`4ccf70f` 后真机 luna→Go DeepSeek 子代理仍 400：`原生 Responses 目标不支持 previous_response_id：未提供 nativeContract`。根因是 Codex WS 续轮帧把 `previous_response_id` 带到**第三方原生 Responses** 目标（`mg-opencodego-deepseek-v4-1-flash`，走 line 2934 strict nativeGate）。
+- 修法：在 RESPONSES 分支入口对第三方目标剔除 `previous_response_id`（portable 上游按完整 input 工作、不支持服务端续轮），不进入 nativeGate/projection；`projectThirdPartyResponsesParams` 同步剔除作二次保险；`store`/`background`/`truncation` 仍严格。官方目标路径不受影响。
+- 测试：`agg-v2-third-party-prevresp.test.mjs`（集成：200、字段剔除、内容不丢）+ `agg-v2-third-party-params`/`responses-native`/`codex-official` 断言更新；全量 **129 suites / 1246 tests PASS**。
+- **真机**：`spawn_agent`→`wait_agent`（子=Go DeepSeek）连续两次 EXIT=0、0 `nativeContract`/`No tool call found` 错误；日志 `cached function_call name=spawn_agent/wait_agent`、`injected cached function_call …`。首次一次 `ECONNRESET attempt 1/3`（Go 上游瞬断、网关内建重试），非本变更问题。
 - **真机验收（通用 GUI 身份，`codex exec -m gpt-6-luna`）**：
   - `Compute 2+2…Reply with ONLY the single digit: 4` → EXIT=0，输出 `4`，**0 次 reconnect**，无 error 帧（25s）。
   - 修复前对照：同一命令反复 `Reconnecting 2/5…5/5` + `Falling back from WebSockets to HTTPS`（502），已消失。
