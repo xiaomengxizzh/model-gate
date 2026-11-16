@@ -108,17 +108,64 @@ function splitLines (text) {
   return { eol, lines: text.split(eol) }
 }
 
-const HEADER_RE = /^\[\[?([^\[\]]+)\]\]?$/
+const HEADER_RE = /^\[\[?([^\[\]]+)\]\]?(?:[ \t]*#.*)?$/
 const KEY_RE = /^([A-Za-z0-9_-]+)\s*=\s*([\s\S]*)$/
 
+// 引号感知的行内注释切分：返回 [值部分, 注释部分(含 #，无则 '')]。
+// 只识别单/双引号字符串外的 #；TOML 注释不得出现在字符串字面量内部。
+function splitTrailingComment (text) {
+  const s = String(text == null ? '' : text)
+  let quote = null
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (quote) {
+      if (ch === '\\' && quote === '"') { i++; continue }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue }
+    if (ch === '#') return [s.slice(0, i), s.slice(i)]
+  }
+  return [s, '']
+}
+
+// 去掉字符串字面量后统计括号深度变化（多行数组/内联表续行判定用）。
+function bracketDelta (line, open, close) {
+  const stripped = String(line).replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '')
+  let delta = 0
+  for (const ch of stripped) {
+    if (ch === open) delta++
+    else if (ch === close) delta--
+  }
+  return delta
+}
+
 function isMultilineValue (value) {
-  const v = String(value || '').trim()
+  const v = splitTrailingComment(String(value || ''))[0].trim()
   if (v === '') return true
   if (v.startsWith('"""')) return (v.match(/"""/g) || []).length < 2
   if (v.startsWith("'''")) return (v.match(/'''/g) || []).length < 2
-  if (v.startsWith('[')) return !v.endsWith(']')
-  if (v.startsWith('{')) return !v.endsWith('}')
+  if (v.startsWith('[')) return bracketDelta(v, '[', ']') > 0
+  if (v.startsWith('{')) return bracketDelta(v, '{', '}') > 0
   return false
+}
+
+// 多行值的续行状态：opening 行之后直到闭合分隔符的所有行都是 continuation，
+// 绝不被当作段头/键值改写（2026-11-16 审计 P1：多行字符串内的 `model = "…"` 曾被误改写）。
+function openMultilineState (value) {
+  const v = splitTrailingComment(String(value || ''))[0].trim()
+  if (v.startsWith('"""') && (v.match(/"""/g) || []).length < 2) return { type: 'triple', delim: '"""' }
+  if (v.startsWith("'''") && (v.match(/'''/g) || []).length < 2) return { type: 'triple', delim: "'''" }
+  if (v.startsWith('[')) { const d = bracketDelta(v, '[', ']'); if (d > 0) return { type: 'bracket', depth: d } }
+  if (v.startsWith('{')) { const d = bracketDelta(v, '{', '}'); if (d > 0) return { type: 'brace', depth: d } }
+  return null
+}
+
+function multilineCloses (state, line) {
+  if (state.type === 'triple') return String(line).includes(state.delim)
+  if (state.type === 'bracket') { state.depth += bracketDelta(line, '[', ']'); return state.depth <= 0 }
+  if (state.type === 'brace') { state.depth += bracketDelta(line, '{', '}'); return state.depth <= 0 }
+  return true
 }
 
 export function parseConfigDocument (text) {
@@ -127,9 +174,15 @@ export function parseConfigDocument (text) {
   const meta = []
   const sections = []
   let current = { name: '', isArray: false, start: -1, end: -1 }
+  let pendingMultiline = null
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i]
     const trimmed = raw.trim()
+    if (pendingMultiline) {
+      meta.push({ i, kind: 'continuation', raw, sectionName: current.name })
+      if (multilineCloses(pendingMultiline, raw)) pendingMultiline = null
+      continue
+    }
     if (trimmed === '') { meta.push({ i, kind: 'blank', raw, sectionName: current.name }); continue }
     if (trimmed.startsWith('#')) { meta.push({ i, kind: 'comment', raw, sectionName: current.name }); continue }
     const header = HEADER_RE.exec(trimmed)
@@ -142,8 +195,14 @@ export function parseConfigDocument (text) {
       meta.push({ i, kind: 'header', raw, sectionName: name, isArray })
       continue
     }
+    // 疑似段头但无法解析（如 `[features] 额外文本`）：fail-closed，绝不静默当普通行，
+    // 否则合并会在文末追加重复段而指纹自检仍通过（2026-11-16 审计 P0）。
+    if (trimmed.startsWith('[')) {
+      throw new ConfigError('toml_header_unparseable', '第 ' + (i + 1) + ' 行疑似段头但无法解析（' + trimmed.slice(0, 60) + '）；拒绝自动改写，请手工修正。')
+    }
     const kv = KEY_RE.exec(trimmed)
     if (kv) {
+      const multiline = isMultilineValue(kv[2])
       meta.push({
         i,
         kind: 'entry',
@@ -151,8 +210,9 @@ export function parseConfigDocument (text) {
         sectionName: current.name,
         key: kv[1],
         value: kv[2],
-        multiline: isMultilineValue(kv[2]),
+        multiline,
       })
+      if (multiline) pendingMultiline = openMultilineState(kv[2])
       continue
     }
     meta.push({ i, kind: 'other', raw, sectionName: current.name })
@@ -336,8 +396,11 @@ export function mergeOwnedFields (beforeText, desired) {
     if (idx >= 0) {
       const m = doc.meta[idx]
       if (m.multiline) throw new ConfigError('multiline_value', '顶层 ' + key + ' 是多行/数组值，自动改写被拒绝；请手工合并。')
-      if (doc.lines[idx].trim() !== line) {
-        replacements.set(idx, withIndent(doc.lines[idx], line))
+      // 保留原行的行内注释（owned 行替换不得丢用户注释，2026-11-16 审计 P2）。
+      const comment = splitTrailingComment(doc.lines[idx])[1]
+      const fullLine = comment ? line + ' ' + comment : line
+      if (doc.lines[idx].trim() !== fullLine) {
+        replacements.set(idx, withIndent(doc.lines[idx], fullLine))
         changed.push({ path: key, from: String(m.value).trim(), to: line })
       }
     } else {
@@ -369,8 +432,10 @@ export function mergeOwnedFields (beforeText, desired) {
       if (idx >= 0) {
         const m = doc.meta[idx]
         if (m.multiline) throw new ConfigError('multiline_value', '[' + name + '] ' + k + ' 是多行/数组值，自动改写被拒绝；请手工合并。')
-        if (doc.lines[idx].trim() !== line) {
-          replacements.set(idx, withIndent(doc.lines[idx], line))
+        const comment = splitTrailingComment(doc.lines[idx])[1]
+        const fullLine = comment ? line + ' ' + comment : line
+        if (doc.lines[idx].trim() !== fullLine) {
+          replacements.set(idx, withIndent(doc.lines[idx], fullLine))
           changed.push({ path: name + '.' + k, from: String(m.value).trim(), to: line })
         }
       } else {
