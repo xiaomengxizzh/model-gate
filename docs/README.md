@@ -17,6 +17,7 @@
 | **前端 V3 状态投影/路由/写集契约（UX-00）** | [产品状态投影与模块契约](contracts/ui-v3-product-status.md) |
 | **前端 V3 UX-00 基线实测与审计结论** | [UX-00 基线](roadmap/2026-11-15-ux-v3-ux00-baseline.md) |
 | **前端 V3 开发交付报告（代码清单/阶段状态/证据/阻断/审批）** | [V3 交付报告](roadmap/2026-11-15-ux-v3-delivery.md) |
+| **接手当前生产实例（含未关闭阻断、回滚与凭据边界）** | [ModelGate 交接文档 2026-11-16](roadmap/2026-11-16-modelgate-handoff.md) |
 | 查用户批准的不可降级产品目标、完整真实验收 | [ModelGate 产品契约 MG-R001..MG-R012](product/2026-11-14-owner-product-contract.md) |
 | 直接执行聚合模式开发（伪代码、模块、测试与 PR） | [2026-11-14 聚合完整执行计划](roadmap/2026-11-14-aggregation-pseudocode-plan.md) |
 | 激活主代理与最多 5 名专职子代理 | [Agent Team 直接执行启动提示词](roadmap/2026-11-14-aggregation-agentteam-start.md) |

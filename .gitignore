@@ -35,6 +35,10 @@ mg-tray.exe
 # 本地 agent 工作树（.agents/worktrees/*）：只在本机存在，绝不入库
 .agents/
 config/admin.token
+# 运行时派生产物（2026-11-16）：聚合目录/快照、官方基线快照、视频任务状态
+config/aggregation/
+config/codex-models-baseline.json
+config/videos.json
 mg-tray.new.exe
 
 # Process-local test leftovers and machine key material
