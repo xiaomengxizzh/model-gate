@@ -7,6 +7,9 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { buildCatalog } from '../src/codex/catalog.js'
+// MG-FIX-P1-05：启动器与控制台的原生子代理配置共用同一 canonical 字节，
+// 避免"启动器写 low、控制台写 medium"导致 409 三方差异（两者都是 Codex 原生配置）。
+import { MANAGED_AGENT_DESCRIPTION, buildManagedAgentConfig } from '../src/codex/config.js'
 import { signIn, createPlanCredential } from '../src/subscription/official.js'
 import {
   resolveSubscriptionMode, buildSubscriptionProviderConfig, refreshLocalSubscriptionCredential,
@@ -102,6 +105,7 @@ async function configure() {
   await writeFile(catalogPath, JSON.stringify(catalog), { mode: 0o600 })
   const configPath = join(gatewayHome, 'gateway.json')
   await writeFile(configPath, JSON.stringify(config), { mode: 0o600 })
+  const managedAgent = buildManagedAgentConfig({ model: alias })
   const desktopConfig = `model_provider = "modelgate"
 model = "${parentModel}"
 model_catalog_json = ${JSON.stringify(catalogPath)}
@@ -121,10 +125,10 @@ multi_agent_v2 = false
 code_mode = false
 
 [agents.go_deepseek]
-description = "Native Codex worker using OpenCode Go DeepSeek V4.1 Flash"
-config_file = "go-deepseek.toml"
+description = ${JSON.stringify(MANAGED_AGENT_DESCRIPTION)}
+config_file = ${JSON.stringify(managedAgent.child.fileName)}
 `
-  await writeFile(join(codexHome, 'go-deepseek.toml'), `model = "${alias}"\nmodel_reasoning_effort = "low"\n`, { mode: 0o600 })
+  await writeFile(join(codexHome, managedAgent.child.fileName), managedAgent.child.text, { mode: 0o600 })
   await writeFile(join(codexHome, 'config.toml'), desktopConfig, { mode: 0o600 })
   return {
     alias,
