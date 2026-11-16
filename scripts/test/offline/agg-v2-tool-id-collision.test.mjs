@@ -89,12 +89,16 @@ test('P2-07：混合有/无 id 的多工具交错，id 唯一且内容零改写'
   assert.equal(firstEmptyToolCallId(r.body), null)
 })
 
-test('P2-07：孤儿 output 仍 fail-closed；不伪造 function_call、不丢历史', () => {
+test('P2-07/P0-01：孤儿 output 补稳定关联键；不伪造 function_call、不丢历史、不改内容', () => {
+  const item = { type: 'function_call_output', output: 'orphan' }
   const r = repairThirdPartyToolCallIds({ input: [
     { type: 'message', role: 'assistant', content: 'x' },
-    { type: 'function_call_output', output: 'orphan' },
+    item,
   ] })
   assert.equal(r.body.input.length, 2, '不得丢历史')
   assert.equal(r.body.input.some((i) => i && i.type === 'function_call'), false, '不得伪造 function_call')
-  assert.deepEqual(firstEmptyToolCallId(r.body), { index: 1, type: 'function_call_output', reason: 'missing' })
+  assert.equal(r.body.input[1].output, 'orphan', '不得改内容')
+  assert.match(r.body.input[1].call_id, /^call_mg_orphan_[a-f0-9]{16}$/, '补稳定关联键')
+  assert.ok(r.repaired.some((x) => x.action === 'orphan-adopt'))
+  assert.equal(firstEmptyToolCallId(r.body), null, '补齐后 guard 不再拦截')
 })

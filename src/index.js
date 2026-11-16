@@ -838,9 +838,25 @@ export function repairThirdPartyToolCallIds (body) {
           item.call_id = call.call_id
           repaired.push({ index, type, action: 'pair', from: callIndex })
           consume(callIndex)
+          continue
         }
       }
-      // 无配对 call 的孤儿 output：保持缺省，交由 guard 报可操作错误（不静默丢历史）。
+      // MG-FIX-P0-01 无损修复：真孤儿 output（前面没有可配对 call）。
+      // third-party portable Responses 上游只要求 call_id 为非空字符串，并不要求同一 input 内
+      // 存在对应的 function_call。这里给这个**真实工具结果**补一个稳定的关联键：
+      //   · 不伪造 function_call（不新增任何 call item）；
+      //   · 不删历史、不改 content/output/name（仅补一个缺失的协议字段 call_id）；
+      //   · 由 output 自身内容确定性派生 → Codex 多次重连拿到同一个 id，不再触发形状漂移；
+      //   · 记 orphan-adopt 诊断，绝不静默。
+      // 这样消除“能正常输出但反复重连五次”的 P0 阻断，同时保持 typed fail-closed 对其它非法输入。
+      const seed = JSON.stringify({ t: type, n: item.name == null ? null : item.name, o: item.output == null ? null : item.output, i: index })
+      let synthetic = 'call_mg_orphan_' + sha256Hex(seed).slice(0, 16)
+      // 极端情况下与现有 id 冲突则加后缀，确保唯一。
+      let suffix = 1
+      while (existingIds.has(synthetic)) synthetic = 'call_mg_orphan_' + sha256Hex(seed + ':' + (++suffix)).slice(0, 16)
+      item.call_id = synthetic
+      existingIds.add(synthetic)
+      repaired.push({ index, type, action: 'orphan-adopt' })
     }
   }
   if (!repaired.length) return { body, repaired }

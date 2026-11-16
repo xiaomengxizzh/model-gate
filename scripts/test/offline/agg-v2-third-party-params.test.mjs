@@ -102,8 +102,10 @@ test('call_id 补齐：Codex 新会话里 call/output 都缺 id 时不丢历史�
   assert.deepEqual(r.repaired, [])
   assert.equal(r.body, d)
 
-  // 孤儿 output（前面没有 call）：无法配对 → 保持缺失，交给 guard 报可操作错误
+  // 孤儿 output（前面没有 call）：P0-01 无损修复——补稳定关联键 orphan-adopt，
+  // 不伪造 call、不丢历史、不改内容；补齐后 guard 不再拦截（消除反复重连）。
   const e = repairThirdPartyToolCallIds({ input: [{ type: 'function_call_output', output: 'ok' }] })
-  assert.deepEqual(e.repaired, [])
-  assert.deepEqual(firstEmptyToolCallId(e.body), { index: 0, type: 'function_call_output', reason: 'missing' })
+  assert.deepEqual(e.repaired.map((r) => r.action), ['orphan-adopt'])
+  assert.match(e.body.input[0].call_id, /^call_mg_orphan_[a-f0-9]{16}$/)
+  assert.equal(firstEmptyToolCallId(e.body), null)
 })
