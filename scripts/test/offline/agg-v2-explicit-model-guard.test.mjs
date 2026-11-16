@@ -18,8 +18,12 @@ async function withFixture (fn, { slugs = [OFFICIAL], defaultModel = DEEPSEEK } 
   const dir = await mkdtemp(join(tmpdir(), 'mg-p1-03-'))
   const prevDir = process.env.MG_CONFIG_DIR
   const prevCfg = process.env.MG_CONFIG
+  const prevHome = process.env.CODEX_HOME
   process.env.MG_CONFIG_DIR = dir
   delete process.env.MG_CONFIG
+  // A3 P1-05 后：preview 会把托管子代理文件 go-deepseek.toml 纳入所有权判定；
+  // 必须隔离 CODEX_HOME，否则会读到真实 ~/.codex 而误报 agent_child_modified。
+  process.env.CODEX_HOME = dir
   const configPath = join(dir, 'gateway.json')
   await writeFile(configPath, JSON.stringify({
     defaults: defaultModel ? { model: defaultModel } : {},
@@ -50,6 +54,8 @@ async function withFixture (fn, { slugs = [OFFICIAL], defaultModel = DEEPSEEK } 
     else process.env.MG_CONFIG_DIR = prevDir
     if (prevCfg === undefined) delete process.env.MG_CONFIG
     else process.env.MG_CONFIG = prevCfg
+    if (prevHome === undefined) delete process.env.CODEX_HOME
+    else process.env.CODEX_HOME = prevHome
     await rm(dir, { recursive: true, force: true })
   }
 }

@@ -1,4 +1,5 @@
 import http from 'node:http'
+import { randomBytes } from 'node:crypto'
 import { pipeline } from 'node:stream'
 import { readFileSync, chmodSync, existsSync, copyFileSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -330,10 +331,43 @@ function managementTokenOf(req) {
 // 返回 { explicitAdmin:true, adminSubject } 或 null。adminSubject 是令牌的不可逆短哈希
 // （稳定、便于审计关联；日志/响应永不含令牌本体）。
 function explicitAdminOf(req, state) {
-  if (!state.adminToken) return null
   const supplied = managementTokenOf(req)
-  if (!supplied || !safeTokenCmp(supplied, state.adminToken)) return null
-  return { explicitAdmin: true, adminSubject: 'admin-' + sha256Hex(String(state.adminToken)).slice(0, 16) }
+  if (!supplied) return null
+  if (state.adminToken && safeTokenCmp(supplied, state.adminToken)) {
+    return { explicitAdmin: true, adminSubject: 'admin-' + sha256Hex(String(state.adminToken)).slice(0, 16) }
+  }
+  // MG-FIX-P1-04：本机管理会话令牌——由 POST /api/admin/unlock 在回环+同源校验通过后签发，
+  // 仅存进程内存（重启即失效）、不落盘、不写日志，作用域等效显式管理员但可随时被本地会话丢弃。
+  // 它不是“回环地址=永久管理员”：必须先经解锁端点取得令牌，且仍受下面的 peer/remote 检查约束。
+  if (localAdminSessionValid(state, supplied)) {
+    return { explicitAdmin: true, adminSubject: 'admin-local-session-' + sha256Hex(supplied).slice(0, 16), localSession: true }
+  }
+  return null
+}
+
+// 本机管理会话：token -> expiresAt(ms)。纯内存、重启即失效。
+const LOCAL_ADMIN_SESSION_TTL_MS = 30 * 60 * 1000 // 30 分钟
+function localAdminSessionValid(state, token) {
+  const sessions = state && state.localAdminSessions
+  if (!sessions || !(sessions instanceof Map)) return false
+  const exp = sessions.get(String(token))
+  if (typeof exp !== 'number') return false
+  if (exp <= Date.now()) { sessions.delete(String(token)); return false }
+  return true
+}
+function issueLocalAdminSession(state) {
+  if (!(state.localAdminSessions instanceof Map)) state.localAdminSessions = new Map()
+  // 容量保护：清理过期项，最多保留少量会话，避免内存无限增长。
+  const now = Date.now()
+  for (const [t, exp] of state.localAdminSessions) if (typeof exp !== 'number' || exp <= now) state.localAdminSessions.delete(t)
+  if (state.localAdminSessions.size >= 8) {
+    const oldest = [...state.localAdminSessions.entries()].sort((a, b) => a[1] - b[1])[0]
+    if (oldest) state.localAdminSessions.delete(oldest[0])
+  }
+  const token = randomBytes(32).toString('hex')
+  const expiresAt = now + LOCAL_ADMIN_SESSION_TTL_MS
+  state.localAdminSessions.set(token, expiresAt)
+  return { token, expiresAt }
 }
 
 // 远程管理显式开关：仅 server.allowRemote=true 或 MG_ADMIN_ALLOW_REMOTE=1 时放行非回环 peer。
@@ -2260,6 +2294,29 @@ function makeHandler(state) {
         res.end(req.method === 'HEAD' ? undefined : LEGACY_CONSOLE_RETIRED); return
       }
       if (path === '/api/auth' && req.method === 'GET') { sendJson(res, 200, { needAuth: !!state.adminToken, startedAt: state.st.startedAt }); return }
+
+      // MG-FIX-P1-04：本机管理会话解锁。普通状态（未设置全局管理令牌）下管理面只读且写操作 403；
+      // 用户在本机 GUI 主动点击“解锁聚合管理”后，回环 + 同源/Host（上方已全局校验）取得一个
+      // 短时、纯内存、重启即失效的 local-admin 会话令牌，使 /api/aggregation/* 与 /api/codex/*
+      // 的显式管理员校验通过。绝不把“回环地址”当永久管理员，也不放宽远程/跨源入口。
+      if (path === '/api/admin/unlock' && req.method === 'POST') {
+        // peer 必须是回环（除非所有者显式 allowRemote，语义与其余管理面一致）。
+        if (!isLoopbackPeer(req) && !remoteManagementAllowed(state)) {
+          log && log.warn('admin unlock denied', 'remote_forbidden', path)
+          sendJson(res, 403, { ok: false, code: 'admin_unlock_denied', error: '本机管理会话只允许回环来源；远程管理需显式 allowRemote' })
+          return
+        }
+        // 已设置全局管理令牌时，解锁也必须出示它（未授权者不能仅凭本机连接提权）。
+        if (state.adminToken && !adminOk(req, state)) {
+          log && log.warn('admin unlock denied', 'admin_token_required', path)
+          sendJson(res, 403, { ok: false, code: 'admin_unlock_denied', error: '已设置全局管理令牌：解锁本机管理会话需先提供该令牌' })
+          return
+        }
+        try { await collectBody(req, 64 * 1024) } catch { /* body 无业务语义，仅消费以释放连接 */ }
+        const session = issueLocalAdminSession(state)
+        sendJson(res, 200, { ok: true, token: session.token, scope: 'local-admin', expiresAt: session.expiresAt })
+        return
+      }
       // E6 管理面：/api/codex/*（P0-2 / M4-1b）。
       // 顺序硬约束：Host/Origin 已在上面全局校验 → 可信 peer → 显式管理员 → 才读 body → 派发。
       // 未设置 adminToken 时这里没有任何 loopback 放行：/api/codex/* 一律 403 explicit_admin_required。
@@ -3125,6 +3182,8 @@ export function start(opts = {}) {
     adapterFactory: opts.adapterFactory,
     chatgptPlan: opts.chatgptPlan,
     adminToken: process.env.MG_ADMIN_TOKEN || (cfg.server && cfg.server.adminToken) || (cfg._keys && cfg._keys.__mg_admin) || '',
+    // MG-FIX-P1-04：本机管理会话令牌仓库，纯内存，重启即失效，永不落盘/写日志。
+    localAdminSessions: new Map(),
     paths: cfg._paths || configPaths(),
     // N06：运行时可观测收据（有界内存 ring；request/attempt/usage 三类事件，终态去重）。
     observability: createObservability({ capacity: (cfg.defaults && cfg.defaults.observability && cfg.defaults.observability.capacity) || undefined }),
