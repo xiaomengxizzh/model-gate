@@ -1,6 +1,6 @@
 import http from 'node:http'
 import { randomBytes } from 'node:crypto'
-import { pipeline } from 'node:stream'
+import { pipeline, Transform } from 'node:stream'
 import { readFileSync, chmodSync, existsSync, copyFileSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
@@ -28,6 +28,7 @@ import { classifyTarget, isLoopbackHost } from './codex/identity.js'
 import { restoreResponseJson, detectOpaqueV2Task, detectEncryptedToolSchema } from './codex/interop.js'
 import { readSubscriptionCredential, isGatewaySubscriptionTarget, probeLocalCodexAuth, SubscriptionCredentialError } from './codex/local-subscription.js'
 import { isTargetAuthzError, resolveUpstream, assertResolvedUpstream, assertNoSubscriptionCredentialToThirdParty, authFailureReceipt, authFailureResponse } from './codex/target-authz.js'
+import { reconstructContinuation, recordContinuation, createCaptureSink } from './responses-continuation.js'
 import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
 import { createObservability, hashId } from './observability/events.js'
 import { buildCatalog } from './codex/catalog.js'
@@ -883,7 +884,9 @@ export function repairThirdPartyToolCallIds (body) {
       //   · 由 output 自身内容确定性派生 → Codex 多次重连拿到同一个 id，不再触发形状漂移；
       //   · 记 orphan-adopt 诊断，绝不静默。
       // 这样消除“能正常输出但反复重连五次”的 P0 阻断，同时保持 typed fail-closed 对其它非法输入。
-      const seed = JSON.stringify({ t: type, n: item.name == null ? null : item.name, o: item.output == null ? null : item.output, i: index })
+      // MG-FIX-P2-07（2026-11-16 审计修正）：seed 不含 index——历史位置漂移时同一工具结果
+      // 仍派生同一 id（重连稳定）；同内容多个孤儿的先后顺序决定后缀，碰撞循环保证唯一。
+      const seed = JSON.stringify({ t: type, n: item.name == null ? null : item.name, o: item.output == null ? null : item.output })
       let synthetic = 'call_mg_orphan_' + sha256Hex(seed).slice(0, 16)
       // 极端情况下与现有 id 冲突则加后缀，确保唯一。
       let suffix = 1
@@ -1840,7 +1843,8 @@ function restoreCodexJsonBuffer(buf, route, plan) {
   return { ok: true, json: restored.json, lossy: restored.lossy || [] }
 }
 async function streamCodexResponse(state, budget, log, opts) {
-  const { up, res, route, plan, model, modelName, pid, sg, prov } = opts
+  const { up, res, route, plan, model, modelName, pid, sg, prov, continuation } = opts
+  const captureSink = continuation ? createCaptureSink() : null
   const adapter = createCodexStreamAdapter(res, {
     plan, route, model, log,
     softRestore: !(route && route.codex && route.codex.official === true),
@@ -1854,6 +1858,7 @@ async function streamCodexResponse(state, budget, log, opts) {
   // The caller owns the request budget and provider permit until the relay settles.
   try {
     for await (const chunk of up.stream) {
+      if (captureSink) captureSink.write(chunk)
       await adapter.push(chunk)
       if (adapter.terminal) break
     }
@@ -1868,6 +1873,12 @@ async function streamCodexResponse(state, budget, log, opts) {
   } finally {
     budget.signal.removeEventListener('abort', onAbort)
     res.removeListener('close', onAbort)
+    if (captureSink) {
+      const cap = captureSink.finish()
+      if (cap.responseId) {
+        recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
+      }
+    }
   }
   if (!budget.expired()) {
     if (adapter.terminal === 'response.failed') {
@@ -1942,7 +1953,7 @@ export function verifyCodexAuthReceipt({ pid, modelName, target, identity, prov,
 }
 
 async function proxyOfficialResponses(state, budget, log, opts) {
-  const { req, body, modelName, def, res, codexRoute, codexPlan } = opts
+  const { req, body, modelName, def, res, codexRoute, codexPlan, continuation } = opts
   const candidates = [def.provider, ...(def.fallbacks || [])].filter(Boolean)
   const jsonError = (status, code, message, type) => ({
     status,
@@ -2064,14 +2075,20 @@ async function proxyOfficialResponses(state, budget, log, opts) {
         markOk(state, pid); noteAffinity(state, modelName, pid)
         const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
         if (/text\/event-stream/i.test(ct)) {
-          if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov })
+          if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov, continuation })
           writeUpstreamHeaders(res, up)
-          await streamRawResponses(res, up.stream, budget)
+          await streamRawResponses(res, up.stream, budget, continuation)
           return { streamed: true }
         }
         const buf = await collectBody(up.stream, 128 * 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
         const restored = restoreCodexJsonBuffer(buf, codexRoute, codexPlan)
         if (!restored.ok) return jsonError(502, restored.rejected.code || 'codex_restore_rejected', restored.rejected.message || 'Codex 原生响应恢复失败', 'codex_restore_rejected')
+        if (continuation) {
+          const j = restored.json || tryParse(buf)
+          if (j && typeof j === 'object' && typeof j.id === 'string' && j.id) {
+            recordContinuation({ responseId: j.id, prevId: continuation.prevId, input: continuation.canonicalInput, output: Array.isArray(j.output) ? j.output : [], model: continuation.model, thread: continuation.thread, status: j.status || 'completed' })
+          }
+        }
         if (restored.json) return { status: up.status, contentType: ct, buf: Buffer.from(JSON.stringify(restored.json)) }
         return { status: up.status, contentType: ct, buf }
       }
@@ -2106,7 +2123,7 @@ async function proxyOfficialResponses(state, budget, log, opts) {
 // 非流式：JSON 原样透传并把响应 model 回写客户端请求名；流式：上游 SSE 原样管道（不翻译事件、不改 model）。
 // 仍复用 forward 的 retry/timeout 与请求预算；错误体原样/映射透传。
 async function proxyNativeResponses(state, budget, log, opts) {
-  const { req, body, modelName, def, wantStream, res, codexRoute, codexPlan } = opts
+  const { req, body, modelName, def, wantStream, res, codexRoute, codexPlan, continuation } = opts
   const candidates = [def.provider, ...(def.fallbacks || [])].filter(Boolean)
   const upstreamPath = (typeof def.responsesPath === 'string' && def.responsesPath) ? def.responsesPath : '/v1/responses'
   const singleShot = isToolBearingBody(body)
@@ -2200,9 +2217,9 @@ async function proxyNativeResponses(state, budget, log, opts) {
         markOk(state, pid); noteAffinity(state, modelName, pid)
         const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
         if (/text\/event-stream/i.test(ct)) {
-          if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov })
+          if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov, continuation })
           writeUpstreamHeaders(res, up)
-          await streamRawResponses(res, up.stream, budget)
+          await streamRawResponses(res, up.stream, budget, continuation)
           return { streamed: true }
         }
         const buf = await collectBody(up.stream, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024) * 4, { budget, signal: budget.signal, destroyOnAbort: true })
@@ -2211,6 +2228,9 @@ async function proxyNativeResponses(state, budget, log, opts) {
         const j = restored.json || tryParse(buf)
         if (j && typeof j === 'object') {
           if (typeof j.model === 'string') j.model = body.model
+          if (continuation && typeof j.id === 'string' && j.id) {
+            recordContinuation({ responseId: j.id, prevId: continuation.prevId, input: continuation.canonicalInput, output: Array.isArray(j.output) ? j.output : [], model: continuation.model, thread: continuation.thread, status: j.status || 'completed' })
+          }
           tallyResponsesUsage(state, modelName, pid, sg, j.usage || {})
           return { status: up.status, contentType: ct, buf: Buffer.from(JSON.stringify(j)) }
         }
@@ -2259,10 +2279,18 @@ async function proxyNativeResponses(state, budget, log, opts) {
 }
 
 // 原生 Responses 流：逐字节管道（pipeline 负责背压），预算中止/客户端断开时销毁上游。
-function streamRawResponses(res, upstreamStream, budget) {
+function streamRawResponses(res, upstreamStream, budget, continuation) {
   return new Promise((resolve) => {
     let done = false
-    const finish = () => { if (!done) { done = true; cleanup(); resolve() } }
+    const captureSink = continuation ? createCaptureSink() : null
+    const recordCapture = () => {
+      if (!captureSink) return
+      const cap = captureSink.finish()
+      if (cap.responseId) {
+        recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
+      }
+    }
+    const finish = () => { if (!done) { done = true; cleanup(); recordCapture(); resolve() } }
     const onAbort = () => { try { upstreamStream.destroy() } catch {} ; finish() }
     const onClose = () => { try { upstreamStream.destroy() } catch {} ; finish() }
     const cleanup = () => {
@@ -2274,7 +2302,14 @@ function streamRawResponses(res, upstreamStream, budget) {
       try { budget.signal.addEventListener('abort', onAbort, { once: true }) } catch {}
     }
     try { res.once('close', onClose) } catch {}
-    pipeline(upstreamStream, res, () => finish())
+    if (captureSink) {
+      const tap = new Transform({
+        transform (chunk, _enc, cb) { captureSink.write(chunk); cb(null, chunk) },
+      })
+      pipeline(upstreamStream, tap, res, () => finish())
+    } else {
+      pipeline(upstreamStream, res, () => finish())
+    }
   })
 }
 
@@ -2916,6 +2951,51 @@ function makeHandler(state) {
           })
           return
         }
+        // —— 续轮历史重建 + 状态登记（2026-11-16 审计 P0）——
+        // Codex WS/续轮帧带 previous_response_id 时只发**增量** input（省略它认为服务端已持有的
+        // 历史项）。订阅后端与第三方便携上游都不接受该字段；只剔除不重建会永久丢失被省略的
+        // 消息/推理项。这里按 response.id 取回上一轮真实 input+output，重建完整历史后再剔除；
+        // 每一轮（含首轮）都登记续轮状态，供下一轮重建。缓存缺失（重启/淘汰/超容量）→
+        // fail-closed 400，绝不静默丢上下文。仅 native Responses / 官方路由参与；
+        // Chat 桥（虚拟池/chat 协议模型）的 previous_response_id 仍由桥契约显式拒绝。
+        let continuation = null
+        if (body && nDef && !nDef.isVirtualModel && !nDef.virtual && nDef.provider && state.cfg.providers[nDef.provider]) {
+          const contProv = buildProvider(state.cfg, nDef.provider)
+          const contEligible = (nProto && nProto.protocol === RESPONSES) || classifyTarget(contProv, state.cfg).kind === 'official'
+          if (contEligible) {
+            const hasPrev = Object.prototype.hasOwnProperty.call(body, 'previous_response_id')
+            const prevIdRaw = hasPrev && typeof body.previous_response_id === 'string' ? body.previous_response_id : null
+            if (hasPrev) {
+              const rec = reconstructContinuation(body.previous_response_id, body.input)
+              if (!rec.ok) {
+                log && log.warn('responses continuation state missing', 'reason=' + rec.reason)
+                sendJson(res, 400, {
+                  error: {
+                    message: '续轮状态缺失（previous_response_id 指向的上一轮响应不在网关续轮缓存中：' +
+                      '网关重启、会话过期或历史超出缓存容量）。网关不静默丢弃被省略的历史；请新开会话后重试。',
+                    code: 'continuation_state_missing',
+                    type: 'invalid_request_error',
+                  },
+                })
+                return
+              }
+              body = Object.assign({}, body, { input: rec.input })
+              delete body.previous_response_id
+              log && log.info('responses continuation reconstructed', 'restored=' + rec.restoredItems, 'delta=' + rec.deltaItems)
+            }
+            const canonicalInput = Array.isArray(body.input)
+              ? body.input
+              : (typeof body.input === 'string' && body.input !== ''
+                ? [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: body.input }] }]
+                : [])
+            continuation = {
+              prevId: prevIdRaw,
+              canonicalInput,
+              model: body.model,
+              thread: String((req.headers && (req.headers['thread-id'] || req.headers['session-id'])) || ''),
+            }
+          }
+        }
         // D1-A：解析到官方上游（内置 openai 身份，由 openai_base_url 指到网关）→ 官方透传代理。
         // 判定只认 codex/identity.classifyTarget（单一真源），不按 provider 名字猜。
         if (nDef && !nDef.isVirtualModel && !nDef.virtual && nDef.provider && state.cfg.providers[nDef.provider]) {
@@ -2933,7 +3013,7 @@ function makeHandler(state) {
               body = prep.body
               codexPlan = prep.plan
             }
-            const noutOfficial = await proxyOfficialResponses(state, budget, log, { req, body, modelName: nHit.canonicalName, def: nDef, res, codexRoute, codexPlan })
+            const noutOfficial = await proxyOfficialResponses(state, budget, log, { req, body, modelName: nHit.canonicalName, def: nDef, res, codexRoute, codexPlan, continuation })
             if (noutOfficial && noutOfficial.streamed) return
             res.writeHead(noutOfficial.status, { 'content-type': noutOfficial.contentType }); res.end(noutOfficial.buf); return
           }
@@ -2972,7 +3052,7 @@ function makeHandler(state) {
           // upstream returns flattened calls. softRestore only applies to terminal
           // metadata for third-party routes, so a completed stream is not turned into
           // a synthetic STREAM_INTERRUPTED by an over-strict restore.
-          const nout = await proxyNativeResponses(state, budget, log, { req, body, modelName: nHit.canonicalName, def: nDef, wantStream: !!body.stream, res, codexRoute, codexPlan })
+          const nout = await proxyNativeResponses(state, budget, log, { req, body, modelName: nHit.canonicalName, def: nDef, wantStream: !!body.stream, res, codexRoute, codexPlan, continuation })
           if (nout && nout.streamed) return
           res.writeHead(nout.status, { 'content-type': nout.contentType }); res.end(nout.buf); return
         }

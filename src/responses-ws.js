@@ -16,101 +16,25 @@
 import http from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
 import { isIP } from 'node:net'
+import { recordWarmupContinuation } from './responses-continuation.js'
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 export const RESPONSES_WS_PATHS = Object.freeze(new Set(['/v1/responses', '/responses']))
 const TERMINAL_EVENTS = new Set(['response.completed', 'response.failed', 'response.incomplete'])
 const OPCODE = Object.freeze({ CONT: 0x0, TEXT: 0x1, BINARY: 0x2, CLOSE: 0x8, PING: 0x9, PONG: 0xa })
 
-// —— connection-scoped function_call 缓存（解决 wait_agent/spawn_agent 孤儿 output）——
-// 官方 Responses WS 在连接内缓存上一条 response 的 input/output items（含 function_call），
-// 下一轮靠 previous_response_id 取回。订阅后端不接受 previous_response_id，本桥改在网关侧
-// 缓存"上游真实发过的 function_call"，遇孤儿 output 时把真实 call 注入回 input。
-// 只缓存真实捕获的 item，绝不伪造 call_id / 改 output 内容；按 thread 隔离、有界、有 TTL，进程内、重启即失效。
-const TOOL_CALL_TYPES = new Set(['function_call', 'custom_tool_call'])
-const TOOL_OUTPUT_TYPES = new Set(['function_call_output', 'custom_tool_call_output'])
-const SESSION_CALL_CACHE_CAP = 128        // 每个会话缓存的 function_call 上限
-const SESSION_CACHE_TTL_MS = 6 * 60 * 60 * 1000 // 与 opencode-bridge 一致 6h
-const SESSION_CACHE_MAX_KEYS = 128        // 进程内最多保留会话数，超出按最近使用淘汰
-const sessionCallCache = new Map()        // sessionKey -> { calls: Map<call_id, item>, touchedAt }
-
-function sessionKeyOf(upgradeReq) {
-  const h = (upgradeReq && upgradeReq.headers) || {}
-  const raw = h['thread-id'] || h['session-id'] || h['x-codex-window-id'] || ''
-  const key = String(Array.isArray(raw) ? raw[0] : raw).split(':')[0].trim()
-  return key || null
-}
-function cacheBucket(sessionKey) {
-  if (!sessionKey) return null
-  const now = Date.now()
-  let b = sessionCallCache.get(sessionKey)
-  if (b && now - b.touchedAt > SESSION_CACHE_TTL_MS) { sessionCallCache.delete(sessionKey); b = null }
-  if (!b) {
-    if (sessionCallCache.size >= SESSION_CACHE_MAX_KEYS) {
-      let oldestKey = null, oldest = Infinity
-      for (const [k, v] of sessionCallCache) if (v.touchedAt < oldest) { oldest = v.touchedAt; oldestKey = k }
-      if (oldestKey !== null) sessionCallCache.delete(oldestKey)
-    }
-    b = { calls: new Map(), touchedAt: now }
-    sessionCallCache.set(sessionKey, b)
-  }
-  b.touchedAt = now
-  return b
-}
-function cloneItem(item) { try { return structuredClone(item) } catch { return JSON.parse(JSON.stringify(item)) } }
-
-// 从上游 SSE 事件捕获真实 function_call（output_item.* 携带完整 item；response.completed 携带 output[]）。
-function captureToolCalls(peer, obj, log) {
-  if (!obj || typeof obj !== 'object' || !peer.sessionKey) return
-  const bucket = cacheBucket(peer.sessionKey)
-  if (!bucket) return
-  const consider = (item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return
-    if (!TOOL_CALL_TYPES.has(item.type) || typeof item.call_id !== 'string' || !item.call_id) return
-    if (!bucket.calls.has(item.call_id)) {
-      if (bucket.calls.size >= SESSION_CALL_CACHE_CAP) {
-        const first = bucket.calls.keys().next().value
-        if (first !== undefined) bucket.calls.delete(first)
-      }
-      bucket.calls.set(item.call_id, cloneItem(item))
-      if (log && log.info) log.info('responses-ws cached function_call', 'call=' + item.call_id, 'name=' + String(item.name || ''))
-    }
-  }
-  if ((obj.type === 'response.output_item.added' || obj.type === 'response.output_item.done') && obj.item) consider(obj.item)
-  if (obj.response && Array.isArray(obj.response.output)) for (const it of obj.response.output) consider(it)
-}
-
-// 新一轮 create 帧发出前：把缓存中的真实 function_call 注入到孤儿 output 前面（仅当同 input 内无配对 call）。
-function injectCachedToolCalls(peer, body, log) {
-  const input = body && body.input
-  if (!Array.isArray(input) || !peer.sessionKey) return []
-  const bucket = cacheBucket(peer.sessionKey)
-  if (!bucket || bucket.calls.size === 0) return []
-  const present = new Set()
-  for (const it of input) if (it && TOOL_CALL_TYPES.has(it.type) && typeof it.call_id === 'string') present.add(it.call_id)
-  const injected = []
-  const out = []
-  for (const it of input) {
-    if (it && TOOL_OUTPUT_TYPES.has(it.type) && typeof it.call_id === 'string' && it.call_id &&
-        !present.has(it.call_id) && bucket.calls.has(it.call_id)) {
-      out.push(cloneItem(bucket.calls.get(it.call_id))) // 真实捕获的 call，原样注入
-      present.add(it.call_id)
-      injected.push(it.call_id)
-    }
-    out.push(it)
-  }
-  if (injected.length) {
-    body.input = out
-    if (log && log.info) log.info('responses-ws injected cached function_call', injected.join(','))
-  }
-  return injected
-}
+// 续轮历史重建已下沉到 POST 入口（src/responses-continuation.js）：WS 重放与 HTTP 回落
+// 共用同一条续轮缓存，按 response.id 重建完整 input+output。本模块不再自持工具调用缓存
+// （旧实现只补 function_call、不补其余历史项，且回落/淘汰/重启即失效——2026-11-16 审计 P0）。
 
 // 逐跳头与 WS 握手头一律不重放进内部 POST；authorization / x-codex-* / openai-beta 等保留。
+// 轮次级客户端提示（turn-metadata/routing-hint/client-request-id）只在 upgrade 时刻有效，
+// 同 socket 后续轮次复用会失真——一律剔除（2026-11-16 审计 P2）。
 const STRIP_HEADERS = new Set([
   'host', 'connection', 'upgrade', 'content-length', 'transfer-encoding',
   'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions',
   'sec-websocket-protocol', 'accept', 'accept-encoding', 'content-encoding', 'te', 'trailer',
+  'x-codex-turn-metadata', 'x-codex-routing-hint', 'x-client-request-id',
 ])
 
 function wsAccept(key) {
@@ -162,14 +86,14 @@ function reasonPhrase(status) {
 
 // —— WS 连接：服务端帧不掩码；客户端帧强制掩码 ——
 class WsPeer {
-  constructor(socket, { maxMessageBytes, onMessage, onClose, log, sessionKey }) {
+  constructor(socket, { maxMessageBytes, onMessage, onClose, log }) {
     this.socket = socket
     this.maxMessageBytes = maxMessageBytes
     this.onMessage = onMessage
     this.onClose = onClose
     this.log = log
-    this.sessionKey = sessionKey || null
     this.closed = false
+    this.closing = false
     this.buffer = Buffer.alloc(0)
     this.fragments = []
     this.fragmentOpcode = null
@@ -178,20 +102,33 @@ class WsPeer {
     this.controller = null
     this.turnActive = false
     this.turnDone = true
+    this.turnOutput = []
+    this.turnResponseId = null
+    this.finishTurn = null
     socket.on('data', (chunk) => this._onData(chunk))
     socket.on('error', () => this._teardown())
     socket.on('close', () => this._teardown())
+    // 客户端半关闭（FIN）：立即收尾在途轮次，不留僵尸连接（2026-11-16 审计 P1）。
+    socket.on('end', () => { this._teardown(); try { socket.end() } catch {} })
+    this.pingTimer = setInterval(() => {
+      if (this.closed || this.closing || socket.destroyed) return
+      this._enqueue(OPCODE.PING, Buffer.alloc(0)).catch(() => {})
+    }, 60000)
+    if (this.pingTimer.unref) this.pingTimer.unref()
   }
 
   _teardown() {
     if (this.closed) return
     this.closed = true
+    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null }
     if (this.controller) { try { this.controller.abort() } catch {} this.controller = null }
     try { if (this.onClose) this.onClose() } catch {}
   }
 
   _close(code, reason) {
-    if (this.closed) return
+    if (this.closed || this.closing) return
+    // 同步置 closing：同一 chunk 内后续帧立即停止 dispatch，绝不在判死连接上再触发付费轮次。
+    this.closing = true
     const reasonBuf = Buffer.from(String(reason || ''), 'utf8')
     const payload = Buffer.alloc(2 + reasonBuf.length)
     payload.writeUInt16BE(code, 0)
@@ -203,9 +140,9 @@ class WsPeer {
   }
 
   _onData(chunk) {
-    if (this.closed) return
+    if (this.closed || this.closing) return
     this.buffer = Buffer.concat([this.buffer, chunk])
-    while (!this.closed) {
+    while (!this.closed && !this.closing) {
       const frame = this._parseFrame()
       if (!frame) break
       this._handleFrame(frame)
@@ -216,6 +153,7 @@ class WsPeer {
     const b = this.buffer
     if (b.length < 2) return null
     const fin = (b[0] & 0x80) !== 0
+    const rsv = b[0] & 0x70
     const opcode = b[0] & 0x0f
     const masked = (b[1] & 0x80) !== 0
     let len = b[1] & 0x7f
@@ -236,17 +174,19 @@ class WsPeer {
     const payload = Buffer.from(b.subarray(offset, offset + len))
     for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3]
     this.buffer = b.subarray(offset + len)
-    return { fin, opcode, payload }
+    return { fin, rsv, opcode, payload }
   }
 
   _handleFrame(frame) {
-    const { fin, opcode, payload } = frame
-    if (opcode === OPCODE.CLOSE) {
-      this._close(1000, '')
-      return
+    const { fin, rsv, opcode, payload } = frame
+    if (rsv !== 0) { this._close(1002, 'RSV bits must be zero'); return }
+    if (opcode >= 0x8) {
+      // 控制帧必须 FIN 且载荷 ≤125（RFC 6455 §5.5）。
+      if (!fin || payload.length > 125) { this._close(1002, 'invalid control frame'); return }
+      if (opcode === OPCODE.CLOSE) { this._close(1000, ''); return }
+      if (opcode === OPCODE.PING) { this._enqueue(OPCODE.PONG, Buffer.from(payload)).catch(() => {}); return }
+      return // PONG
     }
-    if (opcode === OPCODE.PING) { this._enqueue(OPCODE.PONG, Buffer.from(payload)).catch(() => {}); return }
-    if (opcode === OPCODE.PONG) return
     if (opcode === OPCODE.BINARY) { this._close(1003, 'binary frames not supported'); return }
     if (opcode === OPCODE.CONT) {
       if (this.fragmentOpcode === null) { this._close(1002, 'unexpected continuation'); return }
@@ -254,23 +194,34 @@ class WsPeer {
       this.fragmentBytes += payload.length
       if (this.fragmentBytes > this.maxMessageBytes) { this._close(1009, 'message too large'); return }
       if (fin) {
-        const text = Buffer.concat(this.fragments).toString('utf8')
+        const buf = Buffer.concat(this.fragments)
         this.fragments = []; this.fragmentOpcode = null; this.fragmentBytes = 0
-        this._dispatch(text)
+        this._dispatchText(buf)
       }
       return
     }
     if (opcode === OPCODE.TEXT) {
+      // 分片进行中收到新数据帧 = 协议错误，绝不静默丢弃旧分片。
+      if (this.fragmentOpcode !== null) { this._close(1002, 'new data frame during fragmentation'); return }
       if (!fin) {
         this.fragmentOpcode = opcode
         this.fragments = [payload]
         this.fragmentBytes = payload.length
         return
       }
-      this._dispatch(payload.toString('utf8'))
+      this._dispatchText(payload)
       return
     }
     this._close(1002, 'unsupported opcode')
+  }
+
+  _dispatchText(buf) {
+    let text
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf) } catch {
+      this._close(1007, 'invalid UTF-8 payload')
+      return
+    }
+    this._dispatch(text)
   }
 
   _dispatch(text) {
@@ -373,15 +324,20 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
   const targetHost = (!bound || bound === '0.0.0.0') ? '127.0.0.1' : (bound === '::' ? '[::1]' : (isIP(bound) === 6 ? '[' + bound + ']' : bound))
   const targetPort = addr && typeof addr === 'object' ? addr.port : (state.cfg.server && state.cfg.server.port) || 8787
   const body = Object.assign({}, frame)
+  // WS 帧控制字段不属于 Responses 请求体：type 是帧类型，generate 是预热开关。
+  // 漏删会把它们透传给上游（审计 P1）；WS 轮次一律流式，强制 stream:true。
   delete body.type
-  // 孤儿 function_call_output 补回本会话缓存的真实 function_call（不改 output、不伪造 id）。
-  injectCachedToolCalls(peer, body, log)
+  delete body.generate
+  body.stream = true
+  // 续轮历史重建在内部 POST 入口统一完成（responses-continuation），此处不再注入工具调用。
   const bodyText = JSON.stringify(body)
   const headers = buildPostHeaders(upgradeReq, targetHost, targetPort, bodyText)
   const controller = new AbortController()
   peer.controller = controller
   peer.turnActive = true
   peer.turnDone = false
+  peer.turnOutput = []
+  peer.turnResponseId = null
   let finished = false
 
   const finish = () => {
@@ -391,6 +347,7 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
     peer.turnActive = false
     peer.turnDone = true
   }
+  peer.finishTurn = finish
 
   const req = http.request({
     host: targetHost.replace(/^\[|\]$/g, ''),
@@ -422,7 +379,12 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
       let obj = null
       try { obj = JSON.parse(text) } catch {}
       const type = obj ? String(obj.type || '') : ''
-      captureToolCalls(peer, obj, log) // 缓存上游真实 function_call，供后续轮次配对孤儿 output
+      // 累积本轮真实 output：interrupt 时回传部分输出，绝不以空 output 抹掉已流式内容。
+      if (obj) {
+        if (obj.response && typeof obj.response.id === 'string') peer.turnResponseId = obj.response.id
+        if (type === 'response.output_item.done' && obj.item) peer.turnOutput.push(obj.item)
+        if (TERMINAL_EVENTS.has(type) && obj.response && Array.isArray(obj.response.output)) peer.turnOutput = obj.response.output
+      }
       if (TERMINAL_EVENTS.has(type)) finish()
       peer.sendText(text).catch(() => finish())
     }
@@ -433,9 +395,9 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
     upstream.on('data', (c) => {
       if (!sniffed) {
         // 网关部分 Responses 路径把 SSE 字节标成 application/json。按首个分块正文探测：
-        // 以 event:/data: 开头即 SSE（即便 header 说 json）；否则累积为纯 JSON 响应。
+        // 以 event:/data:（含前置注释/keepalive/BOM）开头即 SSE；否则累积为纯 JSON 响应。
         chunks.push(c)
-        const head = Buffer.concat(chunks).slice(0, 512).toString('utf8').replace(/^\s+/, '')
+        const head = Buffer.concat(chunks).slice(0, 512).toString('utf8').replace(/^\uFEFF/, '').replace(/^\s+/, '')
         if (looksLikeSse(head) || /^\{/.test(head)) {
           sniffed = true
           if (/^\{/.test(head)) {
@@ -454,15 +416,16 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
     })
     upstream.on('end', () => {
       if (finished) return
-      if (parse === false) {
-        const rawText = Buffer.concat(chunks).toString('utf8')
+      // parse===null（空 body / 无法判定前缀）与 parse===false（纯 JSON）统一走 JSON 合成；
+      // 解析失败必须回 error 终态——任何路径都绝不让客户端无终态挂死（审计 P1）。
+      if (parse === false || parse === null) {
+        const rawText = Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, '')
         let response = null
         try { response = JSON.parse(rawText) } catch {}
         if (!response || typeof response !== 'object') {
           peer.sendJson(errorFrame(502, '', log)).finally(finish)
           return
         }
-        captureToolCalls(peer, { type: 'response.completed', response }, log)
         const id = response.id || ('resp_mgws_' + randomBytes(12).toString('hex'))
         const base = Object.assign({}, response, { id, status: response.status || 'completed' })
         peer.sendJson({ type: 'response.created', response: base })
@@ -488,6 +451,8 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
 
 function warmup(peer, frame) {
   const id = 'resp_mgws_' + randomBytes(12).toString('hex')
+  // 预热应答也登记续轮状态：Codex 若以该 id 续轮，重建结果就是 delta 本身（不丢历史）。
+  recordWarmupContinuation({ responseId: id, model: frame.model || '' })
   peer.sendJson({ type: 'response.created', response: { id, status: 'in_progress', model: frame.model || '', output: [] } })
   peer.sendJson({
     type: 'response.completed',
@@ -521,17 +486,22 @@ function onMessageFactory(ctx, upgradeReq) {
         runTurn(ctx.peer, ctx, frame, upgradeReq)
         return
       case 'response.interrupt': {
-        if (!ctx.peer.controller) {
+        const controller = ctx.peer.controller
+        if (!controller) {
           await ctx.peer.sendJson({ type: 'response.interrupt.failed', response_id: frame.response_id || null })
           return
         }
-        const rid = frame.response_id || null
+        const rid = frame.response_id || ctx.peer.turnResponseId || null
+        const partial = ctx.peer.turnOutput.slice()
+        // 先停止转发再回 incomplete：否则排队中的上游事件会在 incomplete 之后继续写出，
+        // 造成 WS 双终态（审计 P2）。部分输出原样回传，绝不以空 output 抹掉已流式内容。
+        if (ctx.peer.finishTurn) ctx.peer.finishTurn()
         await ctx.peer.sendJson({ type: 'response.interrupt.accepted', response_id: rid })
         await ctx.peer.sendJson({
           type: 'response.incomplete',
-          response: { id: rid, status: 'incomplete', incomplete_details: { reason: 'interrupted' }, output: [] },
+          response: { id: rid, status: 'incomplete', incomplete_details: { reason: 'interrupted' }, output: partial },
         })
-        try { ctx.peer.controller.abort() } catch {}
+        try { controller.abort() } catch {}
         return
       }
       default:
@@ -572,7 +542,6 @@ function handleUpgrade(req, socket, head, ctx) {
   const peer = new WsPeer(socket, {
     maxMessageBytes: maxBody,
     log,
-    sessionKey: sessionKeyOf(req),
     onMessage: null,
     onClose: () => { if (wsCtx.peer && wsCtx.peer.controller) { try { wsCtx.peer.controller.abort() } catch {} } },
   })
@@ -597,8 +566,15 @@ export function attachResponsesWebSocket(server, { state, log = null, enabled = 
 }
 
 // 按正文前缀判定是否为 SSE（网关某些 Responses 路径把 SSE 字节误标为 application/json，不能只信 content-type）。
+// 容忍 BOM、前置空白与 SSE 注释行（如 `: mg-keepalive`）——注释开头也是合法 SSE 流。
 export function looksLikeSse (headText) {
-  return /^\s*(event:|data:)/.test(String(headText || ''))
+  const text = String(headText || '').replace(/^\uFEFF/, '')
+  for (const line of text.split('\n')) {
+    const t = line.replace(/^\s+/, '').replace(/\r$/, '')
+    if (t === '' || t.startsWith(':')) continue
+    return /^(event:|data:|id:|retry:)/.test(t)
+  }
+  return false
 }
 
-export { WsPeer, sseParser, wsAccept, captureToolCalls, injectCachedToolCalls, sessionKeyOf, sessionCallCache }
+export { WsPeer, sseParser, wsAccept }

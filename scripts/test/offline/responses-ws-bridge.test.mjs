@@ -12,59 +12,17 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import { randomBytes } from 'node:crypto'
 import { startGateway, startScriptedUpstream } from './harness.mjs'
-import { looksLikeSse, captureToolCalls, injectCachedToolCalls, sessionKeyOf, sessionCallCache } from '../../../src/responses-ws.js'
+import { looksLikeSse } from '../../../src/responses-ws.js'
 
-test('SSE 判定按正文前缀，不被 content-type 误标欺骗', () => {
+test('SSE 判定按正文前缀，不被 content-type 误标欺骗；容忍注释/keepalive/BOM', () => {
   assert.equal(looksLikeSse('event: response.created\ndata: {...}'), true)
   assert.equal(looksLikeSse('data: {"type":"response.created"}'), true)
   assert.equal(looksLikeSse('  \n data: {...}'), true, '允许前导空白')
+  assert.equal(looksLikeSse(': mg-keepalive\n\ndata: {...}'), true, 'SSE 注释开头也是 SSE')
+  assert.equal(looksLikeSse('\uFEFFdata: {...}'), true, '容忍 BOM')
   assert.equal(looksLikeSse('{"id":"resp_1","status":"completed"}'), false, '纯 JSON 不算 SSE')
   assert.equal(looksLikeSse(''), false)
-})
-
-// —— connection-scoped function_call 缓存（纯函数级） ——
-test('captureToolCalls 只缓存真实 function_call，按 call_id 存储且不伪造', () => {
-  sessionCallCache.clear()
-  const peer = { sessionKey: 'thread-AAA' }
-  const realCall = { type: 'function_call', call_id: 'call_wait_1', name: 'wait_agent', arguments: '{"agent_id":"a1"}', status: 'completed' }
-  captureToolCalls(peer, { type: 'response.output_item.added', item: realCall }, null)
-  captureToolCalls(peer, { type: 'response.output_text.delta', delta: 'x' }, null) // 非工具事件不缓存
-  const bucket = sessionCallCache.get('thread-AAA')
-  assert.ok(bucket && bucket.calls.has('call_wait_1'))
-  assert.deepEqual(bucket.calls.get('call_wait_1'), realCall)
-  assert.equal(bucket.calls.size, 1, '只缓存真实 call，不缓存文本事件')
-})
-
-test('injectCachedToolCalls 只给孤儿 output 注入真实 call，不改 output/不伪造/跨会话隔离', () => {
-  sessionCallCache.clear()
-  const peerA = { sessionKey: 'thread-A' }
-  const peerB = { sessionKey: 'thread-B' }
-  const realCall = { type: 'function_call', call_id: 'call_x', name: 'wait_agent', arguments: '{}' }
-  captureToolCalls(peerA, { type: 'response.output_item.done', item: realCall }, null)
-
-  // A 会话：孤儿 output 得到配对 call；output 本身逐字不动
-  const bodyA = { input: [{ type: 'function_call_output', call_id: 'call_x', output: 'RESULT' }] }
-  const injected = injectCachedToolCalls(peerA, bodyA, null)
-  assert.deepEqual(injected, ['call_x'])
-  assert.equal(bodyA.input.length, 2)
-  assert.deepEqual(bodyA.input[0], realCall, '注入的是缓存的真实 call')
-  assert.deepEqual(bodyA.input[1], { type: 'function_call_output', call_id: 'call_x', output: 'RESULT' }, 'output 未被改写')
-
-  // 已有配对 call 的 input 不重复注入
-  const bodyA2 = { input: [{ type: 'function_call', call_id: 'call_x', name: 'wait_agent' }, { type: 'function_call_output', call_id: 'call_x', output: 'R' }] }
-  assert.deepEqual(injectCachedToolCalls(peerA, bodyA2, null), [])
-  assert.equal(bodyA2.input.length, 2)
-
-  // B 会话拿不到 A 的缓存，不注入（不跨会话泄漏）
-  const bodyB = { input: [{ type: 'function_call_output', call_id: 'call_x', output: 'R' }] }
-  assert.deepEqual(injectCachedToolCalls(peerB, bodyB, null), [])
-  assert.equal(bodyB.input.length, 1)
-})
-
-test('sessionKeyOf 从 thread-id/session-id 取会话键，剥离 window 后缀', () => {
-  assert.equal(sessionKeyOf({ headers: { 'thread-id': 'thread-123' } }), 'thread-123')
-  assert.equal(sessionKeyOf({ headers: { 'x-codex-window-id': 'thread-9:0' } }), 'thread-9')
-  assert.equal(sessionKeyOf({ headers: {} }), null)
+  assert.equal(looksLikeSse(': only comments\n\n'), false, '只有注释没有事件行不算可判定 SSE')
 })
 
 function sse(events) {
@@ -179,10 +137,11 @@ function wsConnect(port, { path = '/v1/responses', headers = {} } = {}) {
         buf = buf.subarray(off + len)
         if (opcode === 0x1) {
           const text = payload.toString('utf8')
-          frames.push(text)
           allFrames.push(text)
           const w = waiters.shift()
+          // 有等待者时直接交付，不再入队——否则同一帧会被投递两次，泄漏到后续 until。
           if (w) { clearTimeout(w.timer); w.res(text) }
+          else frames.push(text)
         } else if (opcode === 0x8) {
           socket.end()
         }
@@ -232,22 +191,30 @@ test('WS 握手成功；SSE 事件逐帧转发；握手头不转发上游', { ti
   assert.notEqual(String(hits[0].headers.connection || '').toLowerCase(), 'upgrade', 'connection 不得保留 upgrade 语义')
 })
 
-test('真机复现闭环：缓存真实 function_call，下一轮孤儿 output 被注入配对', { timeout: 30000 }, async (t) => {
-  sessionCallCache.clear()
+test('续轮重建闭环：previous_response_id 增量帧恢复完整历史（消息+工具调用不丢）', { timeout: 30000 }, async (t) => {
   const bodies = []
+  let n = 0
   const up = await startScriptedUpstream(async (req, res) => {
     const chunks = []
     for await (const c of req) chunks.push(c)
     const b = JSON.parse(Buffer.concat(chunks).toString('utf8'))
     bodies.push(b)
+    n++
     res.writeHead(200, { 'content-type': 'text/event-stream' })
-    // 第一轮：上游返回一个真实 function_call(wait_agent)
-    res.end(sse([
-      created('resp_fc'),
-      { type: 'response.output_item.added', item: { type: 'function_call', call_id: 'call_wait_e2e', name: 'wait_agent', arguments: '{}', status: 'in_progress' } },
-      { type: 'response.output_item.done', item: { type: 'function_call', call_id: 'call_wait_e2e', name: 'wait_agent', arguments: '{}', status: 'completed' } },
-      completed('resp_fc', 'called'),
-    ]))
+    if (n === 1) {
+      // 第一轮：上游返回真实 function_call(wait_agent) + 助手消息（completed.output 权威全集）
+      const fc = { type: 'function_call', id: 'fc_e2e', call_id: 'call_wait_e2e', name: 'wait_agent', arguments: '{}', status: 'completed' }
+      const am = { type: 'message', id: 'am_e2e', role: 'assistant', content: [{ type: 'output_text', text: 'called' }] }
+      res.end(sse([
+        created('resp_fc'),
+        { type: 'response.output_item.done', item: fc },
+        { type: 'response.output_item.done', item: am },
+        { type: 'response.completed', response: { id: 'resp_fc', status: 'completed', model: 'mock', output: [fc, am], usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 } } },
+      ]))
+    } else {
+      const id = 'resp_cont_' + n
+      res.end(sse([created(id), completed(id, 'ok' + n)]))
+    }
   })
   const gw = await startGateway({ config: responsesConfig(up.base) })
   t.after(async () => { await gw.stop(); await up.stop() })
@@ -258,21 +225,132 @@ test('真机复现闭环：缓存真实 function_call，下一轮孤儿 output �
   ws.send(createFrame('spawn then wait'))
   await ws.until('response.completed')
   await new Promise((r) => setTimeout(r, 30))
-  // 轮2：客户端只回一个孤儿 function_call_output（真实 Codex wait_agent 的形状）
+  // 轮2：真实 Codex 续轮形状——previous_response_id + 仅增量 input（孤儿 output + 新消息）。
   ws.send(createFrame('collect', {
+    previous_response_id: 'resp_fc',
     input: [{ type: 'function_call_output', call_id: 'call_wait_e2e', output: 'CHILD_DONE' }],
   }))
   await ws.until('response.completed')
+  await new Promise((r) => setTimeout(r, 30))
+  // 轮3：链式续轮，历史必须包含前两轮全部 item。
+  ws.send(createFrame('turn 3', {
+    previous_response_id: 'resp_cont_2',
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'turn 3' }] }],
+  }))
+  await ws.until('response.completed')
 
-  assert.equal(bodies.length, 2)
+  assert.equal(bodies.length, 3)
   const turn2Input = bodies[1].input
+  assert.equal(bodies[1].previous_response_id, undefined, 'previous_response_id 不得透传上游')
+  // 第一轮的用户消息与助手消息必须被恢复（旧实现只注入 function_call，其余历史永久丢失）。
+  assert.ok(turn2Input.some((x) => x.type === 'message' && x.role === 'user' && x.content[0].text === 'spawn then wait'), '轮1 用户消息 preserved')
+  assert.ok(turn2Input.some((x) => x.id === 'am_e2e'), '轮1 助手消息 preserved')
   const calls = turn2Input.filter((x) => x.type === 'function_call').map((x) => x.call_id)
-  const outputs = turn2Input.filter((x) => x.type === 'function_call_output').map((x) => x.call_id)
-  assert.ok(calls.includes('call_wait_e2e'), '第二轮 input 应含被注入的真实 function_call')
-  assert.ok(outputs.includes('call_wait_e2e'), '孤儿 output 仍在')
+  assert.ok(calls.includes('call_wait_e2e'), '真实 function_call 被恢复')
   assert.ok(turn2Input.findIndex((x) => x.type === 'function_call' && x.call_id === 'call_wait_e2e') <
             turn2Input.findIndex((x) => x.type === 'function_call_output' && x.call_id === 'call_wait_e2e'), 'call 必须排在 output 前')
   assert.equal(turn2Input.find((x) => x.type === 'function_call_output').output, 'CHILD_DONE', 'output 内容未被改写')
+  const turn3Input = bodies[2].input
+  assert.ok(turn3Input.some((x) => x.type === 'message' && x.role === 'user' && x.content[0].text === 'spawn then wait'), '轮3 仍含轮1 用户消息')
+  assert.ok(turn3Input.some((x) => x.type === 'function_call_output' && x.output === 'CHILD_DONE'), '轮3 仍含轮2 工具结果')
+  assert.ok(turn3Input.some((x) => x.type === 'message' && x.role === 'user' && x.content[0].text === 'turn 3'), '轮3 新消息在末尾')
+})
+
+test('HTTP 回落续轮与 WS 共用同一续轮缓存；缺失状态 fail-closed 400', { timeout: 30000 }, async (t) => {
+  const bodies = []
+  let n = 0
+  const up = await startScriptedUpstream(async (req, res) => {
+    const chunks = []
+    for await (const c of req) chunks.push(c)
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+    n++
+    const id = 'resp_http_' + n
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.end(sse([created(id), completed(id, 'http' + n)]))
+  })
+  const gw = await startGateway({ config: responsesConfig(up.base) })
+  t.after(async () => { await gw.stop(); await up.stop() })
+
+  // 轮1 走 WS
+  const ws = await wsConnect(gw.port)
+  t.after(() => ws.close())
+  ws.send(createFrame('ws turn'))
+  await ws.until('response.completed')
+  await new Promise((r) => setTimeout(r, 30))
+  // 轮2 回落 HTTP POST，带 previous_response_id + 增量 input
+  const r2 = await fetch('http://127.0.0.1:' + gw.port + '/v1/responses', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'ws-model', stream: true, previous_response_id: 'resp_http_1', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'http turn' }] }] }),
+  })
+  assert.equal(r2.status, 200)
+  await r2.text()
+  assert.equal(bodies.length, 2)
+  assert.ok(bodies[1].input.some((x) => x.content && x.content[0] && x.content[0].text === 'ws turn'), 'HTTP 回落轮恢复 WS 轮历史')
+  assert.equal(bodies[1].previous_response_id, undefined)
+  // 未知 previous_response_id → typed 400，零上游调用
+  const r3 = await fetch('http://127.0.0.1:' + gw.port + '/v1/responses', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'ws-model', stream: true, previous_response_id: 'resp_never_seen', input: [] }),
+  })
+  assert.equal(r3.status, 400)
+  const e3 = await r3.json()
+  assert.equal(e3.error.code, 'continuation_state_missing')
+  assert.equal(bodies.length, 2, '缺失状态不得触达上游')
+})
+
+test('WS 帧控制字段不透传上游：type/generate 剔除且强制 stream:true', { timeout: 30000 }, async (t) => {
+  const bodies = []
+  const up = await startScriptedUpstream(async (req, res) => {
+    const chunks = []
+    for await (const c of req) chunks.push(c)
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.end(sse([created('resp_fields'), completed('resp_fields', 'ok')]))
+  })
+  const gw = await startGateway({ config: responsesConfig(up.base) })
+  t.after(async () => { await gw.stop(); await up.stop() })
+  const ws = await wsConnect(gw.port)
+  t.after(() => ws.close())
+  const frame = createFrame('fields')
+  delete frame.stream
+  frame.generate = true
+  ws.send(frame)
+  await ws.until('response.completed')
+  assert.equal(bodies[0].type, undefined, '帧类型不得进入请求体')
+  assert.equal(bodies[0].generate, undefined, '预热开关不得进入请求体')
+  assert.equal(bodies[0].stream, true, 'WS 轮次一律流式')
+})
+
+test('SSE 正文以注释开头且 content-type 误标 json：仍逐帧转发并有终态', { timeout: 30000 }, async (t) => {
+  const up = await startScriptedUpstream(async (req, res) => {
+    for await (const c of req) {}
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(': mg-keepalive\n\n' + sse([created('resp_sniff'), completed('resp_sniff', 'sniffed')]))
+  })
+  const gw = await startGateway({ config: responsesConfig(up.base) })
+  t.after(async () => { await gw.stop(); await up.stop() })
+  const ws = await wsConnect(gw.port)
+  t.after(() => ws.close())
+  ws.send(createFrame('sniff'))
+  const done = await ws.until('response.completed')
+  assert.equal(done.response.id, 'resp_sniff')
+})
+
+test('200 空 body / 无法判定前缀：必回 error 终态，绝不挂死', { timeout: 30000 }, async (t) => {
+  const up = await startScriptedUpstream(async (req, res) => {
+    for await (const c of req) {}
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('')
+  })
+  const gw = await startGateway({ config: responsesConfig(up.base) })
+  t.after(async () => { await gw.stop(); await up.stop() })
+  const ws = await wsConnect(gw.port)
+  t.after(() => ws.close())
+  ws.send(createFrame('empty'))
+  const err = await ws.until('error')
+  assert.equal(err.status, 502)
 })
 
 test('generate:false 本地预热，零上游调用；同 socket 可续传下一轮', { timeout: 30000 }, async (t) => {
@@ -343,6 +421,52 @@ test('response.interrupt 取消在途轮次，回 accepted + incomplete', { time
   assert.equal(incomplete.response.incomplete_details.reason, 'interrupted')
   await new Promise((r) => setTimeout(r, 80))
   assert.equal(aborted, true, '内部 POST 必须被真正中止')
+  // incomplete 之后不得再有任何上游事件帧（双终态防护）。
+  await new Promise((r) => setTimeout(r, 80))
+  const after = ws.allFrames.map((f) => JSON.parse(f).type)
+  const lastTerminal = after.lastIndexOf('response.incomplete')
+  assert.equal(after.slice(lastTerminal + 1).filter((x) => x.startsWith('response.')).length, 0, 'incomplete 后不得再转发响应事件')
+})
+
+test('response.interrupt 保留已流式的部分输出，不以空 output 抹掉', { timeout: 30000 }, async (t) => {
+  const up = await startScriptedUpstream(async (req, res) => {
+    for await (const c of req) { /* drain */ }
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.write(sse([
+      created('resp_partial'),
+      { type: 'response.output_item.done', item: { type: 'message', id: 'msg_partial', role: 'assistant', content: [{ type: 'output_text', text: 'partial work' }] } },
+    ]))
+    // 不 end：等待 interrupt。
+  })
+  const gw = await startGateway({ config: responsesConfig(up.base) })
+  t.after(async () => { await gw.stop(); await up.stop() })
+  const ws = await wsConnect(gw.port)
+  t.after(() => ws.close())
+  ws.send(createFrame('partial'))
+  await ws.until('response.output_item.done')
+  ws.send({ type: 'response.interrupt', response_id: 'resp_partial' })
+  const incomplete = await ws.until('response.incomplete')
+  assert.equal(incomplete.response.id, 'resp_partial')
+  assert.ok(Array.isArray(incomplete.response.output) && incomplete.response.output.some((i) => i.id === 'msg_partial'), '部分输出必须保留在 incomplete.output')
+})
+
+test('客户端半关闭（FIN）收尾在途轮次，不留僵尸连接', { timeout: 30000 }, async (t) => {
+  let aborted = false
+  const up = await startScriptedUpstream(async (req, res) => {
+    for await (const c of req) { /* drain */ }
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.write(sse([created('resp_fin')]))
+    res.on('close', () => { if (!res.writableEnded) aborted = true })
+  })
+  const gw = await startGateway({ config: responsesConfig(up.base) })
+  t.after(async () => { await gw.stop(); await up.stop() })
+  const ws = await wsConnect(gw.port)
+  ws.send(createFrame('fin'))
+  await ws.until('response.created')
+  ws.socket.end() // 客户端 FIN（半关闭）
+  const deadline = Date.now() + 3000
+  while (!aborted && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+  assert.equal(aborted, true, 'FIN 后在途上游请求必须被中止')
 })
 
 test('内部 POST 的 401 以 error 帧回传，不绕过客户端 Key', { timeout: 30000 }, async (t) => {

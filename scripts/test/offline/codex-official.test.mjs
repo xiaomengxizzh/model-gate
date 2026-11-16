@@ -165,14 +165,14 @@ test('订阅官方入口：patchSubscriptionRequestBody 剔除 previous_response
   assert.equal(patched.input[0].role, 'user', '字符串 input 归一化为消息项')
 })
 
-test('第三方目标：previous_response_id 在入口剔除后按完整 input 转发（不误报 nativeContract）', async (t) => {
+test('第三方目标：previous_response_id 续轮重建完整历史后剔除转发；无状态续轮 fail-closed', async (t) => {
   const bodies = []
   const up = await startScriptedUpstream(async (req, res) => {
     const chunks = []
     for await (const c of req) chunks.push(c)
     bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8')))
     res.writeHead(200, { 'content-type': 'text/event-stream' })
-    res.end('data: {"type":"response.created","response":{"id":"r","status":"in_progress","output":[]}}\n\ndata: {"type":"response.completed","response":{"id":"r","status":"completed","output":[]}}\n\n')
+    res.end('data: {"type":"response.created","response":{"id":"r","status":"in_progress","output":[]}}\n\ndata: {"type":"response.completed","response":{"id":"r","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"o1"}]}]}}\n\n')
   })
   const gw = await startGateway({
     config: {
@@ -182,14 +182,33 @@ test('第三方目标：previous_response_id 在入口剔除后按完整 input �
     },
   })
   t.after(async () => { await gw.stop(); await up.stop() })
+  // 轮1：建立续轮状态
+  const r1 = await gw.call('/v1/responses', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: { model: 'mg-third-responses', input: 'x', stream: true },
+  })
+  assert.equal(r1.status, 200)
+  await r1.text()
+  // 轮2：带 previous_response_id 的增量续轮 → 重建完整历史后剔除该字段转发
   const r = await gw.call('/v1/responses', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: { model: 'mg-third-responses', input: 'x', stream: true, previous_response_id: 'resp_prev' },
+    body: { model: 'mg-third-responses', input: 'y', stream: true, previous_response_id: 'r' },
   })
-  assert.equal(r.status, 200, 'previous_response_id 应在入口剔除而非被 nativeGate 拒绝')
+  assert.equal(r.status, 200, '有状态续轮应重建后放行，而非被 nativeGate 拒绝')
   await r.text()
-  assert.equal(bodies.length, 1)
-  assert.equal(Object.prototype.hasOwnProperty.call(bodies[0], 'previous_response_id'), false)
+  assert.equal(bodies.length, 2)
+  assert.equal(Object.prototype.hasOwnProperty.call(bodies[1], 'previous_response_id'), false)
+  const texts = bodies[1].input.flatMap((i) => (i.content || []).map((c) => c.text))
+  assert.ok(texts.includes('x') && texts.includes('o1') && texts.includes('y'), '轮1 输入/输出与轮2 增量都在完整历史中')
+  // 无状态续轮：typed 400，零上游调用
+  const r3 = await gw.call('/v1/responses', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: { model: 'mg-third-responses', input: 'z', stream: true, previous_response_id: 'resp_never' },
+  })
+  assert.equal(r3.status, 400)
+  const e3 = JSON.parse(await r3.text())
+  assert.equal(e3.error.code, 'continuation_state_missing')
+  assert.equal(bodies.length, 2)
 })
 
 test('WS upgrade：网关完成 101 握手，握手阶段零上游命中', async (t) => {
