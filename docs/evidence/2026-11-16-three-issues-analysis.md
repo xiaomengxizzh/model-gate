@@ -58,3 +58,24 @@ B 形态下日志仍为 `gateway_subscription ... chatgptplan ... local_codex_au
 
 ### 用户操作提示
 Codex Desktop 需**新开对话**才会读取新 config（旧会话不会重载）；请在 GUI 新会话确认首轮无重连。
+
+## 问题 1 最终取舍：保留通用 codex，WS 重连为官方身份固有行为（2026-11-16）
+
+所有者明确：要用**原版通用 codex（内置 openai provider，功能更全）**，不用 modelgate 专用。
+因此已回滚 config 到 `model_provider="openai"` + `openai_base_url`（sha `8f3d6cc6…`），
+回退备份 `config.toml.bak-before-websocket-fix-20261116T172052` 保留。
+
+### 为什么通用 codex 下无法消除 WS 重连（三条独立取证）
+1. 给内置 `openai` provider 加 `[model_providers.openai] supports_websockets=false`：
+   Codex **不启动失败**，但 WS 错误仍出现（10 次）→ 内置 provider 的该标志被忽略。
+2. WS 探针（本地网关监听 upgrade）：`UPGRADE HITS: []` → Codex 的 WS 试探**不连本地网关**，
+   连的是内置 provider 硬编码的官方 endpoint；因此网关无法用"实现 WS"来消除。
+3. 只有切到非内置 `modelgate` provider + `supports_websockets=false` 时 WS=0（A/B 已证），
+   但那正是所有者不要的"专用 codex"形态。
+
+### 结论与取舍
+- 通用 codex 下"首轮 N 次重连"是**官方身份 Responses-WebSocket→HTTPS 回退协商**，
+  属 Codex 客户端固有行为，**不影响结果**（推理 EXIT=0、回答正常）。
+- 在不牺牲通用 codex 功能/身份的前提下，本仓库范围**无法**消除它（证据如上）。
+- 若要强行消除，唯一途径是放弃通用身份切 modelgate provider——所有者已否决。
+- 因此：保留通用 codex + 保留全部已修复功能 + 接受无害的 WS 回退日志；不擅自再改 provider。
