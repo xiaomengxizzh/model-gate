@@ -138,6 +138,52 @@
 
 结论：**链路组件齐备但尚未打通**——旧代码需重启、实例无管理令牌（`/api/auth needAuth=false`，聚合接口 403）、既有 Go 上游与聚合注册表 id 冲突，三者任一未解决都无法让 Codex 选择 DeepSeek。详见本轮对话答复。
 
+
+## 7.2 生产实例：重启、聚合数据补齐与聚合模式启用（2026-11-16）
+
+所有者指令：重启网关、取消管理令牌设置、补充聚合数据、启动网关聚合模式。
+
+### 7.2.1 重启（systemd 用户单元，经 D-Bus）
+
+- 会话内 `systemctl --user` 不可用（沙箱无 systemd 私有总线），改用 `gdbus` 调 `org.freedesktop.systemd1.Manager`：
+  `LoadUnit` → `StartUnit` → `RestartUnit model-gateway.service` 成功；单元 `ActiveState=active`。
+- 新代码生效证据：`GET /` → **302** `/ui-next/`；`/admin` → **410**；`/api/status.official` = `{credential:detected, expiry:valid, reason:local_codex_chatgpt}`。
+- 单元文件里 `Environment=MG_ADMIN_TOKEN=` 为空 → `/api/auth.needAuth=false`（与"取消管理令牌"一致，最终状态保持无令牌）。
+
+### 7.2.2 补充聚合数据（adopt 既有 Go 上游 + 真实目录发现）
+
+- 新增 `adopt` 接管路径（`registry.addProvider({preset, adopt:true})`）：既有 `providers.opencodego`（V1 时代记录：`baseUrl=https://opencode.ai/inference/go`、`apiKeyEnv=OPENCODE_API_KEY`、模型 `deepseek-v4.1-flash→opencodego`）原地补聚合元数据，**保留端点/凭据引用/模型绑定**；未声明 adopt 仍 409。
+- `POST /api/aggregation/providers {preset, adopt:true}` → 201，`configVersion 393→394`。
+- 首次 sync 因缺官方基线目录失败 `catalog_base_missing`（本地从未配置 `defaults.codexCatalogBasePath`）。把 `~/.codex/models_cache.json`（11 个官方 slug，含 `gpt-6.1-sol`/`gpt-6-luna`）快照到 `config/codex-models-baseline.json` 并写入该配置项后重试：
+  - `POST /providers/opencodego/sync` → **200**，发现 **31** 个模型（真实 opencode.ai 模型清单，凭据为本机 `OPENCODE_API_KEY`）。
+  - 聚合目录发布：**generation 2 / 12 个模型（11 官方 + 1 第三方）**，`targetPresent=true`，481872 bytes；其余 30 个 Go 模型按 V2 单模型范围显式列入 `v2_scope_excluded`（不是静默丢弃）。
+
+### 7.2.3 补齐官方套餐路由（避免"启用聚合后官方 GPT 走网关即 404"）
+
+启用聚合会把 `openai_base_url` 指向网关，官方模型请求因此也进入网关。本机原先没有任何官方模型路由（`gpt-*` 落到 `defaults.provider=jiyuan` → 404），因此先补齐：
+
+- 新增上游 `chatgptplan`：`{baseUrl:'https://chatgpt.com', codexIdentity:'official', responsesPath:'/backend-api/codex/responses', gatewaySubscription:{enabled:true}, api:'responses'}`（复用本机 Codex 登录，凭据由网关只读读取，客户端凭据不透传）。
+- 新增 11 个官方模型条目 + 聚合模型条目 `mg-opencodego-deepseek-v4-1-flash → opencodego/deepseek-v4.1-flash (api=responses)`。
+- 路由预演（`/api/route-preview`，不发起推理）：`gpt-6.1-sol → chatgptplan`、`gpt-6-luna → chatgptplan`、`mg-opencodego-deepseek-v4-1-flash → opencodego`、既有 `deepseek-v4.1-flash → opencodego` 不变。
+
+### 7.2.4 启动聚合模式（428 → consent → 原子写 → 验证）
+
+- `POST /api/aggregation/activate {model:'mg-opencodego-deepseek-v4-1-flash'}` → **428** 预览：`ok=true, state=ready, mode=official`，catalog present/12 models/targetPresent，无 blocked，仅 1 条"保留 5 个 MCP server 段"警告。
+- 带 `consentToken + expectedSha` 再提交 → **200**：`mode=aggregated`、`appliedSha=3c149cd5f6b2…`、`verification.ok=true`（configSha 一致、modelCount 12、catalog present、gateway status 200）、`needsRestart=true`（`client_running_with_old_config`，Codex 正运行）。
+- 备份：`~/.codex/config.toml.bak`，sha256 = `ba1a01926d58…` 与写入前一致（`matches=true`）。
+- Codex 配置变化（157 → 160 行）：`model_provider="openai"`、`openai_base_url="http://127.0.0.1:8787"`、`model="mg-opencodego-deepseek-v4-1-flash"`、`model_catalog_json="…/config/aggregation/catalog/local/current.json"`；`[model_providers.custom]`、`[mcp_servers.*]` 等用户段逐字保留。
+
+### 7.2.5 管理令牌（按指令取消）
+
+- 为执行聚合写入临时通过 `POST /api/admin-token` 设置随机令牌（回环初始化车道），完成后立即 `{token:""}` 清除并删除临时文件。
+- 终态：`/api/auth.needAuth=false`；`/api/status`=200；`/api/aggregation/*`=403（设计如此：聚合管理要求显式管理员）。控制台首页因此进入 `needs_admin_token` 态，文案已改为"Codex 侧已生效的聚合配置不受影响"。
+
+### 7.2.6 未验证 / 下一步
+
+- **真实推理未执行**：本轮没有发起任何 GPT/Go 推理请求（无付费调用授权）。DeepSeek 端到端与官方 GPT 端到端仍为 `NOT_TESTED`；需在 Codex 中完全退出并重开后由用户实测。
+- Codex 必须**完全退出并重新打开**（当前检测到运行中的客户端仍用旧配置）。
+- 回滚：控制台「退出并恢复」或 `POST /api/aggregation/deactivate`（需令牌），或直接 `cp ~/.codex/config.toml.bak ~/.codex/config.toml`。
+
 ## 8. 分支、PR 与所有者审批事项
 
 - 集成分支：`feat/modelgate-ux-v3`（工作树 `.agents/worktrees/dsh-21ec827a-8f7c`，**仅本地**）。

@@ -420,7 +420,7 @@ export function nextPrimaryAction (ps) {
     case 'read_only_unknown':
       return { id: 'check-version', label: '查看高级诊断', kind: 'route', route: '#/aggregation', detail: '当前实例不支持聚合管理，请确认版本后重试。' }
     case 'needs_admin_token':
-      return { id: 'set-admin-token', label: '设置管理令牌', kind: 'route', route: '#/settings?section=admin-token', detail: '聚合管理接口拒绝匿名（403 explicit_admin_required）；设置令牌后即可继续。' }
+      return { id: 'set-admin-token', label: '设置管理令牌', kind: 'route', route: '#/settings?section=admin-token', detail: '聚合管理接口拒绝匿名（403 explicit_admin_required）；设置令牌后即可在控制台查看与管理聚合。' }
     case 'cannot_detect_codex':
       return { id: 'locate-codex', label: '查看如何安装/定位 Codex', kind: 'route', route: '#/connections?step=codex', detail: '需要先有原版 Codex Desktop。' }
     case 'needs_go_key':
@@ -517,7 +517,7 @@ export function overallOf (ps) {
     case 'read_only_unknown':
       return { level: 'unknown', label: '状态未知（实例版本不支持）', detail: '当前实例没有聚合管理接口。' }
     case 'needs_admin_token':
-      return { level: 'action', label: '需要操作：设置管理令牌', detail: '聚合管理接口要求显式管理员令牌；设置后才能连接 OpenCode Go 与启用聚合。' }
+      return { level: 'action', label: '需要操作：设置管理令牌', detail: '聚合管理接口要求显式管理员令牌（当前实例未设置）；Codex 侧已生效的聚合配置不受影响，如需在本控制台查看/修改聚合，请先设置令牌。' }
     case 'recoverable_error':
       return { level: 'error', label: '出现问题：读取失败', detail: '控制台没有取得真实状态，可安全重试。' }
     case 'locked':
