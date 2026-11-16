@@ -168,9 +168,11 @@ function discoverySummary (deps) {
   if (!providers.length) return emptyDiscovery('unknown', '尚未配置聚合供应商')
   const snaps = []
   const attempts = []
+  const missing = []
   for (const p of providers) {
     const snap = snapshotOf(deps, p.id)
     if (snap) snaps.push(snap)
+    else missing.push(p.id)
     const attempt = attemptOf(deps, p.id)
     if (attempt) attempts.push(attempt)
   }
@@ -183,6 +185,11 @@ function discoverySummary (deps) {
   if (partial) {
     return { state: 'partial', complete: false, discovered, reason: partial.code || 'discovery_incomplete', truncated: true }
   }
+  // MG-FIX-P2-08：任一已配置 provider 没有可信快照就不能宣布整体 complete。
+  // “未知”不等于“空白”，更不等于“完整”：避免 UI 显示假的“准备就绪”。
+  if (missing.length) {
+    return { state: 'partial', complete: false, discovered, reason: 'providers_not_synced', missingProviders: missing, truncated: true }
+  }
   const emptyConfirmed = snaps.length === providers.length && snaps.every((s) => s.emptyConfirmed === true && s.models.length === 0)
   return {
     state: 'complete',
@@ -190,8 +197,7 @@ function discoverySummary (deps) {
     discovered,
     reason: null,
     upstreamConfirmedEmpty: emptyConfirmed,
-    // 若部分 provider 从未同步，整体仍不是完整目录。
-    providersComplete: snaps.length === providers.length,
+    providersComplete: true,
   }
 }
 
@@ -312,7 +318,21 @@ function pickModel (catalog, cfg, requested) {
   const models = catalog && Array.isArray(catalog.models) ? catalog.models : []
   const slugs = models.map((m) => m && (m.slug || m.id)).filter(Boolean)
   const want = String(requested || '').trim()
-  if (want && slugs.includes(want)) return want
+  if (want) {
+    // MG-FIX-P1-03：用户显式指定目标模型时，必须能在当前目录里找到它。
+    // 目录缺失该 ID 时绝不静默回退到默认/目录首项（可能是官方 GPT），
+    // 而是 fail-closed：稳定 422 并要求重新同步，零配置写入、零模型出站。
+    if (!slugs.includes(want)) {
+      throw new DesktopError(
+        'requested_model_unavailable',
+        '请求的目标模型不在当前聚合目录中，拒绝静默切换到其它模型；请重新同步目录后重试',
+        { requested: want, available: slugs },
+        422,
+      )
+    }
+    return want
+  }
+  // 未显式指定模型才允许默认：cfg.defaults.model → 目录首项。
   const fallback = cfg && cfg.defaults && cfg.defaults.model ? String(cfg.defaults.model) : ''
   if (fallback && slugs.includes(fallback)) return fallback
   return slugs[0] || fallback || null
