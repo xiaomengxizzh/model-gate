@@ -25,6 +25,7 @@ import {
   REMOTE_COMPACTION_LITERALS,
   RESERVED_OVERRIDE_SECTIONS,
   SENSITIVE_FIELD_RE,
+  atomicWriteFile,
   buildDesiredCodexConfig,
   buildManagedAgentConfig,
   commitConfigPlan,
@@ -226,7 +227,7 @@ function agentChildThreeWay (baseText, theirsText, guidance) {
 }
 
 // 计算启用时的子代理文件计划。不写盘。
-function planManagedAgentChild (paths, opts, desired) {
+function planManagedAgentChild (paths, opts, desired, prevRecord) {
   const childPath = paths.managedAgentPath
   if (opts.managedAgent === false || !String(opts.model || '').trim()) {
     return { path: childPath, fileName: MANAGED_AGENT_FILE, managed: false, action: 'none', conflict: null,
@@ -259,8 +260,19 @@ function planManagedAgentChild (paths, opts, desired) {
   }
   if (!before.exists) { plan.action = 'create'; return plan }
   if (before.sha256 === afterSha) { plan.action = 'same'; return plan }
-  // 已存在但内容不是我们写入的规范字节：视为用户/第三方所有，拒绝覆盖。
+  // 已存在且与目标字节不同：先识别是否是我们上次写入的规范字节（状态记录或字节级规范形状），
+  // 是 → 允许升级（换模型/effort 不再永久 409，2026-11-16 审计 P1-5）；否 → 用户所有，拒绝覆盖。
+  const prevAppliedSha = prevRecord && prevRecord.applied ? prevRecord.applied.sha256 : null
+  if (prevAppliedSha && before.sha256 === prevAppliedSha) {
+    plan.action = 'upgrade'
+    return plan
+  }
   const theirsText = readFileSync(childPath, 'utf8')
+  if (isCanonicalManagedChildText(theirsText, opts.model)) {
+    // 状态漂移（记录丢失/早期版本写入）但文件恰为 ModelGate 规范形状：按可升级的托管文件对待。
+    plan.action = 'upgrade'
+    return plan
+  }
   plan.action = 'conflict'
   plan.conflict = {
     reason: 'agent_child_modified',
@@ -269,6 +281,21 @@ function planManagedAgentChild (paths, opts, desired) {
       'go-deepseek.toml 不是 ModelGate 写入的规范内容；为不覆盖你的修改，本次不写入。请手工合并后重试，或移走该文件。'),
   }
   return plan
+}
+
+// 字节级规范形状识别：仅 model + model_reasoning_effort 两键、与 buildManagedAgentConfig
+// 对同一 (model, effort) 的输出逐字一致，且 model 属于 ModelGate 托管别名（本次目标模型或
+// mg-opencodego- 命名空间）。用户自有模型（如 "user-own"）即使形状相同也判非托管（保守）。
+function isCanonicalManagedChildText (text, expectedModel) {
+  const modelMatch = /^model = "([^"]+)"$/m.exec(String(text))
+  const effortMatch = /^model_reasoning_effort = "([^"]+)"$/m.exec(String(text))
+  if (!modelMatch || !effortMatch) return false
+  const model = modelMatch[1]
+  if (model !== String(expectedModel || '') && !model.startsWith('mg-opencodego-')) return false
+  try {
+    const built = buildManagedAgentConfig({ model, reasoningEffort: effortMatch[1] })
+    return built.child.text === text
+  } catch { return false }
 }
 
 // 写入子代理文件：先留原始字节备份，再原子替换并写后校验；失败尽量恢复原状。
@@ -586,7 +613,11 @@ export function probeDesktopClient (desktopPath, opts = {}) {
       let cmdline = ''
       try { cmdline = readFileSync('/proc/' + name + '/cmdline', 'utf8') } catch { continue }
       const argv0 = cmdline.split('\0')[0]
-      if (!argv0 || !(argv0 === target || argv0 === desktopPath || argv0.startsWith(dir + '/'))) continue
+      // 只认同一可执行文件（含符号链接路径与同目录同名 Electron 子进程）；
+      // 旧 dir 前缀匹配会把 /usr/bin 下所有进程误判为 Desktop（2026-11-16 审计 P2）。
+      const sameExe = argv0 === target || argv0 === desktopPath ||
+        (basename(argv0) === basename(target) && (dirname(argv0) === dir || dirname(argv0) === dirname(desktopPath)))
+      if (!argv0 || !sameExe) continue
       matches++
       const ticks = readProcStartTicks(name)
       if (ticks == null || !Number.isFinite(boot)) continue
@@ -1092,7 +1123,7 @@ export function preview (opts = {}) {
     }
   }
   const desired = buildDesired({ baseUrl: gatewayBaseUrl, model: opts.model, catalogPath: opts.catalogPath, features: opts.features, managedProvider: opts.managedProvider, managedAgent: opts.managedAgent, agentReasoningEffort: opts.agentReasoningEffort })
-  const childPlan = planManagedAgentChild(paths, opts, desired)
+  const childPlan = planManagedAgentChild(paths, opts, desired, (loadState(paths) || {}).agentChild || null)
   let before
   let beforeText = ''
   let existing
@@ -1283,7 +1314,7 @@ export async function activate (opts = {}) {
       desired = buildDesired({ baseUrl: gatewayBaseUrl, model: opts.model, catalogPath: opts.catalogPath, features: opts.features, managedProvider: opts.managedProvider, managedAgent: opts.managedAgent, agentReasoningEffort: opts.agentReasoningEffort })
     } catch (e) { throw asDesktopError(e, 'invalid_desired') }
     // MG-FIX-P1-05：用户自行改过 go-deepseek.toml 时在任何写入之前 409，绝不覆盖。
-    const childPlan = planManagedAgentChild(paths, opts, desired)
+    const childPlan = planManagedAgentChild(paths, opts, desired, (loadState(paths) || {}).agentChild || null)
     if (childPlan.conflict) {
       const conflict = childPlan.conflict
       throw new DesktopError(conflict.reason,
@@ -1317,6 +1348,27 @@ export async function activate (opts = {}) {
       sha256: before.exists ? before.sha256 : '',
       size: before.size,
       mtimeMs: before.mtimeMs,
+    }
+    // 回滚基线不可重置（2026-11-16 审计 P1-4）：再次激活（换模型/用户改过 owned 键）时，
+    // before/backup 必须继承首次接入前的原始基线，否则退出会"恢复"出仍聚合的配置。
+    const previousState = loadState(paths)
+    const keepBaseline = !!(previousState && previousState.mode === 'aggregated' && previousState.before)
+    const baselineBefore = keepBaseline ? previousState.before : stateBefore
+    const baselineBeforeSha = keepBaseline ? previousState.beforeSha : stateBefore.sha256
+    let baselineBackupPath = keepBaseline ? previousState.backupPath || null : null
+    if (keepBaseline && baselineBackupPath && baselineBeforeSha) {
+      // 稳定化原始备份：commit 会把 .bak 轮换成 .bak.prev（两代后丢失）。在写入前把与基线
+      // sha 一致的原始字节复制到 .bak.baseline，回滚锚点永不随轮转漂移。
+      try {
+        const orig = readFileSync(baselineBackupPath, 'utf8')
+        if (sha256Hex(Buffer.from(orig, 'utf8')) === String(baselineBeforeSha)) {
+          const stable = paths.configPath + '.bak.baseline'
+          let needWrite = true
+          try { needWrite = sha256Hex(Buffer.from(readFileSync(stable, 'utf8'), 'utf8')) !== String(baselineBeforeSha) } catch {}
+          if (needWrite) atomicWriteFile(stable, orig, 0o600)
+          baselineBackupPath = stable
+        }
+      } catch { /* 原始备份不可读时保持原记录，回滚仍可按 before 记录诊断 */ }
     }
     if (noChange) {
       const verification = await verifyAll(Object.assign({}, opts, { baseUrl: gatewayBaseUrl }), paths, desired, afterSha)
@@ -1458,11 +1510,11 @@ export async function activate (opts = {}) {
     const appliedAt = Date.now()
     saveState(paths, {
       mode: 'aggregated',
-      before: stateBefore,
+      before: baselineBefore,
       applied: { sha256: afterSha, size: Buffer.byteLength(afterText, 'utf8') },
       appliedSha: afterSha,
-      beforeSha: stateBefore.sha256,
-      backupPath: journalBase.backupPath,
+      beforeSha: baselineBeforeSha,
+      backupPath: baselineBackupPath || journalBase.backupPath,
       desired,
       agentChild: childRecord,
       appliedAt,
@@ -1477,7 +1529,7 @@ export async function activate (opts = {}) {
       changed: true,
       idempotent: false,
       sha: afterSha,
-      backupPath: journalBase.backupPath,
+      backupPath: baselineBackupPath || journalBase.backupPath,
       verification,
       recovery,
       mode: 'aggregated',

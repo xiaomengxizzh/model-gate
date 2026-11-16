@@ -122,7 +122,7 @@ function mapError(error) {
   if (error instanceof RegistryError || error instanceof DiscoveryError || error instanceof AggregatedCatalogError) {
     const status = code === 'version_conflict' ? 409
       : code === 'provider_not_found' ? 404
-        : code === 'provider_exists' || code === 'provider_id_in_use' || code === 'provider_kind_already_configured' ? 409
+        : code === 'provider_exists' || code === 'provider_id_in_use' || code === 'provider_kind_already_configured' || code === 'provider_in_use' ? 409
           : code === 'registry_not_configured' || code === 'discovery_not_configured' || code === 'catalog_not_configured' ? 503
             : 400
     return { status, body: { ok: false, code, error: error.message, details: error.details || undefined } }
@@ -189,7 +189,7 @@ export function createAggregationHandlers(deps = {}) {
     const id = providerIdFrom(ctx, body, req)
     if (!id) return denied(400, 'provider_id_missing', '缺少 provider id')
     try {
-      const out = registry.removeProvider(id)
+      const out = registry.removeProvider(id, { force: !!(body && body.force === true) })
       return { status: 200, body: { ok: true, removed: out.id, configVersion: out.version } }
     } catch (error) { return mapError(error) }
   }
@@ -344,7 +344,9 @@ export function createAggregationHandlers(deps = {}) {
     return {
       status: 200,
       body: {
-        ok: providers.every((p) => p.snapshotComplete || p.lastAttempt === null),
+        // 从未同步成功的 provider 不得计为 ok（与 discoverySummary 的 partial 语义一致，
+        // 2026-11-16 审计 P1-8：lastAttempt===null 不是健康证据）。
+        ok: providers.length > 0 && providers.every((p) => p.snapshotComplete === true),
         scope,
         configVersion: currentVersion(ctx),
         providers,

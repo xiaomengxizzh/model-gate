@@ -131,6 +131,7 @@ export const SUITES = [
   'scripts/test/offline/responses-continuation.test.mjs',
   'scripts/test/offline/responses-ws-bridge.test.mjs',
   'scripts/test/offline/codex-toml-safety.test.mjs',
+  'scripts/test/offline/codex-desktop-lifecycle.test.mjs',
   'scripts/test/offline/retry-governance.test.mjs',
   'scripts/test/offline/routing-decision.test.mjs',
   'scripts/test/offline/routing-ledger.test.mjs',

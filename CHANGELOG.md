@@ -2,6 +2,28 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-16 Codex 实际使用严格审计修复（续轮历史/TOML 安全/能力声明/托管生命周期）
+
+### Fixed
+
+- **P0 续轮历史丢失**：Codex 续轮帧只发增量 input，网关此前剔除 `previous_response_id` 却不重建历史，多轮会话上下文断裂；旧 WS 缓存只注入 `function_call`、不补消息/推理项，且 HTTP 回落/淘汰/重启即失效。新增 `src/responses-continuation.js`：按 `response.id` 缓存每轮真实 input+output，续轮重建完整历史（按 item.id 去重），WS 重放与 HTTP 回落共用；缓存缺失/过期/超容量 fail-closed 400 `continuation_state_missing`，绝不静默丢上下文。捕获接入官方/第三方代理的流式与 JSON 路径，中断轮次记录部分输出。
+- **P0 TOML 段头注释**：`[features] # 注释` 不被识别为段头 → 接入追加重复段产出非法 TOML 且指纹自检通过。HEADER_RE 容忍尾注释；疑似段头无法解析 fail-closed `toml_header_unparseable`。
+- **P0/P1 能力声明漂移**：聚合目录投影丢弃显式覆盖，Go 子模型 `shell_type:"disabled"`、effort 落到 assumed `medium`（真机 spawn 实测被拒），与 PASS_REAL 启动器路径不一致。投影继承 api/effortOptions/reasoning/codex 运行时声明/capabilities/evidence/alias；Go V2 目标带证据性默认（`unified_exec` + `freeform` + low/high + `nativeCompaction:'codex-owned-local'` + `history.compaction:'preserve'`），运行期路由同步声明（压缩标记原样透传、远程密文压缩 typed 拒绝）。托管子代理默认 effort 改为受支持的 `high`。
+- **P1 多行字符串续行被改写**：`"""…"""` 内形如 `model = "…"` 的行被当 owned 键静默改写。解析器跟踪多行值状态（三引号/嵌套括号深度，引号感知），续行逐字保留；带注释单行数组不再误判多行；owned 行替换保留行内注释。
+- **P1 回滚基线被重置**：再次激活（换模型）把 before/backup 重置为聚合后的文件，退出"恢复"出仍聚合的配置。任何分支继承首次接入基线；原始备份稳定化到 `.bak.baseline`，不再随两代轮转丢失。
+- **P1 托管子文件永久 409**：自己上次写的规范字节（换模型/effort）被判 `agent_child_modified`。凭状态记录或字节级规范形状（mg- 别名）识别自有旧字节并允许升级；用户自有模型同形状文件仍保守判冲突。
+- **P1 WS 桥挂死/僵尸/泄漏**：SSE 嗅探容忍注释/keepalive/BOM，空 body/无法判定前缀必回终态；半关闭(FIN)收尾在途轮次；帧控制字段 `type`/`generate` 不透传上游并强制 `stream:true`；剔除轮次级陈旧头。
+- **P1 健康完成态误报**：从未同步的 provider 不再计为 ok（与 discoverySummary 一致）。
+- **P2 WS 帧层加固**：RSV/控制帧 fin+len/分片中新数据帧/UTF-8 fatal(1007) 校验；closing 同步停 dispatch（判死连接不再触发付费轮次）；interrupt 先停转发再回 incomplete（防双终态）且保留部分输出。
+- **P2 orphan-adopt 稳定性**：合成 id 的 seed 去掉 index，历史位置漂移时同一工具结果 id 稳定。
+- **P2 目录回滚丢别名**：aliases/officialSlugs 随世代持久化，回滚继承；显式 alias 随投影继承。
+- **P2 provider 删除守卫**：仍被模型路由引用的 provider 拒绝删除（`provider_in_use` 409），显式 force 才允许。
+- **P2 Desktop 进程探测误匹配**：不再以目录前缀匹配（/usr/bin 下所有进程被误判），只认同一可执行文件。
+
+### 验证边界
+
+离线套件与门禁全绿（见 docs/evidence/2026-11-16-codex-audit-remediation.md）。真实长会话/父子派单/原生压缩复验需额度与授权，未执行，不宣称 PASS_REAL。
+
 ## [Unreleased] —— 2026-11-16 兼容 Codex 省略 call_id 的工具历史（第三方 Responses）
 
 ### Fixed

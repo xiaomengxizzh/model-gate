@@ -1159,6 +1159,9 @@ export function recordVersion(state, entry, { historyLimit = DEFAULT_HISTORY_LIM
     configFingerprint: entry.configFingerprint || null,
     catalogFingerprint: entry.catalogFingerprint || null,
     bindings: entry.bindings || {},
+    // 别名与官方 slug 清单随版本持久化：回滚不得丢别名（2026-11-16 审计 P2）。
+    aliases: entry.aliases || {},
+    officialSlugs: entry.officialSlugs || [],
     verified: entry.verified || null,
   }
   return {

@@ -428,13 +428,27 @@ export function createRegistry(options = {}) {
     return Object.assign({}, recordOf(id, entry), { version })
   }
 
-  function removeProvider(id) {
+  function removeProvider(id, opts = {}) {
     const key = String(id == null ? '' : id).trim()
     const cfg = currentConfig()
     const entry = cfg.providers && cfg.providers[key]
     const rec = entry ? recordOf(key, entry) : null
     if (!rec) {
       reject('provider_not_found', '聚合适配 Provider 不存在：' + key)
+    }
+    // 仍被模型路由引用的 provider 不得直接删除（2026-11-16 审计 P2：删除会造成
+    // 聚合激活/已发布目录与配置漂移）。显式 force 才允许（调用方自担路由后果）。
+    if (opts.force !== true) {
+      const referencing = Object.entries(cfg.models || {})
+        .filter(([, m]) => m && typeof m === 'object' && (
+          m.provider === key ||
+          (m.providerModels && Object.prototype.hasOwnProperty.call(m.providerModels, key)) ||
+          (Array.isArray(m.fallbacks) && m.fallbacks.includes(key))))
+        .map(([name]) => name)
+      if (referencing.length) {
+        reject('provider_in_use', 'Provider ' + key + ' 仍被模型引用（' + referencing.slice(0, 5).join(', ') +
+          (referencing.length > 5 ? ' 等' : '') + '）；请先移除或改路由这些模型，或显式 force。')
+      }
     }
     const { version } = commitProviders(({ providers, removed }) => {
       delete providers[key]
