@@ -106,22 +106,46 @@ function resolveBaseCatalog(options, cfg) {
   }
 }
 
+// 默认原生压缩阈值：OpenCode 官方目录 deepseek-v4.1-flash 的 auto_compact_token_limit=943718
+// （1,048,576 的 90%，本机 cc-switch-model-catalog.json 真机取证）。此前聚合目录漏了该字段，
+// 导致 Codex 用默认阈值；补回后 Codex 按模型自身能力触发本地压缩，网关不自建压缩。
+export const DEFAULT_NATIVE_COMPACT_TOKENS = 943718
+
 // 单条快照模型 → buildCatalog 的 models.<name> 条目。name 必须是上游精确 ID。
-function projectionEntry(model, provider) {
+// opts.overrides：来自 gateway 配置 models.<id>.codex 的显式覆盖（优先级高于默认值）。
+function projectionEntry(model, provider, opts = {}) {
   const codex = {
     displayName: model.displayName || model.upstreamId,
     contextWindow: model.contextWindow,
   }
+  const caps = {}
+  const evidence = {}
   // 只有上游/证据显式声明 supportsSearchTool 时才写能力；其余能力一律保守不声明。
   if (model.capabilities && model.capabilities.supportsSearchTool === true) {
-    codex.capabilities = { supportsSearchTool: true }
-    codex.evidence = {
-      supportsSearchTool: {
-        source: (model.evidence && model.evidence.source) || 'upstream_model_list',
-        observedAt: datePart(model.evidence && model.evidence.observedAt),
-      },
+    caps.supportsSearchTool = true
+    evidence.supportsSearchTool = {
+      source: (model.evidence && model.evidence.source) || 'upstream_model_list',
+      observedAt: datePart(model.evidence && model.evidence.observedAt),
     }
   }
+  // MG-NATIVE-COMPACT：把原生压缩阈值写进模型级 auto_compact_token_limit。
+  // 优先取显式覆盖（models.<id>.codex.capabilities.autoCompactTokenLimit 或顶层同名），
+  // 否则用官方签名默认值；且不得超过 contextWindow（Codex 校验，超限=永不触发）。
+  const overrideCodex = (opts.overrides && opts.overrides.codex) || {}
+  const overrideCaps = overrideCodex.capabilities || {}
+  const requested = overrideCaps.autoCompactTokenLimit !== undefined
+    ? overrideCaps.autoCompactTokenLimit
+    : overrideCodex.autoCompactTokenLimit
+  const compactTokens = Number.isInteger(requested) && requested > 0
+    ? Math.min(requested, model.contextWindow)
+    : Math.min(DEFAULT_NATIVE_COMPACT_TOKENS, model.contextWindow)
+  caps.autoCompactTokenLimit = compactTokens
+  evidence.autoCompactTokenLimit = {
+    source: Number.isInteger(requested) ? 'gateway_config_override' : 'opencode_official_catalog',
+    observedAt: '2026-11-16',
+  }
+  codex.capabilities = caps
+  codex.evidence = evidence
   return {
     provider: provider.providerSegment,
     capability: 'chat',
@@ -246,7 +270,9 @@ export function createAggregatedCatalog(options = {}) {
           throw new AggregatedCatalogError('upstream_id_duplicate_in_snapshot',
             '快照内重复 upstreamId：' + model.upstreamId, { providerId: provider.id, upstreamId: model.upstreamId })
         }
-        models[model.upstreamId] = projectionEntry(model, provider)
+        // 传该上游模型在 gateway 配置里的显式 codex 覆盖（若有），供压缩阈值等能力投影。
+        const modelOverride = (cfg.models && (cfg.models[model.upstreamId] || cfg.models[model.publicId])) || {}
+        models[model.upstreamId] = projectionEntry(model, provider, { overrides: modelOverride })
       }
       // V2：目标模型必须存在，否则这一层没有可交付能力 → fail-closed（不发布空 Go 层冒充可用）。
       const targetPublished = goScope.enforced && Object.prototype.hasOwnProperty.call(models, goScope.targetUpstreamModel)
