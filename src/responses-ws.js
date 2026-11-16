@@ -22,6 +22,90 @@ export const RESPONSES_WS_PATHS = Object.freeze(new Set(['/v1/responses', '/resp
 const TERMINAL_EVENTS = new Set(['response.completed', 'response.failed', 'response.incomplete'])
 const OPCODE = Object.freeze({ CONT: 0x0, TEXT: 0x1, BINARY: 0x2, CLOSE: 0x8, PING: 0x9, PONG: 0xa })
 
+// —— connection-scoped function_call 缓存（解决 wait_agent/spawn_agent 孤儿 output）——
+// 官方 Responses WS 在连接内缓存上一条 response 的 input/output items（含 function_call），
+// 下一轮靠 previous_response_id 取回。订阅后端不接受 previous_response_id，本桥改在网关侧
+// 缓存"上游真实发过的 function_call"，遇孤儿 output 时把真实 call 注入回 input。
+// 只缓存真实捕获的 item，绝不伪造 call_id / 改 output 内容；按 thread 隔离、有界、有 TTL，进程内、重启即失效。
+const TOOL_CALL_TYPES = new Set(['function_call', 'custom_tool_call'])
+const TOOL_OUTPUT_TYPES = new Set(['function_call_output', 'custom_tool_call_output'])
+const SESSION_CALL_CACHE_CAP = 128        // 每个会话缓存的 function_call 上限
+const SESSION_CACHE_TTL_MS = 6 * 60 * 60 * 1000 // 与 opencode-bridge 一致 6h
+const SESSION_CACHE_MAX_KEYS = 128        // 进程内最多保留会话数，超出按最近使用淘汰
+const sessionCallCache = new Map()        // sessionKey -> { calls: Map<call_id, item>, touchedAt }
+
+function sessionKeyOf(upgradeReq) {
+  const h = (upgradeReq && upgradeReq.headers) || {}
+  const raw = h['thread-id'] || h['session-id'] || h['x-codex-window-id'] || ''
+  const key = String(Array.isArray(raw) ? raw[0] : raw).split(':')[0].trim()
+  return key || null
+}
+function cacheBucket(sessionKey) {
+  if (!sessionKey) return null
+  const now = Date.now()
+  let b = sessionCallCache.get(sessionKey)
+  if (b && now - b.touchedAt > SESSION_CACHE_TTL_MS) { sessionCallCache.delete(sessionKey); b = null }
+  if (!b) {
+    if (sessionCallCache.size >= SESSION_CACHE_MAX_KEYS) {
+      let oldestKey = null, oldest = Infinity
+      for (const [k, v] of sessionCallCache) if (v.touchedAt < oldest) { oldest = v.touchedAt; oldestKey = k }
+      if (oldestKey !== null) sessionCallCache.delete(oldestKey)
+    }
+    b = { calls: new Map(), touchedAt: now }
+    sessionCallCache.set(sessionKey, b)
+  }
+  b.touchedAt = now
+  return b
+}
+function cloneItem(item) { try { return structuredClone(item) } catch { return JSON.parse(JSON.stringify(item)) } }
+
+// 从上游 SSE 事件捕获真实 function_call（output_item.* 携带完整 item；response.completed 携带 output[]）。
+function captureToolCalls(peer, obj, log) {
+  if (!obj || typeof obj !== 'object' || !peer.sessionKey) return
+  const bucket = cacheBucket(peer.sessionKey)
+  if (!bucket) return
+  const consider = (item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return
+    if (!TOOL_CALL_TYPES.has(item.type) || typeof item.call_id !== 'string' || !item.call_id) return
+    if (!bucket.calls.has(item.call_id)) {
+      if (bucket.calls.size >= SESSION_CALL_CACHE_CAP) {
+        const first = bucket.calls.keys().next().value
+        if (first !== undefined) bucket.calls.delete(first)
+      }
+      bucket.calls.set(item.call_id, cloneItem(item))
+      if (log && log.info) log.info('responses-ws cached function_call', 'call=' + item.call_id, 'name=' + String(item.name || ''))
+    }
+  }
+  if ((obj.type === 'response.output_item.added' || obj.type === 'response.output_item.done') && obj.item) consider(obj.item)
+  if (obj.response && Array.isArray(obj.response.output)) for (const it of obj.response.output) consider(it)
+}
+
+// 新一轮 create 帧发出前：把缓存中的真实 function_call 注入到孤儿 output 前面（仅当同 input 内无配对 call）。
+function injectCachedToolCalls(peer, body, log) {
+  const input = body && body.input
+  if (!Array.isArray(input) || !peer.sessionKey) return []
+  const bucket = cacheBucket(peer.sessionKey)
+  if (!bucket || bucket.calls.size === 0) return []
+  const present = new Set()
+  for (const it of input) if (it && TOOL_CALL_TYPES.has(it.type) && typeof it.call_id === 'string') present.add(it.call_id)
+  const injected = []
+  const out = []
+  for (const it of input) {
+    if (it && TOOL_OUTPUT_TYPES.has(it.type) && typeof it.call_id === 'string' && it.call_id &&
+        !present.has(it.call_id) && bucket.calls.has(it.call_id)) {
+      out.push(cloneItem(bucket.calls.get(it.call_id))) // 真实捕获的 call，原样注入
+      present.add(it.call_id)
+      injected.push(it.call_id)
+    }
+    out.push(it)
+  }
+  if (injected.length) {
+    body.input = out
+    if (log && log.info) log.info('responses-ws injected cached function_call', injected.join(','))
+  }
+  return injected
+}
+
 // 逐跳头与 WS 握手头一律不重放进内部 POST；authorization / x-codex-* / openai-beta 等保留。
 const STRIP_HEADERS = new Set([
   'host', 'connection', 'upgrade', 'content-length', 'transfer-encoding',
@@ -78,12 +162,13 @@ function reasonPhrase(status) {
 
 // —— WS 连接：服务端帧不掩码；客户端帧强制掩码 ——
 class WsPeer {
-  constructor(socket, { maxMessageBytes, onMessage, onClose, log }) {
+  constructor(socket, { maxMessageBytes, onMessage, onClose, log, sessionKey }) {
     this.socket = socket
     this.maxMessageBytes = maxMessageBytes
     this.onMessage = onMessage
     this.onClose = onClose
     this.log = log
+    this.sessionKey = sessionKey || null
     this.closed = false
     this.buffer = Buffer.alloc(0)
     this.fragments = []
@@ -289,6 +374,8 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
   const targetPort = addr && typeof addr === 'object' ? addr.port : (state.cfg.server && state.cfg.server.port) || 8787
   const body = Object.assign({}, frame)
   delete body.type
+  // 孤儿 function_call_output 补回本会话缓存的真实 function_call（不改 output、不伪造 id）。
+  injectCachedToolCalls(peer, body, log)
   const bodyText = JSON.stringify(body)
   const headers = buildPostHeaders(upgradeReq, targetHost, targetPort, bodyText)
   const controller = new AbortController()
@@ -332,8 +419,10 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
     // SSE 事件转发（终止事件同步收尾，避免同分块多帧时 end 误判追加 failed）：
     const onEvent = (text) => {
       if (finished) return
-      let type = ''
-      try { type = String((JSON.parse(text) || {}).type || '') } catch {}
+      let obj = null
+      try { obj = JSON.parse(text) } catch {}
+      const type = obj ? String(obj.type || '') : ''
+      captureToolCalls(peer, obj, log) // 缓存上游真实 function_call，供后续轮次配对孤儿 output
       if (TERMINAL_EVENTS.has(type)) finish()
       peer.sendText(text).catch(() => finish())
     }
@@ -373,6 +462,7 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
           peer.sendJson(errorFrame(502, '', log)).finally(finish)
           return
         }
+        captureToolCalls(peer, { type: 'response.completed', response }, log)
         const id = response.id || ('resp_mgws_' + randomBytes(12).toString('hex'))
         const base = Object.assign({}, response, { id, status: response.status || 'completed' })
         peer.sendJson({ type: 'response.created', response: base })
@@ -482,6 +572,7 @@ function handleUpgrade(req, socket, head, ctx) {
   const peer = new WsPeer(socket, {
     maxMessageBytes: maxBody,
     log,
+    sessionKey: sessionKeyOf(req),
     onMessage: null,
     onClose: () => { if (wsCtx.peer && wsCtx.peer.controller) { try { wsCtx.peer.controller.abort() } catch {} } },
   })
@@ -510,4 +601,4 @@ export function looksLikeSse (headText) {
   return /^\s*(event:|data:)/.test(String(headText || ''))
 }
 
-export { WsPeer, sseParser, wsAccept }
+export { WsPeer, sseParser, wsAccept, captureToolCalls, injectCachedToolCalls, sessionKeyOf, sessionCallCache }

@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import { randomBytes } from 'node:crypto'
 import { startGateway, startScriptedUpstream } from './harness.mjs'
-import { looksLikeSse } from '../../../src/responses-ws.js'
+import { looksLikeSse, captureToolCalls, injectCachedToolCalls, sessionKeyOf, sessionCallCache } from '../../../src/responses-ws.js'
 
 test('SSE 判定按正文前缀，不被 content-type 误标欺骗', () => {
   assert.equal(looksLikeSse('event: response.created\ndata: {...}'), true)
@@ -20,6 +20,51 @@ test('SSE 判定按正文前缀，不被 content-type 误标欺骗', () => {
   assert.equal(looksLikeSse('  \n data: {...}'), true, '允许前导空白')
   assert.equal(looksLikeSse('{"id":"resp_1","status":"completed"}'), false, '纯 JSON 不算 SSE')
   assert.equal(looksLikeSse(''), false)
+})
+
+// —— connection-scoped function_call 缓存（纯函数级） ——
+test('captureToolCalls 只缓存真实 function_call，按 call_id 存储且不伪造', () => {
+  sessionCallCache.clear()
+  const peer = { sessionKey: 'thread-AAA' }
+  const realCall = { type: 'function_call', call_id: 'call_wait_1', name: 'wait_agent', arguments: '{"agent_id":"a1"}', status: 'completed' }
+  captureToolCalls(peer, { type: 'response.output_item.added', item: realCall }, null)
+  captureToolCalls(peer, { type: 'response.output_text.delta', delta: 'x' }, null) // 非工具事件不缓存
+  const bucket = sessionCallCache.get('thread-AAA')
+  assert.ok(bucket && bucket.calls.has('call_wait_1'))
+  assert.deepEqual(bucket.calls.get('call_wait_1'), realCall)
+  assert.equal(bucket.calls.size, 1, '只缓存真实 call，不缓存文本事件')
+})
+
+test('injectCachedToolCalls 只给孤儿 output 注入真实 call，不改 output/不伪造/跨会话隔离', () => {
+  sessionCallCache.clear()
+  const peerA = { sessionKey: 'thread-A' }
+  const peerB = { sessionKey: 'thread-B' }
+  const realCall = { type: 'function_call', call_id: 'call_x', name: 'wait_agent', arguments: '{}' }
+  captureToolCalls(peerA, { type: 'response.output_item.done', item: realCall }, null)
+
+  // A 会话：孤儿 output 得到配对 call；output 本身逐字不动
+  const bodyA = { input: [{ type: 'function_call_output', call_id: 'call_x', output: 'RESULT' }] }
+  const injected = injectCachedToolCalls(peerA, bodyA, null)
+  assert.deepEqual(injected, ['call_x'])
+  assert.equal(bodyA.input.length, 2)
+  assert.deepEqual(bodyA.input[0], realCall, '注入的是缓存的真实 call')
+  assert.deepEqual(bodyA.input[1], { type: 'function_call_output', call_id: 'call_x', output: 'RESULT' }, 'output 未被改写')
+
+  // 已有配对 call 的 input 不重复注入
+  const bodyA2 = { input: [{ type: 'function_call', call_id: 'call_x', name: 'wait_agent' }, { type: 'function_call_output', call_id: 'call_x', output: 'R' }] }
+  assert.deepEqual(injectCachedToolCalls(peerA, bodyA2, null), [])
+  assert.equal(bodyA2.input.length, 2)
+
+  // B 会话拿不到 A 的缓存，不注入（不跨会话泄漏）
+  const bodyB = { input: [{ type: 'function_call_output', call_id: 'call_x', output: 'R' }] }
+  assert.deepEqual(injectCachedToolCalls(peerB, bodyB, null), [])
+  assert.equal(bodyB.input.length, 1)
+})
+
+test('sessionKeyOf 从 thread-id/session-id 取会话键，剥离 window 后缀', () => {
+  assert.equal(sessionKeyOf({ headers: { 'thread-id': 'thread-123' } }), 'thread-123')
+  assert.equal(sessionKeyOf({ headers: { 'x-codex-window-id': 'thread-9:0' } }), 'thread-9')
+  assert.equal(sessionKeyOf({ headers: {} }), null)
 })
 
 function sse(events) {
@@ -185,6 +230,49 @@ test('WS 握手成功；SSE 事件逐帧转发；握手头不转发上游', { ti
     assert.equal(hits[0].headers[name], undefined, 'WS 握手头不得转发上游: ' + name)
   }
   assert.notEqual(String(hits[0].headers.connection || '').toLowerCase(), 'upgrade', 'connection 不得保留 upgrade 语义')
+})
+
+test('真机复现闭环：缓存真实 function_call，下一轮孤儿 output 被注入配对', { timeout: 30000 }, async (t) => {
+  sessionCallCache.clear()
+  const bodies = []
+  const up = await startScriptedUpstream(async (req, res) => {
+    const chunks = []
+    for await (const c of req) chunks.push(c)
+    const b = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    bodies.push(b)
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    // 第一轮：上游返回一个真实 function_call(wait_agent)
+    res.end(sse([
+      created('resp_fc'),
+      { type: 'response.output_item.added', item: { type: 'function_call', call_id: 'call_wait_e2e', name: 'wait_agent', arguments: '{}', status: 'in_progress' } },
+      { type: 'response.output_item.done', item: { type: 'function_call', call_id: 'call_wait_e2e', name: 'wait_agent', arguments: '{}', status: 'completed' } },
+      completed('resp_fc', 'called'),
+    ]))
+  })
+  const gw = await startGateway({ config: responsesConfig(up.base) })
+  t.after(async () => { await gw.stop(); await up.stop() })
+
+  const ws = await wsConnect(gw.port, { headers: { 'thread-id': 'thread-e2e-1' } })
+  t.after(() => ws.close())
+  // 轮1：触发上游返回 function_call
+  ws.send(createFrame('spawn then wait'))
+  await ws.until('response.completed')
+  await new Promise((r) => setTimeout(r, 30))
+  // 轮2：客户端只回一个孤儿 function_call_output（真实 Codex wait_agent 的形状）
+  ws.send(createFrame('collect', {
+    input: [{ type: 'function_call_output', call_id: 'call_wait_e2e', output: 'CHILD_DONE' }],
+  }))
+  await ws.until('response.completed')
+
+  assert.equal(bodies.length, 2)
+  const turn2Input = bodies[1].input
+  const calls = turn2Input.filter((x) => x.type === 'function_call').map((x) => x.call_id)
+  const outputs = turn2Input.filter((x) => x.type === 'function_call_output').map((x) => x.call_id)
+  assert.ok(calls.includes('call_wait_e2e'), '第二轮 input 应含被注入的真实 function_call')
+  assert.ok(outputs.includes('call_wait_e2e'), '孤儿 output 仍在')
+  assert.ok(turn2Input.findIndex((x) => x.type === 'function_call' && x.call_id === 'call_wait_e2e') <
+            turn2Input.findIndex((x) => x.type === 'function_call_output' && x.call_id === 'call_wait_e2e'), 'call 必须排在 output 前')
+  assert.equal(turn2Input.find((x) => x.type === 'function_call_output').output, 'CHILD_DONE', 'output 内容未被改写')
 })
 
 test('generate:false 本地预热，零上游调用；同 socket 可续传下一轮', { timeout: 30000 }, async (t) => {
