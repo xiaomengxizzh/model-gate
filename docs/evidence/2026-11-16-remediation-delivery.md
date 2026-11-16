@@ -115,3 +115,51 @@
 - 不宣称“ModelGate 已完成”：P0-01 真实 400 未关闭（BLOCKED），MG-R006 真实压缩未在本树通过。
 - 不把代码完成/模拟通过/真实通过/Desktop 通过/所有者批准/已发布 混为一谈。
 - 不删除或改写 V1/V2/UX-V3 历史证据；不安装未授权依赖；不改真实生产。
+
+---
+
+## 附录 A：第二轮（所有者授权真实调用后的追加修复，2026-11-16 晚）
+
+> 本附录记录所有者在首轮交付后明确授权（真实 gpt-6-luna 父→Go 长会话、MG-R009 双实例形态、
+> 通过审批文件）并报告新问题“请求 DeepSeek 能输出但错误重连五次”后的追加工作。
+> 前文 §7/§8 的“费用 0 / 审批为空”为**首轮**状态；以本附录为准。
+
+### A.1 用户报告确证根因
+“能输出但重连五次”就是 P0-01 的真实表现：生产日志 `05:27:15` 的孤儿
+`function_call_output` 触发 `400 third_party_tool_call_id_missing`（零计费），Codex 反复重连。
+隔离网关复现同一形状 → 400；确认根因。
+
+### A.2 追加提交
+| 提交 | 内容 |
+| --- | --- |
+| `5f765f7` | P0-01 无损修复：孤儿 output 补稳定合成 call_id（orphan-adopt），不伪造 call/不删历史/不改内容；新增 `agg-v2-orphan-adopt` 5/5，更新两个旧契约 |
+| `1010a63` | 真机发现并修复：原生子代理 effort `medium`→`high`（Go DeepSeek 只支持 low/high）；`agg-desktop-child-effort` 3/3 |
+| `3ee50ce` | P0-01 真实会话验证记录（PASS_REAL 分层） |
+| `e4d48e9` | 所有者授权记录（MG-R009 形态/真实会话/P0-01 修复，带归属，不代填等价/压缩批准） |
+
+### A.3 真实验证（有界、真实付费，隔离环境，未碰生产）
+见 `docs/evidence/2026-11-16-p0-01-real-validation.md`。要点：
+- 孤儿形状：修复前 400（零计费）→ 修复后 **HTTP 200 / completed**，模型正确看到工具结果；连发两次（模拟重连）均 200、id 稳定。
+- `gpt-6-luna` 官方：**HTTP 200**，仅 `model=gpt-6-luna`（MG-R012）。
+- 原生父子：真实 `codex exec`，父 rollout `gpt-6-luna`（spawn_agent/wait_agent），子 rollout `mg-opencodego-deepseek-v4-1-flash`；父回报 `NATIVE_OK`；网关日志 3×chatgpt-plan + 2×opencodego；**无 400、无重连**（MG-R005 PASS_REAL）。
+- 生产 8787 / PID 323092 未触碰；真实 `~/.codex/config.toml` sha `867d53d5…` 前后一致。
+
+### A.4 资源费用（更新）
+真实验证产生**少量有界真实调用费用**：1×孤儿形状 400（零计费）+ 1×孤儿修复后 200 + 1×重连复测 200 + 2×gpt-6-luna 官方最小请求 + 原生父子会话 ~15.3k tokens（父）+ 2×Go 子请求。无下载/安装。
+
+### A.5 状态更新（严格分层）
+- **PASS_REAL（本树）**：P0-01 孤儿形状 400 消除；MG-R012 仅 gpt-6-luna；MG-R005 原生父→子派单。
+- **仍 BLOCKED**：MG-R006 原生压缩与压缩后同子 resume（四项 partial，本轮有界会话未覆盖压缩触发）；完整原版 Desktop GUI 多视口模型选择器；`release:freeze`（需最终树重采真实证据 + MG-R006 同树证据，不能改 SHA/代填等价）。
+- **MG-R009**：双实例安装隔离形态已获所有者批准；单实例多租户非本轮必达。
+
+### A.6 审批与门禁的诚实处理
+`v2-release-approvals.json` 记录了所有者真实授予的三项决策（带 source/归属），
+MG-R009 requirement-form 已满足。**未**伪造代码等价冻结批准、**未**虚构重新采集的 PASS_REAL、
+**未**替所有者接受 MG-R006 四项 partial。因此 `release:freeze` 仍诚实 FAIL/BLOCKED，
+失败项为：最终树需重新冻结、MG-R006 四项、两条代码等价批准。这是正确且不可绕过的阻断。
+
+### A.7 交付物
+- Draft PR #8（https://github.com/xiaomengxizzh/model-gate/pull/8）已推送最新修复提交，
+  保持 Draft，**未合并/未发布/未切生产**。
+- 全部离线套件仍绿：npm test 127 suites / 1230 passed / 0 failed / 3 skip；
+  新增 `agg-v2-orphan-adopt` 5/5、`agg-desktop-child-effort` 3/3。
