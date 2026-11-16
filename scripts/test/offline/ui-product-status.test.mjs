@@ -306,9 +306,12 @@ test('聚合接口 403 explicit_admin_required → needs_admin_token（不是“
   })
   assert.equal(ps.error.kind, 'denied')
   assert.equal(ps.state, 'needs_admin_token')
-  assert.equal(ps.primary.id, 'set-admin-token')
-  assert.equal(ps.primary.route, '#/settings?section=admin-token')
-  assert.match(ps.overall.label, /管理令牌/)
+  // P1-04：主操作改为本机解锁管理会话，设置令牌保留为次级入口（避免跳设置页死循环）。
+  assert.equal(ps.primary.id, 'unlock-admin')
+  assert.equal(ps.primary.kind, 'local-admin-unlock')
+  assert.ok(ps.secondary.some((a) => a.id === 'set-admin-token' && a.route === '#/settings?section=admin-token'))
+  assert.ok(ps.readOnlyReason && ps.readOnlyReason.code === 'explicit_admin_required')
+  assert.match(ps.overall.label, /只读/)
   assert.notEqual(ps.primary.id, 'retry')
 })
 

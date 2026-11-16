@@ -422,7 +422,10 @@ export function nextPrimaryAction (ps) {
     case 'read_only_unknown':
       return { id: 'check-version', label: '查看高级诊断', kind: 'route', route: '#/aggregation', detail: '当前实例不支持聚合管理，请确认版本后重试。' }
     case 'needs_admin_token':
-      return { id: 'set-admin-token', label: '设置管理令牌', kind: 'route', route: '#/settings?section=admin-token', detail: '聚合管理接口拒绝匿名（403 explicit_admin_required）；设置令牌后即可在控制台查看与管理聚合。' }
+      // P1-04：主操作是“本机解锁管理会话”（POST /api/admin/unlock），不是跳设置页的死循环。
+      return { id: 'unlock-admin', label: '解锁聚合管理', kind: 'local-admin-unlock', route: null,
+        detail: '聚合管理被拒绝（403 ' + (str((obj(p.error) && p.error.code) || (obj(p.aggregation) && obj(p.aggregation.error) && obj(p.aggregation.error).code)) || 'aggregation_admin_required') + '）。' +
+          'Codex 侧已生效的配置不受影响；可在本机开启临时管理会话，解锁前不会发起任何写入。' }
     case 'cannot_detect_codex':
       return { id: 'locate-codex', label: '查看如何安装/定位 Codex', kind: 'route', route: '#/connections?step=codex', detail: '需要先有原版 Codex Desktop。' }
     case 'needs_go_key':
@@ -519,7 +522,7 @@ export function overallOf (ps) {
     case 'read_only_unknown':
       return { level: 'unknown', label: '状态未知（实例版本不支持）', detail: '当前实例没有聚合管理接口。' }
     case 'needs_admin_token':
-      return { level: 'action', label: '需要操作：设置管理令牌', detail: '聚合管理接口要求显式管理员令牌（当前实例未设置）；Codex 侧已生效的聚合配置不受影响，如需在本控制台查看/修改聚合，请先设置令牌。' }
+      return { level: 'action', label: '只读：聚合管理未解锁', detail: '聚合接口返回 403（要求显式管理员身份，当前实例没有全局管理令牌）。状态为只读，Codex 侧已生效的配置不受影响；点击“解锁聚合管理”可在本机开启临时管理会话，或在设置里写入 MG_ADMIN_TOKEN。解锁前不会发起任何写入。' }
     case 'recoverable_error':
       return { level: 'error', label: '出现问题：读取失败', detail: '控制台没有取得真实状态，可安全重试。' }
     case 'locked':
@@ -577,6 +580,10 @@ export function deriveProductStatus (input) {
     checkedAt: Number(inp.now) || Date.now(),
     missingSections,
     readOnly: true,
+    // P1-04：403 时给出准确只读原因（what/why/how），不是"读取失败"。
+    readOnlyReason: aggError && aggError.kind === 'denied'
+      ? { code: aggError.code || 'aggregation_admin_required', status: aggError.status || 403, message: aggError.message || '' }
+      : null,
   }
   ps.state = homeStateOf(ps)
   ps.overall = overallOf(ps)
@@ -587,6 +594,9 @@ export function deriveProductStatus (input) {
   }
   if (ps.aggregation.supported) {
     ps.secondary.push({ id: 'advanced', label: '查看高级诊断', kind: 'route', route: '#/aggregation' })
+  }
+  if (ps.state === 'needs_admin_token') {
+    ps.secondary.push({ id: 'set-admin-token', label: '改用管理令牌', kind: 'route', route: '#/settings?section=admin-token', detail: '需要远程/多设备管理时，可在设置里写入 MG_ADMIN_TOKEN。' })
   }
   if (ps.state !== 'ready' && ps.state !== 'loading' && ps.aggregation.mode === 'aggregated') {
     ps.secondary.push({ id: 'refresh', label: '重新检测', kind: 'reload', route: null })

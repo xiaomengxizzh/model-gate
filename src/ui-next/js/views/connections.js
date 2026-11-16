@@ -417,6 +417,14 @@ export function activationPreviewSummary (preview) {
     firstRun: p.firstRun === true,
     warnings: Array.isArray(p.warnings) ? p.warnings : [],
     catalog: p.catalog || null,
+    // MG-FIX-P1-05：把 Codex 原生子代理配置的托管计划如实展示给用户。
+    agentChild: p.agentChild && typeof p.agentChild === 'object' ? {
+      action: String(p.agentChild.action || ''),
+      fileName: String(p.agentChild.fileName || 'go-deepseek.toml'),
+      before: p.agentChild.before || null,
+      after: p.agentChild.after || null,
+      conflict: p.agentChild.conflict || null,
+    } : null,
     expectedSha: p.expectedSha == null ? '' : String(p.expectedSha),
     consentToken: typeof p.consentToken === 'string' ? p.consentToken : '',
     blocked: Array.isArray(p.blocked) ? p.blocked : [],
@@ -932,11 +940,14 @@ function diffTable (rows) {
 
 function renderConflict (host, outcome, ctx) {
   const tw = outcome.threeWay || describeThreeWay(outcome)
+  const child = String(outcome.code || '').indexOf('agent_child') !== -1
   clear(host)
   host.append(
     callout('warn',
       h('strong', { text: '拒绝覆盖：' }),
-      ' Codex 配置在预览后被其他程序修改过。ModelGate 保留你的改动，不会为了启用聚合而覆盖。'),
+      ' ' + (child
+        ? '原生子代理文件 go-deepseek.toml 不是 ModelGate 写入的规范内容（或接入后被你改过）。ModelGate 保留你的改动，不会覆盖；请手工合并或移走该文件后重试。'
+        : 'Codex 配置在预览后被其他程序修改过。ModelGate 保留你的改动，不会为了启用聚合而覆盖。')),
     h('p', { class: 'hint', text: tw.summary }),
     tw.available && tw.rows.length
       ? table([
@@ -960,7 +971,15 @@ function renderPreview (host, outcome, ctx, live) {
       ' 只写 ModelGate 拥有的字段；其它行（MCP / projects / 权限 / 注释 / 你自己的 [model_providers.*]）逐字节保留。这次预览没有写入任何内容。'),
     s.firstRun ? callout('warn', h('strong', { text: '首次设置：' }), ' 会在 Codex 用户级配置中新增下面这些字段。') : null,
     s.blocked.length
-      ? callout('danger', h('strong', { text: '前置条件未满足：' }), s.blocked.map((b) => (b && (b.code || b.message)) || 'blocked').join('、'))
+      ? callout('danger', h('strong', { text: '前置条件未满足：' }), s.blocked.map((b) => ((b && b.message) || (b && b.code) || 'blocked')).join(' '))
+      : null,
+    s.agentChild && s.agentChild.action !== 'none'
+      ? callout('info', h('strong', { text: '原生子代理配置：' }),
+        (s.agentChild.action === 'create' ? '将新建 ' + s.agentChild.fileName :
+          s.agentChild.action === 'same' ? s.agentChild.fileName + ' 已存在且内容规范（保持不动）' :
+            s.agentChild.action === 'conflict' ? s.agentChild.fileName + ' 与托管内容不一致，需先人工处理' :
+              '将更新 ' + s.agentChild.fileName) +
+        '。这是 Codex 原生父子代理配置，退出聚合时按托管语义自动恢复；不启用任何自造调度。')
       : null,
     s.conflicts.length ? callout('warn', h('strong', { text: '将覆盖 ' + s.conflicts.length + ' 个已有值：' }), s.conflicts.join('、')) : null,
     s.consentToken ? null : callout('warn', h('strong', { text: '缺少确认令牌：' }), ' 服务端没有返回 consentToken，无法安全写入；请重新检测后再预览。'),

@@ -95,6 +95,9 @@ export const api = {
   probe: (id) => request('/api/probe', { method: 'POST', body: id ? { id } : {} }),
   modelTest: (id) => request('/api/model-test', { method: 'POST', body: id ? { id } : {} }),
   setAdminToken: (value) => request('/api/admin-token', { method: 'POST', body: { token: value } }),
+  // P1-04：无全局管理令牌时，发起"本机临时管理会话"解锁聚合管理。
+  // 成功返回一次性 token，前端只在内存里 setToken；端点尚不存在时返回 404，UI 会降级到设置页。
+  adminUnlock: () => request('/api/admin/unlock', { method: 'POST', body: {}, authEvent: false }),
 
   // —— 聚合管理只读快照（首页/连接页/聚合页共用，见契约 §5）——
   aggregationHealth: (opts = {}) => request('/api/aggregation/health', opts),
