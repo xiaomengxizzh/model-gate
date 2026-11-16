@@ -30,3 +30,31 @@
   （本例 943718）+ `model_auto_compact_token_limit`（config.toml 全局覆盖，二进制 schema 确认）。
   当前已设为官方 1M 的 90%（≈922K tokens），高于 256k/512k。要更高需同步提高 context_window，
   但那会改变模型可见历史长度，属产品决策，不擅自上调。
+
+## 问题 1 追加：切 provider 消除首轮 WS 重连（2026-11-16，已完成）
+
+### A/B 真机取证（隔离 HOME + 真 auth + 生产 8787，最小 luna 请求）
+| 配置 | wsErrors | exit | 推理 |
+| --- | --- | --- | --- |
+| A：内置 `openai` provider + `openai_base_url`（原形态） | **7** | 0 | AB_OK |
+| B：`modelgate` provider + `supports_websockets=false` | **0** | 0 | AB_OK |
+
+B 形态下日志仍为 `gateway_subscription ... chatgptplan ... local_codex_auth`、`domain=official`，
+即 **ChatGPT 本机登录/套餐能力完整保留**；父子派单 `collab: SpawnAgent`+`collab: Wait` 正常。
+
+### 已应用到真实 ~/.codex/config.toml（原子写，完整回滚）
+最小改动（其它字段逐字节不变）：
+- `model_provider = "openai"` → `"modelgate"`
+- 移除顶层 `openai_base_url`，新增 `[model_providers.modelgate]`：
+  `base_url="http://127.0.0.1:8787/v1"`、`wire_api="responses"`、
+  `requires_openai_auth=false`、**`supports_websockets=false`**
+- `model_catalog_json` 保持顶层；`features.multi_agent`、`agents.go_deepseek` 不变。
+- auth.json 未变（sha `de7cc6e9…`）。
+- 回滚：`cp ~/.codex/config.toml.bak-before-websocket-fix-20261116T172052 ~/.codex/config.toml`
+
+### 最终真机验收（用改动后的真实 config，非隔离副本）
+`codex exec "Reply with exactly FINAL_OK"`：**exit=0、wsErrors=0、FINAL_OK** ——
+首轮重连彻底消除、真实 luna 推理正常。生产 8787 healthz ok。
+
+### 用户操作提示
+Codex Desktop 需**新开对话**才会读取新 config（旧会话不会重载）；请在 GUI 新会话确认首轮无重连。
