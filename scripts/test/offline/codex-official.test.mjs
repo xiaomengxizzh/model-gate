@@ -165,7 +165,7 @@ test('订阅官方入口：patchSubscriptionRequestBody 剔除 previous_response
   assert.equal(patched.input[0].role, 'user', '字符串 input 归一化为消息项')
 })
 
-test('第三方目标：previous_response_id 续轮重建完整历史后剔除转发；无状态续轮 fail-closed', async (t) => {
+test('第三方目标：previous_response_id 续轮重建完整历史后剔除转发；无状态续轮优雅降级', async (t) => {
   const bodies = []
   const up = await startScriptedUpstream(async (req, res) => {
     const chunks = []
@@ -200,15 +200,15 @@ test('第三方目标：previous_response_id 续轮重建完整历史后剔除�
   assert.equal(Object.prototype.hasOwnProperty.call(bodies[1], 'previous_response_id'), false)
   const texts = bodies[1].input.flatMap((i) => (i.content || []).map((c) => c.text))
   assert.ok(texts.includes('x') && texts.includes('o1') && texts.includes('y'), '轮1 输入/输出与轮2 增量都在完整历史中')
-  // 无状态续轮：typed 400，零上游调用
+  // 无状态续轮：优雅降级转发（告警，不硬 400）
   const r3 = await gw.call('/v1/responses', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: { model: 'mg-third-responses', input: 'z', stream: true, previous_response_id: 'resp_never' },
   })
-  assert.equal(r3.status, 400)
-  const e3 = JSON.parse(await r3.text())
-  assert.equal(e3.error.code, 'continuation_state_missing')
-  assert.equal(bodies.length, 2)
+  assert.equal(r3.status, 200)
+  await r3.text()
+  assert.equal(bodies.length, 3)
+  assert.equal(bodies[2].previous_response_id, undefined)
 })
 
 test('WS upgrade：网关完成 101 握手，握手阶段零上游命中', async (t) => {

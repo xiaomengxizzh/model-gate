@@ -28,7 +28,7 @@ import { classifyTarget, isLoopbackHost } from './codex/identity.js'
 import { restoreResponseJson, detectOpaqueV2Task, detectEncryptedToolSchema } from './codex/interop.js'
 import { readSubscriptionCredential, isGatewaySubscriptionTarget, probeLocalCodexAuth, SubscriptionCredentialError } from './codex/local-subscription.js'
 import { isTargetAuthzError, resolveUpstream, assertResolvedUpstream, assertNoSubscriptionCredentialToThirdParty, authFailureReceipt, authFailureResponse } from './codex/target-authz.js'
-import { reconstructContinuation, recordContinuation, createCaptureSink } from './responses-continuation.js'
+import { reconstructContinuation, recordContinuation, createCaptureSink, continuationStoreSize } from './responses-continuation.js'
 import { v2ScopeOf, V2_TARGET_UPSTREAM_MODEL, GO_NATIVE_CODEX_DEFAULTS } from './providers/opencode-go.js'
 import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
 import { createObservability, hashId } from './observability/events.js'
@@ -1864,13 +1864,12 @@ function restoreCodexJsonBuffer(buf, route, plan) {
 async function streamCodexResponse(state, budget, log, opts) {
   const { up, res, route, plan, model, modelName, pid, sg, prov, continuation } = opts
   const captureSink = continuation ? createCaptureSink() : null
-  let earlyRecorded = false
   const recordEarly = () => {
-    if (!captureSink || earlyRecorded) return
-    const cap = captureSink.terminalSnapshot()
+    if (!captureSink) return
+    const cap = captureSink.takeRecordable()
     if (cap && cap.responseId) {
-      earlyRecorded = true
-      recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'completed' })
+      const rec = recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'in_progress' })
+      log && log.info('responses continuation recorded', 'id=' + cap.responseId, 'items=' + cap.output.length, 'recorded=' + rec.recorded, (rec.reason ? 'reason=' + rec.reason : ''))
     }
   }
   const adapter = createCodexStreamAdapter(res, {
@@ -1905,6 +1904,8 @@ async function streamCodexResponse(state, budget, log, opts) {
       const cap = captureSink.finish()
       if (cap.responseId) {
         recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
+      } else if (cap.sawAny) {
+        log && log.warn('responses continuation capture empty', 'events=' + (cap.eventTypes || []).join('|'), 'status=' + String(cap.status))
       }
     }
   }
@@ -2105,7 +2106,7 @@ async function proxyOfficialResponses(state, budget, log, opts) {
         if (/text\/event-stream/i.test(ct)) {
           if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov, continuation })
           writeUpstreamHeaders(res, up)
-          await streamRawResponses(res, up.stream, budget, continuation)
+          await streamRawResponses(res, up.stream, budget, continuation, log)
           return { streamed: true }
         }
         const buf = await collectBody(up.stream, 128 * 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
@@ -2247,7 +2248,7 @@ async function proxyNativeResponses(state, budget, log, opts) {
         if (/text\/event-stream/i.test(ct)) {
           if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov, continuation })
           writeUpstreamHeaders(res, up)
-          await streamRawResponses(res, up.stream, budget, continuation)
+          await streamRawResponses(res, up.stream, budget, continuation, log)
           return { streamed: true }
         }
         const buf = await collectBody(up.stream, ((state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024) * 4, { budget, signal: budget.signal, destroyOnAbort: true })
@@ -2307,17 +2308,16 @@ async function proxyNativeResponses(state, budget, log, opts) {
 }
 
 // 原生 Responses 流：逐字节管道（pipeline 负责背压），预算中止/客户端断开时销毁上游。
-function streamRawResponses(res, upstreamStream, budget, continuation) {
+function streamRawResponses(res, upstreamStream, budget, continuation, log) {
   return new Promise((resolve) => {
     let done = false
     const captureSink = continuation ? createCaptureSink() : null
-    let earlyRecorded = false
-    const recordEarly = () => {
-      if (!captureSink || earlyRecorded) return
-      const cap = captureSink.terminalSnapshot()
+      const recordEarly = () => {
+      if (!captureSink) return
+      const cap = captureSink.takeRecordable()
       if (cap && cap.responseId) {
-        earlyRecorded = true
-        recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'completed' })
+        const rec = recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'in_progress' })
+        log && log.info('responses continuation recorded', 'id=' + cap.responseId, 'items=' + cap.output.length, 'recorded=' + rec.recorded, (rec.reason ? 'reason=' + rec.reason : ''))
       }
     }
     const recordCapture = () => {
@@ -2325,6 +2325,8 @@ function streamRawResponses(res, upstreamStream, budget, continuation) {
       const cap = captureSink.finish()
       if (cap.responseId) {
         recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
+      } else if (cap.sawAny) {
+        log && log.warn('responses continuation capture empty', 'events=' + (cap.eventTypes || []).join('|'), 'status=' + String(cap.status))
       }
     }
     const finish = () => { if (!done) { done = true; cleanup(); recordCapture(); resolve() } }
@@ -3002,23 +3004,21 @@ function makeHandler(state) {
           if (contEligible) {
             const hasPrev = Object.prototype.hasOwnProperty.call(body, 'previous_response_id')
             const prevIdRaw = hasPrev && typeof body.previous_response_id === 'string' ? body.previous_response_id : null
+            let degraded = false
             if (hasPrev) {
               const rec = reconstructContinuation(body.previous_response_id, body.input)
-              if (!rec.ok) {
-                log && log.warn('responses continuation state missing', 'reason=' + rec.reason)
-                sendJson(res, 400, {
-                  error: {
-                    message: '续轮状态缺失（previous_response_id 指向的上一轮响应不在网关续轮缓存中：' +
-                      '网关重启、会话过期或历史超出缓存容量）。网关不静默丢弃被省略的历史；请新开会话后重试。',
-                    code: 'continuation_state_missing',
-                    type: 'invalid_request_error',
-                  },
-                })
-                return
+              if (rec.ok) {
+                body = Object.assign({}, body, { input: rec.input })
+                log && log.info('responses continuation reconstructed', 'prev=' + prevIdRaw, 'restored=' + rec.restoredItems, 'delta=' + rec.deltaItems)
+              } else {
+                // 优雅降级（2026-11-16 三轮真机反馈）：状态缺失不再硬 400 打断会话——
+                // 告警 + 剔除 prev_id 后落回既有形状修复链路（第三方 orphan-adopt 已真机验证；
+                // 官方后端按位置配对）。Codex 实测保留消息历史、仅省略服务端缓存的工具项，
+                // 降级转发可继续会话；上下文可能不完整，绝不静默（warn + lossy 诊断）。
+                degraded = true
+                log && log.warn('responses continuation degraded', 'reason=' + rec.reason, 'prev=' + prevIdRaw, 'store=' + continuationStoreSize().count)
               }
-              body = Object.assign({}, body, { input: rec.input })
               delete body.previous_response_id
-              log && log.info('responses continuation reconstructed', 'restored=' + rec.restoredItems, 'delta=' + rec.deltaItems)
             }
             const canonicalInput = Array.isArray(body.input)
               ? body.input
@@ -3026,7 +3026,7 @@ function makeHandler(state) {
                 ? [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: body.input }] }]
                 : [])
             continuation = {
-              prevId: prevIdRaw,
+              prevId: degraded ? null : prevIdRaw,
               canonicalInput,
               model: body.model,
               thread: String((req.headers && (req.headers['thread-id'] || req.headers['session-id'])) || ''),

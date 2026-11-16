@@ -256,7 +256,7 @@ test('续轮重建闭环：previous_response_id 增量帧恢复完整历史（�
   assert.ok(turn3Input.some((x) => x.type === 'message' && x.role === 'user' && x.content[0].text === 'turn 3'), '轮3 新消息在末尾')
 })
 
-test('HTTP 回落续轮与 WS 共用同一续轮缓存；缺失状态 fail-closed 400', { timeout: 30000 }, async (t) => {
+test('HTTP 回落续轮与 WS 共用同一续轮缓存；缺失状态优雅降级', { timeout: 30000 }, async (t) => {
   const bodies = []
   let n = 0
   const up = await startScriptedUpstream(async (req, res) => {
@@ -288,16 +288,16 @@ test('HTTP 回落续轮与 WS 共用同一续轮缓存；缺失状态 fail-close
   assert.equal(bodies.length, 2)
   assert.ok(bodies[1].input.some((x) => x.content && x.content[0] && x.content[0].text === 'ws turn'), 'HTTP 回落轮恢复 WS 轮历史')
   assert.equal(bodies[1].previous_response_id, undefined)
-  // 未知 previous_response_id → typed 400，零上游调用
+  // 未知 previous_response_id → 优雅降级：告警 + 剔除 prev_id 转发（不再硬 400 打断会话）
   const r3 = await fetch('http://127.0.0.1:' + gw.port + '/v1/responses', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'ws-model', stream: true, previous_response_id: 'resp_never_seen', input: [] }),
+    body: JSON.stringify({ model: 'ws-model', stream: true, previous_response_id: 'resp_never_seen', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'degraded' }] }] }),
   })
-  assert.equal(r3.status, 400)
-  const e3 = await r3.json()
-  assert.equal(e3.error.code, 'continuation_state_missing')
-  assert.equal(bodies.length, 2, '缺失状态不得触达上游')
+  assert.equal(r3.status, 200, '状态缺失降级转发，不打断会话')
+  await r3.text()
+  assert.equal(bodies.length, 3)
+  assert.equal(bodies[2].previous_response_id, undefined, '降级轮仍剔除 prev_id')
 })
 
 test('WS 帧控制字段不透传上游：type/generate 剔除且强制 stream:true', { timeout: 30000 }, async (t) => {

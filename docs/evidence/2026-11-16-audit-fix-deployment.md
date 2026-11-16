@@ -43,3 +43,15 @@
 | 父代理 400 `continuation_state_missing` | 真实订阅后端 completed 后不关流；登记原在流结束回调，Codex 收到终态即续轮 → 登记未执行 | 终态事件到达即登记（terminalSnapshot + 逐 chunk 检查）；流结束仍权威覆盖；新增开流复现回归 |
 
 验证：全量 133 suites / 1288 tests PASS；check/docs exit 0。生产重启后冒烟见下。
+"
+## 7. 第三轮真机反馈：韧性修正（同日晚，父代理续轮仍 400）
+
+根因链复盘：离线 mock 与真实后端行为差异逐层暴露——(1) include 新项；(2) completed 后不关流；
+(3) 终态事件信封形状可能仍有差异（待诊断确认）。方法论修正：不再用"离线全绿"推断真机可用。
+
+本轮三项修正：
+1. **优雅降级**：续轮状态缺失不再硬 400——warn + 剔除 prev_id 落回形状修复链路（第三方 orphan-adopt / 官方按位置配对）。依据：Codex 实测保留消息历史、仅省略服务端缓存的工具项。状态可用时仍完整重建。
+2. **增量预登记**：response.created 预登记、output_item.done 增量更新、终态定稿——即使终态形状不被识别，续轮状态也已存在。sink 兼容事件顶层 id。
+3. **全链路结构化诊断**（仅协议元数据）：recorded / capture empty(events=…) / reconstructed(prev=…) / degraded(reason=…,store=…)。下次异常可直接从日志定位断点。
+
+回归：未知终态形状 + 开流续轮、completed 后开流续轮、降级转发（三层）；全量见提交。
