@@ -41,3 +41,19 @@ test('缺少这些字段时零改动（不无中生有）', () => {
   const onlyEffort = { model: 'x', reasoning: { effort: 'low' } }
   assert.equal(projectThirdPartyResponsesParams(onlyEffort, thirdParty).body.reasoning.effort, 'low')
 })
+
+test('第三方 Responses 目标：剔除 stream_options（OpenCode Go portable 上游 400 实测）', () => {
+  const prov = { id: 'opencodego', baseUrl: 'https://opencode.ai/inference/go' }
+  const out = projectThirdPartyResponsesParams({
+    model: 'deepseek-v4.1-flash',
+    input: 'hi',
+    stream: true,
+    stream_options: { include_usage: true },
+  }, prov)
+  assert.equal(Object.prototype.hasOwnProperty.call(out.body, 'stream_options'), false)
+  assert.ok(out.dropped.includes('stream_options'))
+  // 官方目标不改：stream_options 原样保留，避免破坏官方路径的逐字节语义
+  const official = projectThirdPartyResponsesParams({ stream_options: { include_usage: true } }, { id: 'chatgptplan', baseUrl: 'https://chatgpt.com', codexIdentity: 'official' })
+  assert.deepEqual(official.body.stream_options, { include_usage: true })
+  assert.deepEqual(official.dropped, [])
+})

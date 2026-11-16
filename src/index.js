@@ -699,6 +699,14 @@ export function projectThirdPartyResponsesParams(body, prov) {
     else delete out.include
     dropped.push('include:reasoning.encrypted_content')
   }
+  // 2026-11-16 真机实测（OpenCode Go /v1/responses）：客户端带 `stream_options` 时上游 400
+  // “stream_options: requires a native Responses target; portable routing requires the full
+  // conversation in input”。该字段属于 Chat Completions，Responses 语义里用量在
+  // response.completed 事件中返回，因此对**第三方** Responses 目标显式剔除（官方目标仍逐字节透传）。
+  if (Object.prototype.hasOwnProperty.call(out, 'stream_options')) {
+    delete out.stream_options
+    dropped.push('stream_options')
+  }
   return { body: out, dropped }
 }
 
