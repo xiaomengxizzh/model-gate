@@ -480,7 +480,9 @@ const COLLABORATION_TOOL_LIST = ['spawn_agent', 'send_message', 'followup_task']
 export const COLLABORATION_TOOLS = Object.freeze(COLLABORATION_TOOL_LIST.slice())
 
 const DEFAULT_NAMESPACE = 'collaboration'
-const DROPPABLE_INCLUDE = ['reasoning.encrypted_content', 'output_text.logprobs']
+// Codex 0.167 多代理还会请求 output.encrypted_content（加密输出项）；第三方便携上游
+// 不产生密文输出，丢弃不影响正确性（2026-11-16 真机子代理 400 取证）。官方目标逐字透传。
+const DROPPABLE_INCLUDE = ['reasoning.encrypted_content', 'output.encrypted_content', 'output_text.logprobs']
 const AGENT_MESSAGE_KEYS = new Set([
   'type', 'id', 'author', 'recipient', 'content', 'status',
   'internal_chat_message_metadata_passthrough', 'encrypted_content',
