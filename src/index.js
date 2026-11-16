@@ -736,10 +736,28 @@ export function repairThirdPartyToolCallIds (body) {
   if (!items) return { body, repaired: [] }
   const out = items.map((it) => (it && typeof it === 'object' && !Array.isArray(it)) ? Object.assign({}, it) : it)
   const repaired = []
-  const pending = [] // 未闭合的 call 索引（最近的在后）
+  const hasId = (it) => !!(it && typeof it.call_id === 'string' && it.call_id !== '')
+  // MG-FIX-P2-07：先扫描历史里已存在的每一个 call_id，合成 ID 必须避开它们，
+  // 否则输入里本就有 call_mg_1 时会生成重复 ID，造成工具结果错绑/重复。
+  const existingIds = new Set() // 所有已出现的 id（call + output）：合成 id 必须全部避开，防止误配到孤儿 output
+  const callIds = new Set()     // 当前 call 占用的 id：回填时用来检测“另一个 call 已占用该 id”
+  for (const it of out) {
+    if (!hasId(it)) continue
+    existingIds.add(it.call_id)
+    if (TOOL_CALL_TYPES.has(String(it.type || ''))) callIds.add(it.call_id)
+  }
   let seq = 0
-  const nextSyntheticId = () => 'call_mg_' + (++seq)
-  const hasId = (it) => typeof it.call_id === 'string' && it.call_id !== ''
+  const nextSyntheticId = () => {
+    let id
+    do { id = 'call_mg_' + (++seq) } while (existingIds.has(id))
+    existingIds.add(id)
+    return id
+  }
+  const pending = [] // 未闭合 call 的索引栈（最近的在末尾）
+  const consume = (index) => {
+    const at = pending.indexOf(index)
+    if (at >= 0) pending.splice(at, 1)
+  }
   for (let index = 0; index < out.length; index++) {
     const item = out[index]
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue
@@ -747,31 +765,48 @@ export function repairThirdPartyToolCallIds (body) {
     if (TOOL_CALL_TYPES.has(type)) {
       if (!hasId(item)) {
         item.call_id = nextSyntheticId()
+        callIds.add(item.call_id)
         repaired.push({ index, type, action: 'assign' })
       }
       pending.push(index)
       continue
     }
     if (TOOL_OUTPUT_TYPES.has(type)) {
-      const callIndex = pending.length ? pending[pending.length - 1] : null
-      if (!hasId(item)) {
-        if (callIndex != null && hasId(out[callIndex])) {
-          item.call_id = out[callIndex].call_id
-          repaired.push({ index, type, action: 'pair', from: callIndex })
-          pending.pop()
+      if (hasId(item)) {
+        // MG-FIX-P2-07：output 自带 id 时，先在未闭合 call 中按“完全相等的 call_id”精确匹配，
+        // 绝不盲目取栈顶（栈顶可能是另一个真实 call），避免真实 id 被回填/错绑。
+        let callIndex = -1
+        for (let p = pending.length - 1; p >= 0; p--) {
+          const c = out[pending[p]]
+          if (hasId(c) && c.call_id === item.call_id) { callIndex = pending[p]; break }
         }
-        // 无配对 call：保持缺省，交由 guard 报出可操作错误（不静默丢历史）
+        if (callIndex >= 0) { consume(callIndex); continue }
+        // 无精确匹配：仅当栈顶是我们生成的合成 id 时回填真实 id（call 缺 id、output 带 id 的既有语义）。
+        if (pending.length) {
+          const top = pending[pending.length - 1]
+          const call = out[top]
+          if (typeof call.call_id === 'string' && call.call_id.startsWith('call_mg_') && !callIds.has(item.call_id)) {
+            call.call_id = item.call_id
+            callIds.add(item.call_id)
+            repaired.push({ index: top, type: String(call.type || ''), action: 'backfill', from: index })
+            consume(top)
+            continue
+          }
+        }
+        // 无法确认关联：保持原样，交由 guard fail-closed；不吞 output、不伪造 call、不改写真实 id。
         continue
       }
-      // output 自带 id，但对应 call 缺/是合成 id → 回填，保证两端一致
-      if (callIndex != null) {
+      // output 无 id：与栈顶尚未闭合且已有 id 的 call 按位置配对（既有无损语义）。
+      if (pending.length) {
+        const callIndex = pending[pending.length - 1]
         const call = out[callIndex]
-        if (!hasId(call) || (typeof call.call_id === 'string' && call.call_id.startsWith('call_mg_'))) {
-          call.call_id = item.call_id
-          repaired.push({ index: callIndex, type: String(call.type || ''), action: 'backfill', from: index })
+        if (hasId(call)) {
+          item.call_id = call.call_id
+          repaired.push({ index, type, action: 'pair', from: callIndex })
+          consume(callIndex)
         }
       }
-      pending.pop()
+      // 无配对 call 的孤儿 output：保持缺省，交由 guard 报可操作错误（不静默丢历史）。
     }
   }
   if (!repaired.length) return { body, repaired }
@@ -789,6 +824,40 @@ export function firstEmptyToolCallId (body) {
     if (typeof raw !== 'string' || raw === '') return { index, type, reason: typeof raw === 'string' ? 'empty' : 'missing' }
   }
   return null
+}
+
+// MG-FIX-P0-01：最小的“仅结构信息”脱敏 trace。只描述 item 的形状（type/role/name/id/call_id
+// 是否存在、是否工具调用/结果），以及请求归属（thread/correlation/route）。绝不输出正文、
+// content、arguments、output、token、authorization 或任何凭据/提示词内容。
+// 用途：当孤立工具输出导致 typed 400 时，运维凭这份 trace 判断历史形状与配对为何失败，
+// 而不必也不允许查看用户的真实对话内容。
+export function toolHistoryShapeTrace (body, meta = {}) {
+  const items = Array.isArray(body && body.input) ? body.input : []
+  const present = (v) => (typeof v === 'string' && v !== '') ? 'set' : (v === '' ? 'empty' : 'absent')
+  const shape = items.slice(0, 24).map((it, index) => {
+    if (!it || typeof it !== 'object' || Array.isArray(it)) return { index, type: 'unknown' }
+    const type = String(it.type || (it.role ? 'message' : 'unknown'))
+    const row = {
+      index,
+      type,
+      callId: present(it.call_id),
+      toolCall: TOOL_CALL_TYPES.has(type),
+      toolOutput: TOOL_OUTPUT_TYPES.has(type),
+    }
+    if (type === 'message' && it.role !== undefined) row.role = String(it.role)
+    if (it.name !== undefined) row.name = String(it.name) // 工具名是协议元数据，不是正文
+    if (it.id !== undefined) row.id = present(it.id)
+    return row
+  })
+  const out = {
+    itemCount: items.length,
+    traced: shape.length,
+    items: shape,
+  }
+  for (const key of ['thread', 'correlation', 'route', 'provider', 'model', 'reason']) {
+    if (meta[key] !== undefined && meta[key] !== null) out[key] = String(meta[key])
+  }
+  return out
 }
 
 // V2-08（A2 实测缺陷）：429 时按 models.*.fallbacks 换到**另一个授权域**的供应商 = 静默换供应商/套餐。
@@ -1979,10 +2048,24 @@ async function proxyNativeResponses(state, budget, log, opts) {
     }
     const badCallId = isOfficialResponsesProvider(prov) ? null : firstEmptyToolCallId(thirdPartyBody)
     if (badCallId) {
-      const shapes = (Array.isArray(thirdPartyBody.input) ? thirdPartyBody.input : [])
-        .slice(0, 12)
-        .map((it) => (it && typeof it === 'object' ? String(it.type || (it.role ? 'message:' + it.role : 'unknown')) : 'unknown'))
-      log && log.warn('第三方 Responses 历史中工具项缺少 call_id', pid, 'index=' + badCallId.index, 'type=' + badCallId.type, 'shapes=' + shapes.join('|'))
+      // MG-FIX-P0-01：补最小“仅结构信息”脱敏 trace（序号/type/role/name/id/call_id 是否存在 +
+      // thread/correlation/route），只写入诊断日志用于定位历史形状；绝不记录正文/凭据。
+      // thread/correlation 先哈希，避免把会话标识明文写进日志；route/model 是协议元数据。
+      const convRaw = (req && req.headers && (req.headers['x-conversation-id'] || req.headers['x-session-id']))
+        || (thirdPartyBody && (thirdPartyBody.conversation_id || thirdPartyBody.session_id))
+      const threadHash = hashId(convRaw, 'mg-p0-thread')
+      const reqHash = hashId(req && req.headers && req.headers['x-request-id'], 'mg-p0-req')
+      const trace = toolHistoryShapeTrace(thirdPartyBody, {
+        route: upstreamPath,
+        provider: pid,
+        model: modelName,
+        reason: badCallId.reason,
+        thread: threadHash || undefined,
+        correlation: reqHash || undefined,
+      })
+      log && log.warn('第三方 Responses 历史中工具项缺少 call_id', pid,
+        'index=' + badCallId.index, 'type=' + badCallId.type,
+        'trace=' + JSON.stringify(trace))
       return {
         status: 400,
         contentType: 'application/json; charset=utf-8',
@@ -1992,7 +2075,14 @@ async function proxyNativeResponses(state, budget, log, opts) {
               + '（前面没有可对应的工具调用）。第三方便携 Responses 上游要求 call_id 非空；请新开会话，或清理这段异常历史后重试。',
             code: 'third_party_tool_call_id_missing',
             type: 'invalid_request_error',
-            detail: { index: badCallId.index, itemType: badCallId.type, reason: badCallId.reason },
+            // detail 只含结构信息（序号/type/role/name/id/call_id 是否存在），不含正文/凭据，
+            // 让客户端与审计能解释“为何无法配对”而不暴露用户对话内容。
+            detail: {
+              index: badCallId.index,
+              itemType: badCallId.type,
+              reason: badCallId.reason,
+              historyShape: trace.items,
+            },
           },
         })),
       }
