@@ -2,6 +2,13 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-16 修复第三方 Responses 目标的 stream_options 400
+
+### Fixed
+
+- **Codex → OpenCode Go DeepSeek 报 `stream_options: requires a native Responses target; portable routing requires the full conversation in input`**：客户端（Codex）会带 `stream_options`（Chat Completions 字段，用于用量统计），而 OpenCode Go 的 `/v1/responses` 是 portable 适配层、拒绝该字段。修复：`projectThirdPartyResponsesParams()` 对**非官方** Responses 目标显式剔除 `stream_options` 并写诊断日志；官方目标仍逐字节透传，不改官方语义。Responses 语义下用量由 `response.completed` 事件返回。
+- 回归：`scripts/test/offline/agg-v2-third-party-params.test.mjs`（新增 stream_options 用例 + 官方目标不剔除的对照）。
+
 ## [Unreleased] —— 2026-11-15 前端入口收敛（旧管理员控制台退役，所有者指令）
 
 ### Changed（行为变更，非向后兼容）
