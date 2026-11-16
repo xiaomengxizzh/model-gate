@@ -73,6 +73,8 @@ deriveProductStatus({
 
 约束：只读 `CODEX_HOME/auth.json` 的 `auth_mode` 与 token **存在性**；不返回、不记录、不刷新 token；探测异常返回 `credential:'unknown'`（不假定已登录）。
 
+**凭据优先复用系统环境变量**：若 `providers.opencodego.apiKeyEnv`（默认 `OPENCODE_API_KEY`）在进程环境或用户级环境中存在，`/api/status.providers[].hasKey=true`、`keySource=env|env-registry`，向导必须提供"使用现有凭据并连接"（不调用 `POST /api/keys`、不回显值）；只有环境里没有时才要求用户粘贴。聚合发现（sync）与转发链共用 `resolveKey`，不会出现"状态说有、同步说没有"。
+
 **Go Key 写入通道**沿用现有 API，不新建存储：`POST /api/aggregation/providers`（可用 `preset:'opencode-go'` 省略 ID/URL/env）→ `POST /api/keys {id:'opencodego', key}` → `POST /api/aggregation/providers/opencodego/sync` → `POST /api/aggregation/activate`（428 预览 → consentToken → 原子写 → 回执）。每一步独立可重试/可回滚（`DELETE /api/aggregation/providers/:id`）。
 
 ## 4. 路由与导航契约（A1 实现，A3 消费）

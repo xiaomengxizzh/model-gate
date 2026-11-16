@@ -18,7 +18,7 @@
 //     仅回环来源（isLocal）才继续，除非入口已显式放行（isLocal 由 index.js 传入）。
 //   - 不接受客户端提供的文件路径：activate 的 catalogPath 只能来自服务端已发布目录。
 //   - 错误一律返回稳定 code，绝不把未知异常变成泛化 500 文本或回显凭据。
-import { configPaths } from '../router.js'
+import { configPaths, resolveKey } from '../router.js'
 import { createRegistry } from './registry.js'
 import { createDiscoveryEngine, createFileSnapshotStore } from './discovery.js'
 import { createAggregatedCatalog } from './catalog.js'
@@ -80,11 +80,33 @@ function syntheticRequest (method, path) {
   }
 }
 
+// 发现请求的凭据来源必须与转发链同源：keys.local.json → 进程环境变量 → 用户级环境变量实时读取。
+// discovery 默认只读 process.env，而进程 env 是启动快照；用户后来写入
+// ~/.config/environment.d/*.conf 的 Key 在已运行实例上不可见，会导致
+// "/api/status 显示 hasKey=true，但 sync 报 discovery_credential_missing"。
+// 这里注入 resolveKey，让聚合发现同样能吃到环境变量（且绝不写入/回显 Key 值）。
+export function providerCredentialResolver (cfg) {
+  return (provider) => {
+    if (!provider) return null
+    if (provider.keyRef === 'none') return null
+    const id = provider.id || (provider.aggregation && provider.aggregation.id)
+    if (!id) return null
+    const def = (cfg && cfg.providers && cfg.providers[id]) || provider._def || provider
+    const resolved = resolveKey(cfg || {}, def, id)
+    return resolved && resolved.key ? resolved.key : null
+  }
+}
+
 function buildDeps (cfg, log, reload) {
   const dir = configPaths().dir
   const registry = createRegistry({ log, reload })
   const cacheStore = createFileSnapshotStore({ dir })
-  const discovery = createDiscoveryEngine({ registry, cacheStore, cfg: cfg || {} })
+  const discovery = createDiscoveryEngine({
+    registry,
+    cacheStore,
+    cfg: cfg || {},
+    resolveCredential: providerCredentialResolver(cfg),
+  })
   const catalog = createAggregatedCatalog({ registry, cacheStore, dir, readConfig: () => (cfg || {}) })
   const handlers = createAggregationHandlers({ registry, discovery, catalog, readConfig: () => (cfg || {}), activation: null })
   return { registry, discovery, catalog, handlers }

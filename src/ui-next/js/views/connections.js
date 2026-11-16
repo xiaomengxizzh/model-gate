@@ -131,6 +131,23 @@ export function buildKeyRequest (key) {
   return { id: GO_PROVIDER, key: String(key == null ? '' : key) }
 }
 
+// 既有凭据（系统环境变量 / 网关已存）只报告"来源"，永不回显值。
+// product.go.credentialSource 来自 /api/status.providers[].keySource：
+//   env          = 进程环境变量
+//   env-registry = 用户级环境变量（environment.d / 注册表，实时读取）
+//   keys         = 网关已保存的 Key
+export function existingCredentialInfo (product) {
+  const go = product && product.go ? product.go : null
+  if (!go || go.credentialPresent !== true) return { available: false, source: null, envName: null, label: '' }
+  const source = String(go.credentialSource || '')
+  const envName = go.apiKeyEnv || 'OPENCODE_API_KEY'
+  if (source === 'env' || source === 'env-registry') {
+    return { available: true, source, envName, label: '系统环境变量 ' + envName }
+  }
+  if (source === 'keys') return { available: true, source, envName: null, label: '网关已保存的 Key' }
+  return { available: false, source: source || null, envName: null, label: '' }
+}
+
 export function buildDeactivateRequest (expectedSha) {
   const sha = expectedSha == null ? '' : String(expectedSha)
   return sha ? { expectedSha: sha } : {}
@@ -247,9 +264,15 @@ export async function runConnectFlow (deps = {}) {
     }
   }
 
-  // 2) 保存 Key（唯一凭据写入通道；只有这里会带上 Key 值）
+  // 2) 凭据：优先复用系统环境变量里的既有凭据（网关 resolveKey 会读 env / 用户级 env），
+  //    绝不为了"走一遍流程"把已有 Key 再写进 keys.local.json。
   if (fromIndex > 1) markNotRun(1)
-  else if (!key) {
+  else if (deps.useExistingCredential === true) {
+    steps[1].status = 'existing'
+    steps[1].message = '使用系统环境变量中的现有凭据（未写入、未回显任何 Key）'
+    result.keySaved = false
+    result.credentialSource = 'existing-env'
+  } else if (!key) {
     steps[1].status = 'failed'
     steps[1].code = 'key_required'
     steps[1].message = '缺少 OpenCode Go API Key'
@@ -691,6 +714,48 @@ function keyPanel (ctx, product) {
 
   const next = h('div', { class: 'toolbar', style: { marginTop: '10px' } },
     h('button', { class: 'btn btn-sm', type: 'button', text: '查看模型发现结果', onclick: () => goToStep('model') }))
+
+  // 已有系统环境变量凭据时：默认"直接使用"，不再要求粘贴；粘贴只是可选后备。
+  const existing = existingCredentialInfo(product)
+  if (existing.available) {
+    const useExisting = h('button', { class: 'btn btn-primary', type: 'button', text: '使用现有凭据并连接' })
+    const manualBox = h('details', { class: 'advanced' },
+      h('summary', { text: '改用其他 API Key' }),
+      keyField,
+      h('div', { class: 'toolbar' }, submit))
+    useExisting.addEventListener('click', async () => {
+      error.textContent = ''
+      live.textContent = '正在注册供应商并使用系统环境变量中的凭据…'
+      useExisting.disabled = true
+      let result = null
+      try {
+        result = await runConnectFlow({
+          post: viewPost(ctx),
+          useExistingCredential: true,
+          configVersion: currentConfigVersion(),
+          overrides: { id: idInput.value.trim(), baseUrl: baseInput.value.trim(), apiKeyEnv: envInput.value.trim() },
+        })
+      } catch (e) {
+        result = { ok: false, failedStep: 'unknown', failedCode: (e && e.message) ? String(e.message) : 'connect_flow_failed', steps: [] }
+      } finally {
+        useExisting.disabled = false
+        useExisting.removeAttribute('aria-busy')
+      }
+      renderFlowResult(resultHost, result)
+      if (result && result.ok) { try { toast('连接已就绪', 'success') } catch { /* 无 toast 环境 */ } }
+    })
+    return card('连接 OpenCode Go',
+      '系统中已存在可用的 OpenCode Go 凭据；ModelGate 直接从环境变量读取，不会写入或显示 Key 值。',
+      h('div', { class: 'page-stack' },
+        callout('good',
+          h('strong', { text: '已检测到：' }), existing.label,
+          ' —— 无需粘贴 Key。网关在每次请求时从环境变量读取，Key 不进入配置、不进入日志、不回显。'),
+        h('div', { class: 'toolbar' }, useExisting),
+        manualBox,
+        advanced,
+        next,
+        resultHost))
+  }
 
   submit.addEventListener('click', async () => {
     error.textContent = ''

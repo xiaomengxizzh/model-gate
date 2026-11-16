@@ -98,6 +98,7 @@
 - **面板门禁**：启用管理令牌后，打开控制台先显示**登录卡片**，输入正确令牌才进入主界面（令牌错误红字提示）。浏览器记住当前网关实例（按启动时间戳 `startedAt` 判定），同一实例内刷新不再要求输入；**网关重启后需重新输入令牌**。
 - **数据面鉴权**：`MG_CLIENT_KEY` 或面板里的 `clientKey` 设置后，`/v1/*` 需携带同一 Key，否则 401；未配置全局 Key 时，绑定独立 Key 的虚拟模型仍需验证其 Key；其他入口保留本地匿名访问。全局 Key 可访问全部模型；虚拟 Key 在启用全局门禁时只放行自己的入口。
 - **转发鉴权**：向各上游转发时**剥离客户端自带** `Authorization/Cookie/x-api-key/proxy-*`，统一由网关注入，杜绝绕过；配置里的 `extraHeaders` 也不能覆盖或注入鉴权头（命中即忽略并留审计日志，只记头名）。详见下节「Codex 聚合身份域」。
+- **上游 Key 来源只有两条：环境变量或加密 keys 库（内联 `apiKey` 永不读取）**。`providers.<名>.apiKeyEnv` 指向变量名，网关按顺序解析：① 加密 keys 库（面板写入的 `providers.<id>` Key）→ ② **进程环境变量** → ③ **用户级环境变量实时读取**（Linux：`systemctl --user show-environment`，未命中再直接解析 `~/.config/environment.d/*.conf`；Windows：`HKCU\Environment`；带 60s 缓存）。第 ③ 步让"在系统里配好 `OPENCODE_API_KEY` 后无需重启网关即可生效"，且 **Key 不会写进 `gateway.local.json`/`keys.local.json`/`/api/status`/日志**（`/api/status` 只回 `hasKey` 与 `keySource=env|env-registry|keys` 以及变量名 `apiKeyEnv`）。**聚合发现（sync）使用同一个解析器**，因此"状态页显示 hasKey=true 但 sync 报 `discovery_credential_missing`"不再发生。控制台「模型与账号」检测到既有环境变量凭据时默认"使用现有凭据并连接"，不会要求用户重新粘贴，也不会写 `/api/keys`。回归：`scripts/test/offline/aggregation-env-credential.test.mjs`、`user-env.test.mjs`。
 - **Key 加密落盘**：`config/keys.local.json` **始终 AES-256-GCM 加密**（文件头 `MG1:`），主密钥优先取 `MG_KEYS_MASTER`，否则自动生成并持久化到用户目录的 `master.key`。`clientKey` 同样加密存于 keys 库，不写明文。文件启动时收紧权限（Windows `icacls` / 其它 `chmod 0600`）。
 - **日志脱敏**：日志对已登记密钥/Token 值统一掩码，减少密钥落日志的风险；热更新后脱敏名单同步仍见开发计划 MG-005。
 

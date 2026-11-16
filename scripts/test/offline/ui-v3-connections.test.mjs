@@ -350,6 +350,34 @@ test('目标模型固定很深：容错接受公共 ID / 上游名 / 旧写法�
 })
 
 // ---------- 7) product 缺失时绝不出现成功状态 ----------
+test('既有环境变量凭据：向导默认"使用现有凭据"，不写 /api/keys、不回显 Key', async () => {
+  // 识别：env / env-registry / keys 三种来源都算"已存在"；未知来源不冒充。
+  const envInfo = connections.existingCredentialInfo({ go: { credentialPresent: true, credentialSource: 'env', apiKeyEnv: 'OPENCODE_API_KEY' } })
+  assert.equal(envInfo.available, true)
+  assert.equal(envInfo.source, 'env')
+  assert.match(envInfo.label, /OPENCODE_API_KEY/)
+  assert.equal(connections.existingCredentialInfo({ go: { credentialPresent: true, credentialSource: 'env-registry', apiKeyEnv: 'OPENCODE_API_KEY' } }).available, true)
+  assert.equal(connections.existingCredentialInfo({ go: { credentialPresent: true, credentialSource: 'keys' } }).label, '网关已保存的 Key')
+  assert.equal(connections.existingCredentialInfo({ go: { credentialPresent: false } }).available, false)
+  assert.equal(connections.existingCredentialInfo(null).available, false)
+  // 不得把任何值带进 label
+  assert.doesNotMatch(envInfo.label, /sk-|Bearer|\w{20,}/)
+
+  const calls = []
+  const post = async (path, body) => {
+    calls.push({ path, body })
+    if (path === '/api/aggregation/providers') return { ok: true, provider: { id: 'opencodego' }, configVersion: 7 }
+    if (path.endsWith('/sync')) return { ok: true, applied: true, completeness: 'complete' }
+    throw new Error('不应调用 ' + path)
+  }
+  const result = await connections.runConnectFlow({ post, useExistingCredential: true, configVersion: 7 })
+  assert.equal(result.keySaved, false)
+  assert.equal(result.credentialSource, 'existing-env')
+  assert.ok(!calls.some((c) => c.path === '/api/keys'), '使用现有凭据时绝不写 /api/keys')
+  assert.ok(calls.some((c) => c.path.endsWith('/sync')), '仍要同步模型清单')
+  assert.match(result.steps[1].message, /未写入|环境变量/)
+})
+
 test('既有非聚合 Go 上游占用 id 时：显式 adopt 重试接管，并保留原端点/Key 语义', async () => {
   const calls = []
   let providerAttempt = 0

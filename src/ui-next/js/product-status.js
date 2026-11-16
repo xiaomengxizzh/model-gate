@@ -210,6 +210,8 @@ export function deriveGo (status, aggregation) {
     providerId: providerId || null,
     credentialPresent,
     credentialSource: statusProvider ? str(statusProvider.keySource) || null : null,
+    // 凭据变量名只用于告诉用户"正在用哪个环境变量"，绝不读取/回显其值。
+    apiKeyEnv: statusProvider ? str(statusProvider.apiKeyEnv) || null : null,
     targetModelConfigured: !!target,
     discoveryState: discoveryState || 'unknown',
     supported: !unsupported,
