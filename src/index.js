@@ -28,7 +28,7 @@ import { classifyTarget, isLoopbackHost } from './codex/identity.js'
 import { restoreResponseJson, detectOpaqueV2Task, detectEncryptedToolSchema } from './codex/interop.js'
 import { readSubscriptionCredential, isGatewaySubscriptionTarget, probeLocalCodexAuth, SubscriptionCredentialError } from './codex/local-subscription.js'
 import { isTargetAuthzError, resolveUpstream, assertResolvedUpstream, assertNoSubscriptionCredentialToThirdParty, authFailureReceipt, authFailureResponse } from './codex/target-authz.js'
-import { reconstructContinuation, recordContinuation, createCaptureSink, continuationStoreSize } from './responses-continuation.js'
+import { reconstructContinuation, recordContinuation, createCaptureSink, continuationStoreSize, configureContinuationRootFix } from './responses-continuation.js'
 import { v2ScopeOf, V2_TARGET_UPSTREAM_MODEL, GO_NATIVE_CODEX_DEFAULTS } from './providers/opencode-go.js'
 import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
 import { createObservability, hashId } from './observability/events.js'
@@ -2421,6 +2421,9 @@ async function proxyOfficialResponses(state, budget, log, opts) {
         const ctDeclaredSse = /text\/event-stream/i.test(ctRaw)
         const ct = ctRaw || 'application/json; charset=utf-8'
         const rootFixOn = continuationRootFixOn(state)
+        // G2 第二轮治本：把 server.continuationRootFix 透传给终态快照/登记保护（默认 ON，false 回落旧语义）。
+        // 与上一轮 ct 嗅探/sink 挂载/真实 id 登记共用同一开关；配置进程内恒定，逐请求设置无副作用。
+        configureContinuationRootFix(rootFixOn)
         // G2 治本 #1：ct 缺失/非 event-stream 时按正文前缀嗅探；SSE 正文不得因 ct 误判落入 JSON 分支。
         // 仅治本开启且有续轮上下文时嗅探；关闭时与 cc6a797 的 ct 分支逐字节一致。
         const sniffChunk = (rootFixOn && !ctDeclaredSse && continuation) ? await peekFirstChunk(up.stream, budget.signal) : null

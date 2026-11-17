@@ -34,6 +34,13 @@ export function configureContinuationLimits (patch = {}) {
   limits = Object.assign({}, limits, patch)
 }
 
+// G2 第二轮治本（受 server.continuationRootFix 控制：默认 ON，仅显式 false 回落旧语义）：
+//  · 终态快照在 completedOutput 空/缺失时保留 output_item.done 已捕获的真实项（含 function_call）；
+//  · recordContinuation 拒绝用空 output 幂等覆盖同 key 已有的非空 output。
+// 与上一轮治本共用同一开关；显式 false 时两处都恢复 cc6a797/6026e87 的旧语义，保证可回滚。
+let rootFixOn = true
+export function configureContinuationRootFix (v) { rootFixOn = v !== false }
+
 export function resetContinuationStore () {
   entries.clear()
   totalBytes = 0
@@ -53,6 +60,23 @@ function cloneItems (items) {
   for (const it of items) {
     if (it == null) continue
     try { out.push(structuredClone(it)) } catch { try { out.push(JSON.parse(JSON.stringify(it))) } catch {} }
+  }
+  return out
+}
+
+// 终态快照合并：completedOutput 仍为权威来源，但补入「只在 output_item.done 出现」的真实项
+// （按 item.id 去重，id 冲突时保留 completedOutput 版本）。订阅后端把 function_call 只放在
+// output_item.done、而 response.completed.output 为空时，避免终态快照丢掉已捕获的 function_call。
+function mergeCapturedOutput (completed, captured) {
+  const out = cloneItems(completed)
+  const seen = new Set()
+  for (const it of out) if (it && typeof it === 'object' && typeof it.id === 'string' && it.id) seen.add(it.id)
+  for (const it of captured) {
+    if (it && typeof it === 'object' && typeof it.id === 'string' && it.id) {
+      if (seen.has(it.id)) continue
+      seen.add(it.id)
+    }
+    out.push(it)
   }
   return out
 }
@@ -79,9 +103,16 @@ export function recordContinuation ({ responseId, prevId = null, input, output, 
   if (typeof responseId !== 'string' || responseId === '') return { recorded: false, reason: 'no_response_id' }
   const inputItems = cloneItems(input)
   const outputItems = cloneItems(output)
+  const prev = entries.get(responseId)
+  // G2 第二轮治本：同一 key 已有非空 output 时，禁止用空 output 的终态快照幂等覆盖
+  // （保留更完整的版本）。空快照多来自「completedOutput 缺失/为空但 function_call 只在
+  // output_item.done」的后端；覆盖会冲掉已捕获的 function_call → 下轮 function_call_output
+  // 成孤儿 → 上游 400。显式关闭开关时恢复旧的无条件覆盖语义。
+  if (rootFixOn && prev && Array.isArray(prev.output) && prev.output.length > 0 && outputItems.length === 0) {
+    return { recorded: false, reason: 'keep_richer_output' }
+  }
   const bytes = byteLengthOf(inputItems) + byteLengthOf(outputItems)
   if (bytes > limits.maxEntryBytes) return { recorded: false, reason: 'entry_too_large' }
-  const prev = entries.get(responseId)
   if (prev) { entries.delete(responseId); totalBytes -= prev.bytes }
   entries.set(responseId, {
     prevId: typeof prevId === 'string' && prevId ? prevId : null,
@@ -190,9 +221,13 @@ export function createCaptureSink () {
     }
   }
   const snapshot = () => {
-    const output = completedOutput
-      ? cloneItems(completedOutput)
-      : cloneItems(Array.from(outputById.values()).concat(outputNoId))
+    const captured = cloneItems(Array.from(outputById.values()).concat(outputNoId))
+    // G2 第二轮治本：终态快照保留 output_item.done 已捕获的真实项（含 function_call）。
+    // completedOutput 空/缺失时不得回退成空；非空时以其为权威并补入仅增量出现的项。
+    // 显式关闭 server.continuationRootFix 时恢复旧语义（空 completedOutput 优先 → 可返回空）。
+    const output = rootFixOn
+      ? mergeCapturedOutput(completedOutput, captured)
+      : (completedOutput ? cloneItems(completedOutput) : captured)
     return { responseId, status: status || (sawAny ? 'completed' : null), output, sawAny, eventTypes: eventTypes.slice() }
   }
   return {
