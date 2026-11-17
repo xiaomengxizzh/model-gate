@@ -291,3 +291,83 @@ G0 环境/版本/源定位 → G1 CC Switch/原生源码/竞品/文献研究与�
 只有用户在**原版 Codex Desktop + ModelGate GUI** 中，不经任何手工协议补丁完成以下场景，才能声明真正完成：保留官方套餐登录、选择 GPT-6 Luna 父代理和 Go DeepSeek 子代理、可靠多轮工具执行、原生派单/同子追派/等待/中断/恢复、真实 Codex 原生压缩后的同子连续工作、复杂开发任务完成、出错可诊断且不会静默换模型、退出恢复原环境。上述每一环具有同一最终冻结 SHA 上的真实证据，安全、授权与最终所有者审批通过。
 
 未完成任何一环，诚实报告 PARTIAL / BLOCKED / NO-GO，保持交付能力与用户目标的区别。禁止在失去关键原生功能的前提下宣布完成。
+
+
+---
+
+## 11. 2026-11-17 P0 增补：ChatGPT 官方套餐普通对话断流与传输可靠性
+
+> **本节优先级高于原 1.2、6.2、6.3 的旧顺序；详细研究范围、公开证据、诊断方法和验收矩阵见 [官方套餐对话中断与 Responses 传输可靠性专项补充任务书](../research/modelgate-stream-interruption-reliability-20261117.md)。**
+
+用户新增报告：即使仅使用 ChatGPT 官方套餐模型普通对话，也可能无故中断/停滞；类似现象曾在旧版 CC Switch 出现。该问题独立于 DeepSeek 子代理和工具续轮，必须提升为 P0。不得预设它是 ModelGate、CC Switch 或 OpenAI 单方问题。
+
+### 11.1 已发现的重要外部证据
+
+- CC Switch #4535 的特定 Chat upstream 提前截断问题，在 v3.16.2 加入截断检测、v3.16.4 继续加固；这是检测不完整流，不代表中途自动恢复。
+- CC Switch #1673 的 405 WebSocket 兼容问题以 426 触发 Codex 回退 HTTP/SSE 处理；当前 #8404 仍要求真正的 WS/WSS 代理。426 fallback 不能称为端到端 WebSocket。
+- CC Switch #8126 / PR #8281 修复 Chat 转换器在 [DONE] 后仍继续消费上游的问题；PR 明确不实现 retry/continuation。Issue 被关闭不等于中途断流已能自动续传。
+- Codex 官方仓库仍有多起公开断流报告：#20739、#32366、#36059、#44099、#51886；其中包括无本地代理的 ChatGPT Pro 用户断流、长线程 WebSocket 关闭、HTTP 200 无 SSE 事件以及特定请求的约 900 秒截断。
+- OpenAI 网络建议明确提醒代理、防火墙、TLS inspection 和 WebSocket idle timeout 可能造成 Codex 连接停滞或断开。
+
+以上证据说明同类现象确实存在，但不构成用户本机根因的证明。
+
+### 11.2 ModelGate 当前传输架构必须重新审计
+
+本次读取 main 源码发现：
+- src/responses-ws.js 接受 Codex 客户端 WS，但 runTurn 实际向本机 /v1/responses 发 HTTP POST，并以 text/event-stream 消费上游；当前是 **Client WS → Local HTTP → Upstream SSE → Client WS**，不是端到端 WS。
+- src/responses-ws.js 每 60 秒向客户端发 Ping；PONG 当前仅被忽略，尚需核实/补齐 liveness 计时。
+- src/index.js::proxyOfficialResponses 的原生 Responses forward 调用传 noRetry: true；必须审计其确切作用及与中途恢复的关系。
+- src/index.js::streamCodexResponse 的 catch 未绑定原始异常，只向下游映射通用 stream interrupted/timeout，可能丢失 ECONNRESET 等根因。需增加安全脱敏的阶段和 errno/code 观测。
+- 必须检查 HTTP 200 但首事件长期不出现、SSE EOF 缺少真实 terminal、异常关闭和资源释放。
+
+这些是源码审计发现的风险点，不是已证明的用户故障根因。
+
+### 11.3 新增执行任务 T13（P0-A）
+
+| ID | 优先级 | 目标 | 主线交付 | 真实验收 |
+| --- | --- | --- | --- | --- |
+| T13 | P0-A | 官方套餐普通对话连续性与 Responses 传输可靠性；分别研究 Codex 直连、CC Switch 本地路由/聚合、ModelGate WS→HTTP/SSE、候选端到端 WS | 本机实际路由与版本溯源、传输调用图、故障分类、脱敏诊断、竞品/官方源码研究、ADR | 同一主机/账号/网络的 direct / CC Switch / ModelGate 受控真实任务对照；覆盖旧线程/新线程、长任务、首事件、SSE terminal、WS ping/pong、错误恢复；不得用 1+1 冒充 |
+
+T13 研究与真实验证至少包括：
+1. 确认用户实际使用界面、客户端版本、官方登录路径、实际 Provider/模型、当时接管工具及其模式。
+2. 画出 direct Codex、CC Switch、ModelGate 的完整 transport topology，区分客户端到网关与网关到上游的协议。
+3. 区分 WS handshake 失败、WS 中途关闭、HTTP 200 无首事件、SSE 无 terminal EOF、ECONNRESET、first-event timeout、idle timeout、overall budget、用户中断、工具续轮 400。
+4. 对照 Codex 官方 WS retry/fallback、CC Switch 426 fallback 与截断检测、ModelGate 内部 HTTP/SSE 适配。
+5. 评估安全的 retry/continuation。禁止重放已产生副作用的工具调用，禁止伪造 completed、删历史、静默换模型或跨账号域回退。
+6. 评估 first-event timeout、stream idle timeout、overall budget、WS pong deadline 的独立配置与可观测性。
+7. GUI 必须让用户知道当前 Provider、模型、实际传输、首事件等待/重试状态、是否保留部分结果及可恢复操作。
+
+### 11.4 优先级与阶段顺序修订
+
+新的 P0 顺序：
+1. **P0-A T13：官方套餐普通对话/Responses 传输可靠性**（先建立 direct / CC Switch / ModelGate 基线）。
+2. P0-B T05：官方 GPT 父代理工具续轮 400。
+3. P0-C T06：跨供应商原生 V2 子任务与密文边界。
+4. P0-D T07：Codex 原生压缩与 same-child resume。
+
+新增阶段 **G0.5**：在 G0 环境、版本、授权盘点之后，完成普通官方对话的 direct / CC Switch / ModelGate 传输基线、故障分类和 T13 专项研究方案；之后再进入 G1 源码/竞品研究与 G2 修复。T01 本机 CC Switch 源码研究必须与 T13 并行启动。
+
+### 11.5 真实测试矩阵扩展
+
+新增 R13–R20，详见补充任务书：
+- R13 官方直连基线；
+- R14 ModelGate 同任务；
+- R15 本机 CC Switch 同任务；
+- R16 有代表性的长时间生成/多文件任务；
+- R17 旧长线程与新线程 A/B；
+- R18 普通无工具对话与有工具编码任务对照；
+- R19 WS 长连接、空闲恢复、断线与网络切换；
+- R20 故障恢复、部分结果保留、取消/重试与用户可见错误。
+
+只有同一冻结 SHA 上的真实 PASS_REAL 才计入最终门禁。禁止用健康检查、简单单轮 prompt、Mock、单纯 200 状态或禁用 WebSocket/工具/压缩换取通过。
+
+### 11.6 启动指令更新
+
+执行 AI 在原启动提示词的 G0 之后，必须先并行启动：
+- A1：本机 CC Switch 版本/源码与相关历史修复研究（T01）；
+- A2：Codex 原生 WebSocket、HTTP fallback、重试/超时和会话状态研究（T02/T13）；
+- A3：ModelGate 当前 WS→HTTP/SSE 代码路径、错误保留与资源生命周期审计（T13）；
+- A4：CC Switch/Codex Issues、PR、release、论坛和相关论文证据复核（T03/T13）；
+- A5：独立 QA 制定 direct / CC Switch / ModelGate 同场景真实对照与收据模板（T13）。
+
+主代理负责对齐真实用户路径、预算与授权；子代理最多五个。完成 G0.5 之前不得直接大规模改写代理传输层。任何未能真实复现或未能取得证据的项标 NOT_RUN/BLOCKED，不得猜测归因。
