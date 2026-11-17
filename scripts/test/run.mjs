@@ -123,6 +123,8 @@ export const SUITES = [
   'scripts/test/offline/p0b-failclosed.test.mjs',
   'scripts/test/offline/continuation-root-fix.test.mjs',
   'scripts/test/offline/continuation-snapshot-fix.test.mjs',
+  'scripts/test/offline/g2-thirdparty-parent.test.mjs',
+  'scripts/test/offline/g2-parent-model.test.mjs',
   'scripts/test/offline/native-boundary.test.mjs',
   'scripts/test/offline/native-usage.test.mjs',
   'scripts/test/offline/optional-endpoints.test.mjs',

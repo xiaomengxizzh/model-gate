@@ -30,6 +30,50 @@ let limits = {
   maxTotalBytes: DEFAULT_MAX_TOTAL_BYTES,
 }
 
+// G2 第三层（方案 B）——id 登记/重建一致性：
+// 同一轮响应存在两个 id 视角：① 网关从上游正文捕获并登记的真实 response.id（50hex / 24hex），
+// ② WS 桥回写给 Codex、被 Codex 放进下一轮 previous_response_id 的客户端可见 id
+// （可能是真实 id，也可能是 resp_mgws_ 合成 id）。二者不一致时 reconstruct 直接以
+// previous_response_id 查 store 会落空（continuation_state_missing / restored=0），下一轮只剩
+// 孤儿 function_call_output → tool_call_pairing typed 400（方案 A 改闸门顺序已被明确否决）。
+// 这里提供一对有界、进程内的 id 别名原语：登记时把「客户端引用 id ↔ 登记键」绑为同一值，
+// 重建时先把引用 id 解析到登记键。只改查键，不动 captureSink / 终态快照 / 拒空覆盖 / 去重 /
+// fail-closed 语义；显式 configureContinuationIdAlias(false) 可整体回落到 dc6e26e 行为。
+const DEFAULT_MAX_ALIASES = DEFAULT_MAX_ENTRIES * 2
+const idAliases = new Map() // aliasId -> canonicalId（双向写入，但重建只做有限跳解析，防环）
+let idAliasOn = true
+export function configureContinuationIdAlias (v) { idAliasOn = v !== false }
+
+function aliasLink (a, b) {
+  if (typeof a !== 'string' || !a || typeof b !== 'string' || !b || a === b) return false
+  if (!idAliases.has(a) && idAliases.size >= DEFAULT_MAX_ALIASES) {
+    const oldest = idAliases.keys().next().value
+    if (oldest !== undefined) idAliases.delete(oldest)
+  }
+  idAliases.set(a, b)
+  return true
+}
+// 绑定两个 id 为同一轮响应；返回是否至少写入一个方向。
+export function registerContinuationAlias (aliasId, canonicalId) {
+  if (!idAliasOn) return false
+  const forward = aliasLink(aliasId, canonicalId)
+  const backward = aliasLink(canonicalId, aliasId)
+  return forward || backward
+}
+// 有限跳（<=4）解析，带环检测；无别名 / 关闭时原样返回。
+export function resolveContinuationId (id) {
+  if (!idAliasOn || typeof id !== 'string' || !id) return id
+  const seen = new Set([id])
+  let cur = id
+  for (let hop = 0; hop < 4; hop++) {
+    const next = idAliases.get(cur)
+    if (!next || seen.has(next)) break
+    seen.add(next)
+    cur = next
+  }
+  return cur
+}
+
 export function configureContinuationLimits (patch = {}) {
   limits = Object.assign({}, limits, patch)
 }
@@ -43,11 +87,12 @@ export function configureContinuationRootFix (v) { rootFixOn = v !== false }
 
 export function resetContinuationStore () {
   entries.clear()
+  idAliases.clear()
   totalBytes = 0
 }
 
 export function continuationStoreSize () {
-  return { count: entries.size, bytes: totalBytes }
+  return { count: entries.size, bytes: totalBytes, aliases: idAliases.size }
 }
 
 function byteLengthOf (value) {
@@ -99,7 +144,7 @@ function evictIfNeeded () {
 
 // 记录一轮真实发生的响应。responseId 缺失（上游失败/无 id）时不记录。
 // input：入口级完整历史（数组）；output：上游真实 output items。
-export function recordContinuation ({ responseId, prevId = null, input, output, model = '', thread = '', status = 'completed' }) {
+export function recordContinuation ({ responseId, prevId = null, input, output, model = '', thread = '', status = 'completed', aliases = null }) {
   if (typeof responseId !== 'string' || responseId === '') return { recorded: false, reason: 'no_response_id' }
   const inputItems = cloneItems(input)
   const outputItems = cloneItems(output)
@@ -126,6 +171,12 @@ export function recordContinuation ({ responseId, prevId = null, input, output, 
   })
   totalBytes += bytes
   evictIfNeeded()
+  // G2 第三层（方案 B）：把调用的「客户端可见 id」与登记键绑为同一值，使下一轮 Codex
+  // 用它作 previous_response_id 时 reconstruct 能解析到本条目。aliases 只登记 id 关系，
+  // 不产生任何 item，也不改写 entry 的 input/output（P0-B 机制原样保留）。
+  if (idAliasOn && Array.isArray(aliases)) {
+    for (const alias of aliases) registerContinuationAlias(alias, responseId)
+  }
   return { recorded: true }
 }
 
@@ -147,10 +198,18 @@ function dedupeAppend (history, items) {
 }
 
 // 续轮重建：parent.input + parent.output + delta。缺失/过期 → fail-closed。
+// G2 第三层（方案 B）：先把客户端引用的 id 解析到登记键（消除 resp_mgws_ 合成 id 与
+// 真实 50hex/24hex 的冲突），解析只改查键；输入/输出/去重/fail-closed 语义完全不变。
 export function reconstructContinuation (prevId, deltaInput) {
   if (typeof prevId !== 'string' || prevId === '') return { ok: false, reason: 'no_previous_response_id' }
   evictIfNeeded()
-  const parent = entries.get(prevId)
+  // 直接命中优先：正常链式续轮（real→real）不受别名影响，避免别名链把 R2 误解析到 R1。
+  // 只有直接查不到时才尝试把客户端引用 id（resp_mgws_ / 24hex / 任意形态）解析到登记键。
+  let parent = entries.get(prevId)
+  if (!parent && idAliasOn) {
+    const resolved = resolveContinuationId(prevId)
+    if (resolved !== prevId) parent = entries.get(resolved)
+  }
   if (!parent) return { ok: false, reason: 'continuation_state_missing' }
   parent.touchedAt = Date.now()
   const delta = Array.isArray(deltaInput)

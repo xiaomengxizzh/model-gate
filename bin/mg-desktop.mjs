@@ -20,7 +20,9 @@ const codexHome = join(appState, 'codex')
 const guiHome = join(appState, 'desktop')
 const gatewayHome = join(appState, 'gateway')
 const port = Number(process.env.MG_DESKTOP_PORT || 18787)
-const parentModel = 'gpt-6-luna'
+// 父模型可配置：默认仍为 luna（字节兼容既有行为），MG_PARENT_MODEL 可显式设为第三方 slug
+// （如 mg-opencodego-deepseek-v4-1-flash），用于 deepseek→deepseek 父子验证。
+const parentModel = process.env.MG_PARENT_MODEL || 'gpt-6-luna'
 const childModel = 'deepseek-v4.1-flash'
 const parentProvider = 'chatgpt-plan'
 

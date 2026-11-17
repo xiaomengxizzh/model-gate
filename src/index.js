@@ -28,7 +28,7 @@ import { classifyTarget, isLoopbackHost } from './codex/identity.js'
 import { restoreResponseJson, detectOpaqueV2Task, detectEncryptedToolSchema } from './codex/interop.js'
 import { readSubscriptionCredential, isGatewaySubscriptionTarget, probeLocalCodexAuth, SubscriptionCredentialError } from './codex/local-subscription.js'
 import { isTargetAuthzError, resolveUpstream, assertResolvedUpstream, assertNoSubscriptionCredentialToThirdParty, authFailureReceipt, authFailureResponse } from './codex/target-authz.js'
-import { reconstructContinuation, recordContinuation, createCaptureSink, continuationStoreSize, configureContinuationRootFix } from './responses-continuation.js'
+import { reconstructContinuation, recordContinuation, createCaptureSink, continuationStoreSize, configureContinuationRootFix, configureContinuationIdAlias } from './responses-continuation.js'
 import { v2ScopeOf, V2_TARGET_UPSTREAM_MODEL, GO_NATIVE_CODEX_DEFAULTS } from './providers/opencode-go.js'
 import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
 import { createObservability, hashId } from './observability/events.js'
@@ -1176,6 +1176,27 @@ function continuationRootFixOn (state) {
   const v = state && state.cfg && state.cfg.server && state.cfg.server.continuationRootFix
   return v !== false
 }
+
+// ── G2 第三层（方案 B）：id 登记/重建一致性（默认 ON，仅显式布尔 false 回滚） ──────────
+// Codex 续轮帧引用的 id（WS 桥回写的 resp_mgws_ 合成 id、第三方 24hex、官方 50hex）与
+// captureSink 登记键（真实 response.id）可能不是同一值 → reconstruct 直接查键落空 →
+// 孤儿 function_call_output → tool_call_pairing typed 400。方案 B 不改闸门顺序，改为把
+// 「客户端引用 id ↔ 登记键」绑为别名：登记时写入 aliases，重建未直接命中时解析。
+// 默认语义宽松：仅布尔 false 关闭；其它一律默认 ON。
+function continuationIdAliasOn (state) {
+  const v = state && state.cfg && state.cfg.server && state.cfg.server.continuationIdAlias
+  return v !== false
+}
+// 从续轮上下文提取"客户端引用 id"候选，供登记时绑定别名。rawPrevId 是本轮请求里 Codex
+// 携带的 previous_response_id（即它用来引用上一轮的 id）；chain 里 Codex 可能持续用同一 id。
+function continuationClientIds (continuation) {
+  if (!continuation) return null
+  const out = []
+  for (const id of [continuation.rawPrevId, continuation.prevId]) {
+    if (typeof id === 'string' && id && !out.includes(id)) out.push(id)
+  }
+  return out.length ? out : null
+}
 // 只读前缀嗅探：从上游流读首个分块判定 SSE，立即 unshift 放回原流，后续 SSE/JSON 分支
 // 照常消费原流。不改字节/不丢数据；探测上限由调用方截取（与 responses-ws.js:570 同款前缀）。
 function peekFirstChunk (stream, signal) {
@@ -2169,7 +2190,7 @@ async function streamCodexResponse(state, budget, log, opts) {
     if (!captureSink) return
     const cap = captureSink.takeRecordable()
     if (cap && cap.responseId) {
-      const rec = recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'in_progress' })
+      const rec = recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, aliases: continuationClientIds(continuation), model: continuation.model, thread: continuation.thread, status: cap.status || 'in_progress' })
       log && log.info('responses continuation recorded', 'id=' + cap.responseId, 'items=' + cap.output.length, 'recorded=' + rec.recorded, (rec.reason ? 'reason=' + rec.reason : ''))
       causalAliasOnRegister(continuation, cap.responseId, log)
       if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_early'))
@@ -2208,7 +2229,7 @@ async function streamCodexResponse(state, budget, log, opts) {
       // 补丁⑧ B 点：挂上后实际解析到的事件规模（纯观测）。
       offStructSinkRecv(log, off, 'codex', cap)
       if (cap.responseId) {
-        recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
+        recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, aliases: continuationClientIds(continuation), model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
         causalAliasOnRegister(continuation, cap.responseId, log)
         if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_final'))
       } else if (cap.sawAny) {
@@ -2424,6 +2445,8 @@ async function proxyOfficialResponses(state, budget, log, opts) {
         // G2 第二轮治本：把 server.continuationRootFix 透传给终态快照/登记保护（默认 ON，false 回落旧语义）。
         // 与上一轮 ct 嗅探/sink 挂载/真实 id 登记共用同一开关；配置进程内恒定，逐请求设置无副作用。
         configureContinuationRootFix(rootFixOn)
+        // G2 第三层（方案 B）：透传 id 登记/重建一致性开关（默认 ON，false 回落到 dc6e26e 直接查键行为）。
+        configureContinuationIdAlias(continuationIdAliasOn(state))
         // G2 治本 #1：ct 缺失/非 event-stream 时按正文前缀嗅探；SSE 正文不得因 ct 误判落入 JSON 分支。
         // 仅治本开启且有续轮上下文时嗅探；关闭时与 cc6a797 的 ct 分支逐字节一致。
         const sniffChunk = (rootFixOn && !ctDeclaredSse && continuation) ? await peekFirstChunk(up.stream, budget.signal) : null
@@ -2474,7 +2497,7 @@ async function proxyOfficialResponses(state, budget, log, opts) {
             if (offOn) offStructSinkRecv(log, { branch: 'json', official: identity.kind === 'official', corr: offCorr }, 'json', cap)
             if (cap && cap.responseId) {
               const regStatus = cap.status || ((j && typeof j.status === 'string') ? j.status : 'completed')
-              recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: Array.isArray(cap.output) ? cap.output : [], model: continuation.model, thread: continuation.thread, status: regStatus })
+              recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: Array.isArray(cap.output) ? cap.output : [], aliases: continuationClientIds(continuation), model: continuation.model, thread: continuation.thread, status: regStatus })
               causalAliasOnRegister(continuation, cap.responseId, log)
             } else if (causalJson && causalJson.idRegisterFromClientPrev && continuation.rawPrevId) {
               // 保留补丁⑨实验语义：sink 也拿不到 id 时才用客户端 prev 兜底登记。
@@ -2484,7 +2507,7 @@ async function proxyOfficialResponses(state, budget, log, opts) {
           } else {
             // 回滚（continuationRootFix=false）：cc6a797 原行为，JSON 分支不挂 captureSink。
             if (j && typeof j === 'object' && typeof j.id === 'string' && j.id) {
-              recordContinuation({ responseId: j.id, prevId: continuation.prevId, input: continuation.canonicalInput, output: Array.isArray(j.output) ? j.output : [], model: continuation.model, thread: continuation.thread, status: j.status || 'completed' })
+              recordContinuation({ responseId: j.id, prevId: continuation.prevId, input: continuation.canonicalInput, output: Array.isArray(j.output) ? j.output : [], aliases: continuationClientIds(continuation), model: continuation.model, thread: continuation.thread, status: j.status || 'completed' })
               causalAliasOnRegister(continuation, j.id, log)
             } else if (causalJson && causalJson.idRegisterFromClientPrev && continuation.rawPrevId) {
               const rec = recordContinuation({ responseId: continuation.rawPrevId, prevId: continuation.prevId, input: continuation.canonicalInput, output: [], model: continuation.model, thread: continuation.thread, status: (j && typeof j.status === 'string') ? j.status : 'completed' })
@@ -2634,7 +2657,7 @@ async function proxyNativeResponses(state, budget, log, opts) {
         if (j && typeof j === 'object') {
           if (typeof j.model === 'string') j.model = body.model
           if (continuation && typeof j.id === 'string' && j.id) {
-            recordContinuation({ responseId: j.id, prevId: continuation.prevId, input: continuation.canonicalInput, output: Array.isArray(j.output) ? j.output : [], model: continuation.model, thread: continuation.thread, status: j.status || 'completed' })
+            recordContinuation({ responseId: j.id, prevId: continuation.prevId, input: continuation.canonicalInput, output: Array.isArray(j.output) ? j.output : [], aliases: continuationClientIds(continuation), model: continuation.model, thread: continuation.thread, status: j.status || 'completed' })
           }
           tallyResponsesUsage(state, modelName, pid, sg, j.usage || {})
           return { status: up.status, contentType: ct, buf: Buffer.from(JSON.stringify(j)) }
@@ -2694,7 +2717,7 @@ function streamRawResponses(res, upstreamStream, budget, continuation, log, off)
       if (!captureSink) return
       const cap = captureSink.takeRecordable()
       if (cap && cap.responseId) {
-        const rec = recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'in_progress' })
+        const rec = recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, aliases: continuationClientIds(continuation), model: continuation.model, thread: continuation.thread, status: cap.status || 'in_progress' })
         log && log.info('responses continuation recorded', 'id=' + cap.responseId, 'items=' + cap.output.length, 'recorded=' + rec.recorded, (rec.reason ? 'reason=' + rec.reason : ''))
         causalAliasOnRegister(continuation, cap.responseId, log)
         if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_early'))
@@ -2706,7 +2729,7 @@ function streamRawResponses(res, upstreamStream, budget, continuation, log, off)
       // 补丁⑧ B 点：挂上后实际解析到的事件规模（纯观测）。
       offStructSinkRecv(log, off, 'raw', cap)
       if (cap.responseId) {
-        recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
+        recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, aliases: continuationClientIds(continuation), model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
         causalAliasOnRegister(continuation, cap.responseId, log)
         if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_final'))
       } else if (cap.sawAny) {
@@ -3393,6 +3416,10 @@ function makeHandler(state) {
           const offOnHere = offStructOn(state) && contKind === 'official'
           const offCorrHere = offOnHere ? offStructCorr(req, null) : null
           if (contEligible) {
+            // G2 第三层（方案 B）：在决定 reconstruct / 登记前统一透传 id 一致性开关。
+            // 官方与第三方 native Responses 都经过本块；显式 server.continuationIdAlias=false
+            // 回落 dc6e26e 的直接查键语义（别名不写入也不解析）。
+            configureContinuationIdAlias(continuationIdAliasOn(state))
             const hasPrev = Object.prototype.hasOwnProperty.call(body, 'previous_response_id')
             const prevIdRaw = hasPrev && typeof body.previous_response_id === 'string' ? body.previous_response_id : null
             // 补丁⑨：实验配置快照仅在此续轮分支求值；全部 OFF 时下列实验代码全不执行。
