@@ -1002,47 +1002,123 @@ function offStructStoreFields (off, captureSink, cap, point) {
   const statusReal = (off.tap && off.tap.seen) ? off.tap.seen.statusReal : !!(cap && cap.status != null)
   return ['corr=' + off.corr, 'point=' + point, 'terminal=' + (terminal ? '1' : '0'), 'statusReal=' + (statusReal ? '1' : '0'), 'tsMs=' + (Date.now() - off.t0)]
 }
-// 一次性 SSE 首帧探针 + 终态观察：Transform 原样透传每个 chunk，只在观测窗口内解析 data 行。
-// 观测失败一律吞掉，绝不影响上游字节流。只记顶层键名/事件类型/id 层级/终态类型，绝不记正文。
-function offStructTapSSE (log, corr, t0) {
-  const seen = { first: false, terminal: null, statusReal: false }
+// ── 补丁⑧：H1/H2 区分探针（复用补丁⑦ T05 同一诊断开关，纯观测零行为变更） ──────
+// A 点 = applyEvent/事件分发入口：mgp0.offstruct.applyevent（只读 SSE Transform 视窗）。
+// B 点 = captureSink 挂载：mgp0.offstruct.sinkattach + mgp0.offstruct.sinkrecv。
+// 判定逻辑（供取证同学用，所有行同 corr 串线）：
+//  H1：A 点无 applyevent（n=0，或 type 异常/信封未识别）→ 信封没进事件分发/applyEvent。
+//      若同时 B 点 attached=0 更确定；注意 SSE 官方路径 continuation 恒非 null，B 通常为 1，故以 A 无事件为主判据。
+//  H2：A 点有 applyevent（官方分支，含 response.* / JSON response）且 B 点 attached=0
+//      （典型为 JSON 分支——直接 recordContinuation、从不挂 captureSink）→ 事件进了分发但该分支没挂 sink。
+//  两者都具备（A 有事件 + B attached=1 + sinkrecv ntypes>0）却仍 store=0 → 记为"其他/CONSISTENT 不足"，不强行归因。
+// 脱敏铁律：只记事件 type / 计数 / 布尔标志 / id 层级类别 / corr(hashId)；绝不记正文、prompt、arguments、
+// output 文本、Authorization、apiKey、cookie 或明文 id（id 仅层级 + hashId 前 8 位）。
+const OFFSTRUCT_MAX_APPLYEVENT = 32
+// 只做布尔判定：是否在事件对象里出现 function_call / function_call_output 形状（绝不记参数/正文）。
+function offStructFnFlags (obj) {
+  let fnCall = false
+  let fnOut = false
+  const mark = (t) => {
+    if (t === 'function_call') fnCall = true
+    else if (t === 'function_call_output') fnOut = true
+  }
+  try {
+    if (obj && typeof obj === 'object') {
+      if (typeof obj.type === 'string') mark(obj.type)
+      if (obj.item && typeof obj.item.type === 'string') mark(obj.item.type)
+      const out = (obj.response && Array.isArray(obj.response.output)) ? obj.response.output
+        : (Array.isArray(obj.output) ? obj.output : null)
+      if (out) for (let i = 0; i < out.length && i < 16; i++) { const it = out[i]; if (it && typeof it.type === 'string') mark(it.type) }
+    }
+  } catch { /* 观测失败绝不影响数据流 */ }
+  return { fnCall, fnOut }
+}
+function offStructApplyFields (off, obj, n, kind) {
+  const isJson = kind === 'json'
+  const type = (obj && typeof obj.type === 'string') ? obj.type : (isJson ? 'response' : 'none')
+  const responseId = (obj && obj.response && typeof obj.response.id === 'string' && obj.response.id) ? obj.response.id : null
+  // SSE 事件顶层 id 需 type=response.*；JSON 响应对象顶层 id（object=response / kind=json）直接即 response id。
+  const topId = (obj && typeof obj.id === 'string' && obj.id &&
+    (String(obj.type || '').startsWith('response.') || isJson || obj.object === 'response')) ? obj.id : null
+  const id = responseId || topId
+  const flags = offStructFnFlags(obj)
+  return [
+    'kind=' + (kind || 'sse'),
+    'branch=' + ((off && off.branch) || 'none'),
+    'official=' + ((off && off.official) ? '1' : '0'),
+    'n=' + n,
+    'type=' + type,
+    'hasRespId=' + (id ? '1' : '0'),
+    'idLevel=' + offStructIdLevel(id),
+    'idH=' + offStructIdH(id),
+    'hasFnCall=' + (flags.fnCall ? '1' : '0'),
+    'hasFnCallOut=' + (flags.fnOut ? '1' : '0'),
+  ]
+}
+// B 点：captureSink 是否挂到该分支（分支标识 + 官方目标 + continuation 存在 + attached 布尔）。
+function offStructSinkAttach (log, off, branch, attached, continuation) {
+  if (!off || !off.corr) return
+  offStructLog(log, 'sinkattach', off.corr, [
+    'branch=' + branch, 'official=' + (off.official ? '1' : '0'),
+    'attached=' + (attached ? '1' : '0'), 'continuation=' + (continuation ? '1' : '0'),
+  ])
+}
+// B 点：挂上后该 sink 实际解析到的事件规模（去重 type 数 / sawAny / 是否捕获到 responseId）。
+function offStructSinkRecv (log, off, branch, cap) {
+  if (!off || !off.corr || !cap) return
+  offStructLog(log, 'sinkrecv', off.corr, [
+    'branch=' + branch, 'official=' + (off.official ? '1' : '0'),
+    'ntypes=' + (Array.isArray(cap.eventTypes) ? cap.eventTypes.length : 0),
+    'sawAny=' + (cap.sawAny ? '1' : '0'),
+    'hasRespId=' + (cap.responseId ? '1' : '0'),
+  ])
+}
+// SSE 只读 Transform：原样透传每个 chunk。解析 data 行仅为观测——首帧/终态仍一次性，
+// 另对进入事件分发的每个事件产出 A 点 applyevent（超过上限只计数不记日志，避免刷屏）。
+// 观测失败一律吞掉，绝不影响上游字节流；只记 type/计数/布尔/id 层级，绝不记正文。
+function offStructTapSSE (log, corr, t0, meta) {
+  const off = meta || null
+  const seen = { first: false, terminal: null, statusReal: false, count: 0 }
   let buf = ''
   let evName = ''
   const tap = new Transform({
     transform (chunk, _enc, cb) {
       try {
         const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
-        if (!seen.first || !seen.terminal) {
-          buf += text
-          let nl
-          while ((nl = buf.indexOf('\n')) >= 0) {
-            const line = buf.slice(0, nl).replace(/\r$/, '')
-            buf = buf.slice(nl + 1)
-            if (line.startsWith('event:')) { evName = line.slice(6).trim(); continue }
-            if (!line.startsWith('data:')) continue
-            let obj = null
-            try { obj = JSON.parse(line.slice(5).trim()) } catch { /* 非 JSON data 行只跳过，不记正文 */ }
-            if (obj && typeof obj === 'object') {
-              const id = offStructEventId(obj)
-              if (!seen.first) {
-                seen.first = true
-                offStructLog(log, 'firstframe', corr, [
-                  'kind=sse', 'sseEvent=' + (evName || 'none'), 'keys=' + offStructKeys(obj),
-                  'type=' + (typeof obj.type === 'string' ? obj.type : 'none'),
-                  'idPresent=' + (id ? '1' : '0'), 'idLevel=' + offStructIdLevel(id), 'idH=' + offStructIdH(id),
-                ])
-              }
-              if (obj.response && typeof obj.response.status === 'string') seen.statusReal = true
-              const t = typeof obj.type === 'string' ? obj.type : ''
-              if (OFFSTRUCT_TERMINALS.has(t)) {
-                seen.terminal = t
-                offStructLog(log, 'terminal', corr, ['kind=sse', 'type=' + t, 'synthetic=0', 'tsMs=' + (Date.now() - t0)])
-              }
+        buf += text
+        let nl
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).replace(/\r$/, '')
+          buf = buf.slice(nl + 1)
+          if (line.startsWith('event:')) { evName = line.slice(6).trim(); continue }
+          if (!line.startsWith('data:')) continue
+          let obj = null
+          try { obj = JSON.parse(line.slice(5).trim()) } catch { /* 非 JSON data 行只跳过，不记正文 */ }
+          if (obj && typeof obj === 'object') {
+            // A 点：每个进入事件分发的 SSE 事件都计数。
+            seen.count += 1
+            if (seen.count <= OFFSTRUCT_MAX_APPLYEVENT) {
+              offStructLog(log, 'applyevent', corr, offStructApplyFields(off, obj, seen.count, 'sse'))
             }
-            evName = ''
+            const id = offStructEventId(obj)
+            if (!seen.first) {
+              seen.first = true
+              offStructLog(log, 'firstframe', corr, [
+                'kind=sse', 'sseEvent=' + (evName || 'none'), 'keys=' + offStructKeys(obj),
+                'type=' + (typeof obj.type === 'string' ? obj.type : 'none'),
+                'idPresent=' + (id ? '1' : '0'), 'idLevel=' + offStructIdLevel(id), 'idH=' + offStructIdH(id),
+              ])
+            }
+            if (obj.response && typeof obj.response.status === 'string') seen.statusReal = true
+            const t = typeof obj.type === 'string' ? obj.type : ''
+            if (OFFSTRUCT_TERMINALS.has(t) && !seen.terminal) {
+              seen.terminal = t
+              offStructLog(log, 'terminal', corr, ['kind=sse', 'type=' + t, 'synthetic=0', 'tsMs=' + (Date.now() - t0)])
+            }
           }
-          if (buf.length > 65536) buf = '' // 防止无换行垃圾数据无限增长
+          evName = ''
         }
+        if (buf.length > 65536) buf = '' // 防止无换行垃圾数据无限增长
       } catch { /* 观测失败绝不影响数据流 */ }
       cb(null, chunk)
     },
@@ -1961,6 +2037,8 @@ function restoreCodexJsonBuffer(buf, route, plan) {
 async function streamCodexResponse(state, budget, log, opts) {
   const { up, res, route, plan, model, modelName, pid, sg, prov, continuation, off } = opts
   const captureSink = continuation ? createCaptureSink() : null
+  // 补丁⑧ B 点：captureSink 是否挂到 codex 分支（纯观测）。
+  offStructSinkAttach(log, off, 'codex', !!captureSink, !!continuation)
   const recordEarly = () => {
     if (!captureSink) return
     const cap = captureSink.takeRecordable()
@@ -2000,6 +2078,8 @@ async function streamCodexResponse(state, budget, log, opts) {
     res.removeListener('close', onAbort)
     if (captureSink) {
       const cap = captureSink.finish()
+      // 补丁⑧ B 点：挂上后实际解析到的事件规模（纯观测）。
+      offStructSinkRecv(log, off, 'codex', cap)
       if (cap.responseId) {
         recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
         if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_final'))
@@ -2212,7 +2292,10 @@ async function proxyOfficialResponses(state, budget, log, opts) {
         const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
         if (/text\/event-stream/i.test(ct)) {
           // P2/P4（SSE）：首帧探针 + 终态观察由流路径内嵌，原样透传，不改字节/不改协议。
-          const off = offOn ? { corr: offCorr, t0: offT0, tap: offStructTapSSE(log, offCorr, offT0) } : null
+          // 补丁⑧：off 携带 branch/official 供 A 点 applyevent 与 B 点 sinkattach 标注分支与官方目标。
+          const offBranch = (codexRoute && codexPlan) ? 'codex' : 'raw'
+          const offMeta = offOn ? { branch: offBranch, official: identity.kind === 'official' } : null
+          const off = offOn ? { corr: offCorr, t0: offT0, branch: offBranch, official: identity.kind === 'official', tap: offStructTapSSE(log, offCorr, offT0, offMeta) } : null
           if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov, continuation, off })
           writeUpstreamHeaders(res, up)
           await streamRawResponses(res, up.stream, budget, continuation, log, off)
@@ -2228,6 +2311,11 @@ async function proxyOfficialResponses(state, budget, log, opts) {
           const st = (j && typeof j.status === 'string') ? j.status : 'none'
           offStructLog(log, 'firstframe', offCorr, ['kind=json', 'keys=' + offStructKeys(j), 'idLevel=' + offStructIdLevel(id), 'idH=' + offStructIdH(id), 'status=' + st])
           offStructLog(log, 'terminal', offCorr, ['kind=json', 'type=' + st, 'status=' + up.status, 'synthetic=0'])
+          // 补丁⑧ A 点（JSON 分支）：事件进入分发（kind=json，n=1）。
+          const offJson = { branch: 'json', official: identity.kind === 'official', corr: offCorr }
+          offStructLog(log, 'applyevent', offCorr, offStructApplyFields(offJson, j, 1, 'json'))
+          // 补丁⑧ B 点（JSON 分支）：该分支从不挂 captureSink（直接 recordContinuation）→ attached=0。
+          offStructSinkAttach(log, offJson, 'json', false, !!continuation)
         }
         if (continuation) {
           if (j && typeof j === 'object' && typeof j.id === 'string' && j.id) {
@@ -2430,6 +2518,8 @@ function streamRawResponses(res, upstreamStream, budget, continuation, log, off)
   return new Promise((resolve) => {
     let done = false
     const captureSink = continuation ? createCaptureSink() : null
+    // 补丁⑧ B 点：captureSink 是否挂到 raw 分支（纯观测）。
+    offStructSinkAttach(log, off, 'raw', !!captureSink, !!continuation)
       const recordEarly = () => {
       if (!captureSink) return
       const cap = captureSink.takeRecordable()
@@ -2442,6 +2532,8 @@ function streamRawResponses(res, upstreamStream, budget, continuation, log, off)
     const recordCapture = () => {
       if (!captureSink) return
       const cap = captureSink.finish()
+      // 补丁⑧ B 点：挂上后实际解析到的事件规模（纯观测）。
+      offStructSinkRecv(log, off, 'raw', cap)
       if (cap.responseId) {
         recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
         if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_final'))

@@ -118,6 +118,7 @@ export const SUITES = [
   'scripts/test/offline/n05-quota-emergency.test.mjs',
   'scripts/test/offline/n03-cli-contract.test.mjs',
   'scripts/test/offline/offstruct-diagnostic.test.mjs',
+  'scripts/test/offline/offstruct-h12-probe.test.mjs',
   'scripts/test/offline/native-boundary.test.mjs',
   'scripts/test/offline/native-usage.test.mjs',
   'scripts/test/offline/optional-endpoints.test.mjs',
