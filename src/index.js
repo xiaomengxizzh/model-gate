@@ -954,6 +954,103 @@ export function toolHistoryShapeTrace (body, meta = {}) {
   return out
 }
 
+// ── 补丁⑦ T05：官方结构诊断（只读观测，零行为变更） ────────────────────────────
+// 由 server.diagnosticOfficialStructure 控制（默认 OFF），仅 proxyOfficialResponses 路径生效。
+// 沿用 toolHistoryShapeTrace 的“仅形状元数据”脱敏路线：会话/请求标识与 response id 一律先 hashId。
+// 绝不记录正文、prompt、arguments、output 文本、Authorization、apiKey、cookie 或明文 id。
+const OFFSTRUCT_TERMINALS = new Set(['response.completed', 'response.failed', 'response.incomplete'])
+// 去 resp_/call_ 前缀后量测 hex 长度：56=官方 Responses / 32=Go portable / other=其它长度 / opaque=无法量测。
+export function offStructIdLevel (id) {
+  if (typeof id !== 'string' || !id) return 'opaque'
+  const s = id.replace(/^(resp_|call_)/, '')
+  if (!s || !/^[0-9a-fA-F]+$/.test(s)) return 'opaque'
+  if (s.length === 56) return 'official56'
+  if (s.length === 32) return 'go32'
+  return 'other'
+}
+function offStructIdH (id) {
+  const h = hashId(id, 'mg-p0-offstruct-id')
+  return h ? h.slice(0, 8) : 'none'
+}
+function offStructKeys (obj) {
+  return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? Object.keys(obj).slice(0, 12).join(',') : ''
+}
+function offStructOn (state) {
+  return !!(state && state.cfg && state.cfg.server && state.cfg.server.diagnosticOfficialStructure === true)
+}
+function offStructCorr (req, continuation) {
+  const h = (req && req.headers) || {}
+  const thread = h['thread-id'] || h['session-id'] || (continuation && continuation.thread) || ''
+  const rid = h['x-request-id'] || ''
+  return hashId(String(thread) + '|' + String(rid), 'mg-p0-offstruct-corr') || 'none'
+}
+function offStructLog (log, point, corr, fields) {
+  if (!log || typeof log.info !== 'function') return
+  log.info('mgp0.offstruct.' + point, 'corr=' + corr, ...fields.filter(Boolean))
+}
+function offStructEventId (obj) {
+  if (!obj || typeof obj !== 'object') return null
+  if (obj.response && typeof obj.response.id === 'string' && obj.response.id) return obj.response.id
+  if (typeof obj.id === 'string' && obj.id && String(obj.type || '').startsWith('response.')) return obj.id
+  return null
+}
+// P5：recordContinuation 调用点追加 corr/终态/真实状态/相对时间戳（只追加，不改原有日志语义）。
+function offStructStoreFields (off, captureSink, cap, point) {
+  if (!off || !off.corr) return []
+  let terminal = false
+  try { terminal = !!(captureSink && captureSink.terminalSnapshot()) } catch { /* 观测失败不影响登记 */ }
+  const statusReal = (off.tap && off.tap.seen) ? off.tap.seen.statusReal : !!(cap && cap.status != null)
+  return ['corr=' + off.corr, 'point=' + point, 'terminal=' + (terminal ? '1' : '0'), 'statusReal=' + (statusReal ? '1' : '0'), 'tsMs=' + (Date.now() - off.t0)]
+}
+// 一次性 SSE 首帧探针 + 终态观察：Transform 原样透传每个 chunk，只在观测窗口内解析 data 行。
+// 观测失败一律吞掉，绝不影响上游字节流。只记顶层键名/事件类型/id 层级/终态类型，绝不记正文。
+function offStructTapSSE (log, corr, t0) {
+  const seen = { first: false, terminal: null, statusReal: false }
+  let buf = ''
+  let evName = ''
+  const tap = new Transform({
+    transform (chunk, _enc, cb) {
+      try {
+        const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
+        if (!seen.first || !seen.terminal) {
+          buf += text
+          let nl
+          while ((nl = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, nl).replace(/\r$/, '')
+            buf = buf.slice(nl + 1)
+            if (line.startsWith('event:')) { evName = line.slice(6).trim(); continue }
+            if (!line.startsWith('data:')) continue
+            let obj = null
+            try { obj = JSON.parse(line.slice(5).trim()) } catch { /* 非 JSON data 行只跳过，不记正文 */ }
+            if (obj && typeof obj === 'object') {
+              const id = offStructEventId(obj)
+              if (!seen.first) {
+                seen.first = true
+                offStructLog(log, 'firstframe', corr, [
+                  'kind=sse', 'sseEvent=' + (evName || 'none'), 'keys=' + offStructKeys(obj),
+                  'type=' + (typeof obj.type === 'string' ? obj.type : 'none'),
+                  'idPresent=' + (id ? '1' : '0'), 'idLevel=' + offStructIdLevel(id), 'idH=' + offStructIdH(id),
+                ])
+              }
+              if (obj.response && typeof obj.response.status === 'string') seen.statusReal = true
+              const t = typeof obj.type === 'string' ? obj.type : ''
+              if (OFFSTRUCT_TERMINALS.has(t)) {
+                seen.terminal = t
+                offStructLog(log, 'terminal', corr, ['kind=sse', 'type=' + t, 'synthetic=0', 'tsMs=' + (Date.now() - t0)])
+              }
+            }
+            evName = ''
+          }
+          if (buf.length > 65536) buf = '' // 防止无换行垃圾数据无限增长
+        }
+      } catch { /* 观测失败绝不影响数据流 */ }
+      cb(null, chunk)
+    },
+  })
+  return { stream: tap, seen }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 // V2-08（A2 实测缺陷）：429 时按 models.*.fallbacks 换到**另一个授权域**的供应商 = 静默换供应商/套餐。
 // 同域 fallback 保留既有行为；只要后续存在跨域候选就按真实 429 返回。
 // R008 修复（A4 实测）：forward.js 对 429 以 MG_FB_RATE_LIMITED 抛出，导致 index.js 的
@@ -1862,7 +1959,7 @@ function restoreCodexJsonBuffer(buf, route, plan) {
   return { ok: true, json: restored.json, lossy: restored.lossy || [] }
 }
 async function streamCodexResponse(state, budget, log, opts) {
-  const { up, res, route, plan, model, modelName, pid, sg, prov, continuation } = opts
+  const { up, res, route, plan, model, modelName, pid, sg, prov, continuation, off } = opts
   const captureSink = continuation ? createCaptureSink() : null
   const recordEarly = () => {
     if (!captureSink) return
@@ -1870,6 +1967,7 @@ async function streamCodexResponse(state, budget, log, opts) {
     if (cap && cap.responseId) {
       const rec = recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'in_progress' })
       log && log.info('responses continuation recorded', 'id=' + cap.responseId, 'items=' + cap.output.length, 'recorded=' + rec.recorded, (rec.reason ? 'reason=' + rec.reason : ''))
+      if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_early'))
     }
   }
   const adapter = createCodexStreamAdapter(res, {
@@ -1884,7 +1982,7 @@ async function streamCodexResponse(state, budget, log, opts) {
   res.once('close', onAbort)
   // The caller owns the request budget and provider permit until the relay settles.
   try {
-    for await (const chunk of up.stream) {
+    for await (const chunk of (off && off.tap ? up.stream.pipe(off.tap.stream) : up.stream)) {
       if (captureSink) { captureSink.write(chunk); recordEarly() }
       await adapter.push(chunk)
       if (adapter.terminal) break
@@ -1904,6 +2002,7 @@ async function streamCodexResponse(state, budget, log, opts) {
       const cap = captureSink.finish()
       if (cap.responseId) {
         recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
+        if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_final'))
       } else if (cap.sawAny) {
         log && log.warn('responses continuation capture empty', 'events=' + (cap.eventTypes || []).join('|'), 'status=' + String(cap.status))
       }
@@ -1992,6 +2091,9 @@ async function proxyOfficialResponses(state, budget, log, opts) {
   const serverHost = (state.cfg.server && state.cfg.server.host) || '127.0.0.1'
   const singleShot = isToolBearingBody(body)
   const receiptsOn = aggregationModeActive(state.cfg)
+  const offOn = offStructOn(state)
+  const offCorr = offOn ? offStructCorr(req, continuation) : null
+  const offT0 = offOn ? Date.now() : 0
   let localCredential = null
   let lastErr = null
   for (const pid of candidates) {
@@ -2089,6 +2191,11 @@ async function proxyOfficialResponses(state, budget, log, opts) {
     try {
       release = await acquireProvider(state, pid, state.cfg, budget.signal)
       const up = await forward(prov, upstreamPath, 'POST', headers, payload, state.cfg.defaults || {}, log, { budget, signal: budget.signal, noRetry: true })
+      // P1 入口：只记 host/身份/路径/HTTP 状态/content-type，绝不记带 query 的完整 URL 或任何标识明文。
+      if (offOn) offStructLog(log, 'entry', offCorr, [
+        'pid=' + pid, 'identity=' + identity.kind, 'host=' + identity.host, 'path=' + upstreamPath,
+        'status=' + up.status, 'ct=' + ((up.headers && up.headers['content-type']) || ''),
+      ])
       if (appPlan) log.info('chatgpt_plan_response', 'provider=' + pid, 'model=' + target.servingName, 'status=' + up.status)
       if (up.status >= 300 && up.status < 400) {
         try { await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true }) } catch {}
@@ -2104,16 +2211,25 @@ async function proxyOfficialResponses(state, budget, log, opts) {
         markOk(state, pid); noteAffinity(state, modelName, pid)
         const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
         if (/text\/event-stream/i.test(ct)) {
-          if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov, continuation })
+          // P2/P4（SSE）：首帧探针 + 终态观察由流路径内嵌，原样透传，不改字节/不改协议。
+          const off = offOn ? { corr: offCorr, t0: offT0, tap: offStructTapSSE(log, offCorr, offT0) } : null
+          if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov, continuation, off })
           writeUpstreamHeaders(res, up)
-          await streamRawResponses(res, up.stream, budget, continuation, log)
+          await streamRawResponses(res, up.stream, budget, continuation, log, off)
           return { streamed: true }
         }
         const buf = await collectBody(up.stream, 128 * 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
         const restored = restoreCodexJsonBuffer(buf, codexRoute, codexPlan)
         if (!restored.ok) return jsonError(502, restored.rejected.code || 'codex_restore_rejected', restored.rejected.message || 'Codex 原生响应恢复失败', 'codex_restore_rejected')
+        const j = restored.json || ((offOn || continuation) ? tryParse(buf) : null)
+        if (offOn) {
+          // P2（JSON）/P4：记顶层键名 + id 层级 + 真实 status，不记 output 正文。
+          const id = offStructEventId(j) || (j && typeof j.id === 'string' ? j.id : null)
+          const st = (j && typeof j.status === 'string') ? j.status : 'none'
+          offStructLog(log, 'firstframe', offCorr, ['kind=json', 'keys=' + offStructKeys(j), 'idLevel=' + offStructIdLevel(id), 'idH=' + offStructIdH(id), 'status=' + st])
+          offStructLog(log, 'terminal', offCorr, ['kind=json', 'type=' + st, 'status=' + up.status, 'synthetic=0'])
+        }
         if (continuation) {
-          const j = restored.json || tryParse(buf)
           if (j && typeof j === 'object' && typeof j.id === 'string' && j.id) {
             recordContinuation({ responseId: j.id, prevId: continuation.prevId, input: continuation.canonicalInput, output: Array.isArray(j.output) ? j.output : [], model: continuation.model, thread: continuation.thread, status: j.status || 'completed' })
           }
@@ -2122,6 +2238,8 @@ async function proxyOfficialResponses(state, budget, log, opts) {
         return { status: up.status, contentType: ct, buf }
       }
       const ebuf = await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
+      // P4（HTTP 非 2xx）：只记 HTTP 状态，不记错误正文（ebuf 经 scrubBody 后仍属正文，绝不落此日志）。
+      if (offOn) offStructLog(log, 'terminal', offCorr, ['kind=http', 'type=http_error', 'status=' + up.status, 'synthetic=0'])
       agg(state, pid, 'errors', 1); state.st.counters.errors += 1
       markFail(state, pid, prov.circuit)
       if (receiptsOn) {
@@ -2308,7 +2426,7 @@ async function proxyNativeResponses(state, budget, log, opts) {
 }
 
 // 原生 Responses 流：逐字节管道（pipeline 负责背压），预算中止/客户端断开时销毁上游。
-function streamRawResponses(res, upstreamStream, budget, continuation, log) {
+function streamRawResponses(res, upstreamStream, budget, continuation, log, off) {
   return new Promise((resolve) => {
     let done = false
     const captureSink = continuation ? createCaptureSink() : null
@@ -2318,6 +2436,7 @@ function streamRawResponses(res, upstreamStream, budget, continuation, log) {
       if (cap && cap.responseId) {
         const rec = recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'in_progress' })
         log && log.info('responses continuation recorded', 'id=' + cap.responseId, 'items=' + cap.output.length, 'recorded=' + rec.recorded, (rec.reason ? 'reason=' + rec.reason : ''))
+        if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_early'))
       }
     }
     const recordCapture = () => {
@@ -2325,6 +2444,7 @@ function streamRawResponses(res, upstreamStream, budget, continuation, log) {
       const cap = captureSink.finish()
       if (cap.responseId) {
         recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
+        if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_final'))
       } else if (cap.sawAny) {
         log && log.warn('responses continuation capture empty', 'events=' + (cap.eventTypes || []).join('|'), 'status=' + String(cap.status))
       }
@@ -2341,14 +2461,17 @@ function streamRawResponses(res, upstreamStream, budget, continuation, log) {
       try { budget.signal.addEventListener('abort', onAbort, { once: true }) } catch {}
     }
     try { res.once('close', onClose) } catch {}
+    // 诊断探针作为只读 stage 插在管道最前，原样透传；OFF 时 stages 与现状完全一致。
+    const stages = [upstreamStream]
+    if (off && off.tap) stages.push(off.tap.stream)
     if (captureSink) {
       const tap = new Transform({
         transform (chunk, _enc, cb) { captureSink.write(chunk); recordEarly(); cb(null, chunk) },
       })
-      pipeline(upstreamStream, tap, res, () => finish())
-    } else {
-      pipeline(upstreamStream, res, () => finish())
+      stages.push(tap)
     }
+    stages.push(res)
+    pipeline(...stages, () => finish())
   })
 }
 
@@ -3000,7 +3123,11 @@ function makeHandler(state) {
         let continuation = null
         if (body && nDef && !nDef.isVirtualModel && !nDef.virtual && nDef.provider && state.cfg.providers[nDef.provider]) {
           const contProv = buildProvider(state.cfg, nDef.provider)
-          const contEligible = (nProto && nProto.protocol === RESPONSES) || classifyTarget(contProv, state.cfg).kind === 'official'
+          const contKind = classifyTarget(contProv, state.cfg).kind
+          const contEligible = (nProto && nProto.protocol === RESPONSES) || contKind === 'official'
+          // P5 官方限定：reconstruct/degraded 与官方目标同现时才写诊断日志，第三方路径不产生任何观测行。
+          const offOnHere = offStructOn(state) && contKind === 'official'
+          const offCorrHere = offOnHere ? offStructCorr(req, null) : null
           if (contEligible) {
             const hasPrev = Object.prototype.hasOwnProperty.call(body, 'previous_response_id')
             const prevIdRaw = hasPrev && typeof body.previous_response_id === 'string' ? body.previous_response_id : null
@@ -3010,6 +3137,7 @@ function makeHandler(state) {
               if (rec.ok) {
                 body = Object.assign({}, body, { input: rec.input })
                 log && log.info('responses continuation reconstructed', 'prev=' + prevIdRaw, 'restored=' + rec.restoredItems, 'delta=' + rec.deltaItems)
+                if (offOnHere) offStructLog(log, 'store', offCorrHere, ['point=reconstruct_hit', 'idLevel=' + offStructIdLevel(prevIdRaw), 'idH=' + offStructIdH(prevIdRaw), 'store=' + continuationStoreSize().count])
               } else {
                 // 优雅降级（2026-11-16 三轮真机反馈）：状态缺失不再硬 400 打断会话——
                 // 告警 + 剔除 prev_id 后落回既有形状修复链路（第三方 orphan-adopt 已真机验证；
@@ -3017,6 +3145,7 @@ function makeHandler(state) {
                 // 降级转发可继续会话；上下文可能不完整，绝不静默（warn + lossy 诊断）。
                 degraded = true
                 log && log.warn('responses continuation degraded', 'reason=' + rec.reason, 'prev=' + prevIdRaw, 'store=' + continuationStoreSize().count)
+                if (offOnHere) offStructLog(log, 'store', offCorrHere, ['point=degraded', 'idLevel=' + offStructIdLevel(prevIdRaw), 'idH=' + offStructIdH(prevIdRaw), 'store=' + continuationStoreSize().count])
               }
               delete body.previous_response_id
             }
