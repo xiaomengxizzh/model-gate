@@ -1127,6 +1127,62 @@ function offStructTapSSE (log, corr, t0, meta) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── 补丁⑨ P0-B 根因链受控 A/B 因果实验（默认全 OFF，仅取证，不进生产） ──────────
+// 这是所有者裁决"先做更多取证再定"的执行工具——取证仪器，不是修复，不改默认行为。
+// 三个子开关各严格 ===true 才生效；全部 OFF 时登记/重建/降级/续轮/终态与补丁⑧逐字节一致。
+// 配置块：server.g1CausalExperiment.{idRegisterFromClientPrev,bridgeIdUseRealPrev,reconstructFailClosedOnRestoredZero}
+// 脱敏铁律沿用补丁⑦/⑧：只记 type / 计数 / 布尔 / id 层级 / corr(hashId)；绝不记正文、prompt、
+// arguments、output 文本、Authorization、apiKey、cookie 或明文 id；id 仅层级 + hashId 前 8 位
+// （offStructIdLevel 把真机 50hex 归 other，不写死 56hex）。
+const CAUSAL_SWITCH_KEYS = Object.freeze(['idRegisterFromClientPrev', 'bridgeIdUseRealPrev', 'reconstructFailClosedOnRestoredZero'])
+// 读取实验配置快照（含 corr）。子开关缺位 / 非严格 true → 一律 OFF。
+function causalSnapshot (state, req, continuation) {
+  const g = (state && state.cfg && state.cfg.server && state.cfg.server.g1CausalExperiment) || null
+  const on = (k) => !!(g && g[k] === true)
+  const h = (req && req.headers) || {}
+  const thread = h['thread-id'] || h['session-id'] || (continuation && continuation.thread) || ''
+  const rid = h['x-request-id'] || ''
+  return {
+    idRegisterFromClientPrev: on('idRegisterFromClientPrev'),
+    bridgeIdUseRealPrev: on('bridgeIdUseRealPrev'),
+    reconstructFailClosedOnRestoredZero: on('reconstructFailClosedOnRestoredZero'),
+    corr: hashId(String(thread) + '|' + String(rid), 'mg-p0-causal-corr') || 'none',
+  }
+}
+function causalAnyOn (c) {
+  return !!(c && (c.idRegisterFromClientPrev || c.bridgeIdUseRealPrev || c.reconstructFailClosedOnRestoredZero))
+}
+function causalLog (log, point, corr, fields) {
+  if (!log || typeof log.info !== 'function') return
+  log.info('mgp0.causal.' + point, 'corr=' + corr, ...fields.filter(Boolean))
+}
+// 合成 id（WS 桥 resp_mgws_）↔ 真实 50hex id 的双向别名，仅实验态写入/读取，进程内、有界。
+const CAUSAL_ALIAS_MAX = 256
+const causalAliases = new Map()
+function causalAliasLink (a, b) {
+  if (typeof a !== 'string' || !a || typeof b !== 'string' || !b || a === b) return false
+  if (causalAliases.size >= CAUSAL_ALIAS_MAX * 2) causalAliases.clear()
+  causalAliases.set(a, b)
+  causalAliases.set(b, a)
+  return true
+}
+function causalAliasResolve (id) {
+  return (typeof id === 'string' && causalAliases.has(id)) ? causalAliases.get(id) : id
+}
+// 登记时建立 prev↔真实 id 双向别名（仅 bridgeIdUseRealPrev 开启且有真实 response id 时）。
+function causalAliasOnRegister (continuation, realId, log) {
+  const c = continuation && continuation.causal
+  if (!c || !c.bridgeIdUseRealPrev || !realId) return false
+  const prev = (continuation.rawPrevId || continuation.prevId)
+  if (!causalAliasLink(prev, realId)) return false
+  causalLog(log, 'alias_link', c.corr, ['fromLevel=' + offStructIdLevel(prev), 'toLevel=' + offStructIdLevel(realId)])
+  return true
+}
+export { causalAliasOnRegister }
+// 仅测试用：清空实验别名状态，保证用例隔离。
+export function resetCausalExperiment () { causalAliases.clear() }
+export { CAUSAL_SWITCH_KEYS, causalSnapshot, causalAnyOn, causalAliasLink, causalAliasResolve }
+
 // V2-08（A2 实测缺陷）：429 时按 models.*.fallbacks 换到**另一个授权域**的供应商 = 静默换供应商/套餐。
 // 同域 fallback 保留既有行为；只要后续存在跨域候选就按真实 429 返回。
 // R008 修复（A4 实测）：forward.js 对 429 以 MG_FB_RATE_LIMITED 抛出，导致 index.js 的
@@ -2045,6 +2101,7 @@ async function streamCodexResponse(state, budget, log, opts) {
     if (cap && cap.responseId) {
       const rec = recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'in_progress' })
       log && log.info('responses continuation recorded', 'id=' + cap.responseId, 'items=' + cap.output.length, 'recorded=' + rec.recorded, (rec.reason ? 'reason=' + rec.reason : ''))
+      causalAliasOnRegister(continuation, cap.responseId, log)
       if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_early'))
     }
   }
@@ -2082,6 +2139,7 @@ async function streamCodexResponse(state, budget, log, opts) {
       offStructSinkRecv(log, off, 'codex', cap)
       if (cap.responseId) {
         recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
+        causalAliasOnRegister(continuation, cap.responseId, log)
         if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_final'))
       } else if (cap.sawAny) {
         log && log.warn('responses continuation capture empty', 'events=' + (cap.eventTypes || []).join('|'), 'status=' + String(cap.status))
@@ -2318,8 +2376,16 @@ async function proxyOfficialResponses(state, budget, log, opts) {
           offStructSinkAttach(log, offJson, 'json', false, !!continuation)
         }
         if (continuation) {
+          const causalJson = continuation.causal || null
           if (j && typeof j === 'object' && typeof j.id === 'string' && j.id) {
             recordContinuation({ responseId: j.id, prevId: continuation.prevId, input: continuation.canonicalInput, output: Array.isArray(j.output) ? j.output : [], model: continuation.model, thread: continuation.thread, status: j.status || 'completed' })
+            // 补丁⑨ switch bridgeIdUseRealPrev：登记时建立 prev ↔ 真实 response id 双向别名（仅实验态）。
+            causalAliasOnRegister(continuation, j.id, log)
+          } else if (causalJson && causalJson.idRegisterFromClientPrev && continuation.rawPrevId) {
+            // 补丁⑨ switch idRegisterFromClientPrev：官方续轮响应体空/无 j.id 时，改用客户端
+            // previous_response_id（真实 50hex id）作为 key 登记，使下一轮 reconstruct 能命中。
+            const rec = recordContinuation({ responseId: continuation.rawPrevId, prevId: continuation.prevId, input: continuation.canonicalInput, output: [], model: continuation.model, thread: continuation.thread, status: (j && typeof j.status === 'string') ? j.status : 'completed' })
+            causalLog(log, 'register_from_prev', causalJson.corr, ['recorded=' + (rec.recorded ? '1' : '0'), 'idLevel=' + offStructIdLevel(continuation.rawPrevId)])
           }
         }
         if (restored.json) return { status: up.status, contentType: ct, buf: Buffer.from(JSON.stringify(restored.json)) }
@@ -2526,6 +2592,7 @@ function streamRawResponses(res, upstreamStream, budget, continuation, log, off)
       if (cap && cap.responseId) {
         const rec = recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'in_progress' })
         log && log.info('responses continuation recorded', 'id=' + cap.responseId, 'items=' + cap.output.length, 'recorded=' + rec.recorded, (rec.reason ? 'reason=' + rec.reason : ''))
+        causalAliasOnRegister(continuation, cap.responseId, log)
         if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_early'))
       }
     }
@@ -2536,6 +2603,7 @@ function streamRawResponses(res, upstreamStream, budget, continuation, log, off)
       offStructSinkRecv(log, off, 'raw', cap)
       if (cap.responseId) {
         recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: cap.output, model: continuation.model, thread: continuation.thread, status: cap.status || 'incomplete' })
+        causalAliasOnRegister(continuation, cap.responseId, log)
         if (off && off.corr) log.info('mgp0.offstruct.store', ...offStructStoreFields(off, captureSink, cap, 'record_final'))
       } else if (cap.sawAny) {
         log && log.warn('responses continuation capture empty', 'events=' + (cap.eventTypes || []).join('|'), 'status=' + String(cap.status))
@@ -3223,14 +3291,34 @@ function makeHandler(state) {
           if (contEligible) {
             const hasPrev = Object.prototype.hasOwnProperty.call(body, 'previous_response_id')
             const prevIdRaw = hasPrev && typeof body.previous_response_id === 'string' ? body.previous_response_id : null
+            // 补丁⑨：实验配置快照仅在此续轮分支求值；全部 OFF 时下列实验代码全不执行。
+            const causalHere = causalSnapshot(state, req, null)
+            const causalCorrHere = causalAnyOn(causalHere) ? causalHere.corr : null
             let degraded = false
             if (hasPrev) {
-              const rec = reconstructContinuation(body.previous_response_id, body.input)
+              // 补丁⑨ switch bridgeIdUseRealPrev：合成 id ↔ 真实 50hex 别名解析后再重建。
+              let recPrevId = body.previous_response_id
+              if (causalHere.bridgeIdUseRealPrev) {
+                const aliased = causalAliasResolve(recPrevId)
+                if (aliased !== recPrevId) {
+                  causalLog(log, 'bridge_alias', causalCorrHere, ['fromLevel=' + offStructIdLevel(recPrevId), 'toLevel=' + offStructIdLevel(aliased)])
+                  recPrevId = aliased
+                }
+              }
+              const rec = reconstructContinuation(recPrevId, body.input)
               if (rec.ok) {
                 body = Object.assign({}, body, { input: rec.input })
                 log && log.info('responses continuation reconstructed', 'prev=' + prevIdRaw, 'restored=' + rec.restoredItems, 'delta=' + rec.deltaItems)
                 if (offOnHere) offStructLog(log, 'store', offCorrHere, ['point=reconstruct_hit', 'idLevel=' + offStructIdLevel(prevIdRaw), 'idH=' + offStructIdH(prevIdRaw), 'store=' + continuationStoreSize().count])
+                if (causalCorrHere) causalLog(log, 'reconstruct_hit', causalCorrHere, ['restored=' + (rec.restoredItems > 0 ? '1' : '0'), 'n=' + rec.restoredItems, 'idLevel=' + offStructIdLevel(recPrevId)])
               } else {
+                // 补丁⑨ switch reconstructFailClosedOnRestoredZero：reconstruct 未命中（restored=0）
+                // 时不静默降级转发，改 typed 错误终止，用于验证"降级"是否为 400 的必要环节。
+                if (causalHere.reconstructFailClosedOnRestoredZero) {
+                  causalLog(log, 'fail_closed', causalCorrHere, ['reason=' + rec.reason, 'idLevel=' + offStructIdLevel(prevIdRaw), 'restored=0'])
+                  sendJson(res, 400, { error: { message: 'continuation reconstruct failed (causal experiment fail-closed)', code: 'causal_reconstruct_fail_closed', type: 'causal_experiment' } })
+                  return
+                }
                 // 优雅降级（2026-11-16 三轮真机反馈）：状态缺失不再硬 400 打断会话——
                 // 告警 + 剔除 prev_id 后落回既有形状修复链路（第三方 orphan-adopt 已真机验证；
                 // 官方后端按位置配对）。Codex 实测保留消息历史、仅省略服务端缓存的工具项，
@@ -3238,6 +3326,7 @@ function makeHandler(state) {
                 degraded = true
                 log && log.warn('responses continuation degraded', 'reason=' + rec.reason, 'prev=' + prevIdRaw, 'store=' + continuationStoreSize().count)
                 if (offOnHere) offStructLog(log, 'store', offCorrHere, ['point=degraded', 'idLevel=' + offStructIdLevel(prevIdRaw), 'idH=' + offStructIdH(prevIdRaw), 'store=' + continuationStoreSize().count])
+                if (causalCorrHere) causalLog(log, 'degraded', causalCorrHere, ['reason=' + rec.reason, 'idLevel=' + offStructIdLevel(prevIdRaw)])
               }
               delete body.previous_response_id
             }
@@ -3248,6 +3337,9 @@ function makeHandler(state) {
                 : [])
             continuation = {
               prevId: degraded ? null : prevIdRaw,
+              // 补丁⑨：实验态登记回退键 + 配置快照；仅 causal 逻辑读取，基线路径不使用。
+              rawPrevId: prevIdRaw,
+              causal: causalHere,
               canonicalInput,
               model: body.model,
               thread: String((req.headers && (req.headers['thread-id'] || req.headers['session-id'])) || ''),
