@@ -1152,6 +1152,26 @@ function causalSnapshot (state, req, continuation) {
 function causalAnyOn (c) {
   return !!(c && (c.idRegisterFromClientPrev || c.bridgeIdUseRealPrev || c.reconstructFailClosedOnRestoredZero))
 }
+
+// ── 止损 P0-B：正式 fail-closed（默认 ON，仅显式 false 回滚） ──────────────────
+// 把第四轮单轮 C 已验证机理的 fail-closed 从"取证仪器"转为"默认正式行为"，止住
+// 官方续轮 reconstruct 未命中时降级转发孤儿 function_call_output 导致的不可诊断 400。
+// 这是正式错误码（continuation_error），不是 causal_experiment 实验标记；与补丁⑨实验
+// 开关互不干扰（实验开关全 OFF 时本止损仍生效；显式 false 才回落旧降级）。
+// 默认语义（宽松读取）：只有布尔 false 显式关闭；undefined/null/0/'false'/其它一律
+// 按默认 true 生效——"未显式 false 就 fail-closed"。
+function p0bFailClosedOnReconstructMiss (state) {
+  const v = state && state.cfg && state.cfg.server && state.cfg.server.p0bFailClosedOnReconstructMiss
+  return v !== false
+}
+// corr 用独立 salt 的 hashId，便于定位；绝不携带明文 thread/rid/prompt/id。
+function p0bCorr (req, continuation) {
+  const h = (req && req.headers) || {}
+  const thread = h['thread-id'] || h['session-id'] || (continuation && continuation.thread) || ''
+  const rid = h['x-request-id'] || ''
+  return hashId(String(thread) + '|' + String(rid), 'mg-p0b-failclosed-corr') || 'none'
+}
+
 function causalLog (log, point, corr, fields) {
   if (!log || typeof log.info !== 'function') return
   log.info('mgp0.causal.' + point, 'corr=' + corr, ...fields.filter(Boolean))
@@ -1181,7 +1201,7 @@ function causalAliasOnRegister (continuation, realId, log) {
 export { causalAliasOnRegister }
 // 仅测试用：清空实验别名状态，保证用例隔离。
 export function resetCausalExperiment () { causalAliases.clear() }
-export { CAUSAL_SWITCH_KEYS, causalSnapshot, causalAnyOn, causalAliasLink, causalAliasResolve }
+export { CAUSAL_SWITCH_KEYS, causalSnapshot, causalAnyOn, causalAliasLink, causalAliasResolve, p0bFailClosedOnReconstructMiss, p0bCorr }
 
 // V2-08（A2 实测缺陷）：429 时按 models.*.fallbacks 换到**另一个授权域**的供应商 = 静默换供应商/套餐。
 // 同域 fallback 保留既有行为；只要后续存在跨域候选就按真实 429 返回。
@@ -3312,14 +3332,33 @@ function makeHandler(state) {
                 if (offOnHere) offStructLog(log, 'store', offCorrHere, ['point=reconstruct_hit', 'idLevel=' + offStructIdLevel(prevIdRaw), 'idH=' + offStructIdH(prevIdRaw), 'store=' + continuationStoreSize().count])
                 if (causalCorrHere) causalLog(log, 'reconstruct_hit', causalCorrHere, ['restored=' + (rec.restoredItems > 0 ? '1' : '0'), 'n=' + rec.restoredItems, 'idLevel=' + offStructIdLevel(recPrevId)])
               } else {
-                // 补丁⑨ switch reconstructFailClosedOnRestoredZero：reconstruct 未命中（restored=0）
-                // 时不静默降级转发，改 typed 错误终止，用于验证"降级"是否为 400 的必要环节。
+                // 补丁⑨ switch reconstructFailClosedOnRestoredZero：取证仪器，仅显式 opt-in 生效。
+                // 实验开关显式开启时保留实验自身 typed 400 语义；关闭时由下面正式止损（默认 ON）
+                // 接管。二者互不干扰；取证回归须显式 p0bFailClosedOnReconstructMiss=false 以隔离止损。
                 if (causalHere.reconstructFailClosedOnRestoredZero) {
                   causalLog(log, 'fail_closed', causalCorrHere, ['reason=' + rec.reason, 'idLevel=' + offStructIdLevel(prevIdRaw), 'restored=0'])
                   sendJson(res, 400, { error: { message: 'continuation reconstruct failed (causal experiment fail-closed)', code: 'causal_reconstruct_fail_closed', type: 'causal_experiment' } })
                   return
                 }
-                // 优雅降级（2026-11-16 三轮真机反馈）：状态缺失不再硬 400 打断会话——
+                // 止损 P0-B（正式默认行为，仅官方续轮）：reconstruct 未命中 / restored=0 时不再
+                // 降级转发（该转发会把当前轮 input 不带 previous_response_id 发给上游，造成孤儿
+                // function_call_output → 不可诊断的 400），改为可操作的 typed 400 + corr 便于定位。
+                // 日志只记 type/reason/布尔/id 层级/corr，绝不记正文/prompt/凭据/明文 id。
+                if (contKind === 'official' && p0bFailClosedOnReconstructMiss(state)) {
+                  const p0bCorrHere = p0bCorr(req, null)
+                  log && log.warn('continuation reconstruct fail-closed', 'reason=' + rec.reason, 'corr=' + p0bCorrHere, 'idLevel=' + offStructIdLevel(prevIdRaw), 'restored=0')
+                  sendJson(res, 400, {
+                    error: {
+                      message: 'continuation reconstruct missed; tool-result turn cannot be safely continued (corr=' + p0bCorrHere + ')',
+                      code: 'continuation_reconstruct_failed',
+                      type: 'continuation_error',
+                      corr: p0bCorrHere,
+                    },
+                  })
+                  return
+                }
+                // 优雅降级（旧行为；显式 p0bFailClosedOnReconstructMiss=false 回滚 / 非官方路径）：
+                // 状态缺失不再硬 400 打断会话——
                 // 告警 + 剔除 prev_id 后落回既有形状修复链路（第三方 orphan-adopt 已真机验证；
                 // 官方后端按位置配对）。Codex 实测保留消息历史、仅省略服务端缓存的工具项，
                 // 降级转发可继续会话；上下文可能不完整，绝不静默（warn + lossy 诊断）。

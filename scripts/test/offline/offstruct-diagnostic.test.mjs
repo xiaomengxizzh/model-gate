@@ -45,7 +45,8 @@ async function setup (t, { diagnostic, sseMode = 'normal', prevId = null } = {})
     emit(terminal, { id, object: 'response', status: sseMode === 'failed' ? 'failed' : 'completed', output: [] })
     res.end()
   })
-  const server = diagnostic === undefined ? {} : { diagnosticOfficialStructure: diagnostic }
+  // 结构诊断观测仪器：显式关闭默认 ON 的正式止损，保留"未命中→降级"故障轮观测目标。
+  const server = Object.assign({ p0bFailClosedOnReconstructMiss: false }, diagnostic === undefined ? {} : { diagnosticOfficialStructure: diagnostic })
   const gw = await startGateway({
     env: { MG_TEST_OFFICIAL_KEY: 'gw-official-test-key' },
     config: {

@@ -76,7 +76,9 @@ async function setup (t, { experiment, responder } = {}) {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify(out))
   })
-  const server = experiment ? { g1CausalExperiment: experiment } : {}
+  // 取证仪器须显式关闭正式止损（默认 ON），否则 reconstruct 未命中会先被正式 typed 400 拦截，
+  // 掩盖三个实验子开关的可观测行为；这样实验回归与正式止损互不干扰。
+  const server = Object.assign({ p0bFailClosedOnReconstructMiss: false }, experiment ? { g1CausalExperiment: experiment } : {})
   const gw = await startGateway({
     env: { MG_TEST_OFFICIAL_KEY: UP_KEY },
     config: {
