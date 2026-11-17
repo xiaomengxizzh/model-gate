@@ -1,6 +1,6 @@
 // 补丁⑦ T05 官方结构诊断 · 双向回归（纯离线，零付费请求 / 零真实上游）。
 // 正向：开关 OFF 零日志零行为；ON 时正常轮只出结构化元数据，绝不泄漏 prompt / Bearer / key / output。
-// 反向：故障轮五观测点按同一 corr 串线，足以判定 H1–H4；id 层级分类确实区分 56hex 与 32hex。
+// 反向：故障轮五观测点按同一 corr 串线，足以判定 H-A…H-D；id 层级分类确实区分 56hex 与 32hex。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
@@ -149,7 +149,7 @@ test('正向 ON · Codex 原生投影流（streamCodexResponse）：探针原样
   assert.equal(text.includes(CLIENT_TOKEN), false, '凭据不得落日志')
 })
 
-test('反向 · 故障轮：五观测点按 corr 串线可判 H1/H3/H4，id 层级区分 56/32', async (t) => {
+test('反向 · 故障轮：五观测点按 corr 串线可判 H-A/H-B/H-D，id 层级区分 56/32', async (t) => {
   // previous_response_id=56hex（未入 store → degraded），上游响应 id=32hex 且终态 failed。
   const { gw } = await setup(t, { diagnostic: true, sseMode: 'failed', prevId: 'resp_' + HEX56 })
   const r = await gw.call('/v1/responses', reqOpts({ previous_response_id: 'resp_' + HEX56 }))
@@ -157,17 +157,17 @@ test('反向 · 故障轮：五观测点按 corr 串线可判 H1/H3/H4，id 层�
   const lines = offLines(gw)
   const text = lines.join('\n')
   for (const label of ['mgp0.offstruct.entry', 'mgp0.offstruct.firstframe', 'mgp0.offstruct.terminal', 'mgp0.offstruct.store']) {
-    assert.ok(text.includes(label), '故障轮须含 ' + label + ' 以支撑 H1–H4 判定')
+    assert.ok(text.includes(label), '故障轮须含 ' + label + ' 以支撑 H-A…H-D 判定')
   }
-  // H1：目标/ID 形状串线——prev 56hex 与上游 32hex 并存，且 store 命中失败（degraded）。
-  assert.ok(text.includes('point=degraded'), 'H1 证据：续轮重建降级')
-  assert.ok(text.includes('idLevel=official56'), 'H1 证据：previous_response_id 层级')
-  assert.ok(text.includes('idLevel=go32'), 'H1 证据：上游响应 id 层级')
-  assert.ok(text.includes('store='), 'H1 证据：store count')
-  // H3/H4：真实终态与默认 completed 可区分。
-  assert.ok(text.includes('type=response.failed'), 'H3/H4 证据：真实 failed 终态')
-  assert.ok(text.includes('statusReal='), 'H3/H4 证据：真实 status 是否存在')
-  assert.ok(text.includes('terminal='), 'H3/H4 证据：终态是否已到达')
+  // H-A：目标/ID 形状串线——prev 56hex 与上游 32hex 并存，且 store 命中失败（degraded）。
+  assert.ok(text.includes('point=degraded'), 'H-A 证据：续轮重建降级')
+  assert.ok(text.includes('idLevel=official56'), 'H-A 证据：previous_response_id 层级')
+  assert.ok(text.includes('idLevel=go32'), 'H-A 证据：上游响应 id 层级')
+  assert.ok(text.includes('store='), 'H-A 证据：store count')
+  // H-B/H-D：真实终态与默认 completed 可区分。
+  assert.ok(text.includes('type=response.failed'), 'H-B/H-D 证据：真实 failed 终态')
+  assert.ok(text.includes('statusReal='), 'H-B/H-D 证据：真实 status 是否存在')
+  assert.ok(text.includes('terminal='), 'H-B/H-D 证据：终态是否已到达')
   // 所有观测点必须同一 corr，否则无法按轮判定假说。
   const corrs = new Set(lines.map((l) => (l.match(/corr=([0-9a-f]+)/) || [])[1]).filter(Boolean))
   assert.equal(corrs.size, 1, '故障轮所有观测点必须共享一个 corr')
