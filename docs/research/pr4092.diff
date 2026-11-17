@@ -1,0 +1,1160 @@
+diff --git a/assets/pr-screenshots/client-compaction-dashboard.png b/assets/pr-screenshots/client-compaction-dashboard.png
+new file mode 100644
+index 00000000000..89c3cf1c40a
+Binary files /dev/null and b/assets/pr-screenshots/client-compaction-dashboard.png differ
+diff --git a/docs-site/src/content/docs/guides/codex-integration.md b/docs-site/src/content/docs/guides/codex-integration.md
+index 5b75a21b412..668f1374540 100644
+--- a/docs-site/src/content/docs/guides/codex-integration.md
++++ b/docs-site/src/content/docs/guides/codex-integration.md
+@@ -245,6 +245,74 @@ The cache remains bounded; this does not extend retention or recover history the
+ longer has. HTTP clients must handle the error explicitly and resend their full context without
+ `previous_response_id`. Retrying only the same ID cannot recover missing state.
+ 
++### Client-side compaction (opt-in)
++
++Authenticated loopback routing normally keeps Codex on its built-in `openai` provider identity.
++That preserves native thread identity, but it also makes Codex request native remote compaction.
++When a routed provider cannot return a native compaction blob, OpenCodeX stores the summary in its
++own `ocx1:` envelope. Native ChatGPT cannot verify that envelope if OpenCodeX is later removed from
++the request path.
++
++On an authenticated loopback route, enable client-side compaction to keep V2 sub-agent routing while preventing new `ocx1:` compaction summaries. Non-loopback and API-key routes retain their existing provider and authentication behavior:
++
++```bash
++ocx system settings --client-compaction on   # or "codexClientCompaction": true in config.json
++ocx sync                                     # rewrites the active config (default: ~/.codex/config.toml); restart Desktop
++```
++
++The setting defaults to off. For authenticated loopback routing, OpenCodeX selects its existing
++dedicated provider form with `requires_openai_auth = true`. If `codexDesktopAuthless` is also
++enabled, that stronger compatibility setting takes precedence and writes
++`requires_openai_auth = false`:
++
++```toml
++model_provider = "opencodex"
++
++[model_providers.opencodex]
++name = "OpenCodex Proxy"
++base_url = "http://127.0.0.1:10100/v1"
++wire_api = "responses"
++requires_openai_auth = true
++```
++
++Codex then owns compaction and stores a portable plaintext summary rather than a new OpenCodeX
++envelope. The compacting request still routes through OpenCodeX and can consume quota on the
++selected provider. V2 sub-agent requests keep their existing provider selection and quota
++accounting. Client-side compaction does not change plaintext delivery, encrypted task passthrough
++through `allowEncryptedV2AgentTasks`, or configured recovery and fallback behavior.
++
++This preference affects future compactions only, and it rewrites no existing `ocx1:` payload in
++any configuration, so use the explicit history recovery workflow for a thread that needs one.
++
++Whether resume-history metadata is re-tagged depends on which form the injection takes. On its
++own, on an authenticated loopback bind, client-side compaction re-tags nothing: it keeps the root
++override instead, as described below. Enabled together with `codexDesktopAuthless`, or on a
++non-loopback bind, the stronger form wins and those forms behave exactly as they do today,
++including their existing forward-tagging of resume history with originals backed up for restore.
++
++Going back from one of those forms to plain Design B migrates the re-tagged threads back. Turning
++off `codexDesktopAuthless` while leaving client-side compaction on does not: that lands on the
++compaction-only form, which skips the history unit, so threads already tagged `opencodex` keep
++that tag. They still reach this proxy, through the provider table rather than the root override.
++
++On the compaction-only form, existing threads keep working because the injection keeps the root
++`openai_base_url` override alongside the provider table. New threads default to `opencodex` and
++get client-side compaction, while a thread already tagged `openai` still resolves to Codex's
++built-in provider — which the retained override still points at this proxy. Without it that
++thread would resume against OpenAI directly, taking configured routing with it. The authless and
++non-loopback forms cannot use the root key, which is why they keep re-tagging instead.
++
++That guarantee covers the override OpenCodeX manages. A root `openai_base_url` you wrote
++yourself is never replaced, and in that case the built-in provider keeps the destination you
++chose, so an `openai`-tagged thread follows your configuration rather than this proxy. Turning
++the setting off and syncing removes the table and returns to the plain Design B override, unless
++`codexDesktopAuthless` or non-loopback admission still requires the provider-table form; those
++two forms cannot use the root key and are unchanged.
++
++While the mode is active, the realtime voice sideband override
++(`experimental_realtime_ws_base_url`) is not injected — the dedicated provider-table form cannot
++carry it — so Codex Desktop voice uses its native endpoint rather than the proxy.
++
+ ### Authless Codex Desktop (opt-in)
+ 
+ In **Dashboard → Overview**, **Open Codex without signing in** controls this existing
+diff --git a/docs-site/src/content/docs/reference/configuration/server.md b/docs-site/src/content/docs/reference/configuration/server.md
+index cdc8d6af523..0fe874c9a9b 100644
+--- a/docs-site/src/content/docs/reference/configuration/server.md
++++ b/docs-site/src/content/docs/reference/configuration/server.md
+@@ -27,6 +27,7 @@ runs helper features around provider requests.
+ | `codexAutoStart?` | `boolean` | `true` | Let the Codex shim run `ocx ensure` before launching Codex. False makes ensure a no-op. |
+ | `codexShimAutoRestore?` | `boolean` | `true` | Restore an installed shim after a completed external Codex update replaces it. Environment opt-out: `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`. |
+ | `codexDesktopAuthless?` | `boolean` | `false` | Opt-in authless Codex Desktop routing on a loopback bind: inject the dedicated `opencodex` provider with `requires_openai_auth = false` so Desktop opens without a ChatGPT login. Ignored on non-loopback binds. `ocx system settings --desktop-authless on`. See [Codex integration](/guides/codex-integration/#authless-codex-desktop-opt-in). |
++| `codexClientCompaction?` | `boolean` | `false` | Opt into Codex client-side compaction on an authenticated loopback bind. Uses the dedicated `opencodex` provider identity with `requires_openai_auth = true`, preventing new routed compactions from storing OpenCodeX-owned `ocx1:` state. `codexDesktopAuthless` takes precedence when both are enabled and keeps `requires_openai_auth = false`. V2 sub-agent routing is unchanged. `ocx system settings --client-compaction on`. See [Codex integration](/guides/codex-integration/#client-side-compaction-opt-in). |
+ | `resetCreditAutoRedeem?` | `{ enabled?: boolean; leadTimeMinutes?: number }` | off | Opt-in: redeem the main Codex account's soonest-expiring reset credit `leadTimeMinutes` (1–60, default 10) before it expires. Every attempt re-reads the upstream credit list first and skips when the credit is gone (for example, redeemed by hand); the `redeem_request_id` is journaled in `$OPENCODEX_HOME/reset-credit-auto-redeem.json` before the call so a crash replays the same idempotent request instead of spending a second credit. Servers sharing this configuration directory coordinate reservations and settlements so one process does not replace another's request record. Logs carry a hashed account key only. |
+ | `syncResumeHistory?` | `boolean` | `true` | Reversible Codex App history compatibility. Original metadata is backed up and restored by `ocx stop` / `ocx restore`. |
+ | `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | Redirect recognized Codex helper/shadow calls to a chosen model while preserving the request's configured reasoning effort. The default source prefix is `gpt-5.6-luna`; older clients through 0.144.x used `gpt-5.4-mini`, which `sourceModels` can restore. |
+diff --git a/gui/src/i18n/de.ts b/gui/src/i18n/de.ts
+index 2a889b8f2b0..3850c73a0ec 100644
+--- a/gui/src/i18n/de.ts
++++ b/gui/src/i18n/de.ts
+@@ -2486,6 +2486,8 @@ export const de: Record<TKey, string> = {
+   "dash.visionAdvancedPopover": "Erweiterte Vision-Einstellungen",
+   "dash.codexDesktopAuthless": "Codex ohne Anmeldung öffnen",
+   "dash.codexDesktopAuthlessHint": "Standardmäßig aus. Überspringt die separate Desktop-Anmeldung bei geeigneten lokalen Verbindungen. Zugangsdaten für den Anbieter bleiben erforderlich. Codex nach einer Änderung neu starten. Kontogebundene Desktop-Funktionen können fehlen.",
++  "dash.codexClientCompaction": "Clientseitige Komprimierung verwenden",
++  "dash.codexClientCompactionHint": "Standardmäßig aus; nur für authentifiziertes Loopback-Routing. Künftige Komprimierungen speichern portable Klartext-Zusammenfassungen, während das OpenCodeX-Provider-Routing und die V2-Subagent-Zustellung aktiv bleiben; der konfigurierte Anbieter kann sie verarbeiten und Kontingent verbrauchen. Vorhandene ocx1-Verläufe müssen weiterhin wiederhergestellt werden. Codex nach einer Änderung neu starten.",
+   "models.newPolicyGlobal": "Neue Modelle zunächst deaktivieren", "models.newPolicyProvider": "Richtlinie für neue Modelle",
+   "models.newPolicy_inherit": "Übernehmen", "models.newPolicy_off": "Aus", "models.newPolicy_on": "An", "models.newBadge": "NEU", "models.newCount": "{count} neu, aus",
+   "models.aliases": "Aliase",
+diff --git a/gui/src/i18n/en.ts b/gui/src/i18n/en.ts
+index 0cf7469f568..13fdc259ce6 100644
+--- a/gui/src/i18n/en.ts
++++ b/gui/src/i18n/en.ts
+@@ -579,6 +579,8 @@ export const en = {
+   "dash.multiAgent": "Sub-agent",
+   "dash.codexDesktopAuthless": "Open Codex without signing in",
+   "dash.codexDesktopAuthlessHint": "Off by default. Skip the separate Desktop sign-in for eligible local connections. Upstream credentials are still required. Restart Codex after changing this setting. Account-gated Desktop features may be unavailable.",
++  "dash.codexClientCompaction": "Use client-side compaction",
++  "dash.codexClientCompactionHint": "Off by default; authenticated loopback only. Future compactions store portable plaintext summaries while OpenCodeX and V2 provider routing stay active; the configured provider may process them and consume quota. History is left untouched, and existing threads keep routing through the proxy via the openai_base_url override OpenCodeX manages; if you set that line yourself it is kept, and those threads follow your destination instead. Existing ocx1 history stays recoverable; recover a thread separately only before replaying it in native Codex. Restart Codex after changing this setting.",
+   "models.v2Conflict": "[agents] max_threads is set — codex will refuse to start; remove it from config.toml",
+   "models.v2Applied": "Sub-agent mode updated — applies to new sessions (restart the Codex app to refresh the picker)",
+   "models.v2ThreadsLabel": "Max threads",
+diff --git a/gui/src/i18n/fr.ts b/gui/src/i18n/fr.ts
+index 576c3b7f23d..1ba6d0331b2 100644
+--- a/gui/src/i18n/fr.ts
++++ b/gui/src/i18n/fr.ts
+@@ -564,6 +564,8 @@ export const fr: Record<TKey, string> = {
+   "dash.multiAgent": "Sous-agent",
+   "dash.codexDesktopAuthless": "Ouvrir Codex sans se connecter",
+   "dash.codexDesktopAuthlessHint": "Désactivé par défaut. Ignore la connexion Desktop séparée pour les connexions locales admissibles. Les identifiants du fournisseur restent nécessaires. Redémarrez Codex après toute modification. Certaines fonctions Desktop liées au compte peuvent être indisponibles.",
++  "dash.codexClientCompaction": "Utiliser la compaction côté client",
++  "dash.codexClientCompactionHint": "Désactivé par défaut, uniquement pour le routage loopback authentifié. Les compactages futurs stockent des résumés portables en texte clair tout en conservant le routage OpenCodeX/V2 ; le fournisseur configuré peut les traiter et consommer son quota. L'historique ocx1 existant doit toujours être restauré. Redémarrez Codex après modification.",
+   "models.v2Conflict": "[agents] max_threads est défini — codex refusera de démarrer ; supprimez-le de config.toml",
+   "models.v2Applied": "Mode sous-agent mis à jour — s’applique aux nouvelles sessions (redémarrez l’application Codex pour actualiser le sélecteur)",
+   "models.v2ThreadsLabel": "Nombre maximal de fils",
+diff --git a/gui/src/i18n/ja.ts b/gui/src/i18n/ja.ts
+index 1e01aea5454..278c580bc75 100644
+--- a/gui/src/i18n/ja.ts
++++ b/gui/src/i18n/ja.ts
+@@ -2507,6 +2507,8 @@ export const ja: Record<TKey, string> = {
+   "dash.visionAdvancedPopover": "詳細なビジョン設定",
+   "dash.codexDesktopAuthless": "ログインせずに Codex を開く",
+   "dash.codexDesktopAuthlessHint": "既定ではオフです。対象のローカル接続で Desktop の個別ログインを省略します。上流プロバイダーの認証情報は引き続き必要です。変更後は Codex を再起動してください。アカウントに依存する Desktop 機能が利用できない場合があります。",
++  "dash.codexClientCompaction": "クライアント側コンパクションを使用",
++  "dash.codexClientCompactionHint": "既定ではオフで、認証済みループバックルーティング専用です。今後のコンパクションは、OpenCodeX と V2 プロバイダーのルーティングを維持したまま移植可能な平文要約を保存します。設定済みプロバイダーが要約を処理し、割り当てを消費する場合があります。既存の ocx1 履歴は別途復旧が必要です。変更後は Codex を再起動してください。",
+   "models.newPolicyGlobal": "新しいモデルを無効で追加", "models.newPolicyProvider": "新しいモデルのポリシー",
+   "models.newPolicy_inherit": "継承", "models.newPolicy_off": "オフ", "models.newPolicy_on": "オン", "models.newBadge": "新着", "models.newCount": "新着 {count} 件、オフ",
+   "models.aliases": "エイリアス",
+diff --git a/gui/src/i18n/ko.ts b/gui/src/i18n/ko.ts
+index f1d20bf65ed..acff6303dc3 100644
+--- a/gui/src/i18n/ko.ts
++++ b/gui/src/i18n/ko.ts
+@@ -2508,6 +2508,8 @@ export const ko: Record<TKey, string> = {
+   "dash.visionAdvancedPopover": "고급 비전 설정",
+   "dash.codexDesktopAuthless": "로그인 없이 Codex 열기",
+   "dash.codexDesktopAuthlessHint": "기본값은 꺼짐입니다. 지원되는 로컬 연결에서 별도의 Desktop 로그인을 건너뜁니다. 업스트림 인증 정보는 여전히 필요합니다. 변경 후 Codex를 다시 시작하세요. 계정에 연결된 Desktop 기능을 사용하지 못할 수 있습니다.",
++  "dash.codexClientCompaction": "클라이언트 측 컴팩션 사용",
++  "dash.codexClientCompactionHint": "기본값은 꺼짐이며 인증된 루프백 라우팅에만 적용됩니다. 향후 컴팩션은 OpenCodeX 및 V2 제공자 라우팅을 유지하면서 이식 가능한 평문 요약을 저장합니다. 설정된 제공자가 요약을 처리하고 할당량을 사용할 수 있습니다. 기록은 건드리지 않으며, 기존 스레드는 OpenCodeX가 관리하는 openai_base_url override를 통해 프록시 경로를 유지합니다. 그 줄을 직접 설정해 두셨다면 그대로 보존하므로 해당 스레드는 설정하신 목적지를 따릅니다. 기존 ocx1 기록은 그대로 복구할 수 있고, 네이티브 Codex에서 해당 스레드를 재개하기 전에만 별도로 복구하세요. 변경 후 Codex를 다시 시작하세요.",
+   "models.newPolicyGlobal": "새 모델을 비활성화 상태로 추가", "models.newPolicyProvider": "새 모델 정책",
+   "models.newPolicy_inherit": "상속", "models.newPolicy_off": "끔", "models.newPolicy_on": "켬", "models.newBadge": "신규", "models.newCount": "신규 {count}개, 꺼짐",
+   "models.aliases": "별칭",
+diff --git a/gui/src/i18n/ru.ts b/gui/src/i18n/ru.ts
+index c583bccb992..72678d05798 100644
+--- a/gui/src/i18n/ru.ts
++++ b/gui/src/i18n/ru.ts
+@@ -2509,6 +2509,8 @@ export const ru: Record<TKey, string> = {
+   "dash.visionAdvancedPopover": "Дополнительные настройки изображений",
+   "dash.codexDesktopAuthless": "Открывать Codex без входа",
+   "dash.codexDesktopAuthlessHint": "По умолчанию выключено. Пропускает отдельный вход в Desktop для допустимых локальных подключений. Учётные данные провайдера по-прежнему нужны. После изменения перезапустите Codex. Функции Desktop, связанные с аккаунтом, могут быть недоступны.",
++  "dash.codexClientCompaction": "Использовать сжатие на стороне клиента",
++  "dash.codexClientCompactionHint": "По умолчанию выключено; только для аутентифицированной loopback-маршрутизации. Будущие сжатия сохраняют переносимые текстовые сводки, а маршрутизация OpenCodeX и V2 остаётся активной; настроенный провайдер может обрабатывать сводки и расходовать квоту. Существующую историю ocx1 всё равно нужно восстановить. После изменения перезапустите Codex.",
+   "models.newPolicyGlobal": "Добавлять новые модели выключенными", "models.newPolicyProvider": "Политика новых моделей",
+   "models.newPolicy_inherit": "Наследовать", "models.newPolicy_off": "Выкл.", "models.newPolicy_on": "Вкл.", "models.newBadge": "НОВАЯ", "models.newCount": "Новых: {count}, выкл.",
+   "models.aliases": "Псевдонимы",
+diff --git a/gui/src/i18n/tr.ts b/gui/src/i18n/tr.ts
+index ca392606771..ffa0272c2b1 100644
+--- a/gui/src/i18n/tr.ts
++++ b/gui/src/i18n/tr.ts
+@@ -2509,6 +2509,8 @@ export const tr: Record<TKey, string> = {
+   "dash.visionAdvancedPopover": "Gelişmiş görsel ayarları",
+   "dash.codexDesktopAuthless": "Codex’i oturum açmadan başlat",
+   "dash.codexDesktopAuthlessHint": "Varsayılan olarak kapalıdır. Uygun yerel bağlantılarda ayrı Desktop oturum açma adımını atlar. Sağlayıcı kimlik bilgileri yine gereklidir. Değişiklikten sonra Codex’i yeniden başlatın. Hesaba bağlı Desktop özellikleri kullanılamayabilir.",
++  "dash.codexClientCompaction": "İstemci tarafı sıkıştırmayı kullan",
++  "dash.codexClientCompactionHint": "Varsayılan olarak kapalıdır ve yalnızca kimliği doğrulanmış geri döngü yönlendirmesinde geçerlidir. Gelecekteki sıkıştırmalar, OpenCodeX ve V2 sağlayıcı yönlendirmesi etkin kalırken taşınabilir düz metin özetleri kaydeder; yapılandırılmış sağlayıcı bunları işleyip kotasını tüketebilir. Mevcut ocx1 geçmişi yine ayrıca kurtarılmalıdır. Değişiklikten sonra Codex’i yeniden başlatın.",
+   "models.newPolicyGlobal": "Yeni modeller devre dışı başlasın", "models.newPolicyProvider": "Yeni model ilkesi",
+   "models.newPolicy_inherit": "Devral", "models.newPolicy_off": "Kapalı", "models.newPolicy_on": "Açık", "models.newBadge": "YENİ", "models.newCount": "{count} yeni, kapalı",
+   "models.aliases": "Takma adlar",
+diff --git a/gui/src/i18n/zh-TW.ts b/gui/src/i18n/zh-TW.ts
+index 6462f6c4b54..0c346f23754 100644
+--- a/gui/src/i18n/zh-TW.ts
++++ b/gui/src/i18n/zh-TW.ts
+@@ -2471,6 +2471,8 @@ export const zhTW: Record<TKey, string> = {
+   "dash.visionAdvancedPopover": "進階視覺設定",
+   "dash.codexDesktopAuthless": "無需登入即可開啟 Codex",
+   "dash.codexDesktopAuthlessHint": "預設關閉。為符合條件的本機連線略過獨立的 Desktop 登入。仍需上游供應商憑證。變更後請重新啟動 Codex。依賴帳戶的 Desktop 功能可能無法使用。",
++  "dash.codexClientCompaction": "使用用戶端壓縮",
++  "dash.codexClientCompactionHint": "預設關閉，僅適用於已驗證的 loopback 路由。未來壓縮會儲存可攜的純文字摘要，同時保留 OpenCodeX 與 V2 提供方路由；已設定的提供方可能處理摘要並消耗其額度。既有 ocx1 歷程仍須另行復原。變更後請重新啟動 Codex。",
+   "models.newPolicyGlobal": "新模型預設停用", "models.newPolicyProvider": "新模型策略",
+   "models.newPolicy_inherit": "繼承", "models.newPolicy_off": "關閉", "models.newPolicy_on": "開啟", "models.newBadge": "新增", "models.newCount": "{count} 個新增，已關閉",
+   "models.aliases": "別名",
+diff --git a/gui/src/i18n/zh.ts b/gui/src/i18n/zh.ts
+index 685227abc0d..7b97cc0a9b4 100644
+--- a/gui/src/i18n/zh.ts
++++ b/gui/src/i18n/zh.ts
+@@ -2507,6 +2507,8 @@ export const zh: Record<TKey, string> = {
+   "dash.visionAdvancedPopover": "高级视觉设置",
+   "dash.codexDesktopAuthless": "无需登录即可打开 Codex",
+   "dash.codexDesktopAuthlessHint": "默认关闭。为符合条件的本地连接跳过单独的 Desktop 登录。仍需上游提供商凭据。更改后请重启 Codex。依赖账户的 Desktop 功能可能不可用。",
++  "dash.codexClientCompaction": "使用客户端压缩",
++  "dash.codexClientCompactionHint": "默认关闭，仅适用于已认证的 loopback 路由。未来压缩会保存可移植的明文摘要，同时保留 OpenCodeX 与 V2 提供方路由；已配置的提供方可能处理摘要并消耗其额度。已有 ocx1 历史仍需单独恢复。更改后请重启 Codex。",
+   "models.newPolicyGlobal": "新模型默认停用", "models.newPolicyProvider": "新模型策略",
+   "models.newPolicy_inherit": "继承", "models.newPolicy_off": "关闭", "models.newPolicy_on": "开启", "models.newBadge": "新增", "models.newCount": "{count} 个新增，已关闭",
+   "models.aliases": "别名",
+diff --git a/gui/src/pages/dashboard-overview-sections.tsx b/gui/src/pages/dashboard-overview-sections.tsx
+index 6606c4f560e..c71687acb9b 100644
+--- a/gui/src/pages/dashboard-overview-sections.tsx
++++ b/gui/src/pages/dashboard-overview-sections.tsx
+@@ -439,6 +439,7 @@ function VisionAdvancedPopover({ t, open, triggerRef, onClose, maxValue, maxInva
+ export function DashboardSidecarPanels({ d }: { d: Dash }) {
+   const {
+     t, settings, settingsSaving, syncing, toggleCodexAutoStart, toggleCodexDesktopAuthless,
++    toggleCodexClientCompaction,
+     sidecar, sidecarSaving, sidecarModels, visionModels, models, saveSidecar,
+     shadowCall, shadowCallSaving, shadowCallHelpTriggerRef, shadowCallHelpOpen, setShadowCallHelpOpen, saveShadowCall,
+   } = d;
+@@ -525,6 +526,26 @@ export function DashboardSidecarPanels({ d }: { d: Dash }) {
+         </div>
+       </div>
+ 
++      <div className="panel">
++        <div className="spread">
++          <div style={{ flex: 1, minWidth: 0 }}>
++            <div className="font-semibold">{t("dash.codexClientCompaction")}</div>
++            <div className="muted setting-hint">{t("dash.codexClientCompactionHint")}</div>
++            {settings?.catalogRefreshPending && <div className="muted setting-hint" role="status">{t("codexAuth.catalogRefreshPending")}</div>}
++          </div>
++          <button
++            type="button"
++            className={`switch ${settings?.codexClientCompaction ?? false ? "on" : ""}`}
++            onClick={toggleCodexClientCompaction}
++            disabled={!settings || settingsSaving || syncing}
++            aria-label={t("dash.codexClientCompaction")}
++            aria-pressed={settings?.codexClientCompaction ?? false}
++          >
++            <span className="knob" />
++          </button>
++        </div>
++      </div>
++
+       <div className="dash-sidecar-grid">
+         {/* Both sidecar cards wear the DashboardInjectionPanel shell: the PANEL is
+             the flex row, copy left, controls right. */}
+diff --git a/gui/src/pages/dashboard-shared.ts b/gui/src/pages/dashboard-shared.ts
+index b6914586b6b..029e39b2dab 100644
+--- a/gui/src/pages/dashboard-shared.ts
++++ b/gui/src/pages/dashboard-shared.ts
+@@ -49,6 +49,7 @@ export interface ModelInfo { id: string; provider: string; namespaced: string; o
+ export interface SettingsData {
+   codexAutoStart: boolean;
+   codexDesktopAuthless?: boolean;
++  codexClientCompaction?: boolean;
+   catalogRefreshPending?: boolean;
+   /** Whether a login may open a browser on the machine running the proxy. */
+   oauthOpenBrowser?: boolean;
+diff --git a/gui/src/pages/use-dashboard-data.ts b/gui/src/pages/use-dashboard-data.ts
+index 605d4eefc4b..5bbe1210bcd 100644
+--- a/gui/src/pages/use-dashboard-data.ts
++++ b/gui/src/pages/use-dashboard-data.ts
+@@ -70,7 +70,7 @@ type CachedOverview = {
+ 
+ type MaMode = "v1" | "default" | "v2";
+ 
+-type CodexPreference = "codexAutoStart" | "codexDesktopAuthless";
++type CodexPreference = "codexAutoStart" | "codexDesktopAuthless" | "codexClientCompaction";
+ type DashboardSettingsState = {
+   settings: SettingsData | null;
+   beforeSave: SettingsData | null;
+@@ -106,7 +106,9 @@ function dashboardSettingsReducer(state: DashboardSettingsState, action: Dashboa
+         settings: {
+           ...state.settings,
+           [action.key]: action.settings[action.key],
+-          catalogRefreshPending: action.key === "codexDesktopAuthless" ? true : state.settings.catalogRefreshPending,
++          catalogRefreshPending: action.key === "codexDesktopAuthless" || action.key === "codexClientCompaction"
++            ? true
++            : state.settings.catalogRefreshPending,
+           startupHealth: action.settings.startupHealth ?? state.settings.startupHealth,
+         },
+       };
+@@ -677,7 +679,7 @@ export function useDashboardData(apiBase: string) {
+       const data = await requireJson<SettingsData>(res, "save failed");
+       settingsMutationEpochRef.current += 1;
+       dispatchSettings({ type: "save-succeeded", key, settings: data });
+-      if (key === "codexDesktopAuthless") await runSync();
++      if (key === "codexDesktopAuthless" || key === "codexClientCompaction") await runSync();
+     } catch {
+       dispatchSettings({ type: "save-failed" });
+       setError(true);
+@@ -689,6 +691,7 @@ export function useDashboardData(apiBase: string) {
+ 
+   const toggleCodexAutoStart = () => toggleCodexSetting("codexAutoStart");
+   const toggleCodexDesktopAuthless = () => toggleCodexSetting("codexDesktopAuthless");
++  const toggleCodexClientCompaction = () => toggleCodexSetting("codexClientCompaction");
+ 
+   // Clears the sync result/error in this hook. The dashboard toast owns its own dismissal
+   // timer but must publish the dismissal here: syncResult/syncError live above the dashboard
+@@ -851,7 +854,8 @@ export function useDashboardData(apiBase: string) {
+     effortCapHelpTriggerRef, updateTriggerRef, maHelpTriggerRef, shadowCallHelpTriggerRef,
+     effortCapHelpDialogRef, updateDialogRef, maHelpDialogRef, shadowCallHelpDialogRef,
+     filteredGroups, sidecarModels, visionModels,
+-    saveSidecar, saveShadowCall, switchMaMode, toggleCodexAutoStart, toggleCodexDesktopAuthless, runSync, clearSyncFeedback,
++    saveSidecar, saveShadowCall, switchMaMode, toggleCodexAutoStart, toggleCodexDesktopAuthless,
++    toggleCodexClientCompaction, runSync, clearSyncFeedback,
+     fetchUpdateCheck, closeUpdateDialog, openUpdateDialog, changeUpdateChannel, runUpdate,
+   };
+ }
+diff --git a/gui/tests/vision-sidecar-dashboard.test.tsx b/gui/tests/vision-sidecar-dashboard.test.tsx
+index 37bcf40d651..fd41cc89fd6 100644
+--- a/gui/tests/vision-sidecar-dashboard.test.tsx
++++ b/gui/tests/vision-sidecar-dashboard.test.tsx
+@@ -409,6 +409,75 @@ test("Desktop login switch defaults off, preserves explicit opt-in, and disables
+   expect(host.textContent).toContain(en["codexAuth.catalogRefreshPending"]);
+ });
+ 
++test("client compaction switch defaults off, preserves explicit opt-in, and invokes its handler", async () => {
++  const { d } = harness();
++  let clicks = 0;
++  d.toggleCodexClientCompaction = async () => { clicks += 1; };
++  d.settings = { codexAutoStart: true, port: 10100, hostname: "127.0.0.1" };
++  await mount(d);
++  const toggle = () => host.querySelector<HTMLButtonElement>(`button[aria-label="${en["dash.codexClientCompaction"]}"]`)!;
++  expect(toggle().getAttribute("aria-pressed")).toBe("false");
++  d.settings.codexClientCompaction = true;
++  await mount(d);
++  expect(toggle().getAttribute("aria-pressed")).toBe("true");
++  await act(async () => { toggle().click(); });
++  expect(clicks).toBe(1);
++});
++
++test("client compaction preference survives a successful save followed by sync failure", async () => {
++  const originalFetch = globalThis.fetch;
++  const writes: Array<{ path: string; body: unknown }> = [];
++  let latest: Dash | undefined;
++  let saved = false;
++  const apiBase = "/client-compaction-sync-failure";
++  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
++    const path = String(input);
++    if (path.endsWith("/api/settings")) {
++      if (init?.method === "PUT") {
++        const body = JSON.parse(String(init.body));
++        writes.push({ path, body });
++        saved = body.codexClientCompaction;
++        return Response.json({ codexClientCompaction: saved, catalogRefreshPending: true });
++      }
++      return Response.json({
++        codexAutoStart: true,
++        codexClientCompaction: saved,
++        port: 10100,
++        hostname: "127.0.0.1",
++      });
++    }
++    if (path.endsWith("/api/sync")) {
++      writes.push({ path, body: init?.body });
++      return Response.json({ error: "sync unavailable" }, { status: 503 });
++    }
++    return Response.json({}, { status: 503 });
++  }) as typeof fetch;
++  function Harness() {
++    const data = useDashboardData(apiBase);
++    useEffect(() => { latest = data; }, [data]);
++    return null;
++  }
++  try {
++    const { createRoot } = await import("react-dom/client");
++    await act(async () => {
++      root = createRoot(host);
++      root.render(<LanguageProvider><Harness /></LanguageProvider>);
++    });
++    await act(async () => { await latest!.toggleCodexClientCompaction(); });
++    expect(writes).toEqual([
++      { path: `${apiBase}/api/settings`, body: { codexClientCompaction: true } },
++      { path: `${apiBase}/api/sync`, body: undefined },
++    ]);
++    expect(latest?.settings?.codexClientCompaction).toBe(true);
++    expect(latest?.settings?.catalogRefreshPending).toBe(true);
++    expect(latest?.syncError).toBe("sync unavailable");
++  } finally {
++    await act(async () => { root?.unmount(); });
++    root = null;
++    globalThis.fetch = originalFetch;
++  }
++});
++
+ 
+ test.each([undefined, false, true])("Desktop login preference %s persists before full sync; sync failure keeps the saved preference", async (initial) => {
+   const originalFetch = globalThis.fetch;
+@@ -428,7 +497,7 @@ test.each([undefined, false, true])("Desktop login preference %s persists before
+       return Response.json({ codexAutoStart: body.codexAutoStart, catalogRefreshPending: false });
+     }
+     if (path.endsWith("/api/sync")) {
+-      writes.push({ path, body: null });
++      writes.push({ path, body: init?.body });
+       return Response.json({ error: "sync unavailable" }, { status: 503 });
+     }
+     if (path.endsWith("/api/settings")) {
+@@ -451,7 +520,7 @@ test.each([undefined, false, true])("Desktop login preference %s persists before
+     await act(async () => { await latest!.toggleCodexDesktopAuthless(); });
+     expect(writes).toEqual([
+       { path: `${apiBase}/api/settings`, body: { codexDesktopAuthless: !initial } },
+-      { path: `${apiBase}/api/sync`, body: null },
++      { path: `${apiBase}/api/sync`, body: undefined },
+     ]);
+     expect(latest?.settings?.codexDesktopAuthless).toBe(!initial);
+     expect(latest?.syncError).toBe("sync unavailable");
+diff --git a/src/cli/system-command.ts b/src/cli/system-command.ts
+index 7811e7d4327..03eb9008873 100644
+--- a/src/cli/system-command.ts
++++ b/src/cli/system-command.ts
+@@ -14,7 +14,7 @@ import {
+ const USAGE = `Usage:
+   ocx system [status] [--json]
+   ocx system settings [--auto-start <on|off>] [--stream-mode <auto|legacy-tee|eager-relay>]
+-      [--desktop-authless <on|off>] [--json]
++      [--desktop-authless <on|off>] [--client-compaction <on|off>] [--json]
+   ocx system startup <health|install-service|install-shim> [--json]
+   ocx system diagnostics [--json]
+   ocx system sync [--json]
+@@ -23,7 +23,11 @@ const USAGE = `Usage:
+   ocx system codex-cli-update check [--json]
+   ocx system update check [--channel <latest|preview>] [--json]
+   ocx system update run [--channel <latest|preview>] [--restart <on|off>] --yes [--json]
+-  ocx system update status <job-id> [--json]`;
++  ocx system update status <job-id> [--json]
++
++--client-compaction favors native replay portability for future compactions while
++keeping OpenCodeX routing active; the configured provider may process summaries
++and consume its quota.`;
+ 
+ async function status(argv: string[], deps: RuntimeApiDeps): Promise<void> {
+   const args = [...argv];
+@@ -44,8 +48,10 @@ async function settings(argv: string[], deps: RuntimeApiDeps): Promise<void> {
+   const autoStart = takeBooleanOption(args, "--auto-start");
+   const streamMode = takeOption(args, "--stream-mode");
+   const desktopAuthless = takeBooleanOption(args, "--desktop-authless");
++  const clientCompaction = takeBooleanOption(args, "--client-compaction");
+   rejectArgs(args, USAGE);
+-  if (autoStart === undefined && streamMode === undefined && desktopAuthless === undefined) {
++  if (autoStart === undefined && streamMode === undefined
++    && desktopAuthless === undefined && clientCompaction === undefined) {
+     const result = await runtimeRequest("/api/settings", {}, deps);
+     printData(result, wantsJson, summaryLines(result));
+     return;
+@@ -54,6 +60,7 @@ async function settings(argv: string[], deps: RuntimeApiDeps): Promise<void> {
+     ...(autoStart !== undefined ? { codexAutoStart: autoStart } : {}),
+     ...(streamMode !== undefined ? { streamMode } : {}),
+     ...(desktopAuthless !== undefined ? { codexDesktopAuthless: desktopAuthless } : {}),
++    ...(clientCompaction !== undefined ? { codexClientCompaction: clientCompaction } : {}),
+   };
+   const result = await runtimeRequest("/api/settings", { method: "PUT", body: JSON.stringify(body) }, deps);
+   printData(result, wantsJson, ["System settings updated."]);
+diff --git a/src/codex/inject.ts b/src/codex/inject.ts
+index 2241d8422bc..b43e8076de0 100644
+--- a/src/codex/inject.ts
++++ b/src/codex/inject.ts
+@@ -175,6 +175,8 @@ export interface CodexRoutingTarget {
+    * and is never weakened by this flag.
+    */
+   desktopAuthless?: boolean;
++  /** Select the dedicated provider identity so Codex owns compaction locally. */
++  clientCompaction?: boolean;
+ }
+ 
+ function validateCodexRoutingTarget(target: CodexRoutingTarget): CodexRoutingTarget {
+@@ -198,14 +200,19 @@ function validateCodexRoutingTarget(target: CodexRoutingTarget): CodexRoutingTar
+   return { ...target, baseUrl: `${parsed.origin}/v1` };
+ }
+ 
+-/** Provider-table form is used for non-loopback admission and for the authless Desktop opt-in. */
++/** Provider-table form is used when auth, admission, or compaction policy needs a dedicated provider. */
+ function usesProviderTable(target: CodexRoutingTarget): boolean {
+-  return target.requiresAdmissionToken || target.desktopAuthless === true;
++  return target.requiresAdmissionToken
++    || target.desktopAuthless === true
++    || target.clientCompaction === true;
+ }
+ 
+ export function standaloneCodexRoutingTarget(
+   port: number,
+-  config?: Pick<OcxConfig, "hostname" | "unauthenticatedLoopbackListener" | "codexDesktopAuthless">,
++  config?: Pick<
++    OcxConfig,
++    "hostname" | "unauthenticatedLoopbackListener" | "codexDesktopAuthless" | "codexClientCompaction"
++  >,
+ ): CodexRoutingTarget {
+   const loopback = config?.unauthenticatedLoopbackListener;
+   const effectivePort = loopback?.enabled ? loopback.port : port;
+@@ -218,6 +225,9 @@ export function standaloneCodexRoutingTarget(
+     ...(config?.codexDesktopAuthless === true && !requiresAdmissionToken
+       ? { desktopAuthless: true }
+       : {}),
++    ...(config?.codexClientCompaction === true && !requiresAdmissionToken
++      ? { clientCompaction: true }
++      : {}),
+   };
+ }
+ 
+@@ -834,7 +844,7 @@ function buildProfileFileForTarget(
+   const host = new URL(origin).host;
+   // Design B (loopback): the reference/fallback file documents the root override form.
+   // Non-loopback keeps the legacy provider-table shape (built-in provider cannot carry
+-  // the x-opencodex-api-key env header); the authless Desktop opt-in shares that shape.
++  // the x-opencodex-api-key env header); explicit Desktop policies share that shape.
+   if (!usesProviderTable(target)) {
+     const lines = [
+       "# OpenCodex proxy fallback config (Design B)",
+@@ -1015,11 +1025,37 @@ export async function injectCodexConfig(
+     ? setRootModelCatalogPath(content, catalogPath)
+     : stripOpencodexCatalogPath(content);
+ 
+-  // Provider-table form: non-loopback admission (legacy) or the authless Desktop opt-in (#1107).
+-  const legacyMode = usesProviderTable(routingTarget);
++  // Provider-table form: non-loopback admission or an explicit Desktop policy.
++  const providerTableMode = usesProviderTable(routingTarget);
++  // Client compaction is the one table form that must not orphan existing threads. It changes
++  // the DEFAULT provider to `opencodex`, but a thread already tagged `openai` keeps resolving
++  // to Codex's built-in entry, and without the root override that entry is api.openai.com —
++  // the thread would resume outside this proxy and outside configured routing. Keeping the
++  // marker-owned root override alongside the table fixes that at the source: codex builds its
++  // provider map as merge_configured_model_providers(built_in_model_providers(openai_base_url),
++  // model_providers), so the override lands on the built-in `openai` entry when the map is
++  // built, independent of which id is the default, and the merge leaves that entry alone for
++  // every id except the two Amazon Bedrock ones. With the managed override in place both
++  // entries point at this proxy. That is a guarantee about the line we own: when the user owns
++  // the root line we inject nothing, and the built-in entry keeps whatever destination they
++  // chose, so an `openai`-tagged thread follows their configuration rather than this proxy.
++  //
++  // Re-tagging history was the alternative and it cannot be made durable: the length-preserving
++  // first-line repair cannot grow "openai" into "opencodex" without pre-existing padding, and
++  // codex re-appends that stale first line whenever it writes git or memory-mode metadata.
++  //
++  // Authless is excluded on purpose: its whole point is a provider that carries
++  // requires_openai_auth = false, and admission-token forms cannot use the root key at all.
++  // Those two forms therefore keep their existing behaviour, forward-tagging resume history with
++  // originals backed up, and that includes the case where a user enables authless and client
++  // compaction together. Only the compaction-only form skips the history unit.
++  const keepRootOverrideAlongsideTable = providerTableMode
++    && routingTarget.clientCompaction === true
++    && routingTarget.desktopAuthless !== true
++    && routingTarget.requiresAdmissionToken !== true;
+   let keptUserBaseUrl = false;
+   let keptUserRealtimeWsBaseUrl = false;
+-  if (legacyMode) {
++  if (providerTableMode) {
+     // Legacy (non-loopback) injection: the built-in openai provider cannot carry the
+     // x-opencodex-api-key env header, so keep the opencodex provider table + root re-tag.
+     // The authless opt-in needs the same table because only a dedicated provider can carry
+@@ -1031,6 +1067,14 @@ export async function injectCodexConfig(
+       content.trimEnd() +
+       "\n" +
+       buildProviderTableBlockForTarget(routingTarget, websocketsEnabled(config ?? {}));
++    // 3) Keep existing `openai`-tagged threads reaching the proxy (see above). Ownership rules
++    // are the Design B ones: a user's own root line is never replaced.
++    if (keepRootOverrideAlongsideTable) {
++      content = stripInjectedOpenaiBaseUrl(content);
++      const rootFallback = setRootOpenaiBaseUrlForTarget(content, routingTarget);
++      content = rootFallback.content;
++      keptUserBaseUrl = rootFallback.keptUserBaseUrl;
++    }
+   } else {
+     // Design B (loopback): a single root override; codex keeps its native `openai` provider id
+     // so thread history is never remapped. Any legacy form was already stripped above.
+@@ -1187,13 +1231,18 @@ export async function injectCodexConfig(
+     atomicWriteFile(CODEX_CONFIG_PATH, content);
+     atomicWriteFile(CODEX_PROFILE_PATH, profileContent);
+     markJournalInjectedState(content, profileContent, {
+-      // A root override is ours only in loopback Design B when no user-owned value won.
+-      injectedOpenaiBaseUrl: legacyMode || keptUserBaseUrl
++      // A root override is ours whenever we wrote one and no user-owned value won. That is
++      // loopback Design B, and now also the client-compaction form, which keeps the same
++      // marker-owned root line beside its provider table. Journaling it matters because the
++      // marker comment is not durable: the Codex app can reserialize config.toml and drop
++      // comments, and restore then has only the journaled value to tell our line from a user's
++      // (#1798). The other table forms never write the key, so they still record null.
++      injectedOpenaiBaseUrl: (providerTableMode && !keepRootOverrideAlongsideTable) || keptUserBaseUrl
+         ? null
+         : rootTomlString(content, "openai_base_url"),
+       // The sideband override is ours only when we wrote it this pass (never in legacy mode,
+       // never when the user owns either key).
+-      injectedRealtimeWsBaseUrl: legacyMode || keptUserBaseUrl || keptUserRealtimeWsBaseUrl
++      injectedRealtimeWsBaseUrl: providerTableMode || keptUserBaseUrl || keptUserRealtimeWsBaseUrl
+         ? null
+         : rootTomlString(content, REALTIME_WS_BASE_URL_KEY),
+       // This is the catalog artifact selected for this injection, even when config.toml
+@@ -1330,7 +1379,11 @@ export async function injectCodexConfig(
+   }
+   // Legacy mode still forward-tags history so re-tagged threads stay listable. Design B needs
+   // the opposite: a one-time migration of previously re-tagged threads BACK to openai (restore
+-  // machinery; cheap no-op when there is nothing to migrate).
++  // machinery; cheap no-op when there is nothing to migrate). The client-compaction opt-in keeps
++  // the root override alongside its table precisely so it does NOT have to touch history: an
++  // existing `openai`-tagged thread still reaches this proxy through the built-in entry. So it
++  // skips this unit, and future-only means what it says — no provider metadata is rewritten and
++  // no `ocx1:` payload is touched.
+   // History runs in a Worker under H, not on this thread.
+   //
+   // The three surfaces it touches — the SQLite rows, the backup manifest, and the
+@@ -1343,8 +1396,8 @@ export async function injectCodexConfig(
+     expectedDesiredEnabled: true,
+     operation: deriveCodexHistoryOperation({
+       direction: "apply",
+-      resumeHistory: config?.syncResumeHistory !== false,
+-      legacyMode,
++      resumeHistory: config?.syncResumeHistory !== false && !keepRootOverrideAlongsideTable,
++      legacyMode: providerTableMode,
+     }),
+   });
+   // A blocked or failed unit is reported, not silently counted as zero work:
+@@ -1375,17 +1428,41 @@ export async function injectCodexConfig(
+   const ejected = (history as { ejectedRows?: number }).ejectedRows ?? 0;
+   const migratedRows = (history.rows ?? 0) + ejected;
+   const historyMessage =
+-    config?.syncResumeHistory === false
++    keepRootOverrideAlongsideTable
++      ? (keptUserBaseUrl
++        ? `  Codex resume history: left unchanged; threads already tagged openai follow your own root openai_base_url, not the proxy.\n`
++        : `  Codex resume history: left unchanged; existing threads keep reaching the proxy through the retained openai_base_url override.\n`)
++      : config?.syncResumeHistory === false
+       ? `  Codex resume history: left unchanged (syncResumeHistory=false).\n`
+       : history.failed
+-        ? formatApplyHistoryFailure(historyOutcome, legacyMode)
+-        : legacyMode
++        ? formatApplyHistoryFailure(historyOutcome, providerTableMode)
++        : providerTableMode
+           ? `  Codex resume history: ${history.rows} thread(s) made visible for opencodex; originals backed up for restore.\n`
+           : migratedRows > 0
+             ? `  Codex resume history: restored original provider metadata for ${migratedRows} manifest-backed thread(s) (one-time).\n`
+             : `  Codex resume history: no backed-up metadata pending; untracked routed history left unchanged.\n`;
+-  // A user-owned root openai_base_url means we did NOT install routing — say so honestly
++  // A user-owned root openai_base_url means we did NOT install root routing — say so honestly
+   // instead of claiming the proxy route is active (catalog/fast_mode were still written).
++  //
++  // The client-compaction form writes a provider table as well, so "nothing was injected" would
++  // misdescribe the file it just produced: new threads do use the injected table. Report that
++  // mixed result on its own terms, and never tell the operator to delete a setting of theirs.
++  if (keptUserBaseUrl && keepRootOverrideAlongsideTable) {
++    return {
++      success: true,
++      ...(nativeSubagentDefaultsWarning ? { nativeSubagentDefaultsWarning } : {}),
++      message:
++        `Injected opencodex as default provider into Codex config (client-side compaction mode; ChatGPT auth remains required).\n` +
++        `  Your root openai_base_url was left exactly as you set it, so opencodex did not add its own.\n` +
++        catalogMessage +
++        historyMessage +
++        managedDefaultsMessage +
++        `  New threads use the injected opencodex provider and route through the proxy.\n` +
++        `  Threads already tagged openai resolve through Codex's built-in provider, which your root openai_base_url points at.\n` +
++        `  Remove that line and rerun 'ocx start' only if you want those threads on the proxy too.\n` +
++        `  Fallback: codex --profile opencodex (same behavior)`,
++    };
++  }
+   if (keptUserBaseUrl) {
+     return {
+       success: true,
+@@ -1403,7 +1480,9 @@ export async function injectCodexConfig(
+   }
+   const headline = routingTarget.desktopAuthless === true
+     ? `Injected opencodex as default provider into Codex config (authless Desktop mode: requires_openai_auth = false).\n`
+-    : legacyMode
++    : routingTarget.clientCompaction === true
++      ? `Injected opencodex as default provider into Codex config (client-side compaction mode; ChatGPT auth remains required).\n`
++    : providerTableMode
+       ? `Injected opencodex as default provider into Codex config.\n`
+       : `Pointed Codex's built-in openai provider at the opencodex proxy (openai_base_url + realtime sideband override).\n`;
+   return {
+@@ -1417,7 +1496,7 @@ export async function injectCodexConfig(
+       `  All models now route through opencodex proxy (like OpenRouter).\n` +
+       `  OpenAI models (gpt-5.5, etc.) are passed through to OpenAI.\n` +
+       `  Custom models route to their configured providers.\n` +
+-      (legacyMode
++      (providerTableMode
+         ? `  Fallback: codex --profile opencodex (same behavior)`
+         : `  Fallback reference: ${CODEX_PROFILE_PATH}`),
+   };
+diff --git a/src/config.ts b/src/config.ts
+index 8da89cbfdfb..8cfaf633918 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -1189,6 +1189,7 @@ const configSchema = z.object({
+   ).optional().catch(undefined),
+   codexShimAutoRestore: z.boolean().optional(),
+   codexDesktopAuthless: z.boolean().optional().catch(undefined),
++  codexClientCompaction: z.boolean().optional().catch(undefined),
+   pausedCodexAccountIds: z.array(z.string().regex(/^[a-zA-Z0-9._-]{1,64}$/)).optional(),
+   codexQuotaAutoRefresh: codexQuotaAutoRefreshSchema.optional().catch(undefined),
+   codexAccountNamespaces: codexAccountNamespacesSchema.optional(),
+diff --git a/src/server/management/config-routes.ts b/src/server/management/config-routes.ts
+index 08f4b85d27d..527178ba0fe 100644
+--- a/src/server/management/config-routes.ts
++++ b/src/server/management/config-routes.ts
+@@ -329,6 +329,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
+       oauthOpenBrowser: config.oauthOpenBrowser !== false,
+       // Absent means off (today's Design B injection), so the GUI/CLI render a plain switch.
+       codexDesktopAuthless: config.codexDesktopAuthless === true,
++      // Absent keeps Design B remote compaction; true selects the dedicated provider identity.
++      codexClientCompaction: config.codexClientCompaction === true,
+       startupHealth: await readStartupHealth(config),
+       codexRuntime: {
+         path: displayCodexRuntimePath(resolved.runtime.command),
+@@ -419,6 +421,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
+       ultraFastTier?: unknown;
+       codexMainAccountHardLock?: unknown;
+       codexDesktopAuthless?: unknown;
++      codexClientCompaction?: unknown;
+     };
+     if (body.codexAutoStart === undefined
+       && body.streamMode === undefined
+@@ -429,8 +432,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
+       && body.showCodexSparkQuota === undefined
+       && body.ultraFastTier === undefined
+       && body.codexMainAccountHardLock === undefined
+-      && body.codexDesktopAuthless === undefined) {
+-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, showCodexSparkQuota, ultraFastTier, codexMainAccountHardLock, or codexDesktopAuthless" }, 400);
++      && body.codexDesktopAuthless === undefined
++      && body.codexClientCompaction === undefined) {
++      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, showCodexSparkQuota, ultraFastTier, codexMainAccountHardLock, codexDesktopAuthless, or codexClientCompaction" }, 400);
+     }
+     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
+       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
+@@ -457,6 +461,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
+     if (body.codexDesktopAuthless !== undefined && typeof body.codexDesktopAuthless !== "boolean") {
+       return jsonResponse({ error: "codexDesktopAuthless boolean is required" }, 400);
+     }
++    if (body.codexClientCompaction !== undefined && typeof body.codexClientCompaction !== "boolean") {
++      return jsonResponse({ error: "codexClientCompaction boolean is required" }, 400);
++    }
+     let quotaAutoRefreshChange: { id: string; window: "fiveHour" | "weekly"; enabled: boolean } | undefined;
+     if (body.codexQuotaAutoRefresh !== undefined) {
+       if (!isPlainRecord(body.codexQuotaAutoRefresh)) {
+@@ -509,10 +516,13 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
+       hasCodexMainAccountHardLock: Object.hasOwn(config, "codexMainAccountHardLock"),
+       codexDesktopAuthless: config.codexDesktopAuthless,
+       hasCodexDesktopAuthless: Object.hasOwn(config, "codexDesktopAuthless"),
++      codexClientCompaction: config.codexClientCompaction,
++      hasCodexClientCompaction: Object.hasOwn(config, "codexClientCompaction"),
+     };
+     const pickerWasEnabled = codexAccountPickerEnabled(config);
+     let pickerIsEnabled = pickerWasEnabled;
+     const authlessWasEnabled = config.codexDesktopAuthless === true;
++    const clientCompactionWasEnabled = config.codexClientCompaction === true;
+     try {
+       if (typeof body.codexAutoStart === "boolean") {
+         config.codexAutoStart = body.codexAutoStart;
+@@ -547,6 +557,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
+       else if (body.codexMainAccountHardLock === false) deleteConfigTopLevelKey(config, "codexMainAccountHardLock");
+       if (body.codexDesktopAuthless === true) config.codexDesktopAuthless = true;
+       else if (body.codexDesktopAuthless === false) deleteConfigTopLevelKey(config, "codexDesktopAuthless");
++      if (body.codexClientCompaction === true) config.codexClientCompaction = true;
++      else if (body.codexClientCompaction === false) deleteConfigTopLevelKey(config, "codexClientCompaction");
+       if (quotaAutoRefreshChange) {
+         const { id, window, enabled } = quotaAutoRefreshChange;
+         const setting = { ...(config.codexQuotaAutoRefresh?.[id] ?? {}) };
+@@ -592,16 +604,22 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
+       if (previousSettings.hasCodexDesktopAuthless) {
+         config.codexDesktopAuthless = previousSettings.codexDesktopAuthless;
+       } else deleteConfigTopLevelKey(config, "codexDesktopAuthless");
++      if (previousSettings.hasCodexClientCompaction) {
++        config.codexClientCompaction = previousSettings.codexClientCompaction;
++      } else deleteConfigTopLevelKey(config, "codexClientCompaction");
+       throw error;
+     }
+     if (typeof body.appOwnedMemoryBudgetMb === "number") {
+       configureAppOwnedMemoryBudget(resolveAppOwnedMemoryBudgetBytes(body.appOwnedMemoryBudgetMb));
+       enforceAppOwnedMemoryBudget();
+     }
+-    // The authless switch changes the injected config.toml shape, so converge now rather than
+-    // waiting for the next start; the injector re-reads config and rewrites the form.
++    // Both Desktop compatibility switches change the injected config.toml shape, so converge now
++    // rather than waiting for the next start; the injector re-reads config and rewrites the form.
+     const authlessIsEnabled = config.codexDesktopAuthless === true;
+-    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled || authlessWasEnabled !== authlessIsEnabled
++    const clientCompactionIsEnabled = config.codexClientCompaction === true;
++    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled
++      || authlessWasEnabled !== authlessIsEnabled
++      || clientCompactionWasEnabled !== clientCompactionIsEnabled
+       ? await convergeCodexCatalog()
+       : undefined;
+     const catalogRefreshPending = catalogRefresh
+@@ -620,6 +638,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
+       catalogRefreshPending,
+       showCodexSparkQuota: config.showCodexSparkQuota === true,
+       codexDesktopAuthless: authlessIsEnabled,
++      codexClientCompaction: clientCompactionIsEnabled,
+       codexMainAccountHardLock: config.codexMainAccountHardLock === true,
+       mainAccountHardLock: getMainAccountHardLockStatus(config),
+       startupHealth: await readStartupHealth(config),
+diff --git a/src/types/config.ts b/src/types/config.ts
+index fc9a55a8fa8..7baadbfadf2 100644
+--- a/src/types/config.ts
++++ b/src/types/config.ts
+@@ -693,6 +693,12 @@ export interface OcxConfig {
+    * non-loopback binds, whose admission token contract is unchanged.
+    */
+   codexDesktopAuthless?: boolean;
++  /**
++   * Opt into Codex-owned client compaction while keeping OpenCodex routing. On an authenticated
++   * loopback bind, inject the dedicated `opencodex` model provider instead of overriding the
++   * built-in `openai` provider, so Codex does not select native remote compaction. Default off.
++   */
++  codexClientCompaction?: boolean;
+   /**
+    * Compatibility mode: temporarily rewrite Codex resume-history metadata while the proxy is active
+    * so Codex App can show old OpenAI chats and opencodex-created exec chats under its default
+diff --git a/tests/cli/cli-headless-parity.test.ts b/tests/cli/cli-headless-parity.test.ts
+index 78f0cc04a1f..5594d44a594 100644
+--- a/tests/cli/cli-headless-parity.test.ts
++++ b/tests/cli/cli-headless-parity.test.ts
+@@ -13,12 +13,30 @@ import { handleProviderRuntimeCommand } from "../../src/cli/provider-runtime";
+ import { providerQuotaLine } from "../../src/cli/account-extended";
+ import { formatAccountTable } from "../../src/cli/account";
+ import { handleConnectCommand } from "../../src/cli/connect";
++import { handleSystemCommand } from "../../src/cli/system-command";
+ import { removeTreeWithRetry } from "../helpers/remove-tree";
+ import { repoPath } from "../helpers/repo-root";
+ 
+ type Recorded = { path: string; method: string; body: unknown };
+ const servers: Array<ReturnType<typeof Bun.serve>> = [];
+ 
++describe("ocx system settings client compaction", () => {
++  test("persists the explicit boolean through the shared settings endpoint", async () => {
++    const { requests, deps } = fakeRuntime((_req, body) => ({ ok: true, ...body }));
++    const logSpy = spyOn(console, "log").mockImplementation(() => {});
++    try {
++      expect(await handleSystemCommand(["settings", "--client-compaction", "on"], deps)).toBe(0);
++      expect(requests).toEqual([{
++        path: "/api/settings",
++        method: "PUT",
++        body: { codexClientCompaction: true },
++      }]);
++    } finally {
++      logSpy.mockRestore();
++    }
++  });
++});
++
+ describe("ocx agent sidecar --list (#2188)", () => {
+   test("web --list prints the server's webSearchModels — the GUI's exact list", async () => {
+     const { requests, deps } = fakeRuntime(req => {
+diff --git a/tests/codex-integration/codex-inject-integration.test.ts b/tests/codex-integration/codex-inject-integration.test.ts
+index 3a5345098e1..827251129e8 100644
+--- a/tests/codex-integration/codex-inject-integration.test.ts
++++ b/tests/codex-integration/codex-inject-integration.test.ts
+@@ -879,6 +879,202 @@ describe("injectCodexConfig integration (Design B)", () => {
+     expect(restored).toContain('model = "gpt-5.5"');
+   });
+ 
++  test("client compaction opt-in (#3978): writes an authenticated provider table and returns to Design B", () => {
++    writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
++
++    const enabled = runInject(codexHome, ocxHome, JSON.stringify({ codexClientCompaction: true }));
++    expect(enabled.status).toBe(0);
++    expect(String(JSON.parse(enabled.stdout).message)).toContain("client-side compaction mode");
++    const providerTable = readFileSync(join(codexHome, "config.toml"), "utf8");
++    expect(providerTable).toContain('model_provider = "opencodex"');
++    expect(providerTable).toContain("[model_providers.opencodex]");
++    expect(providerTable).toContain("requires_openai_auth = true");
++    expect(providerTable).not.toContain("requires_openai_auth = false");
++    // The root override is retained next to the table, which is what keeps threads still tagged
++    // `openai` resolving to this proxy instead of to api.openai.com.
++    expect(providerTable).toContain('openai_base_url = "http://127.0.0.1:10100/v1"');
++
++    expect(runInject(codexHome, ocxHome).status).toBe(0);
++    const designB = readFileSync(join(codexHome, "config.toml"), "utf8");
++    expect(designB).toContain(DESIGN_B_BLOCK);
++    expect(designB).not.toContain("[model_providers.opencodex]");
++    expect(designB).not.toContain('model_provider = "opencodex"');
++    // Disabling leaves exactly one root override, not the table form's copy plus a new one.
++    expect(designB.match(/openai_base_url/g)?.length).toBe(1);
++  });
++
++  test("client compaction never replaces a user-owned root override", () => {
++    // The retention is marker-owned like every other injected root line. When the user owns
++    // that line, nothing is injected and their destination stands. The guarantee that an
++    // `openai`-tagged thread reaches this proxy therefore holds for the managed override only;
++    // a user pointing the built-in provider elsewhere keeps pointing it there.
++    const userOwned = 'openai_base_url = "https://user.example/v1"\nmodel = "gpt-5.5"\n';
++    writeFileSync(join(codexHome, "config.toml"), userOwned, "utf8");
++
++    const enabled = runInject(codexHome, ocxHome, JSON.stringify({ codexClientCompaction: true }));
++    expect(enabled.status).toBe(0);
++
++    const config = readFileSync(join(codexHome, "config.toml"), "utf8");
++    expect(config).toContain('openai_base_url = "https://user.example/v1"');
++    expect(config).not.toContain('openai_base_url = "http://127.0.0.1:10100/v1"');
++    expect(config.match(/openai_base_url/g)?.length).toBe(1);
++    // The opt-in itself still applies: new threads default to the proxy provider.
++    expect(config).toContain('model_provider = "opencodex"');
++    expect(config).toContain("[model_providers.opencodex]");
++    // The user's line must never be journaled as ours, or a later restore would strip it.
++    const journal = JSON.parse(readFileSync(join(codexHome, "opencodex-journal.json"), "utf8"));
++    expect(journal.injectedOpenaiBaseUrl).toBeNull();
++
++    // The reported result has to match the file that was just written. The old root-only
++    // warning claimed nothing was injected and told the operator to delete a valid setting,
++    // while the history line claimed those threads still reached the proxy. Both were wrong
++    // for this mixed configuration.
++    const message = String(JSON.parse(enabled.stdout).message);
++    expect(message).toContain("Injected opencodex as default provider");
++    expect(message).not.toContain("Codex routing NOT injected");
++    expect(message).not.toContain("remove your openai_base_url line");
++    expect(message).toContain("left exactly as you set it");
++    expect(message).toContain("follow your own root openai_base_url, not the proxy");
++  });
++
++  test("the managed override keeps reporting proxy routing for existing threads", () => {
++    // Control for the case above: with no user-owned line, opencodex writes the root override
++    // itself, so the proxy claim is accurate and the root-only warning must not appear.
++    writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
++
++    const enabled = runInject(codexHome, ocxHome, JSON.stringify({ codexClientCompaction: true }));
++    expect(enabled.status).toBe(0);
++
++    const config = readFileSync(join(codexHome, "config.toml"), "utf8");
++    expect(config).toContain('openai_base_url = "http://127.0.0.1:10100/v1"');
++
++    const message = String(JSON.parse(enabled.stdout).message);
++    expect(message).toContain("keep reaching the proxy through the retained openai_base_url override");
++    expect(message).not.toContain("Codex routing NOT injected");
++    expect(message).not.toContain("not the proxy");
++  });
++
++  test("the retained root override is journaled so a comment-dropping rewrite can still restore", () => {
++    writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
++    expect(runInject(codexHome, ocxHome, JSON.stringify({ codexClientCompaction: true })).status).toBe(0);
++
++    // The marker comment is not durable: the app can reserialize config.toml and drop comments,
++    // after which only the journaled value distinguishes our line from a user's (#1798).
++    const journal = JSON.parse(readFileSync(join(codexHome, "opencodex-journal.json"), "utf8"));
++    expect(journal.injectedOpenaiBaseUrl).toBe("http://127.0.0.1:10100/v1");
++
++    const rewritten = readFileSync(join(codexHome, "config.toml"), "utf8")
++      .split("\n").filter(line => !line.startsWith("#")).join("\n");
++    writeFileSync(join(codexHome, "config.toml"), rewritten, "utf8");
++    expect(runRestore(codexHome, ocxHome).status).toBe(0);
++    const restored = readFileSync(join(codexHome, "config.toml"), "utf8");
++    expect(restored).not.toContain("openai_base_url");
++    expect(restored).not.toContain("[model_providers.opencodex]");
++  });
++
++  test("authless together with client compaction keeps the authless form, root key and all", () => {
++    writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
++    const sessionsDir = join(codexHome, "sessions");
++    mkdirSync(sessionsDir, { recursive: true });
++    const rolloutPath = join(sessionsDir, "rollout-authless.jsonl");
++    writeFileSync(rolloutPath, `${JSON.stringify({
++      type: "session_meta",
++      payload: { id: "thread-authless", model_provider: "openai" },
++    })}\n`, "utf8");
++    const db = new Database(join(codexHome, "state_5.sqlite"));
++    db.run(`CREATE TABLE threads (
++      id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, model_provider TEXT NOT NULL,
++      source TEXT, first_user_message TEXT, has_user_event INTEGER
++    )`);
++    db.run("INSERT INTO threads VALUES ('thread-authless', ?, 'openai', 'cli', 'hello', 1)", rolloutPath);
++    db.close();
++
++    const enabled = runInject(codexHome, ocxHome, JSON.stringify({
++      codexClientCompaction: true,
++      codexDesktopAuthless: true,
++    }));
++    expect(enabled.status).toBe(0);
++
++    // Authless is the stronger form and cannot carry the root key, so it keeps its existing
++    // shape: no root override, and resume history is forward-tagged with originals backed up.
++    const config = readFileSync(join(codexHome, "config.toml"), "utf8");
++    expect(config).toContain("requires_openai_auth = false");
++    expect(config).not.toContain("openai_base_url");
++    const verifier = new Database(join(codexHome, "state_5.sqlite"), { readonly: true });
++    expect(verifier.query("SELECT model_provider FROM threads WHERE id = 'thread-authless'").get())
++      .toEqual({ model_provider: "opencodex" });
++    verifier.close();
++  });
++  test("client compaction opt-in leaves pre-existing ocx1 resume history byte-for-byte unchanged", () => {
++    writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
++    const sessionsDir = join(codexHome, "sessions");
++    mkdirSync(sessionsDir, { recursive: true });
++    const rolloutPath = join(sessionsDir, "rollout-ocx1.jsonl");
++    const rollout = `${JSON.stringify({
++      type: "compacted",
++      payload: {
++        replacement_history: [{
++          type: "compaction",
++          encrypted_content: "ocx1:cG9ydGFibGUgc3VtbWFyeQ==",
++        }],
++      },
++    })}\n`;
++    writeFileSync(rolloutPath, rollout, "utf8");
++    const db = new Database(join(codexHome, "state_5.sqlite"));
++    db.run(`CREATE TABLE threads (
++      id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, model_provider TEXT NOT NULL,
++      source TEXT, first_user_message TEXT, has_user_event INTEGER
++    )`);
++    db.run("INSERT INTO threads VALUES ('thread-ocx1', ?, 'opencodex', 'cli', 'hello', 1)", rolloutPath);
++    db.close();
++
++    const enabled = runInject(codexHome, ocxHome, JSON.stringify({ codexClientCompaction: true }));
++    expect(enabled.status).toBe(0);
++    expect(String(JSON.parse(enabled.stdout).message)).toContain("left unchanged");
++    expect(readFileSync(rolloutPath, "utf8")).toBe(rollout);
++    const verifier = new Database(join(codexHome, "state_5.sqlite"), { readonly: true });
++    expect(verifier.query("SELECT model_provider FROM threads WHERE id = 'thread-ocx1'").get())
++      .toEqual({ model_provider: "opencodex" });
++    verifier.close();
++  });
++
++  test("client compaction opt-in keeps existing Design B threads routed without touching history", () => {
++    writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
++    const sessionsDir = join(codexHome, "sessions");
++    mkdirSync(sessionsDir, { recursive: true });
++    const rolloutPath = join(sessionsDir, "rollout-designb.jsonl");
++    const rollout = `${JSON.stringify({
++      type: "session_meta",
++      payload: { id: "thread-designb", model_provider: "openai" },
++    })}\n`;
++    writeFileSync(rolloutPath, rollout, "utf8");
++    const db = new Database(join(codexHome, "state_5.sqlite"));
++    db.run(`CREATE TABLE threads (
++      id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, model_provider TEXT NOT NULL,
++      source TEXT, first_user_message TEXT, has_user_event INTEGER
++    )`);
++    db.run("INSERT INTO threads VALUES ('thread-designb', ?, 'openai', 'cli', 'hello', 1)", rolloutPath);
++    db.close();
++
++    const enabled = runInject(codexHome, ocxHome, JSON.stringify({ codexClientCompaction: true }));
++    expect(enabled.status).toBe(0);
++
++    // The thread stays tagged `openai` and its rollout is untouched. It keeps reaching the proxy
++    // because the injection retains the root override next to the provider table, so codex's
++    // built-in `openai` entry still resolves to this proxy. Re-tagging would have been the other
++    // way to keep it routed, but the length-preserving first-line repair cannot grow "openai"
++    // into "opencodex", and codex re-appends that stale first line on its next metadata write.
++    const config = readFileSync(join(codexHome, "config.toml"), "utf8");
++    expect(config).toContain('model_provider = "opencodex"');
++    expect(config).toContain("[model_providers.opencodex]");
++    expect(config).toContain("openai_base_url");
++    expect(readFileSync(rolloutPath, "utf8")).toBe(rollout);
++    const verifier = new Database(join(codexHome, "state_5.sqlite"), { readonly: true });
++    expect(verifier.query("SELECT model_provider FROM threads WHERE id = 'thread-designb'").get())
++      .toEqual({ model_provider: "openai" });
++    verifier.close();
++  });
++
+   test("authless Desktop opt-in never weakens non-loopback admission", () => {
+     writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
+ 
+diff --git a/tests/codex-integration/codex-inject.test.ts b/tests/codex-integration/codex-inject.test.ts
+index b6be3c2f697..5208e936534 100644
+--- a/tests/codex-integration/codex-inject.test.ts
++++ b/tests/codex-integration/codex-inject.test.ts
+@@ -70,6 +70,56 @@ describe("Codex config injection", () => {
+     });
+   });
+ 
++  describe("Codex client compaction opt-in (#3978)", () => {
++    test.each([undefined, false])("disabled preference %s keeps authenticated loopback on Design B", (codexClientCompaction) => {
++      const target = standaloneCodexRoutingTarget(10100, { codexClientCompaction });
++      expect(target.clientCompaction).toBeUndefined();
++      expect(buildProfileFile(target, null)).toBe(buildProfileFile(10100, null));
++    });
++
++    test("loopback opt-in selects the dedicated provider without disabling ChatGPT auth", () => {
++      const target = standaloneCodexRoutingTarget(10100, { codexClientCompaction: true });
++      expect(target).toMatchObject({
++        requiresAdmissionToken: false,
++        clientCompaction: true,
++      });
++      expect(target.desktopAuthless).toBeUndefined();
++
++      const profile = buildProfileFile(target, "/tmp/opencodex-catalog.json");
++      expect(profile).toContain('model_provider = "opencodex"');
++      expect(profile).toContain("requires_openai_auth = true");
++      // The reference profile documents the provider table only. The root override that keeps
++      // existing `openai`-tagged threads on the proxy is a config.toml global, not a profile
++      // key, so the injected config carries it and this file does not.
++      expect(profile).not.toContain("openai_base_url");
++      // The dedicated provider-table form cannot carry the realtime voice
++      // sideband (it needs the admission-token header): opting in must not
++      // inject experimental_realtime_ws_base_url.
++      expect(profile).not.toContain("experimental_realtime_ws_base_url");
++    });
++
++    test("authless remains the stronger provider-table policy when both preferences are enabled", () => {
++      const target = standaloneCodexRoutingTarget(10100, {
++        codexClientCompaction: true,
++        codexDesktopAuthless: true,
++      });
++      const profile = buildProfileFile(target, null);
++      expect(profile).toContain('model_provider = "opencodex"');
++      expect(profile).toContain("requires_openai_auth = false");
++    });
++
++    test("non-loopback admission remains token-protected", () => {
++      const target = standaloneCodexRoutingTarget(10100, {
++        hostname: "192.168.1.20",
++        codexClientCompaction: true,
++      });
++      expect(target.requiresAdmissionToken).toBe(true);
++      const profile = buildProfileFile(target, null);
++      expect(profile).toContain('env_key = "OPENCODEX_API_AUTH_TOKEN"');
++      expect(profile).toContain("requires_openai_auth = true");
++    });
++  });
++
+   test("explicit HTTPS target emits exact provider destination and admission env", () => {
+     const target = {
+       baseUrl: "https://hub.example.test/v1",
+diff --git a/tests/config/settings-stream-mode.test.ts b/tests/config/settings-stream-mode.test.ts
+index 272e45be6ae..514ba6110a2 100644
+--- a/tests/config/settings-stream-mode.test.ts
++++ b/tests/config/settings-stream-mode.test.ts
+@@ -379,6 +379,42 @@ describe("PUT /api/settings", () => {
+     expect(bad!.status).toBe(400);
+   });
+ 
++  test("codexClientCompaction (#3978): absent reports false, changes converge once, and disable deletes the key", async () => {
++    const config = baseConfig();
++    const absent = await (await getSettings(config))!.json() as { codexClientCompaction?: boolean };
++    expect(absent.codexClientCompaction).toBe(false);
++
++    let convergences = 0;
++    let saved: OcxConfig | undefined;
++    const on = await putSettings(config, { codexClientCompaction: true }, {
++      saveConfigPreservingClaudeCode: next => { saved = next; },
++      createManagementConvergeCodex: catalogConvergenceFactory(() => { convergences += 1; }),
++    });
++    expect(on!.status).toBe(200);
++    expect(await on!.json()).toMatchObject({ codexClientCompaction: true });
++    expect(saved?.codexClientCompaction).toBe(true);
++    expect(convergences).toBe(1);
++
++    const same = await putSettings(config, { codexClientCompaction: true }, {
++      saveConfigPreservingClaudeCode: () => {},
++      createManagementConvergeCodex: catalogConvergenceFactory(() => { convergences += 1; }),
++    });
++    expect(same!.status).toBe(200);
++    expect(convergences).toBe(1);
++
++    const off = await putSettings(config, { codexClientCompaction: false }, {
++      saveConfigPreservingClaudeCode: next => { saved = next; },
++      createManagementConvergeCodex: catalogConvergenceFactory(() => { convergences += 1; }),
++    });
++    expect(off!.status).toBe(200);
++    expect(await off!.json()).toMatchObject({ codexClientCompaction: false });
++    expect(Object.hasOwn(saved!, "codexClientCompaction")).toBe(false);
++    expect(convergences).toBe(2);
++
++    const bad = await putSettings(config, { codexClientCompaction: "yes" });
++    expect(bad!.status).toBe(400);
++  });
++
+   test("account-picker disable does not initialize an empty namespace map", async () => {
+     const config = baseConfig();
+     let convergences = 0;
