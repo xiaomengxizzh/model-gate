@@ -39,7 +39,7 @@ import { planTargetHeaders, targetDeny, legacyPassthroughRequested } from './cod
 import { handleCodexApi, isCodexApiPath } from './codex/api.js'
 import { handleAggregationApi, isAggregationApiPath } from './aggregation/api.js'
 import { registerConfigRoot, sha256Hex } from './codex/config.js'
-import { attachResponsesWebSocket } from './responses-ws.js'
+import { attachResponsesWebSocket, looksLikeSse } from './responses-ws.js'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
@@ -1164,6 +1164,56 @@ function p0bFailClosedOnReconstructMiss (state) {
   const v = state && state.cfg && state.cfg.server && state.cfg.server.p0bFailClosedOnReconstructMiss
   return v !== false
 }
+
+// ── G2 治本：工具结果续轮连续性（默认 ON，仅显式布尔 false 回滚） ────────────────
+// 根因：上游订阅返回 200 SSE 正文但 content-type 为空；仅按 ct 判分支会把 SSE 正文当
+// application/json 处理 → JSON 分支 j.id 解析失败、captureSink 从不挂载 → 真实 response.id
+// 从未登记 → 下一轮 previous_response_id（真实 50hex）reconstruct 未命中 → 孤儿
+// function_call_output → 不可诊断 400。治本让 SSE 正文无论 ct 都按 SSE 分支走并登记真实 id。
+// 与止损 p0bFailClosedOnReconstructMiss 独立：治本成功则不触发止损；治本遗漏由止损兜底。
+// 默认语义（宽松读取）：只有布尔 false 显式关闭；undefined/null/0/'false'/其它一律默认 ON。
+function continuationRootFixOn (state) {
+  const v = state && state.cfg && state.cfg.server && state.cfg.server.continuationRootFix
+  return v !== false
+}
+// 只读前缀嗅探：从上游流读首个分块判定 SSE，立即 unshift 放回原流，后续 SSE/JSON 分支
+// 照常消费原流。不改字节/不丢数据；探测上限由调用方截取（与 responses-ws.js:570 同款前缀）。
+function peekFirstChunk (stream, signal) {
+  return new Promise((resolve) => {
+    let settled = false
+    let chunk = null
+    const cleanup = () => {
+      try { stream.removeListener('readable', onReadable) } catch {}
+      try { stream.removeListener('end', onEnd) } catch {}
+      try { stream.removeListener('error', onError) } catch {}
+      try { if (signal) signal.removeEventListener('abort', onAbort) } catch {}
+    }
+    const finish = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(chunk)
+    }
+    const onReadable = () => {
+      if (settled) return
+      let c = null
+      try { c = stream.read() } catch {}
+      if (c) {
+        chunk = c
+        try { stream.unshift(c) } catch {}
+        finish()
+      }
+    }
+    const onEnd = () => finish()
+    const onError = () => finish()
+    const onAbort = () => finish()
+    if (signal && signal.aborted) { finish(); return }
+    stream.on('readable', onReadable)
+    stream.once('end', onEnd)
+    stream.once('error', onError)
+    if (signal) { try { signal.addEventListener('abort', onAbort, { once: true }) } catch {} }
+  })
+}
 // corr 用独立 salt 的 hashId，便于定位；绝不携带明文 thread/rid/prompt/id。
 function p0bCorr (req, continuation) {
   const h = (req && req.headers) || {}
@@ -1201,7 +1251,7 @@ function causalAliasOnRegister (continuation, realId, log) {
 export { causalAliasOnRegister }
 // 仅测试用：清空实验别名状态，保证用例隔离。
 export function resetCausalExperiment () { causalAliases.clear() }
-export { CAUSAL_SWITCH_KEYS, causalSnapshot, causalAnyOn, causalAliasLink, causalAliasResolve, p0bFailClosedOnReconstructMiss, p0bCorr }
+export { CAUSAL_SWITCH_KEYS, causalSnapshot, causalAnyOn, causalAliasLink, causalAliasResolve, p0bFailClosedOnReconstructMiss, p0bCorr, continuationRootFixOn, peekFirstChunk }
 
 // V2-08（A2 实测缺陷）：429 时按 models.*.fallbacks 换到**另一个授权域**的供应商 = 静默换供应商/套餐。
 // 同域 fallback 保留既有行为；只要后续存在跨域候选就按真实 429 返回。
@@ -2367,15 +2417,27 @@ async function proxyOfficialResponses(state, budget, log, opts) {
         const sg = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
         sg.requests = (sg.requests || 0) + 1
         markOk(state, pid); noteAffinity(state, modelName, pid)
-        const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
-        if (/text\/event-stream/i.test(ct)) {
+        const ctRaw = (up.headers && up.headers['content-type']) || ''
+        const ctDeclaredSse = /text\/event-stream/i.test(ctRaw)
+        const ct = ctRaw || 'application/json; charset=utf-8'
+        const rootFixOn = continuationRootFixOn(state)
+        // G2 治本 #1：ct 缺失/非 event-stream 时按正文前缀嗅探；SSE 正文不得因 ct 误判落入 JSON 分支。
+        // 仅治本开启且有续轮上下文时嗅探；关闭时与 cc6a797 的 ct 分支逐字节一致。
+        const sniffChunk = (rootFixOn && !ctDeclaredSse && continuation) ? await peekFirstChunk(up.stream, budget.signal) : null
+        const sseByBody = !!(sniffChunk && looksLikeSse((Buffer.isBuffer(sniffChunk) ? sniffChunk : Buffer.from(String(sniffChunk))).slice(0, 512).toString('utf8')))
+        const useSse = ctDeclaredSse || sseByBody
+        // 正文确为 SSE 而 ct 误标时纠正写回下游的 contentType，避免下游口径分裂。
+        const correctedCt = (rootFixOn && sseByBody && !ctDeclaredSse) ? 'text/event-stream; charset=utf-8' : ct
+        if (useSse) {
           // P2/P4（SSE）：首帧探针 + 终态观察由流路径内嵌，原样透传，不改字节/不改协议。
           // 补丁⑧：off 携带 branch/official 供 A 点 applyevent 与 B 点 sinkattach 标注分支与官方目标。
           const offBranch = (codexRoute && codexPlan) ? 'codex' : 'raw'
           const offMeta = offOn ? { branch: offBranch, official: identity.kind === 'official' } : null
           const off = offOn ? { corr: offCorr, t0: offT0, branch: offBranch, official: identity.kind === 'official', tap: offStructTapSSE(log, offCorr, offT0, offMeta) } : null
+          // G2 治本 #1：纠正写回下游（WS 桥）的 content-type；无嗅探命中时不传 extra，保持原头。
+          const extraHeaders = (rootFixOn && sseByBody && !ctDeclaredSse) ? { 'content-type': correctedCt } : undefined
           if (codexRoute && codexPlan) return await streamCodexResponse(state, budget, log, { up, res, route: codexRoute, plan: codexPlan, model: body.model, modelName, pid, sg, prov, continuation, off })
-          writeUpstreamHeaders(res, up)
+          writeUpstreamHeaders(res, up, extraHeaders)
           await streamRawResponses(res, up.stream, budget, continuation, log, off)
           return { streamed: true }
         }
@@ -2392,24 +2454,43 @@ async function proxyOfficialResponses(state, budget, log, opts) {
           // 补丁⑧ A 点（JSON 分支）：事件进入分发（kind=json，n=1）。
           const offJson = { branch: 'json', official: identity.kind === 'official', corr: offCorr }
           offStructLog(log, 'applyevent', offCorr, offStructApplyFields(offJson, j, 1, 'json'))
-          // 补丁⑧ B 点（JSON 分支）：该分支从不挂 captureSink（直接 recordContinuation）→ attached=0。
-          offStructSinkAttach(log, offJson, 'json', false, !!continuation)
+          // 补丁⑧ B 点：治本开启时 JSON 分支也挂 captureSink（attached=1）；关闭时仍为旧行为 attached=0。
+          offStructSinkAttach(log, offJson, 'json', !!(continuation && rootFixOn), !!continuation)
         }
         if (continuation) {
           const causalJson = continuation.causal || null
-          if (j && typeof j === 'object' && typeof j.id === 'string' && j.id) {
-            recordContinuation({ responseId: j.id, prevId: continuation.prevId, input: continuation.canonicalInput, output: Array.isArray(j.output) ? j.output : [], model: continuation.model, thread: continuation.thread, status: j.status || 'completed' })
-            // 补丁⑨ switch bridgeIdUseRealPrev：登记时建立 prev ↔ 真实 response id 双向别名（仅实验态）。
-            causalAliasOnRegister(continuation, j.id, log)
-          } else if (causalJson && causalJson.idRegisterFromClientPrev && continuation.rawPrevId) {
-            // 补丁⑨ switch idRegisterFromClientPrev：官方续轮响应体空/无 j.id 时，改用客户端
-            // previous_response_id（真实 50hex id）作为 key 登记，使下一轮 reconstruct 能命中。
-            const rec = recordContinuation({ responseId: continuation.rawPrevId, prevId: continuation.prevId, input: continuation.canonicalInput, output: [], model: continuation.model, thread: continuation.thread, status: (j && typeof j.status === 'string') ? j.status : 'completed' })
-            causalLog(log, 'register_from_prev', causalJson.corr, ['recorded=' + (rec.recorded ? '1' : '0'), 'idLevel=' + offStructIdLevel(continuation.rawPrevId)])
+          if (rootFixOn) {
+            // G2 治本 #2/#3：所有 Responses 响应统一经 captureSink 登记，消除"JSON 分支 attached=0 by
+            // construction"盲区。登记键取 cap.responseId——与 WS 桥从同一正文捕获并回写给 codex 的
+            // 真实 id 同源；拿不到真实 id 就不登记（fail-closed），绝不写合成/prev 空条目覆盖真实 id。
+            const capSink = createCaptureSink()
+            const headText = buf.toString('utf8').replace(/^\uFEFF/, '').replace(/^\s+/, '').slice(0, 512)
+            if (looksLikeSse(headText)) capSink.write(buf)
+            else capSink.captureJson(j || tryParse(buf))
+            const cap = capSink.finish()
+            if (offOn) offStructSinkRecv(log, { branch: 'json', official: identity.kind === 'official', corr: offCorr }, 'json', cap)
+            if (cap && cap.responseId) {
+              const regStatus = cap.status || ((j && typeof j.status === 'string') ? j.status : 'completed')
+              recordContinuation({ responseId: cap.responseId, prevId: continuation.prevId, input: continuation.canonicalInput, output: Array.isArray(cap.output) ? cap.output : [], model: continuation.model, thread: continuation.thread, status: regStatus })
+              causalAliasOnRegister(continuation, cap.responseId, log)
+            } else if (causalJson && causalJson.idRegisterFromClientPrev && continuation.rawPrevId) {
+              // 保留补丁⑨实验语义：sink 也拿不到 id 时才用客户端 prev 兜底登记。
+              const rec = recordContinuation({ responseId: continuation.rawPrevId, prevId: continuation.prevId, input: continuation.canonicalInput, output: [], model: continuation.model, thread: continuation.thread, status: (j && typeof j.status === 'string') ? j.status : 'completed' })
+              causalLog(log, 'register_from_prev', causalJson.corr, ['recorded=' + (rec.recorded ? '1' : '0'), 'idLevel=' + offStructIdLevel(continuation.rawPrevId)])
+            }
+          } else {
+            // 回滚（continuationRootFix=false）：cc6a797 原行为，JSON 分支不挂 captureSink。
+            if (j && typeof j === 'object' && typeof j.id === 'string' && j.id) {
+              recordContinuation({ responseId: j.id, prevId: continuation.prevId, input: continuation.canonicalInput, output: Array.isArray(j.output) ? j.output : [], model: continuation.model, thread: continuation.thread, status: j.status || 'completed' })
+              causalAliasOnRegister(continuation, j.id, log)
+            } else if (causalJson && causalJson.idRegisterFromClientPrev && continuation.rawPrevId) {
+              const rec = recordContinuation({ responseId: continuation.rawPrevId, prevId: continuation.prevId, input: continuation.canonicalInput, output: [], model: continuation.model, thread: continuation.thread, status: (j && typeof j.status === 'string') ? j.status : 'completed' })
+              causalLog(log, 'register_from_prev', causalJson.corr, ['recorded=' + (rec.recorded ? '1' : '0'), 'idLevel=' + offStructIdLevel(continuation.rawPrevId)])
+            }
           }
         }
-        if (restored.json) return { status: up.status, contentType: ct, buf: Buffer.from(JSON.stringify(restored.json)) }
-        return { status: up.status, contentType: ct, buf }
+        if (restored.json) return { status: up.status, contentType: correctedCt, buf: Buffer.from(JSON.stringify(restored.json)) }
+        return { status: up.status, contentType: correctedCt, buf }
       }
       const ebuf = await collectBody(up.stream, 1024 * 1024, { budget, signal: budget.signal, destroyOnAbort: true })
       // P4（HTTP 非 2xx）：只记 HTTP 状态，不记错误正文（ebuf 经 scrubBody 后仍属正文，绝不落此日志）。

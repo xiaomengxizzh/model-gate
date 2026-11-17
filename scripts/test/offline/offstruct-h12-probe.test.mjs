@@ -68,8 +68,10 @@ async function setup (t, { diagnostic = true, sseMode = 'normal', prevId = null,
     env: { MG_TEST_OFFICIAL_KEY: 'gw-official-test-key' },
     config: {
       defaults: { model: '', codexOfficialHosts: ['localhost'] },
-      // H1/H2 探针：显式关闭默认 ON 的正式止损，保留"未命中→降级"故障轮观测目标。
-      server: { diagnosticOfficialStructure: diagnostic, p0bFailClosedOnReconstructMiss: false },
+      // H1/H2 探针：显式关闭默认 ON 的正式止损，保留"未命中→降级"故障轮观测目标；
+      // 同时关闭默认 ON 的 G2 治本，使 JSON 分支回到"attached=0"的 H2 探针签名
+      //（治本开启后 JSON 分支也挂 captureSink，会掩盖 H2 的 B 点未挂特征）。
+      server: { diagnosticOfficialStructure: diagnostic, p0bFailClosedOnReconstructMiss: false, continuationRootFix: false },
       providers: { 'codex-official': { baseUrl: 'http://localhost:' + upstream.port, codexIdentity: 'official', apiKeyEnv: 'MG_TEST_OFFICIAL_KEY' } },
       models: {
         'gpt-6-astra': { provider: 'codex-official', api: 'responses' },
