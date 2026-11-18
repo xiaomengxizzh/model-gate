@@ -14,7 +14,7 @@ import { h } from '../dom.js'
 import {
   pageHead, card, metric, tag, callout, empty, field, dialog, confirmDialog, toast, table, kvList, codeBlock,
 } from '../components.js'
-import { state } from '../store.js'
+import { state, refreshProduct } from '../store.js'
 import { request } from '../api.js'
 import { fmtTime, fmtInt, safeHost } from '../format.js'
 
@@ -36,6 +36,8 @@ export const AGGREGATION_ENDPOINTS = Object.freeze({
   modes: '/api/aggregation/modes',
   switch: '/api/aggregation/switch',
   rollback: '/api/aggregation/rollback',
+  // 漂移解漂：采纳当前 config 字节作为 state 基线，只更新 state、不改 config.toml 内容。
+  reconcile: '/api/aggregation/reconcile',
   activate: '/api/aggregation/activate',
   deactivate: '/api/aggregation/deactivate',
 })
@@ -57,6 +59,7 @@ const AGG = {
   // 逐端点记录缺失，不再把一个接口的 404 放大成"聚合接口全挂"。
   routeMissing: false,      // 四个只读接口（health/providers/models/diagnostics）任一缺失
   modesUnavailable: false,  // 仅 modes 缺失：只禁用三模式切换，不影响其它接口
+  reconcileUnavailable: false, // reconcile 缺失：只禁用「重新对齐配置」，其它展示不受影响
   missingRoutes: [],        // 实际 404 的端点路径，供 routeNotice 如实列出
   health: null,
   modes: null,
@@ -152,6 +155,11 @@ export function buildRollbackRequest (preview, consent) {
     consentToken: consent ? (p.consentToken || '') : '',
     expectedSha: p.expectedSha == null ? '' : String(p.expectedSha),
   }
+}
+
+// 重新对齐请求体：与 rollback 同样只带 consentToken + expectedSha，不携带任何目标模式/字段值。
+export function buildReconcileRequest (preview, consent) {
+  return buildRollbackRequest(preview, consent)
 }
 
 // 发现诚实性：failed / partial / complete-empty / complete / unknown 五种状态。
@@ -439,8 +447,9 @@ function overviewCard (ctx) {
   const restart = health.restart || activation.restart || null
   const rn = restartNotice(restart, mode)
   const backup = health.backup || activation.backup || { available: false }
-  // 只有三模式端点（modes/switch/rollback）缺失时才禁用切换；其它只读接口正常时不误伤。
-  const canToggle = !AGG.modesUnavailable
+  // 只有三模式端点（modes/switch/rollback）缺失或配置漂移时才禁用切换；其它只读接口正常时不误伤。
+  // 漂移时服务端 /switch 必回 409，因此先禁用按钮，引导用户用「重新对齐配置」解漂。
+  const canToggle = !AGG.modesUnavailable && !drifted
   const parents = selectableParentModels(AGG.modes)
   const switchBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '切换接入方式' })
   switchBtn.disabled = !canToggle
@@ -469,6 +478,9 @@ function overviewCard (ctx) {
       tag(rn.label, rn.tone)),
     chooser.node,
     h('div', { class: 'toolbar', style: { margin: '10px 0' } }, switchBtn, rollbackBtn),
+    drifted
+      ? callout('warn', h('strong', { text: '配置漂移中，切换已暂时禁用：' }), ' 请先用页面上方的「重新对齐配置」解漂（只更新 state，不改 config.toml 内容）；解漂成功后本按钮自动恢复可用。')
+      : null,
     h('p', { class: 'hint', text: '接入前备份：' + (backup.available ? ('可用 · ' + (backup.matches ? '与接入前快照一致' : '快照不一致（不可回滚）')) : '无（尚未接入，或接入前文件不存在）') }),
     rn.needed
       ? callout('warn', h('strong', { text: rn.label + '：' }), ' ' + rn.detail)
@@ -892,6 +904,99 @@ async function beginRollback (ctx) {
   }
 }
 
+// —— 漂移解漂：428 preview → 一次性确认 → 带 consentToken/expectedSha 提交 ——
+// 只更新本机 state 基线；config.toml 字节前后不变，不改 model/provider、不切模式。
+function showReconcileConsent (preview, ctx) {
+  const p = preview || {}
+  const rows = Array.isArray(p.rows) ? p.rows : []
+  const confirm = h('button', { class: 'btn btn-primary', type: 'button', text: '确认重新对齐（只写 state）' })
+  const body = h('div', null,
+    callout('warn', h('strong', { text: '只更新本机对齐基线：' }),
+      ' 采纳当前 config.toml 的字节作为新基线（state.appliedSha）；不会修改 config.toml 内容，不会切换接入方式，不会改 model/provider，也不会读取 auth.json。'),
+    callout('info', h('strong', { text: '基线 sha：' }),
+      ' 旧 ' + shaShort(p.beforeSha) + ' → 新 ' + shaShort(p.afterSha || p.expectedSha) + '。下方是「当前配置自有字段 vs 历史期望」的差异，只列字段名与值，不含任何凭据。'),
+    diffRowsTable(rows),
+    h('p', { class: 'hint', text: '对齐后配置字节保持不变；如确实要切换接入方式，再点「切换接入方式」走正常的预览 → 确认流程。' }))
+  const d = dialog({
+    title: '重新对齐配置基线（不改配置内容）',
+    desc: '这是一次性确认；只写 state，不写 config.toml。',
+    wide: true, content: body,
+    actions: [h('button', { class: 'btn', type: 'button', text: '取消', onclick: () => d.close() }), confirm],
+  })
+  confirm.addEventListener('click', async () => {
+    confirm.disabled = true
+    confirm.textContent = '对齐中…'
+    try {
+      const res = await request(AGGREGATION_ENDPOINTS.reconcile, {
+        method: 'POST', body: buildReconcileRequest(p, true), timeoutMs: 60000,
+      })
+      d.close()
+      await afterReconcile(ctx, res)
+    } catch (e) {
+      d.close()
+      if (e && e.status === 409) toast('对齐期间配置又变化了，已中止；请重新对齐', 'error')
+      else if (e && (e.status === 428 || e.data)) toast('需要重新确认，请再试一次', 'error')
+      else toast('对齐失败：' + (e && e.message ? e.message : '未知错误'), 'error')
+      await loadAggregation(ctx)
+    }
+  })
+}
+
+// 成功回执：重拉 health 清掉 drifted 标识、恢复切换按钮，并刷新共享快照（首页/连接页同样受益）。
+async function afterReconcile (ctx, res) {
+  toast(res && res.changed === false
+    ? '配置已对齐，无需重复写入'
+    : '配置基线已重新对齐：只更新 state，config.toml 未改动', 'success')
+  AGG.fetched = false
+  await Promise.all([
+    loadAggregation(ctx),
+    refreshProduct({ force: true, reason: 'reconcile' }).catch(() => null),
+  ])
+  if (typeof ctx.rerender === 'function') ctx.rerender()
+}
+
+// 入口：无 token → 428 preview；带 token 由 showReconcileConsent 完成。导出给 connections.js 复用。
+export async function beginReconcile (ctx = {}) {
+  if (AGG.reconcileUnavailable) { toast('当前网关未提供重新对齐接口，请升级后重试', 'error'); return }
+  try {
+    const res = await request(AGGREGATION_ENDPOINTS.reconcile, {
+      method: 'POST', body: buildReconcileRequest(null, false), timeoutMs: 60000,
+    })
+    if (res && res.preview) { showReconcileConsent(res.preview, ctx); return }
+    if (res && res.ok) { await afterReconcile(ctx, res); return }
+    toast('服务端未返回可用的对齐预览', 'error')
+  } catch (e) {
+    const data = e && e.data ? e.data : null
+    if ((e && e.status === 428) || (data && data.code === 'consent_required')) {
+      if (data && data.preview) { showReconcileConsent(data.preview, ctx); return }
+      toast('需要确认，但服务端未返回预览内容', 'error'); return
+    }
+    if (e && e.status === 404) {
+      AGG.reconcileUnavailable = true
+      AGG.missingRoutes = [AGGREGATION_ENDPOINTS.reconcile]
+      if (typeof ctx.rerender === 'function') ctx.rerender()
+      toast('当前网关未提供重新对齐接口（404）', 'error')
+      return
+    }
+    if (e && e.status === 409) { toast('对齐期间配置又变化了，请重新检测', 'error'); await loadAggregation(ctx); return }
+    toast('无法重新对齐：' + (e && e.message ? e.message : '未知错误'), 'error')
+  }
+}
+
+// drifted 提示（routeNotice 附近）：给处于漂移状态的用户一个 GUI 解漂入口。
+function driftNotice (ctx) {
+  return callout('warn',
+    h('strong', { text: '检测到配置漂移：' }),
+    ' state 基线（appliedSha）与当前 config.toml 字节不一致，服务端会拒绝切换接入方式（409）。' +
+    ' 可以先「重新对齐配置」：采纳当前配置作为新基线，只更新 state、不改 config.toml 内容、不切模式。',
+    h('div', { class: 'toolbar', style: { marginTop: '8px' } },
+      h('button', {
+        class: 'btn btn-primary', type: 'button', text: '重新对齐配置',
+        disabled: AGG.reconcileUnavailable === true,
+        onclick: () => beginReconcile(ctx),
+      })))
+}
+
 function showThreeWay (conflict, ctx) {
   const tw = describeThreeWay(conflict)
   const body = h('div', null,
@@ -962,13 +1067,14 @@ export function render (root, ctx = {}) {
     root.append(callout('info', h('strong', { text: '正在读取聚合状态与 Desktop 探测结果…' }), ' 在响应返回前不显示 0、不显示“已连接”。'))
     return
   }
+  const mode = currentModeOf(AGG.health)
+  const drifted = !!(AGG.health && AGG.health.drifted === true)
   if (AGG.routeMissing || AGG.modesUnavailable) root.append(routeNotice(ctx))
+  if (drifted) root.append(driftNotice(ctx))
   if (AGG.healthError && !AGG.routeMissing) {
     root.append(callout('danger', h('strong', { text: '聚合健康接口读取失败：' }), AGG.healthError.message || '未知错误',
       h('div', { class: 'toolbar', style: { marginTop: '8px' } }, h('button', { class: 'btn btn-sm', type: 'button', text: '重试', onclick: () => { AGG.fetched = false; loadAggregation(ctx) } }))))
   }
-  const mode = currentModeOf(AGG.health)
-  const drifted = !!(AGG.health && AGG.health.drifted === true)
   const modeMetric = modeLabel(mode, drifted)
   root.append(h('div', { class: 'grid grid-4' },
     metric('接入方式', modeMetric.label, '来自服务端 health.mode' + (drifted ? ' · 已漂移' : ''), 'check'),
@@ -980,5 +1086,5 @@ export function render (root, ctx = {}) {
     h('strong', { text: '本页不冒充真实验收：' }),
     ' UI 只能证明接口返回与配置事务成功；原版 Desktop 模型选择器是否出现全部模型、每个模型是否落到正确供应商，必须在真实 GUI 中按交付报告的手动脚本核对（PASS_MOCK ≠ PASS_REAL）。'))
   root.append(advancedSection(ctx))
-  root.append(h('p', { class: 'page-note', text: '数据来源：' + AGGREGATION_ENDPOINTS.health + ' / modes / providers / models / diagnostics；切换走 switch / rollback（activate / deactivate 仅兼容旧路径）。读取于 ' + (AGG.loadedAt ? fmtTime(AGG.loadedAt) : '—') + '。' }))
+  root.append(h('p', { class: 'page-note', text: '数据来源：' + AGGREGATION_ENDPOINTS.health + ' / modes / providers / models / diagnostics；切换走 switch / rollback（activate / deactivate 仅兼容旧路径）；漂移解漂走 reconcile。读取于 ' + (AGG.loadedAt ? fmtTime(AGG.loadedAt) : '—') + '。' }))
 }

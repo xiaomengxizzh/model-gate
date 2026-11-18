@@ -7,9 +7,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { handleAggregationApi } from '../../../src/aggregation/api.js'
+import { DESKTOP_POLICY } from '../../../src/codex/desktop-integration.js'
 import { startGateway } from './harness.mjs'
 
 const TOKEN = 'agg-mode-api-test-admin-token'
@@ -44,7 +46,6 @@ async function setup () {
   const catDir = join(dir, 'aggregation', 'catalog', 'local')
   await mkdir(join(catDir, 'versions'), { recursive: true })
   const text = catalogText()
-  const { createHash } = await import('node:crypto')
   const sha = createHash('sha256').update(text).digest('hex')
   await writeFile(join(catDir, 'current.json'), text)
   await writeFile(join(catDir, 'versions', 'v000001-' + sha.slice(0, 8) + '.json'), text)
@@ -63,12 +64,41 @@ async function setup () {
     env: { MG_ADMIN_TOKEN: TOKEN, CODEX_HOME: codexHome },
     config: { defaults: {}, providers: {}, models: {} },
   })
+  const statePath = join(codexHome, '.modelgate-desktop-state.json')
   return {
-    gw, dir, codexHome, configPath,
+    gw, dir, codexHome, configPath, statePath,
     readConfig: () => readFile(configPath, 'utf8'),
-    readState: async () => JSON.parse(await readFile(join(codexHome, '.modelgate-desktop-state.json'), 'utf8')),
+    readConfigBuffer: () => readFile(configPath),
+    readState: async () => JSON.parse(await readFile(statePath, 'utf8')),
+    readStateRaw: () => readFile(statePath, 'utf8'),
     cleanup: async () => { await gw.stop(); await rm(codexHome, { recursive: true, force: true }); await rm(dir, { recursive: true, force: true }) },
   }
+}
+
+// 切到 aggregated 并建立 state 基线，然后制造一次用户侧注释漂移（config 与 appliedSha 不一致）。
+async function setupDrifted (t) {
+  const f = await setup()
+  t.after(f.cleanup)
+  const p = await api(f, '/api/aggregation/switch', { method: 'POST', body: { mode: 'aggregated', parentModel: PARENT } })
+  assert.equal(p.status, 428, p.text)
+  const applied = await api(f, '/api/aggregation/switch', {
+    method: 'POST',
+    body: { mode: 'aggregated', parentModel: PARENT, consentToken: p.body.preview.consentToken, expectedSha: p.body.preview.expectedSha },
+  })
+  assert.equal(applied.status, 200, applied.text)
+  await writeFile(f.configPath, (await f.readConfig()) + '\n# reconcile local drift\n')
+  const state = await f.readState()
+  const buf = await f.readConfigBuffer()
+  assert.notEqual(state.appliedSha, createHash('sha256').update(buf).digest('hex'), '夹具必须处于 drifted')
+  return f
+}
+
+function allowedOwnedPaths () {
+  const set = new Set(DESKTOP_POLICY.ownedTopLevel)
+  for (const [name, keys] of Object.entries(DESKTOP_POLICY.ownedSections)) {
+    for (const key of keys) set.add(name + '.' + key)
+  }
+  return set
 }
 
 function auth (extra = {}) {
@@ -286,4 +316,148 @@ test('三个端点均已接线：对已鉴权请求不再返回 404', async (t) 
   assert.notEqual(sw.status, 404)
   const rb = await api(f, '/api/aggregation/rollback', { method: 'POST', body: {} })
   assert.notEqual(rb.status, 404)
+})
+
+// ---------------------------------------------------------------------------
+// 8. POST /reconcile：漂移时无 consent → 428 + 脱敏 preview，零写入
+// ---------------------------------------------------------------------------
+test('POST /reconcile：漂移时无 consent 返回 428 + 脱敏 preview，config 字节不变', async (t) => {
+  const f = await setupDrifted(t)
+  const before = await f.readConfigBuffer()
+  const out = await api(f, '/api/aggregation/reconcile', { method: 'POST', body: {} })
+  assert.equal(out.status, 428, out.text)
+  assert.equal(out.body.code, 'consent_required')
+  const p = out.body.preview
+  assert.equal(p.stateOnly, true)
+  assert.equal(p.configUnchanged, true)
+  assert.equal(p.needsReconcile, true)
+  assert.ok(p.reasons.includes('applied_sha_mismatch'))
+  assert.match(p.consentToken, /^[a-f0-9]{64}$/)
+  assert.match(p.beforeSha, /^[a-f0-9]{64}$/)
+  assert.match(p.afterSha, /^[a-f0-9]{64}$/)
+  assert.equal(p.afterSha, p.expectedSha, 'after/expected sha 必须都指向当前 config 字节')
+  assert.notEqual(p.beforeSha, p.afterSha)
+  assert.match(out.body.note, /只更新 state|不修改 config\.toml/)
+  // 脱敏断言：差异行只能是 ModelGate 自有字段，预览里不得出现任何凭据字样。
+  assert.ok(Array.isArray(p.rows) && p.rows.length > 0)
+  const allowed = allowedOwnedPaths()
+  for (const r of p.rows) assert.ok(allowed.has(r.path), 'preview 出现了非自有字段：' + r.path)
+  const dump = JSON.stringify(out.body).toLowerCase()
+  for (const needle of ['api_key', 'apikey', 'authorization', 'bearer', 'secret', 'password', 'keys.local', 'admin.token']) {
+    assert.equal(dump.includes(needle), false, 'preview 泄漏了凭据字样：' + needle)
+  }
+  assert.deepEqual(await f.readConfigBuffer(), before, '预览阶段 config.toml 字节不变')
+})
+
+// ---------------------------------------------------------------------------
+// 9. POST /reconcile：带 consent → 200 解漂；config.toml 字节前后完全不变（关键断言）
+// ---------------------------------------------------------------------------
+test('POST /reconcile：带 consent 200 解漂，drifted→false，config.toml 字节前后完全不变', async (t) => {
+  const f = await setupDrifted(t)
+  const before = await f.readConfigBuffer()
+  const beforeSha = createHash('sha256').update(before).digest('hex')
+  const prev = await api(f, '/api/aggregation/reconcile', { method: 'POST', body: {} })
+  assert.equal(prev.status, 428, prev.text)
+  const rp = prev.body.preview
+  assert.equal(rp.expectedSha, beforeSha)
+
+  const done = await api(f, '/api/aggregation/reconcile', {
+    method: 'POST', body: { consentToken: rp.consentToken, expectedSha: rp.expectedSha },
+  })
+  assert.equal(done.status, 200, done.text)
+  assert.equal(done.body.ok, true)
+  assert.equal(done.body.drifted, false, '解漂后 drifted 必须为 false')
+  assert.equal(done.body.mode, 'aggregated')
+  assert.equal(done.body.reload.applied, false, 'config 没变，不应重载')
+  assert.equal(done.body.reload.needsRestart, false)
+
+  // ★ 关键断言：reconcile 前后 config.toml 字节完全不变，用户漂移行原样保留。
+  const after = await f.readConfigBuffer()
+  assert.deepEqual(after, before, 'KEY: reconcile 前后 config.toml 字节完全不变')
+  assert.equal(createHash('sha256').update(after).digest('hex'), beforeSha, 'KEY: config sha256 不变')
+  assert.match(after.toString('utf8'), /# reconcile local drift\n$/, '用户后加的行必须原样保留')
+
+  // state 基线必须迁移到当前 config 字节，且写前备份存在。
+  const state = await f.readState()
+  assert.equal(state.appliedSha, beforeSha)
+  assert.notEqual(await readFile(f.statePath + '.bak', 'utf8').catch(() => null), null, '成功对账应留下 state 备份')
+
+  // 解漂后三模式切换不再被 409 拒绝（428 → 200）。
+  const modes = await api(f, '/api/aggregation/modes')
+  assert.equal(modes.status, 200)
+  assert.equal(modes.body.drifted, false)
+  const sw = await api(f, '/api/aggregation/switch', { method: 'POST', body: { mode: 'route' } })
+  assert.equal(sw.status, 428, sw.text)
+  const swDone = await api(f, '/api/aggregation/switch', {
+    method: 'POST',
+    body: { mode: 'route', consentToken: sw.body.preview.consentToken, expectedSha: sw.body.preview.expectedSha },
+  })
+  assert.equal(swDone.status, 200, swDone.text)
+  assert.equal(swDone.body.mode, 'route')
+})
+
+// ---------------------------------------------------------------------------
+// 10. POST /reconcile：consentToken 篡改 → 428 零写入（含 state 备份也不生成）
+// ---------------------------------------------------------------------------
+test('POST /reconcile：consentToken 篡改 → 428 且 config/state 零写入', async (t) => {
+  const f = await setupDrifted(t)
+  const configBefore = await f.readConfigBuffer()
+  const stateBefore = await f.readStateRaw()
+  const prev = await api(f, '/api/aggregation/reconcile', { method: 'POST', body: {} })
+  assert.equal(prev.status, 428)
+  const wrong = await api(f, '/api/aggregation/reconcile', {
+    method: 'POST',
+    body: { consentToken: prev.body.preview.consentToken + '-tampered', expectedSha: prev.body.preview.expectedSha },
+  })
+  assert.equal(wrong.status, 428, wrong.text)
+  assert.equal(wrong.body.code, 'consent_required')
+  assert.deepEqual(await f.readConfigBuffer(), configBefore, '令牌失配不得写 config.toml')
+  assert.equal(await f.readStateRaw(), stateBefore, '令牌失配不得写 state')
+  assert.equal(await readFile(f.statePath + '.bak', 'utf8').catch(() => null), null, '令牌失配不得生成 state 备份')
+})
+
+// ---------------------------------------------------------------------------
+// 11. POST /reconcile：鉴权门禁 403 + 幂等 200
+// ---------------------------------------------------------------------------
+test('POST /reconcile：缺/错管理员令牌 403 不回显；漂移消失后幂等 200', async (t) => {
+  const f = await setupDrifted(t)
+  const noAuth = await f.gw.call('/api/aggregation/reconcile', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}),
+  })
+  assert.equal(noAuth.status, 403)
+  const noAuthBody = await noAuth.json()
+  assert.equal(noAuthBody.code, 'explicit_admin_required')
+  assert.equal(JSON.stringify(noAuthBody).includes(TOKEN), false)
+
+  const wrongAuth = await f.gw.call('/api/aggregation/reconcile', {
+    method: 'POST',
+    headers: { authorization: 'Bearer wrong-token', 'content-type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  assert.equal(wrongAuth.status, 403)
+  assert.equal((await wrongAuth.json()).code, 'explicit_admin_required')
+
+  // 模块侧 isLocal=false 仍必须 403（Host/Origin/peer 门禁由入口注入）。
+  const ctx = { method: 'POST', path: '/api/aggregation/reconcile', cfg: {}, rawBody: undefined }
+  const remote = await handleAggregationApi(Object.assign({}, ctx, { explicitAdmin: true, isLocal: false }))
+  assert.equal(remote.status, 403)
+  assert.equal(remote.body.code, 'aggregation_loopback_required')
+
+  // 先成功解漂，再用新预览确认一次：changed=false 的幂等 200。
+  const p1 = await api(f, '/api/aggregation/reconcile', { method: 'POST', body: {} })
+  assert.equal(p1.status, 428)
+  const d1 = await api(f, '/api/aggregation/reconcile', {
+    method: 'POST', body: { consentToken: p1.body.preview.consentToken, expectedSha: p1.body.preview.expectedSha },
+  })
+  assert.equal(d1.status, 200, d1.text)
+  const configAfter = await f.readConfigBuffer()
+  const p2 = await api(f, '/api/aggregation/reconcile', { method: 'POST', body: {} })
+  assert.equal(p2.status, 428)
+  const d2 = await api(f, '/api/aggregation/reconcile', {
+    method: 'POST', body: { consentToken: p2.body.preview.consentToken, expectedSha: p2.body.preview.expectedSha },
+  })
+  assert.equal(d2.status, 200, d2.text)
+  assert.equal(d2.body.changed, false, '漂移已消失时必须幂等')
+  assert.equal(d2.body.drifted, false)
+  assert.deepEqual(await f.readConfigBuffer(), configAfter, '幂等路径也不得改 config.toml')
 })

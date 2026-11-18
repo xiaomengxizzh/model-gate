@@ -245,6 +245,12 @@ export function aggregationState() {
   if (!agg) return null
   return {
     health: agg.health,
+    modes: agg.modes,
+    modesUnavailable: agg.modesUnavailable === true,
+    // 三模式解漂快照字段：drifted 来自 health，解漂成功后由 reconcile 触发的刷新清掉。
+    drifted: !!(agg.health && agg.health.drifted === true),
+    previousMode: agg.health ? (agg.health.previousMode || null) : null,
+    appliedSha: agg.health && agg.health.activation ? (agg.health.activation.appliedSha || null) : null,
     providers: agg.providers,
     models: agg.models,
     diagnostics: agg.diagnostics,

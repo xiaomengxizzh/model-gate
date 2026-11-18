@@ -32,6 +32,7 @@ import {
   buildActivateRequest,
   buildSwitchRequest,
   buildRollbackRequest,
+  beginReconcile,
   modeLabel,
   modeChooser,
   selectableParentModels,
@@ -1114,12 +1115,12 @@ function enablePanel (ctx) {
   const live = h('p', { class: 'hint', role: 'status', 'aria-live': 'polite' })
 
   const switchBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '切换接入方式' })
-  switchBtn.disabled = !snapshot || modeSwitchUnavailable
+  switchBtn.disabled = !snapshot || modeSwitchUnavailable || drifted
   const chooser = modeChooser({
     current: known ? mode : 'official', parents,
-    onChange: (sel) => { switchBtn.disabled = !snapshot || modeSwitchUnavailable || sel === mode },
+    onChange: (sel) => { switchBtn.disabled = !snapshot || modeSwitchUnavailable || drifted || sel === mode },
   })
-  switchBtn.disabled = !snapshot || modeSwitchUnavailable || chooser.getSelection().mode === mode
+  switchBtn.disabled = !snapshot || modeSwitchUnavailable || drifted || chooser.getSelection().mode === mode
   switchBtn.addEventListener('click', () => runModeChange(ctx, 'switch', chooser.getSelection(), host, live))
 
   const canRollback = !!(snapshot && !modeSwitchUnavailable && (mode === 'aggregated' || mode === 'route'))
@@ -1131,6 +1132,14 @@ function enablePanel (ctx) {
         ? callout('info', h('strong', { text: '当前接入方式：' + m.label + '。' }), ' 选择目标方式后点「切换接入方式」；预览不写任何字节，确认后才写入。')
         : callout('warn', h('strong', { text: '接入方式未知。' }), ' 服务端没有返回可识别模式；预览会重新检测，不会盲目写入。'))
       : callout('info', h('strong', { text: '正在读取真实聚合状态。' }), ' 快照到达前不会推测是否已启用，也不会写入任何配置。'))
+  // 漂移阻断的 GUI 解法：服务端 /switch 会 409，先在界面里给出「重新对齐配置」入口。
+  if (drifted) {
+    host.append(callout('warn',
+      h('strong', { text: '检测到配置漂移：' }),
+      ' 服务端会拒绝切换（409）。请先「重新对齐配置」：采纳当前配置作为新基线，只更新 state、不改 config.toml 内容、不切模式；成功后切换按钮自动恢复可用。',
+      h('div', { class: 'toolbar', style: { marginTop: '8px' } },
+        h('button', { class: 'btn btn-primary', type: 'button', text: '重新对齐配置', onclick: () => beginReconcile(ctx) }))))
+  }
 
   return card('选择接入方式', '官方直连 / 路由（纯 DeepSeek）/ 聚合（GPT 父 + DeepSeek 子）；切换前预览，确认后一次写入。',
     h('div', null,

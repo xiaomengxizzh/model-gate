@@ -2171,6 +2171,26 @@ export function previewReconcile (opts = {}) {
   const reasons = []
   if (appliedMismatch) reasons.push('applied_sha_mismatch')
   if (backupMismatch) reasons.push('backup_sha_mismatch')
+  // 脱敏差异：只投影 ModelGate 自有字段（OWNED_*）的字段名/值；state.desired 可能来自历史
+  // 版本或被手工改过，按 OWNED_* 白名单 + SENSITIVE_FIELD_RE 再过滤一次。绝不读取/回显凭据文件。
+  const allowedPaths = new Set(OWNED_TOP_LEVEL.slice())
+  for (const [name, keys] of Object.entries(OWNED_SECTIONS)) {
+    for (const key of keys) allowedPaths.add(name + '.' + key)
+  }
+  let rows = []
+  if (current && current.exists) {
+    try {
+      const existing = readOwnedFields(readFileSync(paths.configPath, 'utf8'))
+      rows = ownedRows(existing, (state && state.desired) || {}, { includeRemovals: true })
+        .filter((r) => allowedPaths.has(r.path) && !SENSITIVE_FIELD_RE.test(r.path))
+    } catch { rows = [] }
+  }
+  // before = 旧 state 基线（appliedSha），after = 当前 config 字节（新基线）。
+  // 对账不改 config.toml，所以 before/after 指的是 state 基线迁移，不是配置文件内容变化。
+  const baselineFromSha = state && state.appliedSha ? String(state.appliedSha) : ''
+  const baselineToSha = currentSha
+  const binding = { fromMode: classification.mode, toMode: classification.mode }
+  const consentToken = consentTokenFor(paths.configPath, baselineFromSha, baselineToSha, binding)
   return {
     contract: DESKTOP_CONTRACT,
     ok: true,
@@ -2183,6 +2203,14 @@ export function previewReconcile (opts = {}) {
     backupPath: state ? state.backupPath || null : null,
     backupSha,
     reasons,
+    // 契约保证：只更新 state 基线；config.toml 字节前后完全不变，不切模式、不改 model/provider。
+    stateOnly: true,
+    configUnchanged: true,
+    baselineFromSha,
+    baselineToSha,
+    expectedSha: currentSha,
+    consentToken,
+    rows,
     plan: {
       mode: classification.mode,
       appliedSha: current.exists ? currentSha : null,
@@ -2198,6 +2226,21 @@ export function reconcileState (opts = {}) {
   const paths = resolveDesktopPaths(opts)
   const preview = previewReconcile(opts)
   const state = loadState(paths)
+  // 确认阶段：consentToken 绑定基线 before/after sha，expectedSha 绑定当前 config.toml 字节。
+  // 任何失配都必须在 state 备份写入之前抛出，确保"零写入"（含 state 备份文件也不生成）。
+  if (opts.consentToken !== undefined && opts.consentToken !== null &&
+      String(opts.consentToken) !== preview.consentToken) {
+    throw new DesktopError('consent_required', '对齐前必须显式确认：请先调用预览并把 consentToken 与 expectedSha 一起回传。', {
+      expectedSha: preview.expectedSha,
+      afterSha: preview.baselineToSha,
+    }, 428)
+  }
+  if (opts.expectedSha !== undefined && opts.expectedSha !== null &&
+      String(opts.expectedSha) !== String(preview.expectedSha)) {
+    throw new DesktopError('concurrent_modification', '预览后 config.toml 已被修改，已中止且未做任何写入。', {
+      expected: String(preview.expectedSha), actual: String(opts.expectedSha),
+    }, 409)
+  }
   if (!preview.needsReconcile || !state) {
     return { ok: true, changed: false, preview, stateBackupPath: null }
   }

@@ -31,7 +31,9 @@ import {
   detect as desktopDetect,
   modeSnapshot,
   preview as desktopPreview,
+  previewReconcile as desktopPreviewReconcile,
   previewRollback as desktopPreviewRollback,
+  reconcileState as desktopReconcileState,
   rollback as desktopRollback,
   status as desktopStatus,
 } from '../codex/desktop-integration.js'
@@ -693,6 +695,44 @@ export async function handleAggregationApi (ctx = {}) {
         body: Object.assign({ ok: true }, out, {
           restart: { needed: restart.needed === true, reason: restart.reason || null },
           reload: runtimeReload(ctx),
+        }),
+      }
+    }
+
+    // POST /reconcile：漂移解漂。无 token → 428 + 脱敏 preview（当前配置自有字段 vs state.desired、
+    // before/after sha、consentToken、expectedSha）；带 token → 只更新 state 基线。
+    // 铁律：reconcile 绝不写 config.toml，只写 state 的 appliedSha/desired 基线，不切模式。
+    // 显式管理员 + 回环/Host/Origin 门禁由 handleAggregationApi 入口统一执行，本路由原样继承。
+    if (rest === '/reconcile' && method === 'POST') {
+      const opts = desktopOpts(ctx.cfg)
+      const token = body && body.consentToken ? String(body.consentToken) : ''
+      if (!token) {
+        const p = desktopPreviewReconcile(opts)
+        return {
+          status: 428,
+          body: {
+            ok: false,
+            code: 'consent_required',
+            preview: Object.assign({}, p, {
+              beforeSha: p.baselineFromSha || '',
+              afterSha: p.baselineToSha || '',
+            }),
+            note: '采纳当前配置作为新基线：只更新 state 文件，不修改 config.toml 内容、不切换接入方式、不改 model/provider、不触碰 auth.json。',
+          },
+        }
+      }
+      const out = desktopReconcileState(Object.assign({}, opts, {
+        consentToken: token,
+        expectedSha: body && body.expectedSha !== undefined ? String(body.expectedSha) : undefined,
+      }))
+      const snap = modeSnapshot(Object.assign(desktopOpts(ctx.cfg), { cfg: ctx.cfg }))
+      return {
+        status: 200,
+        body: Object.assign({ ok: true }, out, {
+          mode: snap.mode,
+          drifted: snap.drifted === true,
+          // config.toml 字节没变，无需重载进程内配置；只需前端重新拉取快照。
+          reload: { applied: false, needsRestart: false, reason: 'state_only_no_config_change' },
         }),
       }
     }

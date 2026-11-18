@@ -112,4 +112,6 @@ export const api = {
   removeAggregationProvider: (id, body) => request(aggregationPath(id), { method: 'DELETE', body: body === undefined ? {} : body }),
   activateAggregation: (body) => request('/api/aggregation/activate', { method: 'POST', body: body === undefined ? {} : body }),
   deactivateAggregation: (body) => request('/api/aggregation/deactivate', { method: 'POST', body: body === undefined ? {} : body }),
+  // 漂移解漂：只更新 state 基线，不写 config.toml；428 预览 → 带 token 提交。
+  reconcileAggregation: (body) => request('/api/aggregation/reconcile', { method: 'POST', body: body === undefined ? {} : body }),
 }
