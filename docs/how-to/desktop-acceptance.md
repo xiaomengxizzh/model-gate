@@ -128,7 +128,39 @@ node scripts/test/live/desktop-gui-checklist.mjs \
 - 若子进程残留，按**精确隔离路径**终止（如 `pgrep -af "$MG_DESKTOP_STATE"` 后逐个 kill），不要按宽泛的 `chatgpt` 关键字杀进程，以免误伤日常实例。
 - 截图中若出现账号标识，提交前裁剪/打码；凭据与 token 永不入库。
 
-## 8. 状态口径
+## 8. 三模式验收矩阵（直连 / 路由 / 聚合）
+
+> 红线不变：`MG_DESKTOP_STATE` 必须指向 `/tmp/...` 可丢弃目录，**禁止**指向日常状态目录；**禁止**让 Desktop 使用 `~/.codex` 作为 `CODEX_HOME`；§1 的日常配置/登录基线比对在每种模式切换后都要重做。本文只记录验收口径，不代表已通过（三模式实现中，真机 `NOT_TESTED`）。
+>
+> **切换通用要求**：每次切换走预览→确认→回执；**必须完全退出并重新打开 Codex GUI 才生效**（含切回直连）；只关窗口/刷新/换会话不算生效。映射口径见[三模式接入方式映射](../product/2026-11-18-three-mode-access-mapping.md)。
+
+| 验收项 | 直连 `official` | 路由 `route` | 聚合 `aggregated` |
+| --- | --- | --- | --- |
+| `mode` 投影 | `official` | `route` | `aggregated` |
+| 顶层 config 字段 | 无 `openai_base_url` 改向；`model_provider` 内置 `openai` | `model_provider="modelgate"`；顶层 `model="mg-opencodego-deepseek-v4-1-flash"` | `model_provider="openai"`；`openai_base_url="http://127.0.0.1:8787"`；`model_catalog_json` 指向隔离目录 |
+| provider 段 | 无 `[model_providers.modelgate]` | `[model_providers.modelgate]`：`base_url=…:8787/v1`、`wire_api=responses`、`requires_openai_auth=false`、`supports_websockets=false`；`capabilities.remote_compaction=unsupported` | 不生成 provider 段；靠顶层 `openai_base_url` 改向 |
+| 子代理 | 无 | 父=子=同一别名；无 GPT 父 | GPT 父（默认 `gpt-6-luna`）+ DeepSeek 子；`[agents.go_deepseek]` 托管 |
+| 选择器可见 | 官方 `6 Luna` | **只**有 `deepseek-v4.1-flash (opencodego)`，无 GPT 入口 | `6 Luna` + `deepseek-v4.1-flash (opencodego)` |
+| GPT 调用 | 官方直连，是 | **0**：`chatgpt-plan` 出站 = 0 | 是，父 model 必须为 `gpt-6-luna` 才符合 MG-R012 |
+| 重启 | 切回直连后完全退出重开 | 切换后完全退出重开 | 切换/启用后完全退出重开 |
+| 回执核对 | 官方请求日志 `domain=official` | 网关日志出现 DeepSeek 别名；**无任何 `chatgpt-plan` / official 出站** | `byModel.mg-opencodego-deepseek-v4-1-flash` 有 token；官方请求 `domain=official` |
+| 状态判定 | `PASS_REAL` 需真实官方回执 | 子调用真实、`chatgpt-plan` 出站=0 才可 `PASS_REAL` | 父仅 luna 可签 `PASS_REAL`；其它父 `UNVERIFIED` |
+
+### 8.1 路由模式零 GPT 调用怎么验（必做）
+
+1. 切到路由 `mode=route` 并完全退出、重开 Codex GUI。
+2. 在隔离实例内发一条最小消息（如 `Reply with exactly MG_ROUTE_OK`）。
+3. 查网关日志与 `stats.json`：`byModel.mg-opencodego-deepseek-v4-1-flash` 有 token；`chatgpt-plan` 出站计数 **必须为 0**。
+4. 若出现任何官方 GPT / `chatgpt-plan` 出站，判 `FAIL`，保留脱敏回执，不得记为通过。
+
+```bash
+tail -100 "$MG_DESKTOP_STATE/gateway/gateway-$(date +%F).log" | grep -iE 'chatgpt-plan|openai|gpt|mg-opencodego'
+python3 -m json.tool "$MG_DESKTOP_STATE/gateway/stats.json" | grep -A5 byModel
+```
+
+> 非 `gpt-6-luna` 父：按 MG-R012 一律 `UNVERIFIED`，不得签 `PASS_REAL`；放宽需所有者书面授权，AI 不自行签（见[三模式接入方式映射 §4](../product/2026-11-18-three-mode-access-mapping.md)）。
+
+## 9. 状态口径
 
 - `PASS_REAL`：本手册步骤中实际观察到 GUI/网关回执。
 - `PASS_MOCK`：只证明离线/替代接线，不能替代产品默认路径。

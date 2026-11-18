@@ -2,6 +2,24 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-18 三模式文档与验收口径（直连 / 路由 / 聚合）
+
+### Added
+
+- **三模式接入方式映射**（`docs/product/2026-11-18-three-mode-access-mapping.md`）：把直连（`official`）/ 路由（`route`）/ 聚合（`aggregated`）三种接入方式映射到既有 MG-R001–MG-R012 契约；明确「直连 = MG-R001 退出聚合；路由与聚合均属经网关接入，路由是纯 DeepSeek 独立呈现」，**不修改契约文本**，措辞用「接入方式」。含每个 mode 的 config 形态对照、切换/预览/确认/回执语义与「切换后必须完全退出并重开 Codex GUI」。
+- **验收口径**：桌面验收手册新增三模式验收矩阵（`docs/how-to/desktop-acceptance.md`），含路由模式零 GPT（`chatgpt-plan` 出站 = 0）的验法；回滚与禁用新增「模式切换与回滚」（`docs/how-to/rollback-and-disable.md`）；部署文档明确「直连不需要停网关服务，停服是运维动作」（`docs/how-to/deploy-and-rollback.md`）。
+- **投影与端点登记**：`ui-v3-product-status.md` / `ui-next-api-matrix.md` 补 `mode`（历史 `profile` 改名）/ `previousMode` / `drifted` 投影与 `switch` / `rollback` / `modes` 端点口径。
+
+### Changed
+
+- **修正过期表述**：`docs/reference/codex-config.md` 中「`/api/codex/config/*` 路由未实现、UI 固定 export-only」已与代码不符，改为「路由已接入（`src/codex/api.js`，§3.1）；未登记 managed 根时 `apply`/`rollback` 403 `write_disabled`」；新增 managed 形态字段说明（`/v1`、`requires_openai_auth=false`、`supports_websockets=false`、`capabilities.remote_compaction`）、owned 白名单变化与「父子模型可不同」。
+
+### 诚实边界（未验证 / 约束）
+
+- **三模式实现中**：本轮只交付文档与验收口径；切换、重启生效、零 GPT 调用的真机项均为 `NOT_TESTED`，未写全契约通过。
+- **UNVERIFIED**：按 MG-R012，真实 GPT 调用仅 `gpt-6-luna` 可签 `PASS_REAL`；非 luna 父一律 `UNVERIFIED`，放宽需所有者书面授权，AI 不自行签收。
+- **API Key 约束**：全程未记录/打印/上传任何明文密钥；文档仅出现环境变量名/字段名（如 `OPENCODE_API_KEY`），不写值、不给内嵌 Key 字段或 bearer token 的配置示例；方案为回环信任、无客户端 Key。
+
 ## [Unreleased] —— 2026-11-18 第三方聚合别名可作父模型（路线 A：身份分流，不含真机验收）
 
 ### Changed

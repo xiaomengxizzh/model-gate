@@ -2,7 +2,7 @@
 
 适用于 `src/codex/config.js`（实现）与 `src/ui-next/js/views/codex.js`（只读预览）。本页写契约，不写操作步骤。
 
-当前状态：模块与离线测试已落地，**尚未接入任何 HTTP 路由**，**未在真实 `~/.codex/config.toml` 上写入**（见 §7 NOT_RUN）。
+当前状态：模块、离线测试与 **`/api/codex/*` HTTP 路由均已落地**（`src/codex/api.js` 在 `src/index.js` 中挂载，见 §3.1）。受控写入默认关闭：只有当启动期用 `MG_CODEX_MANAGED_ROOT` 登记了名为 `config.toml` 的受控根时，`apply` / `rollback` 才可用（否则 403 `write_disabled`）。**真实日常 `~/.codex/config.toml` 写入与 Codex 重启后的加载仍属真机验收项，NOT_RUN**（见 §7）。本页只描述字段与事务口径，不记录任何密钥。
 
 ## 1. 身份前提（D1-A，Codex 0.167 实测）
 
@@ -15,6 +15,8 @@
 | 请求体 `content-encoding` 可能是 `zstd` | 网关必须能解码或明确拒绝 |
 | 官方身份会带真实 ChatGPT Bearer 与 `chatgpt-account-id` | 只允许走受支持的官方路径；第三方上游一律不得接收（E1 身份隔离） |
 
+> 表中「唯一受支持的改向字段」指**内置 `openai` 身份**下的顶层 `openai_base_url`。经网关还有第二种形态：独立的 `[model_providers.modelgate]` provider 段（provider 级 `base_url`），用于路由接入方式；两者语义不同，详见 §2.1 与[三模式接入方式映射](../product/2026-11-18-three-mode-access-mapping.md)。
+
 ## 2. 字段所有权
 
 **受控可写（模块唯一能改的字段）**
@@ -26,6 +28,23 @@
 | `model` | 聚合模型 ID |
 | `model_catalog_json` | 本地完整 Codex 目录的绝对路径（全量替换语义） |
 | `[features]` 的 `multi_agent` / `multi_agent_v2` | D3 的 v2 优先开关（0.167 默认 `false`） |
+
+**owned 白名单变化（受控可写的段，随三模式扩展）**：除上表的顶层字段外，模块还拥有以下段；段内只允许白名单键，其余键一律 `not_owned_field` 拒绝。
+
+| 段 | 允许键 | 用途 |
+| --- | --- | --- |
+| `[features]` | `multi_agent`、`multi_agent_v2` | D3 的 v2 优先开关（0.167 默认 `false`） |
+| `[model_providers.modelgate]` | `name`、`base_url`、`wire_api`、`requires_openai_auth`、`supports_websockets` | 路由接入方式的独立 provider 段；三模式引入 `supports_websockets` 到白名单 |
+| `[model_providers.modelgate.capabilities]` | `remote_compaction` | 仅 `unsupported` / `v2`（RemoteCompactionSupport 枚举，由 Codex 解析器实证） |
+| `[agents.go_deepseek]` | `description`、`config_file` | 聚合方式的托管原生子代理（GPT 父 → DeepSeek 子） |
+
+**managed 形态字段说明**（路由接入方式，`mode=route`）：
+
+- `base_url = "http://127.0.0.1:8787/v1"` —— **带 `/v1`**，是 provider 级地址；与顶层 `openai_base_url`（网关根地址、不带 `/v1`）语义不同，不可混写。
+- `wire_api = "responses"`、`requires_openai_auth = false` —— 该 provider 不依赖官方 ChatGPT Bearer；**不写任何内嵌 Key 字段、不写 bearer token / 客户端密钥**，仅信任本机回环。
+- `supports_websockets = false` —— 关闭 WebSocket 升级，统一走 HTTP `POST /v1/responses`。
+- `[model_providers.modelgate.capabilities] remote_compaction = "unsupported"` —— 关闭远程压缩，由 Codex 侧本地压缩。
+- 禁止触碰 `[model_providers.openai]`（reserved built-in provider ID，发现既有段只告警、不删改）。
 
 **只读保留（模块不修改、不改写顺序）**：`[mcp_servers.*]`、`[projects.*]`、`approval_policy` / `sandbox_mode` 等权限与信任段、所有未知字段与注释。写前写后各算一次 `unmanagedFingerprint`，指纹不一致即拒绝写入（fail closed）。
 
@@ -56,6 +75,21 @@
 }
 ```
 
+### 3.1 已落地的 HTTP 路由（`/api/codex/*`）
+
+服务端 `src/codex/api.js` 的 `handleCodexApi` 已在 `src/index.js` 挂载；一律要求**显式管理员令牌**（未设置 adminToken 时回环也 403 `explicit_admin_required`），Host/Origin/来源校验先于读 body。
+
+| 方法 / 路径 | 作用 | 写盘 |
+| --- | --- | --- |
+| `GET /api/codex/policy` | 字段所有权 + 目录摘要 + 路由清单 | 否 |
+| `POST /api/codex/config/plan` | 只读预览：差异 / 脱敏值 / `planId` + `confirmToken` | 否 |
+| `POST /api/codex/config/apply` | 受控写入：二次快照 + 原子写 + 备份 + 写后校验（仅 managed，必须回传 `planId`） | 是 |
+| `POST /api/codex/config/rollback` | 按不透明 `backupId` 回滚（仅 managed，必须回传 `planId`） | 是 |
+| `GET /api/codex/config/export` | 只回 owned 字段的归一化投影（无保留行、无凭据） | 否 |
+| `GET /api/codex/catalog/status` / `quota` / `emergency` | 目录世代、官方额度三态、应急试算 | 否 |
+
+`apply` / `rollback` 默认 403 `write_disabled`；仅当启动期 `MG_CODEX_MANAGED_ROOT` 成功登记受控根后可用。路由已接入 ≠ 真实 `~/.codex` 已写入：后者仍需隔离实例与真机授权验收（§7）。
+
 ## 4. 写入事务与冲突语义
 
 1. `planConfigApply` 读取文件 → `before = { exists, size, sha256 }`；调用方把 `before` 与 `confirmToken` 展示给用户。
@@ -78,7 +112,8 @@
 - 字段所有者表（受控可写 / 只读保留 / 禁止触碰）。
 - 前后差异：粘贴当前 `config.toml` 后在本标签页内存中逐字段比对（不发请求、不保存、不写盘），展示当前值→写入值、行号、将覆盖项与阻断项。
 - 目录世代与写盘能力只认 `/api/status` 的真实字段；没有就是 `UNKNOWN`，不编造「已生效」。
-- 写入路径：`/api/codex/config/*` 未就绪时固定「仅导出」；浏览器永不直接写文件，也不重启客户端。
+- 写入路径：`/api/codex/config/*` 路由已接入（§3.1）。未登记 managed 根时 `plan` 可做只读预览、`apply`/`rollback` 返回 403 `write_disabled`，UI 据此降级为「仅导出」；登记后走预览→确认→回执。浏览器永不直接写文件，也不重启客户端；**切换接入方式后必须完全退出并重新打开 Codex GUI 才生效**。
+- 接入方式三选一（直连 / 路由 / 聚合）与父子模型可不同：聚合方式下 GPT 父（默认 `gpt-6-luna`）与 DeepSeek 子是不同模型；路由方式下父与子是同一 DeepSeek 别名。父模型不由模块自动替换或降级。映射口径见[三模式接入方式映射](../product/2026-11-18-three-mode-access-mapping.md)。
 
 ## 6. 测试与证据
 
@@ -93,10 +128,12 @@ npm run check                                              # 含 check-ui 16/16
 
 ## 7. 未验证 / NOT_RUN
 
-- 真实 `~/.codex/config.toml` 写入与 Codex 重启后的实际加载：**NOT_RUN**（需所有者逐项授权）。
-- `/api/codex/config/*` 路由接入（index.js 侧）：**未实现**，UI 因此固定 export-only。
+- 真实日常 `~/.codex/config.toml` 写入与 Codex 重启后的实际加载：**NOT_RUN**（需所有者逐项授权；§3.1 的路由已接入不等于已对日常文件写入）。
+- `/api/codex/config/*` 路由接入（index.js 侧）：**已实现**（`src/codex/api.js`，见 §3.1），并有离线路由契约测试；先前「未实现、UI 固定 export-only」的表述已过期。未登记 managed 根时 `apply`/`rollback` 仍返回 403 `write_disabled`，属默认关闭策略而非未接入。
+- 三模式（直连 / 路由 / 聚合）切换、切换后重启生效、路由模式零 GPT 调用：**实现中 / 真机 NOT_TESTED**，见[三模式接入方式映射](../product/2026-11-18-three-mode-access-mapping.md)与[桌面验收手册](../how-to/desktop-acceptance.md)。
 - 真实官方账号下 `openai_base_url` 指向网关后的同会话切换、目录加载、WebSocket 回落：**NOT_RUN**（属 E3 证据范围）。
-- Desktop 端配置形态：未验证。
+- 非 `gpt-6-luna` 的 GPT 父模型真实验收：**UNVERIFIED**（MG-R012 仅允许 Luna 签 `PASS_REAL`，需所有者书面放宽方可放宽）。
+- Desktop 端配置形态：三模式接入方式在真实 Codex Desktop GUI 的行为未验证。
 
 ## 8. 回滚
 

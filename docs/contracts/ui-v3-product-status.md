@@ -54,6 +54,21 @@ deriveProductStatus({
 
 每个状态**只有一个** `primary`（`{id,label,kind,route,detail}`）；`secondary` 最多列出"查看高级诊断 / 退出并恢复 / 重新检测"。`kind==='route'` 的 `route` 使用 `#/connections?step=key|model|enable|restart|use|revert|conflict|codex`。
 
+### 2.2 三模式状态投影扩展（P1 实现中，真机未验收）
+
+三模式（直连 / 路由 / 聚合）接入方式统一在本投影层暴露，**不得由视图各自解释**：
+
+| 字段 | 含义 | 允许值 | 禁止 |
+| --- | --- | --- | --- |
+| `mode` | 当前接入方式（**历史字段 `profile` 已更名为 `mode`**，消费方只读 `mode`） | `official` / `route` / `aggregated` / `unknown` | 不得把 `unknown` 写成 `official` 或反之；不得接受白名单外取值 |
+| `previousMode` | 切换前的上一模式，供回滚使用 | 同上，或 `null` | 缺失/非法时拒绝回滚，不猜测默认值 |
+| `drifted` | 配置漂移标记：受控字段被外部改动导致快照与回执不一致 | 布尔 | `true` 时禁止静默切换，必须先解决漂移并由用户确认 |
+
+- 来源：服务端状态记录（`mode` / `previousMode` / `appliedSha`）与 `unmanagedFingerprint` 一致性判定；投影只做只读呈现。
+- 切换走 预览 → 确认 → 回执；**切换后必须完全退出并重新打开 Codex GUI 才生效**（含切回直连）。视图不得显示"已生效"除非回执明确且用户已重启。
+- 路由 `mode=route` 的验收硬指标是零 GPT（`chatgpt-plan` 出站 = 0）；非 luna 父按 MG-R012 标 `UNVERIFIED`，不得签 `PASS_REAL`。
+- 接入方式到契约的映射与 config 形态见[三模式接入方式映射](../product/2026-11-18-three-mode-access-mapping.md)。
+
 ## 3. 后端最小补充（本次唯一后端改动，主代理执行）
 
 `GET /api/status` 新增只读字段（不新增端点、不新增写入通道）：
@@ -76,6 +91,19 @@ deriveProductStatus({
 **凭据优先复用系统环境变量**：若 `providers.opencodego.apiKeyEnv`（默认 `OPENCODE_API_KEY`）在进程环境或用户级环境中存在，`/api/status.providers[].hasKey=true`、`keySource=env|env-registry`，向导必须提供"使用现有凭据并连接"（不调用 `POST /api/keys`、不回显值）；只有环境里没有时才要求用户粘贴。聚合发现（sync）与转发链共用 `resolveKey`，不会出现"状态说有、同步说没有"。
 
 **Go Key 写入通道**沿用现有 API，不新建存储：`POST /api/aggregation/providers`（可用 `preset:'opencode-go'` 省略 ID/URL/env）→ `POST /api/keys {id:'opencodego', key}` → `POST /api/aggregation/providers/opencodego/sync` → `POST /api/aggregation/activate`（428 预览 → consentToken → 原子写 → 回执）。每一步独立可重试/可回滚（`DELETE /api/aggregation/providers/:id`）。
+
+### 3.1 三模式切换端点（switch / rollback / modes，P1 实现中）
+
+| 操作 | 端点 | 语义 | 写盘 / 重启 |
+| --- | --- | --- | --- |
+| 列出模式 | `GET /api/codex/modes` | 返回可用模式、当前 `mode`、`previousMode`、`drifted`，只读 | 否 / 否 |
+| 切换模式 | `POST /api/codex/switch` | 预览 → 确认 → 回执；目标 `mode` 必须合法（`official`/`route`/`aggregated`） | 是 / **必须完全退出并重开 Codex GUI** |
+| 回滚模式 | `POST /api/codex/rollback` | 回到 `previousMode`，按 `appliedSha`/备份校验；`drifted=true` 时拒绝 | 是 / 必须重开 Codex GUI |
+
+- 端点路径以 P1 实现为准；本节登记的是接口契约口径，尚未真机验收。
+- 切换/回滚一律要求显式管理员令牌、回环来源（或显式 `allowRemote`），不接受浏览器提供的路径或原始 TOML。
+- 非法 `mode` / `previousMode` / `drifted=true`：返回明确错误，配置与状态零改动，不静默降级。
+- 与既有受控配置写入 `/api/codex/config/plan|apply|rollback` 的关系：后者是字段级事务，前者是模式级编排；两者共用同一份 `mode` 状态与备份口径。
 
 ## 4. 路由与导航契约（A1 实现，A3 消费）
 

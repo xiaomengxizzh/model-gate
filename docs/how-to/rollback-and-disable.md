@@ -158,6 +158,38 @@ node scripts/check-metadata.mjs      # 期望 "Metadata: PASS (32 checks)"（本
 | 打开（设为默认）的风险 | 面板保存会**整体替换** `providers`/`models` 两段（deploy 文档已写明），误操作会改掉真实路由 |
 | 验证 | `offline/ui-next` 2（静态树/CSP/遍历防护）、`offline/ui-contract` 2 |
 
+## 4.7 模式切换与回滚（直连 / 路由 / 聚合）
+
+> 三模式实现中，真机未验收。本节记录**设计口径下的切换与回滚路径**，不代表已通过。接入方式映射见[三模式接入方式映射](../product/2026-11-18-three-mode-access-mapping.md)。
+
+### 如何切换
+
+1. 前端三个接入方式**单选**（`official` / `route` / `aggregated`）。
+2. 走预览→确认→回执：预览给出字段差异与影响、零写入；确认后经受控配置写入落盘；回执含 `needsRestart` 与回滚点。
+3. **切换后必须完全退出并重新打开 Codex GUI 才生效**（含切回直连）。只关窗口/刷新/换会话不生效。
+4. 切换记录写入状态：当前 `mode`，上一模式记入 `previousMode`，配置漂移标记 `drifted`（见[产品状态投影](../contracts/ui-v3-product-status.md)）。
+
+### 如何回到上一模式
+
+- 用 `previousMode` 作为回滚目标：预览→确认→写回上一模式字段形态 → 完全退出并重开 Codex GUI。
+- 回到直连即 MG-R001 的退出聚合状态；网关服务无需停止（见[安装、升级与回滚](deploy-and-rollback.md)「停止与重启」）。
+
+### 切换失败时如何回滚
+
+1. 受控写入本身带备份：每次 apply 前写 `config.toml.bak`（已有 `.bak` 轮转为 `.bak.prev`），失败即写后校验回滚；见 [Codex 配置参考 §4](../reference/codex-config.md)。
+2. 用状态回滚点：`state.previous`（上一模式字段快照）/`previousMode` + `appliedSha` 校验；sha 不符（文件被外部改动）→ fail-closed 409，不覆盖。
+3. 托管子代理配置纳入同一回滚事务：聚合方式的 `[agents.go_deepseek]` 与 `go-deepseek.toml` 在退出时按状态记录字节级还原；用户自有改动判 409 三方差异，不覆盖。
+4. 回滚后重开 Codex GUI，复核 `/api/status` 投影 `mode` / `drifted` 与预期一致，并做[桌面验收手册](desktop-acceptance.md) §1 的日常配置/登录基线比对。
+
+### 非法 mode 的拒绝路径
+
+| 输入 | 拒绝行为 | 依据 |
+| --- | --- | --- |
+| 未在白名单的 `mode`（如 `route` 之外的自造值） | 400/409 拒绝，状态不写入、配置零改动；保持当前 `mode` | 状态 schema 校验 `MODES` 白名单 |
+| `previousMode` 缺失或非法 | 拒绝回滚，提示手动选择合法目标；不猜测默认值 | 同上 |
+| 受控写入未登记 managed 根 | `apply`/`rollback` 403 `write_disabled`（诊断用，非 404） | [Codex 配置参考 §3.1](../reference/codex-config.md) |
+| 漂移检测 `drifted=true` | 拒绝静默切换，提示先解决配置漂移（外部改动），再由用户确认 | `unmanagedFingerprint` 不一致即 fail-closed |
+
 ## 5. DISABLED 入口的拒绝路径（必须有测试）
 
 | 入口 | 拒绝行为 | 证据 |
