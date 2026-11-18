@@ -8,7 +8,8 @@
 
 - **`MG_PARENT_MODEL` 可设为第三方聚合别名（如 `mg-opencodego-deepseek-v4-1-flash`）**：`bin/mg-desktop.mjs configure` 现在区分「官方 slug（默认 `gpt-6-luna`，仍走官方 provider）」与「第三方聚合别名」。别名作父时不再被当成官方缓存模型：`official-models.json` 只保留官方基线（luna 投影），别名仅由网关目录绑定解析到 `provider=opencodego`（`domain=thirdParty`），从而不再触发 `official_slug_reuse`，也不会被路由到 `codexOfficialProvider`。`codexOfficialProvider`、官方父路径、`official_slug_reuse` 守卫与 router 官方分支均未改动；未设 `MG_PARENT_MODEL` 或设为官方 slug 时，configure 产出的全部文件与改动前字节一致。
 - 客户端默认模型仍由 `codex/config.toml` 的 `model = "<别名>"` 承担；网关配置**不写** `defaults.model`——该字段语义是"虚拟共用模型名"（`src/router.js:357`、`505-507`），写入聚合别名会让目录零碰撞守卫 `slug_collision` fail-closed 并把解析短路成虚拟模型。
-- 回归：新增 `scripts/test/offline/g2-parent-thirdparty.test.mjs`（6 用例：默认/官方 slug 兼容、别名不入官方目录、缓存污染、解析层 provider/domain、子代理别名与 effort）；`g2-parent-model.test.mjs` ④ 改为在目录层断言 `official_slug_reuse` 守卫未被放宽。
+- 回归：新增 `scripts/test/offline/g2-parent-thirdparty.test.mjs`（7 用例：默认/官方 slug 兼容、别名不入官方目录、gateway 无 `defaults.model`、绑定表唯一、缓存污染、解析层 provider/domain/工具路由、子代理别名与 effort）；`g2-parent-model.test.mjs` ④ 改为在目录层断言 `official_slug_reuse` 守卫未被放宽。
+- **未验证（真机前置）**：顶层 `model=mg-*` 在 managed provider 下是否会被客户端按 ChatGPT 账号模型列表校验。本机 codex-cli 0.167.0 与桌面 codex bundle 均不含该报错字符串，且配置 `requires_openai_auth=false` + `env_key`，代码层面判断不应校验，但无真机回执；另该别名目录条目不声明多代理能力，`spawn_agent` 是否下发须真机观察。
 
 ## [Unreleased] —— 2026-11-16 续轮韧性：状态缺失优雅降级 + 全链路诊断
 
