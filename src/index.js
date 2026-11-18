@@ -15,7 +15,7 @@ import { forwardChain, routeLimit, virtualQuotaExceeded, acquireProvider, initFo
 import { isToolBearingBody } from './retry-policy.js'
 import { createBudget, abortedError } from './budget.js'
 import { responsesToChat, chatToResponse, LEGACY_BRIDGE_COMPAT, prepareCodexNativeRequest } from './responses.js'
-import { resolveUpstreamProtocol, RESPONSES, UNSUPPORTED_PROTOCOL } from './codex/chat-compat.js'
+import { resolveUpstreamProtocol, RESPONSES, CHAT_COMPLETIONS, UNSUPPORTED_PROTOCOL } from './codex/chat-compat.js'
 import { createResponsesStream, createCodexStreamAdapter } from './responses-stream.js'
 import { validateEmbeddingRequest, buildEmbeddingRequest, embeddingHeaders, normalizeEmbeddingResponse, supportsEmbeddings, MAX_EMBEDDING_INPUTS } from './embeddings.js'
 import { validateRerankRequest, buildRerankRequest, rerankHeaders, normalizeRerankResponse, supportsRerank } from './rerank.js'
@@ -28,7 +28,7 @@ import { restoreResponseJson, detectOpaqueV2Task, detectEncryptedToolSchema } fr
 import { readSubscriptionCredential, isGatewaySubscriptionTarget, probeLocalCodexAuth, SubscriptionCredentialError } from './codex/local-subscription.js'
 import { isTargetAuthzError, resolveUpstream, assertResolvedUpstream, assertNoSubscriptionCredentialToThirdParty, authFailureReceipt, authFailureResponse } from './codex/target-authz.js'
 import { reconstructContinuation, recordContinuation, createCaptureSink, continuationStoreSize, configureContinuationRootFix, configureContinuationIdAlias } from './responses-continuation.js'
-import { v2ScopeOf, V2_TARGET_UPSTREAM_MODEL, GO_NATIVE_CODEX_DEFAULTS } from './providers/opencode-go.js'
+import { v2ScopeOf, V2_TARGET_UPSTREAM_MODEL, GO_NATIVE_CODEX_DEFAULTS, isGoBinding } from './providers/opencode-go.js'
 import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
 import { createObservability, hashId } from './observability/events.js'
 import { buildCatalog } from './codex/catalog.js'
@@ -3466,6 +3466,20 @@ function makeHandler(state) {
           const nout = await proxyNativeResponses(state, budget, log, { req, body, modelName: nHit.canonicalName, def: nDef, wantStream: !!body.stream, res, codexRoute, codexPlan, continuation })
           if (nout && nout.streamed) return
           res.writeHead(nout.status, { 'content-type': nout.contentType }); res.end(nout.buf); return
+        }
+        // 方案 B：聚合 Go 绑定（opencodego）的 thirdParty chat-completions 子代理续轮兼容。
+        // 这类子代理（deepseek）的续轮帧由 Codex 连接续轮自行填入 previous_response_id，其 input
+        // 已含完整历史（全量重发）；而 Chat 桥契约（responses.js:317）会据此 400「不维护续轮」，
+        // 子代理无法派单。Chat 桥本就不做 server-side 续轮，删除该字段等价于「无状态重发」，与
+        // RESPONSES 分支（:3437-3440）及续轮重建后（:3392）的删除语义一致：不静默丢历史、不伪造
+        // function_call、不删用户 input、不放宽 MG-R008 配对闸门。
+        // 仅对 Go 绑定子代理开此口子：通用 thirdParty chat 目标（responses-endpoint 拒绝矩阵）仍
+        // 保持 400 fail-closed 契约；官方/原生路径在上方已 return，不受影响。
+        if (nProto && nProto.protocol === CHAT_COMPLETIONS && nDef && nDef.provider &&
+            state.cfg.providers[nDef.provider] && isGoBinding(buildProvider(state.cfg, nDef.provider)) &&
+            body && Object.prototype.hasOwnProperty.call(body, 'previous_response_id')) {
+          body = Object.assign({}, body)
+          delete body.previous_response_id
         }
         // M1-3b：把隐式默认改为显式选择——这是为旧客户端/Codex CLI 保留的已知有损兼容模式；
         // 严格默认入口是 bridge()，未来可切换。
