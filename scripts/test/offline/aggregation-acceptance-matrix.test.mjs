@@ -14,7 +14,7 @@ import {
 } from './aggregation-matrix.js'
 import { SUITES } from '../run.mjs'
 
-const PINNED_CONTRACT_SHA = 'e2068e6edbf76eee47db3c04556eb9ab60548556d6632f955af29269e74edc83'
+const PINNED_CONTRACT_SHA = '67e06d67f5b0fe4fac7e19ca3f17e6a073ccfe35bf177dcf6b960ac4c88a3da2'
 
 // 契约原文（逐字）。改动这里等于改动验收口径，必须由所有者批准。
 const PINNED_WORDING = {

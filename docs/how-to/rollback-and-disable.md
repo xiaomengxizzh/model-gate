@@ -120,12 +120,12 @@ node scripts/check-metadata.mjs      # 期望 "Metadata: PASS (32 checks)"（本
 
 | 项 | 内容 |
 | --- | --- |
-| 客体 | `/api/config/save`、`/api/config/reload`、`/api/admin-token`、`/api/keys` 等管理写操作 |
-| 默认值 | 未设 `MG_ADMIN_TOKEN` 时：本机回环可用，**远程匿名读写一律 403** |
-| 关闭/收紧方法 | ① 设置强 `MG_ADMIN_TOKEN`；② `server.host` 保持 `127.0.0.1`（不要绑 `0.0.0.0`）；③ 反向代理层对 `/api/*` 的写方法直接拒绝；④ 不把管理端口映射到非回环 |
+| 客体 | `/api/config/save`、`/api/config/reload`、`/api/keys`、`/api/aggregation/*` 等管理写操作 |
+| 默认值 | 管理面无令牌（2026-11-18 所有者授权降级）：本机回环可用，**远程匿名读写一律 403** |
+| 收紧方法 | ① `server.host` 保持 `127.0.0.1`（不要绑 `0.0.0.0`）；② Host/Origin 白名单只列本机需要的名字；③ 反向代理层对 `/api/*` 的写方法直接拒绝；④ 不把管理端口映射到非回环 |
 | 关闭后行为 | 面板与远程运维不可用（这是有意的）；数据面 `/v1/*` 不受影响 |
-| 打开（放宽）的风险 | 只有一把令牌 = 全量管理权限（配置、Key 元数据、模型测试）；令牌存加密 keys 库，重启不失效；泄露即等于面板完全暴露 |
-| 验证 | `offline/admin-origin` 4（回环放行/跨源与坏 Host 拒绝/非回环匿名 403）、`offline/admin-secrets` 1（不泄露明文凭据）、`offline/admin-contract` 2 |
+| 打开（放宽）的风险 | 管理面无令牌，任何能到达回环管理端口的本地进程都拥有全量管理权限（配置、Key 元数据、模式切换）；必须靠回环绑定 + Host/Origin 守住边界 |
+| 验证 | `offline/admin-origin`（回环放行/跨源与坏 Host 拒绝/非回环匿名 403）、`offline/admin-secrets`（不泄露明文凭据）、`offline/admin-contract` |
 
 ### 4.4 MCP ↔ UHR 委派
 

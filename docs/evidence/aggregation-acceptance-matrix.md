@@ -4,7 +4,7 @@
 > `scripts/test/offline/aggregation-acceptance-matrix.test.mjs` 在每次 `npm test` 中重新生成并逐字节比对；手工改动契约、计划、证据状态或本文件任一方向都会失败。
 
 - 被测树 SHA：`4feafe0e51dc02d48c45734df5b34e70d3679bd5`（来自 docs/evidence/aggregation-real-luna-2026-11-14.md 的「被测树 SHA」字段，生成器不再保存常量）
-- 契约来源：`docs/product/2026-11-14-owner-product-contract.md`（sha256 `e2068e6edbf76eee47db3c04556eb9ab60548556d6632f955af29269e74edc83`）
+- 契约来源：`docs/product/2026-11-14-owner-product-contract.md`（sha256 `67e06d67f5b0fe4fac7e19ca3f17e6a073ccfe35bf177dcf6b960ac4c88a3da2`）
 - 用例映射来源：`docs/roadmap/2026-11-14-aggregation-pseudocode-plan.md` §I（sha256 `0f65aa3d18f1859e2b524714b46ab9129bcc5c3e9b0cd92e135669784cd64250`）
 - 状态来源：`docs/evidence/aggregation-real-luna-2026-11-14.md`（1 行）、`docs/evidence/aggregation-native-real-2026-11-14.md`（2 行）、`docs/evidence/aggregation-integration-2026-11-14.md`（12 行）、`docs/evidence/agg-p01-opencode-discovery-2026-11-14.md`（6 行）；多份证据对同一需求必须一致。旧轮次快照被新证据取代时，较新文档的依据必须显式写出 `取代 <旧状态> @ <旧文档路径>`，否则生成失败（禁止静默改口径）。
 - 状态口径：契约 §2 的五值（`NOT_TESTED` / `BLOCKED` / `FAIL` / `PASS_MOCK` / `PASS_REAL`）；`PASS_MOCK` 只用于**离线套件真正执行过**的行为，且每行都在「状态依据」里点名已登记的套件。

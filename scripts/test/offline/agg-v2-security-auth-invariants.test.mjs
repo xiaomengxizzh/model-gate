@@ -146,7 +146,7 @@ const WRITE_CTX = {
   rawBody: JSON.stringify({ provider: { kind: 'go', apiKeyEnv: 'MG_TEST_KEY' } }),
 }
 
-test('无显式管理员令牌的聚合写被 403 拒绝，零配置写入', async () => {
+test('模块侧：无显式管理员标记的聚合写被 403 拒绝（模块鉴权源码不变）', async () => {
   const out = await handleAggregationApi(Object.assign({}, WRITE_CTX, {
     explicitAdmin: false, isLocal: true,
   }))

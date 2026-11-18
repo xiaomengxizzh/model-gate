@@ -58,8 +58,8 @@ test('HTTP boundaries, virtual credentials and isolated configuration', { timeou
   const post = (path, body, headers = {}) => fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) })
   const chat = { model: 'private', messages: [{ role: 'user', content: 'hello' }] }
   const admin = { authorization: 'Bearer test-admin' }
-  assert.equal((await fetch(base + '/api/status')).status, 401)
-  const status = await (await fetch(base + '/api/status', { headers: admin })).json()
+  assert.equal((await fetch(base + '/api/status')).status, 200, '管理面无令牌，回环直接可读')
+  const status = await (await fetch(base + '/api/status')).json()
   const model = status.models.find(m => m.name === 'demo')
   assert.equal(model.api, 'openai')
   assert.deepEqual(model.providerModels, { mock: 'vendor-demo' })

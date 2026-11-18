@@ -74,43 +74,31 @@ function lanIPv4 () {
   return null
 }
 
-test('P0-2 入口：无令牌 ⇒ 403 且未读 body（超大 Content-Length 也不会 413）', { timeout: 30000 }, async (t) => {
+test('管理面无令牌：回环可直接访问 /api/codex/*（缺令牌 403 分支已删除）', { timeout: 30000 }, async (t) => {
   const gw = await startGateway({ name: 'm4-1b-anon' })
   t.after(() => gw.stop())
-  const started = Date.now()
-  // 声明 1MiB body 但一个字节都不发：若入口先读 body，这里会挂住；收到 403 即证明没读。
-  const out = await raw(gw.base, '/api/codex/config/plan', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'content-length': String(1024 * 1024) },
-  })
-  const elapsed = Date.now() - started
-  assert.equal(out.status, 403, JSON.stringify(out))
-  assert.equal(out.json.code, 'explicit_admin_required')
-  assert.ok(elapsed < 3000, '必须立刻 403 而不是等待 body：' + elapsed + 'ms')
-  // 旧 /api/* 的本机初始化语义不变（本卡不扩大范围）
+  const out = await gw.get('/api/codex/policy')
+  assert.equal(out.status, 200, JSON.stringify(out))
+  assert.equal((await out.json()).auth.explicitAdminRequired, true)
   assert.equal((await gw.get('/api/status')).status, 200)
 })
 
-test('P0-2 入口：错令牌/缺令牌 403；正确令牌 + 回环 + 同源 200；日志不含令牌', { timeout: 30000 }, async (t) => {
+test('管理面无令牌：任意 Bearer 都被忽略；跨源仍在读 body 前拒绝；日志不含令牌', { timeout: 30000 }, async (t) => {
   const gw = await startGateway({ name: 'm4-1b-token', env: { MG_ADMIN_TOKEN: TOKEN } })
   t.after(() => gw.stop())
 
   const missing = await gw.get('/api/codex/policy')
-  assert.equal(missing.status, 403)
-  assert.equal((await missing.json()).code, 'explicit_admin_required')
-
+  assert.equal(missing.status, 200, '缺令牌不再 403')
   const wrong = await raw(gw.base, '/api/codex/policy', { headers: { authorization: 'Bearer wrong-token' } })
-  assert.equal(wrong.status, 403, JSON.stringify(wrong))
-  assert.equal(wrong.json.code, 'explicit_admin_required')
+  assert.equal(wrong.status, 200, '错误令牌被忽略')
 
   const ok = await raw(gw.base, '/api/codex/policy', { headers: bearer() })
   assert.equal(ok.status, 200, JSON.stringify(ok))
-  assert.equal(ok.json.ok, true)
   assert.equal(ok.json.auth.explicitAdminRequired, true)
   assert.equal(ok.json.auth.adminSubjectBound, true)
   assert.equal(JSON.stringify(ok.json).includes(TOKEN), false, '响应不得回显管理令牌')
 
-  // 跨源（即使带正确令牌）必须 403，且在读 body 之前
+  // 跨源（无令牌概念后依然）必须 403，且在读 body 之前
   const cross = await raw(gw.base, '/api/codex/config/plan', {
     method: 'POST',
     headers: bearer({ origin: 'http://evil.example', 'content-length': String(1024 * 1024) }),
@@ -118,10 +106,9 @@ test('P0-2 入口：错令牌/缺令牌 403；正确令牌 + 回环 + 同源 200
   assert.equal(cross.status, 403, JSON.stringify(cross))
   assert.match(String(cross.json && cross.json.error), /跨源/)
 
-  // 日志（含审计与拒绝日志）不得出现令牌本体
+  // 日志不得出现令牌本体；跨源拒绝已由上面 403 直接断言。
   const text = await readLogs(gw)
   assert.equal(text.includes(TOKEN), false, 'logs must not contain the admin token')
-  assert.ok(text.includes('explicit_admin_required') || text.includes('codex admin denied'), 'denials should be auditable by code')
 })
 
 test('P0-2 入口：非回环 peer 403；显式 allowRemote 才放行', { timeout: 40000 }, async (t) => {

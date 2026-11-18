@@ -175,9 +175,10 @@ test('N03 CLI 写路径：loopback/令牌门禁 + plan→apply→rollback（临�
   assert.equal(noToken.status, 2)
   assert.equal(noToken.json.code, 'admin_token_missing')
 
-  const badToken = cli(['config', 'plan', '--base-url', gw.base, '--root', 'managed-root', '--desired', '{"topLevel":{"model":"x"}}', '--json'], { MG_ADMIN_TOKEN: 'wrong-token' })
-  assert.equal(badToken.status, 3, badToken.stderr)
-  assert.equal(badToken.json.code, 'explicit_admin_required')
+  // 管理面无令牌：服务端忽略 CLI 携带的令牌，错误令牌不再触发 403。
+  const wrongToken = cli(['config', 'plan', '--base-url', gw.base, '--root', 'managed-root', '--desired', '{"topLevel":{"model":"x"}}', '--json'], { MG_ADMIN_TOKEN: 'wrong-token' })
+  assert.equal(wrongToken.status, 0, wrongToken.stderr)
+  assert.match(wrongToken.json.planId, /^pl_/)
 
   const env = { MG_ADMIN_TOKEN: 'synthetic-admin-token' }
   const planned = cli(['config', 'plan', '--base-url', gw.base, '--root', 'managed-root', '--desired', '{"topLevel":{"model":"mg-a"}}', '--api-version', CODEX_API_VERSION, '--json'], env)

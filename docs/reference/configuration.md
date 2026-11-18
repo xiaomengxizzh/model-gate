@@ -93,9 +93,9 @@
 
 ## 安全
 
-- **管理令牌**：设置后受保护的管理接口需 `Authorization: Bearer <token>` 或 `x-mg-admin: <token>`，未授权返回 401；未设置时只有**本机**（回环对端）可调用管理接口，远程对端一律 403，启动会打警告（非回环绑定且无令牌时升级为错误级）。三种设置方式（优先级从高到低）：① 环境变量 `MG_ADMIN_TOKEN`；② `gateway.json` 的 `server.adminToken`；③ 控制面板顶部「令牌」按钮——**面板录入即写服务端并热生效**
-- **管理面来源策略（MG-001）**：① Host 只接受 IP 字面量与 `localhost`/`server.host`/`server.allowedHosts` 中的名字，其他域名返回 403（DNS 重绑定防护）；② 带 `Origin` 的浏览器请求必须同源或命中 `server.allowedOrigins`，跨源写/读一律 403（`Origin: null` 同样拒绝）；③ 无 `Origin` 的 CLI/curl 不受影响。数据面同样做 Host 校验，跨源写请求返回 403 `{error:{message,type:'forbidden'}}`。**迁移**：用自定义域名或局域网域名访问面板/网关时，把该名字加入 `server.allowedHosts`；用另一源的前端页面调用网关时，把该源加入 `server.allowedOrigins`；远程管理访问必须先配置管理令牌。（加密存于 keys 库，重启不失效），留空则关闭保护。若设了环境变量，以环境变量为准。
-- **面板门禁**：启用管理令牌后，打开控制台先显示**登录卡片**，输入正确令牌才进入主界面（令牌错误红字提示）。浏览器记住当前网关实例（按启动时间戳 `startedAt` 判定），同一实例内刷新不再要求输入；**网关重启后需重新输入令牌**。
+- **管理面无令牌（所有者授权的降级，2026-11-18）**：管理令牌功能已整体删除，网关不再读取 `MG_ADMIN_TOKEN` / `server.adminToken` / `keys.__mg_admin`，也不签发或校验任何 Bearer / `x-mg-admin` 凭据。唯一安全下界是**回环对端（或显式 allowRemote）+ Host/Origin 来源校验**；非回环管理请求返回 403。`/api/auth` 恒为 `needAuth:false`，`POST /api/admin/unlock` 为返回 `{ok:true,needAuth:false,deprecated:true}` 的空操作，`POST /api/admin-token` 已移除（404）。环境变量中若仍残留 `MG_ADMIN_TOKEN`，因代码不再读取，对行为无任何影响。
+- **管理面来源策略（MG-001）**：① Host 只接受 IP 字面量与 `localhost`/`server.host`/`server.allowedHosts` 中的名字，其他域名返回 403（DNS 重绑定防护）；② 带 `Origin` 的浏览器请求必须同源或命中 `server.allowedOrigins`，跨源写/读一律 403（`Origin: null` 同样拒绝）；③ 无 `Origin` 的 CLI/curl 不受影响。数据面同样做 Host 校验，跨源写请求返回 403 `{error:{message,type:'forbidden'}}`。**迁移**：用自定义域名或局域网域名访问面板/网关时，把该名字加入 `server.allowedHosts`；用另一源的前端页面调用网关时，把该源加入 `server.allowedOrigins`。
+- **面板门禁**：无登录卡片/锁屏；即便管理面无令牌，Host/Origin 与回环来源校验仍在所有管理请求前执行。
 - **数据面鉴权**：`MG_CLIENT_KEY` 或面板里的 `clientKey` 设置后，`/v1/*` 需携带同一 Key，否则 401；未配置全局 Key 时，绑定独立 Key 的虚拟模型仍需验证其 Key；其他入口保留本地匿名访问。全局 Key 可访问全部模型；虚拟 Key 在启用全局门禁时只放行自己的入口。
 - **转发鉴权**：向各上游转发时**剥离客户端自带** `Authorization/Cookie/x-api-key/proxy-*`，统一由网关注入，杜绝绕过；配置里的 `extraHeaders` 也不能覆盖或注入鉴权头（命中即忽略并留审计日志，只记头名）。详见下节「Codex 聚合身份域」。
 - **上游 Key 来源只有两条：环境变量或加密 keys 库（内联 `apiKey` 永不读取）**。`providers.<名>.apiKeyEnv` 指向变量名，网关按顺序解析：① 加密 keys 库（面板写入的 `providers.<id>` Key）→ ② **进程环境变量** → ③ **用户级环境变量实时读取**（Linux：`systemctl --user show-environment`，未命中再直接解析 `~/.config/environment.d/*.conf`；Windows：`HKCU\Environment`；带 60s 缓存）。第 ③ 步让"在系统里配好 `OPENCODE_API_KEY` 后无需重启网关即可生效"，且 **Key 不会写进 `gateway.local.json`/`keys.local.json`/`/api/status`/日志**（`/api/status` 只回 `hasKey` 与 `keySource=env|env-registry|keys` 以及变量名 `apiKeyEnv`）。**聚合发现（sync）使用同一个解析器**，因此"状态页显示 hasKey=true 但 sync 报 `discovery_credential_missing`"不再发生。控制台「模型与账号」检测到既有环境变量凭据时默认"使用现有凭据并连接"，不会要求用户重新粘贴，也不会写 `/api/keys`。回归：`scripts/test/offline/aggregation-env-credential.test.mjs`、`user-env.test.mjs`。
@@ -104,9 +104,9 @@
 
 ## 管理面入口：/api/codex/* 显式管理员与受控写入（M4-1b / P0-2）
 
-- **显式管理员**：/api/codex/* 一律要求正确管理令牌（Authorization: Bearer <token> 或 x-mg-admin: <token>）。未设置令牌时**不再有任何本机放行**；未携带/错误令牌在读请求体之前返回 403 explicit_admin_required（大 body 不会被读取，也不会变成 413）。
-- **可信来源**：Host/Origin 仍按上文「管理面来源策略」在路由前校验；非回环对端默认 403 remote_forbidden，只有 server.allowRemote=true 或环境变量 MG_ADMIN_ALLOW_REMOTE=1 才放行远程管理（仍要求显式令牌）。旧 /api/* 的管理语义未在本轮改动。
-- **adminSubject**：入口用 sha256(管理令牌) 前 16 位派生稳定主体（形如 admin-xxxxxxxxxxxxxxxx），仅用于审计关联；日志与响应不含令牌本体。
+- **入口显式管理员标记**：入口在完成 Host/Origin/peer 校验后，向模块传固定的 `explicitAdmin:true` 与审计主体 `adminSubject:'admin-local'`（常量，不含凭据）。模块不再因令牌有无而放行/拒绝；令牌概念已删除。
+- **可信来源**：Host/Origin 仍按上文「管理面来源策略」在路由前校验；非回环对端默认 403 remote_forbidden，只有 server.allowRemote=true 或环境变量 MG_ADMIN_ALLOW_REMOTE=1 才放行远程管理（无需令牌）。旧的“缺令牌 403 explicit_admin_required”分支已删除。
+- **adminSubject**：固定常量 `admin-local`，仅用于审计关联，不含任何凭据；日志与响应不含密钥值。
 - **受控写入默认关闭**：apply/rollback 返回 403 write_disabled（便于诊断，不是 404）。启用：设置 MG_CODEX_MANAGED_ROOT=<绝对路径且文件名为 config.toml>；启动时登记为不透明根 id managed-root（mode=managed）。plan/apply 只接受 root=managed-root，不接受任何浏览器提供的路径或原始 TOML。登记失败（非绝对路径/非 config.toml/符号链接/父目录不可解析）只记告警并保持关闭。
 - **重启语义**：root/backup/confirmToken 注册表是进程内的；重启后旧 backupId 失效，需要重新 plan/apply 取得新 backupId；MG_CODEX_MANAGED_ROOT 会在每次启动时重新登记。
 - 相关契约：docs/contracts/management-api-v1.md 第 10 节（模块边界）与本文件。
@@ -306,7 +306,7 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 - **悬浮小窗**：状态 ●、uptime、今日 token、请求/错误，按钮 启动/停止/重启/面板/日志；可拖动，右键菜单切「置顶」，✕ 缩到托盘（守护不中断）。
 - **托盘**：双击唤出小窗；右键菜单 = 面板/小窗/启动/停止/重启/**开机自启**（写 HKCU Run 键，免管理员）/日志文件夹/退出（会停止网关，有确认）。
 - **看门狗**：托盘拉起的网关崩溃后 5s 自动重启（连续快速失败 ≥5 次熔断并气泡提示）；启动前自动清占用端口的残留 node（同 start.bat 语义）。检测到端口已有 node 实例时显示「外部实例/未接管」，不重复拉起。
-- 数据源：轮询 `/healthz`（存活）与 `/api/status`（统计；设置了管理令牌时自动降级为「统计需令牌」）。
+- 数据源：轮询 `/healthz`（存活）与 `/api/status`（统计）。管理面无令牌，不会再出现「统计需令牌」降级。
 
 ## 协议互转（OpenAI ⇄ Anthropic ⇄ Gemini）
 
@@ -337,8 +337,8 @@ model-gateway/
 | `<各 provider 的 apiKeyEnv>` | provider 鉴权；留空则不带 Authorization |
 | `MG_KEYS_MASTER` | 可选：keys 加密主密钥；默认自动生成并持久化，keys 始终加密存储 |
 | `MG_CLIENT_KEY` | 数据面客户端接入 Key（配了则 /v1/* 需带 Bearer） |
-| `MG_ADMIN_TOKEN` | 管理 API 令牌 |
-| `MG_ADMIN_ALLOW_REMOTE` | 置 `1`/`true`/`on` 允许非回环对端访问**管理面**（仍要求显式管理令牌）；默认关闭 |
+| `MG_ADMIN_TOKEN` | 已废弃：管理令牌功能删除后网关不再读取；残留环境变量对行为无影响 |
+| `MG_ADMIN_ALLOW_REMOTE` | 置 `1`/`true`/`on` 允许非回环对端访问**管理面**（无需令牌，仍受 Host/Origin 校验）；默认关闭 |
 | `MG_CODEX_MANAGED_ROOT` | 受控自管 Codex 配置文件的绝对路径（必须名为 `config.toml`）；设置后启动期登记不透明根 `managed-root`，启用 `/api/codex/config/apply|rollback`（仍要求显式管理员）。默认关闭 = apply/rollback 403 `write_disabled` |
 | `MG_MAX_BODY` | 覆盖 `server.maxBodyBytes`（测试用） |
 | `MG_CONFIG` | 指定非默认配置文件路径 |

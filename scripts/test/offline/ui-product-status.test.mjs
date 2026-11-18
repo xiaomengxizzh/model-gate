@@ -68,7 +68,7 @@ test('契约标识与状态机词表固定', () => {
 test('锁定与加载：不显示任何成功状态', () => {
   const locked = deriveProductStatus({ authenticatedAdmin: false, status: statusWith(), aggregation: snap() })
   assert.equal(locked.state, 'locked')
-  assert.equal(locked.primary.id, 'unlock')
+  assert.equal(locked.primary.id, 'retry', '管理面无令牌锁屏，主操作改为重试读取')
   assert.equal(locked.overall.level, 'locked')
 
   const loading = deriveProductStatus({ loading: true, status: null, aggregation: null })
@@ -297,22 +297,21 @@ test('A5 审查 P1/P2 回归：未知≠未安装、428 可达、模式未知不
   assert.match(throttled.primary.detail, /30 秒/)
 })
 
-test('聚合接口 403 explicit_admin_required → needs_admin_token（不是“读取失败”）', () => {
+test('聚合接口 403（来源/Host/Origin）→ needs_admin_token 兼容状态（不是“读取失败”）', () => {
   const ps = deriveProductStatus({
     authenticatedAdmin: true,
     status: statusWith({ providers: [{ id: 'opencodego', hasKey: true }], models: [{ name: GO_TARGET_PUBLIC_ID }] }),
     aggregation: null,
-    aggregationError: { status: 403, data: { code: 'explicit_admin_required' }, message: '403' },
+    aggregationError: { status: 403, data: { code: 'remote_forbidden' }, message: '403' },
   })
   assert.equal(ps.error.kind, 'denied')
   assert.equal(ps.state, 'needs_admin_token')
-  // P1-04：主操作改为本机解锁管理会话，设置令牌保留为次级入口（避免跳设置页死循环）。
-  assert.equal(ps.primary.id, 'unlock-admin')
-  assert.equal(ps.primary.kind, 'local-admin-unlock')
-  assert.ok(ps.secondary.some((a) => a.id === 'set-admin-token' && a.route === '#/settings?section=admin-token'))
-  assert.ok(ps.readOnlyReason && ps.readOnlyReason.code === 'explicit_admin_required')
+  // 管理面无令牌：主操作改为重新检测，不再有解锁/设置令牌入口。
+  assert.equal(ps.primary.id, 'recheck-admin')
+  assert.equal(ps.primary.kind, 'reload')
+  assert.equal(ps.secondary.some((a) => a.id === 'set-admin-token'), false)
+  assert.ok(ps.readOnlyReason && ps.readOnlyReason.code === 'remote_forbidden')
   assert.match(ps.overall.label, /只读/)
-  assert.notEqual(ps.primary.id, 'retry')
 })
 
 test('状态请求失败与聚合失败必须区分来源（都不得被读成“未连接”）', () => {

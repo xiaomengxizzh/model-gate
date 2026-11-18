@@ -222,16 +222,15 @@ test('T-KEY-01 env 覆盖优先：MG_CLIENT_KEY > keys 库 > 旧 defaults', { ti
   assert.equal((await ctx.chat('env-key-wins')).status, 200)
 })
 
-test('T-KEY-01 无权限/无令牌：401 且不改配置', { timeout: 30000 }, async (t) => {
-  const ctx = await boot({ env: { MG_ADMIN_TOKEN: 'admin-token' } })
+test('T-KEY-01 管理面无令牌：写入不再需要令牌，非法值仍 400 且不改配置', { timeout: 30000 }, async (t) => {
+  const ctx = await boot()
   t.after(() => ctx.stop())
-  const before = await (await ctx.gw.get('/api/status', bearer('admin-token'))).json()
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: 'nope' } })).status, 401)
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: 'nope' } }, bearer('wrong-token'))).status, 401)
-  const after = await (await ctx.gw.get('/api/status', bearer('admin-token'))).json()
-  assert.equal(after.configVersion, before.configVersion, '未授权保存不得推进版本')
-  assert.equal(after.defaults.clientKey, '', '未授权保存不得写入 Key')
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { proxyMode: 'direct' } }, bearer('admin-token'))).status, 200)
+  const before = await (await ctx.gw.get('/api/status')).json()
+  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: 12345 } })).status, 400, '非法值仍 400')
+  const after = await (await ctx.gw.get('/api/status')).json()
+  assert.equal(after.configVersion, before.configVersion, '被拒的保存不得推进版本')
+  assert.equal(after.defaults.clientKey, '', '被拒的保存不得写入 Key')
+  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200, '无令牌回环保存直接放行')
 })
 
 test('T-KEY-01 非法值 400 且不落盘、不改内存', { timeout: 30000 }, async (t) => {

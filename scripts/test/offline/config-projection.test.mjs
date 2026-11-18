@@ -31,20 +31,19 @@ test('GET /api/config：只读配置投影（无运行时字段/无明文 Key，
   assert.equal('_paths' in body, false, '不返回内部路径')
 })
 
-test('GET /api/config 需要管理鉴权；投影可直接用于保存并保留扩展字段', { timeout: 30000 }, async (t) => {
+test('GET /api/config 无令牌可读（管理面安全降级）；投影可直接用于保存并保留扩展字段', { timeout: 30000 }, async (t) => {
   const gw = await startGateway({
     name: 'mg009-cfgauth',
-    env: { MG_ADMIN_TOKEN: 'admin-tok' },
     config: { providers: { mock: { baseUrl: 'http://127.0.0.1:1', vendorRateClass: 'tier-a' } }, models: { demo: { provider: 'mock', vendorCapability: 'vision' } } },
   })
   t.after(() => gw.stop())
-  assert.equal((await gw.get('/api/config')).status, 401, '无令牌 401')
-  const auth = { authorization: 'Bearer admin-tok' }
-  const proj = await (await gw.get('/api/config', auth)).json()
+  const first = await gw.get('/api/config')
+  assert.equal(first.status, 200, '管理面无令牌，回环直接可读')
+  const proj = await first.json()
   assert.equal(proj.providers.mock.vendorRateClass, 'tier-a')
-  const save = await gw.post('/api/config/save', Object.assign({}, proj, { version: proj.configVersion }), Object.assign({ 'content-type': 'application/json' }, auth))
+  const save = await gw.post('/api/config/save', Object.assign({}, proj, { version: proj.configVersion }), { 'content-type': 'application/json' })
   assert.equal(save.status, 200, '投影可直接保存（含未知字段）')
-  const again = await (await gw.get('/api/config', auth)).json()
+  const again = await (await gw.get('/api/config')).json()
   assert.equal(again.providers.mock.vendorRateClass, 'tier-a', '保存后扩展字段仍在')
   assert.equal(again.models.demo.vendorCapability, 'vision', '保存后模型扩展字段仍在')
 })

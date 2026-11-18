@@ -97,22 +97,8 @@
       <main class="main" id="view-root" tabindex="-1" aria-live="polite">
         <div class="boot"><span class="spinner" aria-hidden="true"></span><p>正在连接本地控制面…</p></div>
       </main>
-      <footer class="page-footer"><span id="foot-note">只读与写入均通过同源管理 API；令牌仅保存在本标签页内存。</span><span id="foot-time"></span></footer>
+      <footer class="page-footer"><span id="foot-note">只读与写入均通过同源管理 API；管理面仅回环 + Host/Origin 保护，无令牌。</span><span id="foot-time"></span></footer>
     </div>
-  </div>
-
-  <div class="auth-overlay" id="auth-overlay" hidden>
-    <form class="auth-card" id="auth-form" aria-labelledby="auth-title">
-      <div class="auth-glyph" aria-hidden="true">▦</div>
-      <p class="eyebrow">SECURE ACCESS</p>
-      <h1 id="auth-title">解锁管理控制面</h1>
-      <p class="muted">当前实例启用了管理员令牌。令牌只保存在本标签页内存，刷新页面后需重新输入；不会写入 localStorage。</p>
-      <label for="admin-token">管理员令牌</label>
-      <input id="admin-token" type="password" required autocomplete="off" spellcheck="false" placeholder="输入 MG_ADMIN_TOKEN">
-      <p class="field-error" id="auth-error" role="alert" aria-live="assertive"></p>
-      <button class="btn btn-primary btn-block" type="submit">解锁控制面</button>
-      <p class="auth-foot">也可以通过 <code>Authorization: Bearer</code> 在本机 CLI 调用管理 API。</p>
-    </form>
   </div>
 
   <div class="toast-stack" id="toasts" role="status" aria-live="polite"></div>

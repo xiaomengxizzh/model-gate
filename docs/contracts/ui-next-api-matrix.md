@@ -4,26 +4,30 @@
 
 状态口径：**PASS** = 代码连通 + 本轮离线/浏览器实跑；**PARTIAL** = 已有安全降级或只覆盖部分路径；**NOT_SUPPORTED** = 后端没有对应能力，界面明确标注而不是伪造按钮。
 
-## 1. 会话与鉴权
+## 1. 会话与来源校验（管理面无令牌，2026-11-18 安全降级）
+
+所有者授权删除管理令牌功能后，前端不再获取/携带/持久化任何令牌，也不再有锁屏或登录卡。安全下界为**回环对端 + Host/Origin 来源校验**，由网关统一执行。
 
 | UI 操作 | API | 请求 | 返回 / 错误 | 状态 |
 | --- | --- | --- | --- | --- |
-| 启动读取鉴权模式 | `GET /api/auth` | 无 | `{needAuth,startedAt}` | PASS |
-| 解锁控制面 | `GET /api/status` | `Authorization: Bearer <token>` | 200 / 401 | PASS（错误令牌浏览器实测） |
-| 任意请求 401 | 统一拦截 | — | 清空内存令牌、显示锁定页，不保留旧数据 | PASS |
-| 令牌持久化 | 无（设计上不调用） | — | 仅模块内存；刷新即丢失；主题偏好是唯一 localStorage 键 | PASS（静态检查） |
+| 启动兼容读取 | `GET /api/auth` | 无 | `{needAuth:false,startedAt}` | PASS |
+| 直接读取控制面 | `GET /api/status` | 无令牌 | 200（回环 + Host/Origin 通过） | PASS |
+| 非回环/跨源被拒 | 任意管理 API | — | 403 `remote_forbidden` / Host/Origin 拒绝 | PASS（来源下界） |
+| 旧客户端解锁兼容 | `POST /api/admin/unlock` | `{}` | 200 `{ok:true,needAuth:false,deprecated:true}` 空操作 | PASS |
+| 401 兜底 | 统一拦截 | — | 清空已渲染敏感投影并显式报错；管理面正常路径不再有 401 | PARTIAL（兜底保留） |
+| 令牌持久化 | 无（功能已删除） | — | 无令牌可持久化；主题偏好是唯一 localStorage 键 | PASS（静态检查） |
 
 ## 2. Dashboard｜运行总览
 
 | UI 功能 | API | 关键字段 | 状态 |
 | --- | --- | --- | --- |
-| 运行状态 / 版本 / uptime | `GET /api/status` | `configVersion,uptimeMs,server,needAuth` | PASS |
+| 运行状态 / 版本 / uptime | `GET /api/status` | `configVersion,uptimeMs,server,needAuth(false)` | PASS |
 | 请求、错误、Token、P50/P95 | `GET /api/status` | `global.*` | PASS |
 | 延迟趋势 | `GET /api/status` | `global.latTrend`（真实样本；空则空状态） | PASS |
 | 上游健康 | `GET /api/status` | `providers[].st.state/openUntilMs/hasKey` | PASS |
 | 最近路由 / 会话 | `GET /api/status` | `lastServing,dialogues` | PASS |
 | 缓存提醒 | `GET /api/status` | `cache.alert` | PASS（有值才显示） |
-| 关注项 | 派生 | 缺 Key、熔断、空目录、未启令牌、错误率 | PASS（页面标注“仅根据当前状态推导，不触发探活”） |
+| 关注项 | 派生 | 缺 Key、熔断、空目录、错误率 | PASS（页面标注“仅根据当前状态推导，不触发探活”） |
 
 ## 2.1 首页 / 模型与账号（V3，2026-11-15）
 
@@ -110,8 +114,8 @@ V3 把首页改为**状态驱动**：技术指标全部移到「监控与诊断�
 | UI 操作 | API | 请求 | 返回 / 错误 | 状态 |
 | --- | --- | --- | --- | --- |
 | 实例信息 | `GET /api/status` + `GET /api/config` | — | — | PASS |
-| 管理令牌更新/清除 | `POST /api/admin-token` | `{token}` | 200 / 400 / 401 | PASS（环境变量优先级提示） |
-| 锁定当前控制台 | 前端 | — | 清空内存令牌 | PASS |
+| 管理面保护说明 | 前端静态文案 | — | 无令牌；仅回环 + Host/Origin 保护 | PASS |
+| 配置重载 | `POST /api/config/reload` | 无令牌 | 200 | PASS |
 | 韧性参数编辑 | 草稿 + `POST /api/config/save` | `defaults.retry/timeout/concurrency/proxyMode` | 400 / 409 | PASS |
 | 保存前差异 | 前端 | `diffObjects` | — | PASS |
 | 409 冲突 | 前端 | — | 显示冲突对话框；可重新加载远端，禁止静默覆盖 | PASS（浏览器实测） |

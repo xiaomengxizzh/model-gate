@@ -6,11 +6,13 @@
 
 **证据边界**：本文件由源码审阅与手写 fixture 派生，不含浏览器真实鉴权、真实保存回读、真实上游、托盘 UI 或视觉验收。相关验收项在 §10 统一标注 **NOT EXECUTED**，不得把本文件当作已通过前端验收的证明。
 
+> **2026-11-18 所有者授权变更**：管理令牌功能已整体删除。本文所有“管理令牌 / needAuth / 登录卡 / 401 锁屏 / `POST /api/admin-token`”相关段落均为**历史描述**：管理面现在只有回环 + Host/Origin 来源保护，`/api/auth` 恒 `needAuth:false`，`POST /api/admin/unlock` 为 `deprecated:true` 空操作，`/api/admin-token` 已移除（404）。前端不再获取、携带或持久化任何令牌。
+
 ## 1. 结论先行
 
 1. **`GET /api/status` 是只读投影，不是可编辑配置文档。** 它混有运行统计、探针、掩码凭据与配置快照；其中 `providers` / `models` 是带统计的数组，不是磁盘上的配置映射。
 2. **`POST /api/config/save` 是唯一的整包配置写入口。** `providers` / `models` / `virtualModels` 整体替换，`defaults` 顶层合并；写成功后 `configVersion` +1，响应带最新 `status`。
-3. **凭据走独立通道。** 上游 Key 与虚拟模型 Key 走 `POST /api/keys`；管理令牌走 `POST /api/admin-token`；任何 Key 都不经 `/api/status` 或 `/api/config/save` 回显。
+3. **凭据走独立通道。** 上游 Key 与虚拟模型 Key 走 `POST /api/keys`；管理令牌功能已删除（无独立令牌通道）；任何 Key 都不经 `/api/status` 或 `/api/config/save` 回显。
 4. **视图字段与配置字段必须显式分离。** UI 从投影构造"可编辑表单"，保存前剥离统计/探针/掩码字段；不得把 `status.providers` / `status.models` 原样作为请求体。
 5. **未知配置字段必须保留。** `defaults` 由服务端合并保留；`providers` / `models` 由于整体替换，只能由客户端用"不透明扩展字段袋"原样回送；`virtualModels` 不支持未知字段。
 6. **冲突不自动重试。** 409 表示他处已写入新版本；UI 必须停止保存、呈现冲突、让用户选择"加载最新/保留本地草稿/复制本地修改"，绝不能用新版本号静默覆盖。

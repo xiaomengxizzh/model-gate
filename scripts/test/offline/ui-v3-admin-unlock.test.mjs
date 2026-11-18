@@ -1,5 +1,5 @@
-// P1-04 / G5（前端半）：无管理凭据时只读状态准确、原因清楚、本机解锁可操作（离线、零依赖）。
-// 不启动浏览器、不发真实请求、不调用付费模型；fetch 被 stub，DOM 为最小 shim。
+// 管理令牌删除后的前端回归（2026-11-18 所有者授权安全降级）。
+// 不启动浏览器、不发真实请求；fetch 被 stub，DOM 为最小 shim。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -52,104 +52,56 @@ globalThis.window = { location: locationState, addEventListener () {}, removeEve
 globalThis.localStorage = { getItem: () => null, setItem () {}, removeItem () {} }
 globalThis.__MG_UI_TEST__ = true
 
-const apiMod = await import('../../../src/ui-next/js/api.js?admin-unlock-test')
-const { api, getToken, clearToken, setToken, setUnauthorizedHandler } = apiMod
+const apiMod = await import('../../../src/ui-next/js/api.js?no-admin-token-test')
+const { api } = apiMod
 const { deriveProductStatus } = await import('../../../src/ui-next/js/product-status.js')
-const dashboard = await import('../../../src/ui-next/js/views/dashboard.js')
 
-function jsonResponse (body, status = 200) {
-  return { ok: status >= 200 && status < 300, status, headers: { get: () => 'application/json' }, json: async () => body }
-}
-
-test('api.adminUnlock：POST /api/admin/unlock，空体，401 不触发全局锁屏', async () => {
-  const calls = []
-  let unauthorized = 0
-  setUnauthorizedHandler(() => { unauthorized++ })
-  clearToken()
-  globalThis.fetch = async (path, opts) => {
-    calls.push({ path, opts })
-    return jsonResponse({ ok: true, token: 'local-admin-token', scope: 'local-admin', expiresAt: null })
+test('前端 API 客户端不再导出任何令牌函数', () => {
+  for (const name of ['setToken', 'getToken', 'clearToken', 'hasToken', 'setAdminToken', 'adminUnlock']) {
+    assert.equal(name in apiMod, false, name + ' 必须已从前端移除')
   }
-  const out = await api.adminUnlock()
-  assert.deepEqual(out, { ok: true, token: 'local-admin-token', scope: 'local-admin', expiresAt: null })
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0].path, '/api/admin/unlock')
-  assert.equal(calls[0].opts.method, 'POST')
-  assert.equal(calls[0].opts.body, '{}')
-  assert.equal(calls[0].opts.credentials, 'same-origin')
-
-  // 401 不应触发 unauthorizedHandler（authEvent:false），只以 ApiError 抛给调用方。
-  globalThis.fetch = async () => jsonResponse({ ok: false, code: 'admin_unlock_denied', error: 'bad origin' }, 403)
-  await assert.rejects(() => api.adminUnlock(), (e) => e.status === 403 && e.data.code === 'admin_unlock_denied')
-  assert.equal(unauthorized, 0)
-  setUnauthorizedHandler(null)
+  assert.equal('auth' in api, true, '/api/auth 兼容入口保留')
 })
 
-test('403 投影：needs_admin_token 只读原因清楚、主操作为解锁、设置令牌为次级入口', () => {
+test('管理请求不携带 Authorization；/api/auth 返回 needAuth:false', async () => {
+  const realFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url: String(url), headers: opts.headers || {} })
+    return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ needAuth: false, startedAt: 1 }) }
+  }
+  try {
+    const auth = await api.auth()
+    assert.equal(auth.needAuth, false)
+    await api.aggregationModes()
+    assert.equal(calls.every((c) => !c.headers.authorization), true, '请求不得带令牌头')
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('来源被拒时 403 投影为 needs_admin_token 兼容状态，但不再有解锁/设置令牌 CTA', () => {
   const ps = deriveProductStatus({
     authenticatedAdmin: true,
-    status: { providers: [{ id: 'opencodego', hasKey: true }], models: [{ name: 'mg-opencodego-deepseek-v4-1-flash' }] },
+    status: { providers: [], models: [], official: {}, go: {}, codex: {} },
     aggregation: null,
-    aggregationError: { status: 403, data: { code: 'explicit_admin_required' }, message: '403' },
+    aggregationError: { status: 403, data: { code: 'remote_forbidden' }, message: '403' },
   })
   assert.equal(ps.state, 'needs_admin_token')
-  assert.equal(ps.readOnly, true)
-  assert.equal(ps.primary.id, 'unlock-admin')
-  assert.equal(ps.primary.kind, 'local-admin-unlock')
-  assert.match(ps.primary.detail, /403/)
-  assert.match(ps.overall.label, /只读/)
-  assert.match(ps.overall.detail, /解锁|MG_ADMIN_TOKEN/)
-  assert.ok(ps.secondary.some((a) => a.id === 'set-admin-token'))
-  assert.equal(ps.readOnlyReason.code, 'explicit_admin_required')
+  assert.equal(ps.primary.id, 'recheck-admin')
+  assert.equal(ps.primary.kind, 'reload')
+  assert.equal(ps.secondary.some((a) => a.id === 'set-admin-token'), false)
 })
 
-test('首页主 CTA 点击：有 ctx.unlockAdmin 时调用本机解锁，无 ctx 时降级到设置（不死循环）', () => {
-  const ps = deriveProductStatus({
+test('首页 CTA 不再有 unlock / local-admin-unlock 语义', () => {
+  const locked = deriveProductStatus({ authenticatedAdmin: false, loading: false, status: null })
+  assert.equal(locked.primary.kind, 'reload')
+  assert.equal(/解锁|令牌/.test(locked.primary.label), false)
+  const denied = deriveProductStatus({
     authenticatedAdmin: true,
-    status: { providers: [], models: [] },
+    status: { providers: [], models: [], official: {}, go: {}, codex: {} },
     aggregation: null,
-    aggregationError: { status: 403, data: { code: 'explicit_admin_required' }, message: '403' },
+    aggregationError: { status: 403, data: { code: 'remote_forbidden' }, message: '403' },
   })
-  const withCtx = dashboard.buildPrimaryAction(ps, { unlockAdmin: () => { withCtx.called = true } })
-  assert.equal(withCtx.called, undefined)
-  withCtx[0].querySelectorAll // noop
-  // 找到主按钮并触发 click
-  const section = withCtx[0]
-  const findButton = (node) => {
-    if (node.tagName === 'BUTTON') return node
-    for (const c of node.children || []) { const r = c && c.tagName ? findButton(c) : null; if (r) return r }
-    return null
-  }
-  findButton(section).click()
-  assert.equal(withCtx.called, true)
-
-  locationState.hash = ''
-  const noCtx = dashboard.buildPrimaryAction(ps, {})
-  findButton(noCtx[0]).click()
-  assert.equal(locationState.hash, '#/settings?section=admin-token')
-})
-
-test('首页渲染：needs_admin_token 显示只读原因与解锁方式，不显示假成功按钮', () => {
-  const ps = deriveProductStatus({
-    authenticatedAdmin: true,
-    status: { providers: [], models: [] },
-    aggregation: null,
-    aggregationError: { status: 403, data: { code: 'explicit_admin_required' }, message: '403' },
-  })
-  const root = new El('div')
-  dashboard.render(root, { product: () => ps, unlockAdmin: () => {} })
-  const text = root.textContent
-  assert.match(text, /只读/)
-  assert.match(text, /403/)
-  assert.match(text, /解锁聚合管理/)
-  assert.match(text, /MG_ADMIN_TOKEN/)
-  assert.doesNotMatch(text, /已连接|已启用聚合|准备就绪/)
-})
-
-test('解锁成功：返回 token 只在内存 setToken，不写 localStorage', () => {
-  clearToken()
-  setToken('local-admin-token')
-  assert.equal(getToken(), 'local-admin-token')
-  assert.equal(globalThis.localStorage.getItem('mg-admin-token'), null)
-  clearToken()
+  assert.equal(/解锁|令牌/.test(denied.primary.label), false)
 })

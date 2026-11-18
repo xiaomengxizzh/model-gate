@@ -236,14 +236,6 @@ export function buildAggregationCard (product) {
         h('div', { class: 'flex' }, tag(modeText, modeKind)))))
 }
 
-function revealAuth () {
-  const overlay = document.getElementById('auth-overlay')
-  if (!overlay) return
-  overlay.hidden = false
-  const input = document.getElementById('admin-token')
-  if (input && typeof input.focus === 'function') setTimeout(() => input.focus(), 20)
-}
-
 function refreshProduct (ctx) {
   if (ctx && typeof ctx.refreshProduct === 'function') {
     Promise.resolve(ctx.refreshProduct()).catch(() => {})
@@ -260,13 +252,6 @@ function refreshProduct (ctx) {
 
 function runAction (action, ctx) {
   const kind = action && action.kind
-  if (kind === 'unlock') { revealAuth(); return }
-  if (kind === 'local-admin-unlock') {
-    if (ctx && typeof ctx.unlockAdmin === 'function') { ctx.unlockAdmin(action); return }
-    // 尚未接线（或旧实例无该端点）：如实降级到设置页，不静默重试造成死循环。
-    if (typeof location !== 'undefined') location.hash = '#/settings?section=admin-token'
-    return
-  }
   if (kind === 'retry' || kind === 'reload') { refreshProduct(ctx); return }
   if (kind === 'wait') return
   if (action && action.route) location.hash = action.route
@@ -330,13 +315,13 @@ export function render (root, ctx = {}) {
   }))
   root.append(...buildOverall(product))
 
-  // P1-04：只读视图给出准确原因与解锁方式，避免用户反复点刷新陷入死循环。
+  // 只读视图给出准确原因：管理面无令牌，403 只来自来源/Host/Origin 校验。
   if (product && product.state === 'needs_admin_token') {
     const reason = product.readOnlyReason || {}
     root.append(callout('info', h('strong', { text: '当前为只读视图。' }),
       ' 聚合管理接口返回 403' + (reason.code ? '（' + reason.code + '）' : '') +
       '，因此这里既不读取也不写入聚合配置；Codex 侧已经生效的配置不受影响。' +
-      '点击“解锁聚合管理”可在本机开启临时管理会话；需要远程/多设备管理时可在设置里写入 MG_ADMIN_TOKEN。解锁前不会发起任何写操作。'))
+      '请确认从本机回环访问，且 Host/Origin 通过校验；管理面无令牌。'))
   }
 
   if (product && !loading && !locked) {

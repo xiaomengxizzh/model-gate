@@ -171,7 +171,7 @@ const STATES = [
     name: 'locked',
     input: { authenticatedAdmin: false, loading: false, status: null },
     state: 'locked',
-    label: '解锁控制台',
+    label: '重试读取状态',
   },
   {
     name: 'loading',
@@ -517,7 +517,7 @@ test('index.html：分层导航、关键 id、无内联脚本/外部 URL/CSP 风
 
   // app.js / app shell 依赖的 id 必须齐全
   const ids = ['view-root', 'current-view', 'conn-chip', 'conn-text', 'side-pulse', 'side-status', 'side-detail', 'side-version',
-    'foot-time', 'foot-note', 'refresh', 'theme-toggle', 'auth-overlay', 'auth-form', 'admin-token', 'auth-error',
+    'foot-time', 'foot-note', 'refresh', 'theme-toggle',
     'toasts', 'dialog-root', 'app-shell']
   for (const id of ids) assert.match(html, new RegExp('id="' + id + '"'), '缺少关键 id：' + id)
   assert.match(html, /class="top-actions"/)

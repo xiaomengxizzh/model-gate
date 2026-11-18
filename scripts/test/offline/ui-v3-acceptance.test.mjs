@@ -74,22 +74,18 @@ test('UI-01/UI-11: /ui-next 全资产 200 + CSP + 未授权 401 + 聚合 403/404
   assert.doesNotMatch(html, /<script[^>]*>[^<]+<\/script>/, '不得有内联脚本')
   assert.doesNotMatch(html, /https?:\/\/[^"'\s>]+/i, '不得引用外部资产')
 
-  // 2) 未授权 /api/status：401 且不含任何状态/凭据投影
-  const denied = await gw.get('/api/status')
-  assert.equal(denied.status, 401)
-  const deniedRaw = await denied.text()
-  assert.match(deniedRaw, /error/)
-  assert.doesNotMatch(deniedRaw, /providers|official|hasKey|lastServing|access_token|refresh_token/)
-  assert.equal((await gw.get('/api/status', AUTH)).status, 200, '授权后必须可读')
+  // 2) 管理面无令牌：回环 /api/status 直接 200，且不含任何凭据明文
+  const status = await gw.get('/api/status')
+  assert.equal(status.status, 200)
+  const statusRaw = await status.text()
+  assert.doesNotMatch(statusRaw, /access_token|refresh_token|"apiKey"|sk-/)
+  assert.equal((await (await gw.get('/api/auth')).json()).needAuth, false)
+  assert.equal((await gw.get('/api/status', AUTH)).status, 200, '携带旧凭据也不改变结果')
 
-  // 3) 聚合管理面：无令牌 403（不泄数据），未知路由 404 且是稳定 code
-  const noToken = await gw.get('/api/aggregation/health')
-  assert.equal(noToken.status, 403)
-  const noTokenBody = await noToken.json()
-  assert.equal(noTokenBody.code, 'explicit_admin_required')
-  assert.doesNotMatch(JSON.stringify(noTokenBody), /detect|mode|providers|official/)
-
-  const unknown = await gw.get('/api/aggregation/__a5_old_instance_probe__', AUTH)
+  // 3) 聚合管理面：无令牌回环可读；未知路由 404 且是稳定 code
+  const health = await gw.get('/api/aggregation/health')
+  assert.equal(health.status, 200)
+  const unknown = await gw.get('/api/aggregation/__a5_old_instance_probe__')
   assert.equal(unknown.status, 404)
   const unknownBody = await unknown.json()
   assert.equal(unknownBody.code, 'aggregation_route_unknown')
@@ -364,21 +360,20 @@ test('UI-10: 401/403 响应无敏感数据、错误令牌不泄露状态', { tim
   const noToken = await startGateway({ name: 'a5-ui10b', env: { MG_ADMIN_TOKEN: '', CODEX_HOME: codexHome } })
   t.after(async () => { await withToken.stop(); await noToken.stop(); await rm(codexHome, { recursive: true, force: true }) })
 
-  const bad = await withToken.get('/api/status', { authorization: 'Bearer wrong-a5-token' })
-  assert.equal(bad.status, 401)
-  const badRaw = await bad.text()
-  assert.doesNotMatch(badRaw, /providers|models|official|hasKey|lastServing|configVersion|wrong-a5-token/)
+  const ok = await withToken.get('/api/status', { authorization: 'Bearer wrong-a5-token' })
+  assert.equal(ok.status, 200, '管理面无令牌，错误 Bearer 被忽略')
+  const okRaw = await ok.text()
+  assert.doesNotMatch(okRaw, /wrong-a5-token|access_token|refresh_token/)
 
-  // 聚合管理面在"未设置管理员令牌"时是 403 explicit_admin_required（没有回环放行）
+  // 聚合管理面：无令牌回环仍可读；非回环才 403（见 admin-origin.test.mjs）。
   const agg = await noToken.get('/api/aggregation/health')
-  assert.equal(agg.status, 403)
+  assert.equal(agg.status, 200)
   const aggBody = await agg.json()
-  assert.equal(aggBody.code, 'explicit_admin_required')
-  assert.deepEqual(Object.keys(aggBody).sort(), ['code', 'error', 'ok'])
+  assert.equal(aggBody.ok, true)
   const aggRaw = JSON.stringify(aggBody)
-  assert.doesNotMatch(aggRaw, /detect|mode|providers|official|backup/)
+  assert.doesNotMatch(aggRaw, /access_token|refresh_token|"apiKey"/)
 
-  // 未授权时 UI 资产仍可打开（静态页面不涉及凭据）
+  // UI 资产仍可打开（静态页面不涉及凭据）
   assert.equal((await noToken.get('/ui-next')).status, 200)
 })
 

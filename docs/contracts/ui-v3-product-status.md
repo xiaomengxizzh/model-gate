@@ -18,7 +18,7 @@
 
 ```ts
 deriveProductStatus({
-  authenticatedAdmin: boolean,   // 已解锁管理面
+  authenticatedAdmin: boolean,   // 兼容字段：管理面无令牌后恒为 true，不再驱动锁屏
   loading: boolean,              // 首个快照未到
   phase?: 'conflict'|'write_in_progress'|null,
   status: Status | null,         // GET /api/status
@@ -101,7 +101,7 @@ deriveProductStatus({
 | 回滚模式 | `POST /api/aggregation/rollback` | 428 预览 → 确认 → 回到 `previousMode`，按 `appliedSha`/备份校验；`drifted=true` 或无 previous→409 | 是 / 必须重开 Codex GUI |
 
 - 端点路径与代码一致，统一走 `/api/aggregation/*`（`isAggregationApiPath` 已支持）；服务端已接线并通过离线 + HTTP 夹具验证，**真机 GUI 仍 `NOT_TESTED`**。
-- 切换/回滚一律要求显式管理员令牌、回环来源（或显式 `allowRemote`），不接受浏览器提供的路径或原始 TOML。
+- 切换/回滚只需回环来源（或显式 `allowRemote`）且 Host/Origin 校验通过；管理面无令牌（2026-11-18 所有者授权的安全降级），不接受浏览器提供的路径或原始 TOML。
 - 非法 `mode` / `previousMode` / `drifted=true`：返回明确错误，配置与状态零改动，不静默降级。
 - 与既有受控配置写入 `/api/codex/config/plan|apply|rollback` 的关系：后者是字段级事务，前者是模式级编排；两者共用同一份 `mode` 状态与备份口径。
 
@@ -183,8 +183,8 @@ api.activateAggregation(body) / deactivateAggregation(body)
 | 409 | `conflict` | "设置已被其他程序修改，未覆盖" | 三方 diff，可重新检测，不强制覆盖 |
 | 404 聚合接口 | `read_only_unknown` | "当前实例不支持聚合管理" | 停止自动写入 |
 | 断网/超时 | `recoverable_error` | "无法连接本地网关，可重试" | 不显示旧成功状态 |
-| 聚合接口 403 `explicit_admin_required` | `needs_admin_token` | "需要操作：设置管理令牌" | 不清 token、不锁屏、不冒充读取失败；CTA 指向 `#/settings?section=admin-token` |
-| 401 管理令牌 | `locked` | "令牌已失效，请重新解锁" | 清空快照/敏感 DOM |
+| 聚合接口 403 `remote_forbidden`/Host/Origin | `needs_admin_token`（兼容状态名） | "只读：聚合管理被来源校验拒绝" | 不冒充读取失败；提示从本机回环访问并检查 Host/Origin；管理面无令牌 |
+| 401（已无令牌门禁，仅兜底） | `locked`（兼容状态名） | "控制面暂不可用" | 清空快照/敏感 DOM，显式报错，不锁屏 |
 
 ## 9. 非目标
 

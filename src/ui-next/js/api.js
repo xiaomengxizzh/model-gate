@@ -1,5 +1,4 @@
-// Same-origin management API client. Token lives in module memory only.
-let token = ''
+// Same-origin management API client. 管理面无令牌：同源请求直接放行，来源防护由网关的 Host/Origin + 回环绑定负责。
 let unauthorizedHandler = null
 
 export class ApiError extends Error {
@@ -14,10 +13,6 @@ export class ApiError extends Error {
   }
 }
 
-export function setToken(value) { token = String(value || '').trim() }
-export function getToken() { return token }
-export function clearToken() { token = '' }
-export function hasToken() { return !!token }
 export function setUnauthorizedHandler(fn) { unauthorizedHandler = typeof fn === 'function' ? fn : null }
 
 function errorMessage(data, status) {
@@ -34,7 +29,6 @@ function abortedError() {
 export async function request(path, opts = {}) {
   const method = opts.method || 'GET'
   const headers = { accept: 'application/json' }
-  if (token) headers.authorization = 'Bearer ' + token
   if (opts.body !== undefined) headers['content-type'] = 'application/json'
   // 外部 signal（store 的 epoch 取消）与内部 25s 超时共用同一个底层 controller；
   // 两者必须区分：外部取消标记 aborted，绝不触发 unauthorizedHandler。
@@ -67,9 +61,9 @@ export async function request(path, opts = {}) {
   let data = null
   const type = res.headers.get('content-type') || ''
   try { data = type.includes('application/json') ? await res.json() : await res.text() } catch { data = null }
-  // 只有 401 是“会话失效”（清 token/清数据/锁屏）。
-  // 功能级 403（write_disabled / explicit_admin_required / path_not_allowed 等）必须抛给调用方，
-  // 由对应视图/卡片进入局部 error 态；绝不清 token、不清其它视图数据、不跳登录。
+  // 管理面已无令牌：正常路径不会再返回 401。这里保留通用兜底，供未来任何 401 统一收口（如清快照）。
+  // 功能级 403（write_disabled / aggregation_loopback_required 等）必须抛给调用方，
+  // 由对应视图/卡片进入局部 error 态；绝不清其它视图数据、不跳登录。
   if (res.status === 401 && opts.authEvent !== false) {
     if (unauthorizedHandler) unauthorizedHandler({ status: res.status, path })
   }
@@ -94,10 +88,7 @@ export const api = {
   saveKey: (body) => request('/api/keys', { method: 'POST', body }),
   probe: (id) => request('/api/probe', { method: 'POST', body: id ? { id } : {} }),
   modelTest: (id) => request('/api/model-test', { method: 'POST', body: id ? { id } : {} }),
-  setAdminToken: (value) => request('/api/admin-token', { method: 'POST', body: { token: value } }),
-  // P1-04：无全局管理令牌时，发起"本机临时管理会话"解锁聚合管理。
-  // 成功返回一次性 token，前端只在内存里 setToken；端点尚不存在时返回 404，UI 会降级到设置页。
-  adminUnlock: () => request('/api/admin/unlock', { method: 'POST', body: {}, authEvent: false }),
+  reconcileAggregation: (body) => request('/api/aggregation/reconcile', { method: 'POST', body: body === undefined ? {} : body }),
 
   // —— 聚合管理只读快照（首页/连接页/聚合页共用，见契约 §5）——
   aggregationHealth: (opts = {}) => request('/api/aggregation/health', opts),
@@ -112,6 +103,6 @@ export const api = {
   removeAggregationProvider: (id, body) => request(aggregationPath(id), { method: 'DELETE', body: body === undefined ? {} : body }),
   activateAggregation: (body) => request('/api/aggregation/activate', { method: 'POST', body: body === undefined ? {} : body }),
   deactivateAggregation: (body) => request('/api/aggregation/deactivate', { method: 'POST', body: body === undefined ? {} : body }),
-  // 漂移解漂：只更新 state 基线，不写 config.toml；428 预览 → 带 token 提交。
+  // 漂移解漂：只更新 state 基线，不写 config.toml；428 预览 → 确认后提交。
   reconcileAggregation: (body) => request('/api/aggregation/reconcile', { method: 'POST', body: body === undefined ? {} : body }),
 }

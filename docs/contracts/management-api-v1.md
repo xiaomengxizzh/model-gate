@@ -8,22 +8,21 @@
 
 ## 1. 鉴权矩阵
 
-令牌来源优先级：`MG_ADMIN_TOKEN`（环境变量）→ `server.adminToken`（配置文件）→ `keys.__mg_admin`（面板写入，加密存储）。
+**所有者授权的安全降级（2026-11-18）**：管理面**彻底删除令牌功能**。不再读取 `MG_ADMIN_TOKEN` / `server.adminToken` / `keys.__mg_admin`，不再签发或校验任何 Bearer / `x-mg-admin` 凭据，不再有 local-admin 内存会话。唯一安全下界是**回环对端（或显式 allowRemote）+ Host/Origin 来源校验**。这是安全降级，不是 MG-R001/R007 的违背：二者只要求“切换真实生效、可审计、不破坏原配置”，未要求令牌门禁。
 
-凭据形式：`Authorization: Bearer <token>` 或 `x-mg-admin: <token>`；比较为常量时间，两端空白被裁剪。
+| 路径 | 本机对端（回环/显式 allowRemote） | 远程对端（未 allowRemote） |
+| --- | --- | --- |
+| `GET /api/auth` | 200 `{needAuth:false, startedAt}`（公开兼容） | 200（公开兼容） |
+| `POST /api/admin/unlock` | 200 `{ok:true, needAuth:false, deprecated:true}`（空操作，不签发令牌） | 200（空操作无权限含义） |
+| `GET /api/status`、`GET /api/config`、`GET /api/logs`、`GET /api/model-stats`、`GET /api/native-usage` | 200 | 403 |
+| `POST /api/config/save`、`POST /api/config/reload`、`POST /api/keys` | 200 | 403 |
+| `POST /api/route-preview`、`POST /api/probe`、`POST /api/model-test` | 200 | 403 |
+| `/api/codex/*`、`/api/aggregation/*` | 正常业务状态码（如切换预览 428） | 403 `remote_forbidden` |
+| 其他 `/api/*` 未知路径 | 404 | 404 |
 
-| 路径 | 未配置令牌 · 本机对端 | 未配置令牌 · 远程对端 | 已配置令牌 · 无/错凭据 | 已配置令牌 · 有效凭据 |
-| --- | --- | --- | --- | --- |
-| `GET /api/auth` | 200 | 200（公开） | 200（公开） | 200 |
-| `POST /api/admin-token` | 200（本地初始化） | 403 | 401 | 200 |
-| `GET /api/status`、`GET /api/config`、`GET /api/logs`、`GET /api/model-stats`、`GET /api/native-usage` | 200 | 403 | 401 | 200 |
-| `POST /api/config/save`、`POST /api/config/reload`、`POST /api/keys` | 200 | 403 | 401 | 200 |
-| `POST /api/route-preview`、`POST /api/probe`、`POST /api/model-test` | 200 | 403 | 401 | 200 |
-| 其他 `/api/*` 未知路径 | 404 | 404 | 404 | 404 |
+除来源校验外，所有请求先过 Host（防 DNS 重绑定，白名单 `server.allowedHosts`）与 Origin（跨源须命中 `server.allowedOrigins`，`Origin: null` 拒绝）校验；无 `Origin` 的 CLI/curl 放行。数据面同样做 Host 校验，跨源写请求 403（`{error:{message,type:'forbidden'}}`）。
 
-除鉴权外，所有请求先过来源校验（MG-001）：Host 必须是 IP 字面量或 `localhost`/`server.host`/`server.allowedHosts` 中的名字，否则 403；带 `Origin` 的浏览器请求必须同源或命中 `server.allowedOrigins`，否则 403（`Origin: null` 拒绝）。无 `Origin` 的 CLI 客户端放行。数据面同样做 Host 校验，跨源写请求 403（`{error:{message,type:'forbidden'}}`）。
-
-环境变量令牌存在时面板无法清除它（`/api/admin-token` 会把 `keys.__mg_admin` 清空，但 `MG_ADMIN_TOKEN` 仍生效），响应 `needAuth` 如实反映。
+`POST /api/admin-token` 已删除（404）。旧客户端的 `POST /api/admin/unlock` 保留为空操作，仅为避免 404 死循环，响应不含任何令牌字段。
 
 ## 2. 通用规则
 
@@ -40,11 +39,13 @@
 ## 3. 逐路径契约
 
 ### `GET /api/auth`
-公开。响应 `{needAuth: boolean, startedAt: number}`；`needAuth` 只表示"是否已启用令牌"，不代表请求方已通过鉴权。
+公开兼容端点。响应 `{needAuth:false, startedAt: number}`；管理面无令牌，`needAuth` 恒为 false，不代表任何鉴权状态。
 
-### `POST /api/admin-token`
-请求 `{token: string}`（前后空白裁剪）。空串=清除 `keys.__mg_admin`。
-成功 `200 {ok:true, needAuth:boolean}`；已启用令牌时缺当前令牌 `401 {error}`；`keys.local.json` 无法加密（缺主密钥）`400 {error}`。不推进 `configVersion`。
+### `POST /api/admin/unlock`
+兼容空操作。消费空请求体后返回 `200 {ok:true, needAuth:false, deprecated:true}`，**不签发任何令牌**、不改变任何状态。旧客户端不应因该端点 404 而反复重试。
+
+### `POST /api/admin-token`（已删除）
+该端点已移除，调用返回 404。管理令牌功能整体删除；`keys.__mg_admin` 仅作为历史孤儿键的清理标识保留在 `/api/keys` 白名单中，不再被读取。
 
 ### `GET /api/status`
 响应即状态快照，字段见第 4 节。所有模型/上游统计与掩码 Key 元数据都在此聚合，前端只读。
@@ -99,7 +100,7 @@
 
 | 字段 | 类型 | 语义 / 敏感 |
 | --- | --- | --- |
-| `needAuth` | boolean | 是否已启用管理令牌 |
+| `needAuth` | boolean | 恒为 `false`（管理面无令牌，兼容字段） |
 | `configVersion` | number | 与保存接口的 `version` 对应 |
 | `startedAt` / `uptimeMs` | number | 进程启动时刻与运行时长 |
 | `counters` | object | `{requests,errors,retries,interrupts}` 进程内累计 |
@@ -123,7 +124,7 @@
 | 上游 API Key | 任何响应不得回显 | `hasKey`/`keySource` 表达；`apiKeyEnv` 只回显变量名 |
 | 客户端 Key | 只回显掩码 `********` | 掩码回存=保留原值 |
 | 虚拟模型 Key | 只回显 `keySet` | 不返回 Key、不返回过期时间以外的元数据 |
-| 管理令牌 | 不经任何响应回显 | `/api/auth` 只给 `needAuth` |
+| 管理令牌 | 已整体删除，不再存在 | `/api/auth` 恒为 `needAuth:false`；不读取、不签发、不回显 |
 | 磁盘 | `keys.local.json` 为 `MG1:` 密文，权限 0600 | 无主密钥时拒绝明文写入并 400 |
 | 日志 | 不落 Key 与请求正文 | 启动时收集 secrets 供 logger 脱敏 |
 | 原生用量采集 | 只返回 token 计数/模型/provider/目录标签 | 不返回消息正文；默认关闭，目录由管理员显式配置 |
@@ -132,9 +133,9 @@
 ## 6. Fixture（测试实际发送的形状）
 
 ```jsonc
-// 设置令牌
-POST /api/admin-token  {"token":"local-token"}
-→ 200 {"ok":true,"needAuth":true}
+// 兼容解锁（空操作，不签发令牌）
+POST /api/admin/unlock  {}
+→ 200 {"ok":true,"needAuth":false,"deprecated":true}
 
 // 保存配置（带版本）
 POST /api/config/save  {"version":0,"defaults":{"proxyMode":"direct"}}
@@ -161,7 +162,7 @@ POST /api/probe {"id":"mock"} → 200 {"ok":true,"results":[{"id":"mock","ok":tr
 
 > **历史说明（2026-11-15）**：旧管理员控制台 `src/admin.html` 已按所有者指令退役，`GET /` 302 → `/ui-next/`，`/admin`、`/admin.html` 返回 `410 Gone`。以下调用清单描述的是**历史客户端**，用于溯源服务端 API 的来历，不代表当前仍有该页面。
 
-`src/admin.html` 实际调用：`/api/auth`、`/api/status`、`/api/model-stats?days=`、`/api/logs?lines=250`、`/api/config/save`（带 `version`，整体回传 `providers/models/defaults/virtualModels`）、`/api/config/reload`；`GET /api/config` 已提供但面板尚未改用（F1/F2 迁移点）、`/api/keys`（含 `__mg_vm_*`）、`/api/route-preview`、`/api/probe`、`/api/model-test`、`/api/admin-token`。面板用 `Authorization: Bearer`；401 时弹令牌输入框。
+`src/admin.html` 实际调用：`/api/auth`、`/api/status`、`/api/model-stats?days=`、`/api/logs?lines=250`、`/api/config/save`（带 `version`，整体回传 `providers/models/defaults/virtualModels`）、`/api/config/reload`；`GET /api/config` 已提供但面板尚未改用（F1/F2 迁移点）、`/api/keys`（含 `__mg_vm_*`）、`/api/route-preview`、`/api/probe`、`/api/model-test`。该历史面板曾使用 `Authorization: Bearer` 与令牌输入框；管理令牌功能删除后这些凭据一律被网关忽略，`/api/admin-token` 已移除。
 
 已知读写不一致（MG-009）：面板把 `status.providers/models` 数组映射为 `C.providers/C.models` 映射再整体回存，映射规则散落在面板脚本里，缺少服务端 fixture 校验。
 
@@ -172,7 +173,7 @@ POST /api/probe {"id":"mock"} → 200 {"ok":true,"results":[{"id":"mock","ok":tr
 | 已修复：数组/字符串 body、保留键、非数字 version 均 400；删除墓碑 `_removed` 落地（MG-003） | — |
 | `/api/keys` 的 `id` 仍无完整白名单（仅拒绝保留键与空 id；任意合法字符串可写入） | MG-003 余项 |
 | 401/413 与数据面错误信封不同形 | MG-003 |
-| 无令牌时管理写接口仅限本机；跨 Origin/Host 策略已落地（MG-001 已闭环，见 1/2 节） | — |
+| 管理面无令牌，写接口仅靠回环/allowRemote + Host/Origin 保护（MG-001 已闭环，见 1/2 节） | 所有者授权的安全降级 2026-11-18 |
 | `extraHeaders`/`proxy` 原样回显 | MG-005 |
 | 热更新 Key 后 logger 的 secrets 列表不刷新 | MG-005 |
 | 前端 fixture 与视觉验收未做 | MG-009 / F0 |
@@ -189,7 +190,7 @@ POST /api/probe {"id":"mock"} → 200 {"ok":true,"results":[{"id":"mock","ok":tr
 
 | 项 | 契约 |
 | --- | --- |
-| 管理员 | 每个路由声明 explicitAdmin: true，只接受显式管理员会话（ctx.explicitAdmin / requireExplicitAdmin）。“实例未设置 adminToken ⇒ 放行”已删除；旧 requireAdmin 返回值不再能单独放行。 |
+| 管理员 | 每个路由声明 explicitAdmin: true；入口在完成 Host/Origin/peer 校验后传固定的 `explicitAdmin:true` 与审计主体 `adminSubject:'admin-local'`。模块不再因“未设置令牌”而放行或拒绝——令牌概念已整体删除。 |
 | 来源 | 仅回环（127.0.0.1/::1）；显式 allowRemote=true 才放宽。 |
 | 文件选择 | 只接受 registerConfigRoot({id,path,mode}) 登记后的不透明 root id；调用方提供的 path/file/backupPath 一律 400 path_not_allowed，原始 toml/content 一律 400 raw_content_not_allowed。basename=config.toml 只在登记时校验。 |
 | 普通产品模式 | config/apply、config/rollback 一律 403 write_disabled；只有 managedRoot=true 且登记根 mode=managed（受控自管 fixture）才启用。 |
@@ -223,8 +224,8 @@ POST /api/probe {"id":"mock"} → 200 {"ok":true,"results":[{"id":"mock","ok":tr
 
 | HTTP | 语义 | 代表 code |
 | --- | --- | --- |
-| 401 | 入口层令牌缺失/错误（index.js 管理入口；CLI 映射为 exit 2） | 无（入口信封） |
-| 403 | 已识别但无权（非显式管理员/非本机/写被关闭/字段所有权） | explicit_admin_required, remote_forbidden, write_disabled, admin_subject_required |
+| 401 | 已无令牌门禁，正常路径不再出现；保留为通用兜底（CLI 映射为 exit 2） | 无（入口信封） |
+| 403 | 已识别但无权（非回环/Host/Origin 被拒/写被关闭/字段所有权） | remote_forbidden, aggregation_host_denied, aggregation_origin_denied, write_disabled, admin_subject_required |
 | 409 | 代际/绑定冲突（不写盘，保留草稿） | concurrent_modification, unmanaged_conflict, plan_id_mismatch, confirmation_binding_mismatch, root_changed |
 | 400 | 形状/确认/版本错误 | unsupported_api_version, plan_id_required, confirmation_required, invalid_body |
 | 404 | 未知端点/root/backup | unknown_endpoint, unknown_config_root, backup_not_found |
@@ -247,14 +248,14 @@ POST /api/probe {"id":"mock"} → 200 {"ok":true,"results":[{"id":"mock","ok":tr
 | `doctor --json` | 无 | 版本、Node 支持范围、管理 API 版本、显式配置的 providers/models 计数、目录完整性/证据新鲜度（stale 计数）、keys 文件存在性（**不读值**）、支持矩阵；未显式给配置时 config=unknown，不去读 HOME/全局配置。 |
 | `provider list/show`、`model list/show`、`route explain` | 无 | 只读投影；host 只回主机名，key 只回引用来源（store/env/config/absent），不打印任何值；`route explain` 未命中聚合保留 ID 时 exit 5 且 `zeroUpstream:true`。 |
 | `client codex export` | 无 | 只读 TOML 模板（profile + 别名样例 + 显式角色样例）；角色样例标注 `providerOverride:"unsupported"`，不冒充原生同会话切模型；不写文件。 |
-| `config plan` | HTTP | 前置：loopback 目标 + 管理令牌环境变量。输出 planId/generation/redactedDiff/confirmToken。 |
+| `config plan` | HTTP | 前置：loopback 目标；CLI 仍可带令牌环境变量，但服务端已忽略该凭据。输出 planId/generation/redactedDiff/confirmToken。 |
 | `config apply/rollback` | HTTP | 必须 `--plan`；非 TTY 必须 `--yes`；无隐式重试；只写登记 root 指向的 config.toml。 |
 
 CLI 约定：
 
-- 管理令牌只从环境变量读取（默认 `MG_ADMIN_TOKEN`，`--admin-token-env` 可改），不进 argv/输出/日志。
+- 管理令牌功能已删除：CLI 仍支持 `--admin-token-env`（默认 `MG_ADMIN_TOKEN`）以便兼容旧脚本，但服务端不读取，凭据不进 argv/输出/日志。
 - 默认只允许 loopback 目标；非 loopback 需显式 `MG_CLI_ALLOW_REMOTE=1`（输出标注 `remoteTarget:true`）。
-- 退出码：0 ok / 1 形状或服务端 4xx / 2 令牌缺失或 401 / 3 403 / 4 409 / 5 404。
+- 退出码：0 ok / 1 形状或服务端 4xx / 2 连接或鉴权失败（401 已不再由服务端令牌门禁产生） / 3 403 / 4 409 / 5 404。
 - JSON 输出稳定且不含凭据/正文；不写全局文件、不读 `~/.codex`、不碰 auth.json。
 
 

@@ -77,13 +77,14 @@ test('管理 API：状态、日志与磁盘均不泄露明文凭据', { timeout:
   const logText = logs.lines.join('\n')
   for (const secret of SECRETS) assert.ok(!logText.includes(secret), '日志泄露凭据: ' + secret.slice(0, 12))
 
-  // ⑦ 管理令牌本身不经任何响应回显
-  assert.equal((await gw.post('/api/admin-token', { token: ADMIN_SECRET })).status, 200)
-  const locked = await gw.get('/api/status', { authorization: 'Bearer ' + ADMIN_SECRET })
-  assert.equal(locked.status, 200)
-  const lockedText = await locked.text()
-  for (const secret of SECRETS) assert.ok(!lockedText.includes(secret), '加锁后的状态快照泄露凭据')
-  const authText = await (await gw.get('/api/auth')).text()
+  // ⑦ 管理面无令牌：不设置/不回显任何管理令牌；携带伪造 Bearer 也不影响结果。
+  const forged = await gw.get('/api/status', { authorization: 'Bearer ' + ADMIN_SECRET })
+  assert.equal(forged.status, 200)
+  const lockedText = await forged.text()
+  for (const secret of SECRETS) assert.ok(!lockedText.includes(secret), '状态快照泄露凭据')
+  const authBody = await (await gw.get('/api/auth')).json()
+  assert.equal(authBody.needAuth, false)
+  const authText = JSON.stringify(authBody)
   assert.ok(!authText.includes(ADMIN_SECRET), '/api/auth 不得回显令牌')
 })
 

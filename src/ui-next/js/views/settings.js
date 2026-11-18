@@ -1,8 +1,7 @@
-// Security & Settings: instance facts, admin token, resilience defaults, versioned save, export.
+// Security & Settings: instance facts, management-plane protection, resilience defaults, versioned save, export.
 import { h, clear } from '../dom.js'
-import { state, loadAuth, loadAll } from '../store.js'
+import { state, loadAll } from '../store.js'
 import { api } from '../api.js'
-import { setToken, clearToken, getToken } from '../api.js'
 import { ensureDraft, setDraft, peekDraft } from '../config-draft.js'
 import { reviewAndSave, dirtyChip, sanitizeDiff, sourceSummary, expiryStates } from '../save-flow.js'
 import { pageHead, card, callout, field, codeBlock, copyButton, kvList, tag, dialog, toast, confirmDialog } from '../components.js'
@@ -67,7 +66,7 @@ export function render(root, ctx = {}) {
   const d = ensureDraft(c)
   const rerender = ctx.rerender || (() => { location.hash = '#/settings' })
 
-  root.append(pageHead('安全与设置', '核对实例信息、管理令牌、韧性参数与配置事务。所有写操作都经过同源管理 API 与版本校验。', {
+  root.append(pageHead('安全与设置', '核对实例信息、管理面保护、韧性参数与配置事务。所有写操作都经过同源管理 API 与版本校验。', {
     eyebrow: 'GOVERNANCE / SETTINGS',
     actions: [h('button', { class: 'btn', type: 'button', text: '重新加载配置', onclick: async () => {
       try { await api.reloadConfig(); await loadAll(); toast('配置已从磁盘重新加载', 'success'); rerender() } catch (e) { toast('重新加载失败：' + e.message, 'error') }
@@ -81,44 +80,16 @@ export function render(root, ctx = {}) {
     ['进程启动', fmtTime(s.startedAt)],
     ['运行时长', fmtDuration(s.uptimeMs)],
     ['配置版本', String(c.configVersion ?? s.configVersion ?? '—')],
-    ['管理令牌', state.auth.needAuth ? '已启用' : '未启用'],
+    ['管理面保护', '仅回环 + Host/Origin，无令牌'],
     ['密钥文件加密', s.server?.keyEncrypted ? '已启用' : '未确认'],
     ['目录来源', s.codex && s.codex.catalog ? ((s.codex.catalog.path || '路径未知') + (s.codex.catalog.generatedAt ? ' · ' + s.codex.catalog.generatedAt : '')) : '目录来源未知'],
   ]))
 
-  const tokenInput = h('input', { type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: '输入新令牌（留空则清除面板令牌）' })
-  const tokenBtn = h('button', { class: 'btn', type: 'button', text: '更新管理令牌' })
-  tokenBtn.addEventListener('click', async () => {
-    const value = tokenInput.value.trim()
-    const ok = await confirmDialog({
-      title: value ? '更新管理令牌' : '清除面板管理令牌',
-      message: value ? '更新后，当前会话会立即使用新令牌；其他已打开的控制台需要重新输入。' : '将清除由面板写入的令牌。若环境变量 MG_ADMIN_TOKEN 存在，管理面仍会要求认证。',
-      confirmLabel: '确认更新', danger: true,
-    })
-    if (!ok) return
-    tokenBtn.disabled = true
-    try {
-      const res = await api.setAdminToken(value)
-      if (value) setToken(value)
-      tokenInput.value = ''
-      const auth = await loadAuth()
-      toast(res.needAuth ? '令牌设置已提交；管理面需要认证' : '管理令牌已清除', 'success')
-      if (!res.needAuth) { try { await loadAll() } catch {} }
-      rerender()
-    } catch (e) {
-      toast('令牌更新失败：' + e.message, 'error')
-      tokenBtn.disabled = false
-    }
-  })
-  const lockBtn = h('button', { class: 'btn', type: 'button', text: '锁定当前控制台', onclick: () => { clearToken(); window.dispatchEvent(new CustomEvent('mg:lock')) } })
-  const tokenCard = card('管理令牌', '令牌只保存在本标签页内存，不写入浏览器持久存储',
-    h('div', null,
-      callout('info', '令牌优先级：环境变量 MG_ADMIN_TOKEN → server.adminToken → 面板写入。环境变量存在时，面板令牌不会覆盖它。'),
-      field('新管理员令牌', tokenInput, { help: '至少建议 16 个字符；不要把真实令牌粘贴到日志或截图。' }),
-      h('div', { class: 'flex flex-wrap' }, tokenBtn, lockBtn)),
-    { foot: h('span', { text: state.auth.needAuth ? '当前：需要管理员令牌' : '当前：未启用令牌（仅本机可管理）' }) })
+  const managementCard = card('管理面保护', '所有者授权的安全降级：管理面无令牌，仅回环绑定 + Host/Origin 来源校验',
+    callout('info', h('strong', { text: '安全下界：' }), ' 管理 API 仅接受本机回环来源（除非显式 allowRemote），并校验 Host 与 Origin 防止 DNS 重绑定与跨源请求；不再签发或校验任何管理令牌。'),
+    { foot: h('span', { text: '当前：无令牌 · 仅回环 + Host/Origin 保护' }) })
 
-  root.append(h('div', { class: 'grid grid-main' }, info, tokenCard))
+  root.append(h('div', { class: 'grid grid-main' }, info, managementCard))
 
   // Resilience defaults (editable through the same versioned config transaction).
   const retry = (d.data.defaults.retry = d.data.defaults.retry || {})

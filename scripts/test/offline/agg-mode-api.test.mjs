@@ -274,25 +274,25 @@ test('POST /rollback 无 previous 返回 409；有 previous 时 428 预览 → 2
 })
 
 // ---------------------------------------------------------------------------
-// 6. 鉴权门禁：缺令牌/错令牌 403；模块侧显式管理员 + 回环双门禁 403
+// 6. 安全降级：管理面无令牌，无凭据也能读/预览；非回环仍 403；模块侧双门禁不变
 // ---------------------------------------------------------------------------
-test('鉴权门禁：缺失/错误管理员令牌 → 403；模块侧 explicitAdmin/isLocal 不可绕过', async (t) => {
+test('安全下界：无令牌可读、switch 预览 428；模块侧 explicitAdmin/isLocal 不可绕过', async (t) => {
   const f = await setup()
   t.after(f.cleanup)
 
   const noToken = await f.gw.get('/api/aggregation/modes')
-  assert.equal(noToken.status, 403)
-  assert.equal((await noToken.json()).code, 'explicit_admin_required')
+  assert.equal(noToken.status, 200, '管理面无令牌，回环 GET /modes 直接 200')
+  const modesBody = await noToken.json()
+  assert.equal(JSON.stringify(modesBody).includes(TOKEN), false, '响应不得回显管理令牌')
 
-  const wrong = await f.gw.call('/api/aggregation/switch', {
+  const preview = await f.gw.call('/api/aggregation/switch', {
     method: 'POST',
     headers: { authorization: 'Bearer wrong-token', 'content-type': 'application/json' },
     body: JSON.stringify({ mode: 'aggregated' }),
   })
-  assert.equal(wrong.status, 403)
-  const wrongBody = await wrong.json()
-  assert.equal(wrongBody.code, 'explicit_admin_required')
-  assert.equal(JSON.stringify(wrongBody).includes(TOKEN), false, '响应不得回显管理令牌')
+  assert.equal(preview.status, 428, '无令牌（含错误 Bearer）也应进入 428 预览，而非 403')
+  const previewBody = await preview.json()
+  assert.equal(JSON.stringify(previewBody).includes(TOKEN), false, '响应不得回显管理令牌')
 
   // 模块侧双门禁：即便绕过入口，也必须显式管理员 + 回环。
   const ctx = { method: 'GET', path: '/api/aggregation/modes', cfg: {}, rawBody: undefined }
@@ -417,16 +417,15 @@ test('POST /reconcile：consentToken 篡改 → 428 且 config/state 零写入',
 })
 
 // ---------------------------------------------------------------------------
-// 11. POST /reconcile：鉴权门禁 403 + 幂等 200
+// 11. POST /reconcile：无令牌进入 428 预览，不回显凭据；漂移消失后幂等 200
 // ---------------------------------------------------------------------------
-test('POST /reconcile：缺/错管理员令牌 403 不回显；漂移消失后幂等 200', async (t) => {
+test('POST /reconcile：无凭据 428 不回显；漂移消失后幂等 200', async (t) => {
   const f = await setupDrifted(t)
   const noAuth = await f.gw.call('/api/aggregation/reconcile', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}),
   })
-  assert.equal(noAuth.status, 403)
+  assert.equal(noAuth.status, 428, '管理面无令牌，回环预览应 428 而非 403')
   const noAuthBody = await noAuth.json()
-  assert.equal(noAuthBody.code, 'explicit_admin_required')
   assert.equal(JSON.stringify(noAuthBody).includes(TOKEN), false)
 
   const wrongAuth = await f.gw.call('/api/aggregation/reconcile', {
@@ -434,8 +433,7 @@ test('POST /reconcile：缺/错管理员令牌 403 不回显；漂移消失后�
     headers: { authorization: 'Bearer wrong-token', 'content-type': 'application/json' },
     body: JSON.stringify({}),
   })
-  assert.equal(wrongAuth.status, 403)
-  assert.equal((await wrongAuth.json()).code, 'explicit_admin_required')
+  assert.equal(wrongAuth.status, 428, '错误 Bearer 被忽略，仍进入 428 预览')
 
   // 模块侧 isLocal=false 仍必须 403（Host/Origin/peer 门禁由入口注入）。
   const ctx = { method: 'POST', path: '/api/aggregation/reconcile', cfg: {}, rawBody: undefined }

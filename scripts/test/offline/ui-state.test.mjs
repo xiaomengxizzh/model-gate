@@ -82,7 +82,12 @@ globalThis.localStorage = { getItem: () => null, setItem () {}, removeItem () {}
 globalThis.__MG_UI_TEST__ = true
 
 const { state, phaseOf, loadAll, loadStatus, resetData, handleUnauthorized, setPhase, unknownIfMissing } = await import('../../../src/ui-next/js/store.js')
-const { api, ApiError, setToken, clearToken, getToken } = await import('../../../src/ui-next/js/api.js')
+const { api, ApiError } = await import('../../../src/ui-next/js/api.js')
+// 管理面无令牌：测试内保留本地桩，仅用于断言“请求不携带令牌/功能级 403 不误清本地状态”。
+let __testToken = ''
+const setToken = (v) => { __testToken = String(v || '') }
+const getToken = () => __testToken
+const clearToken = () => { __testToken = '' }
 const { ConfigDraft, buildSavePayload, ConflictError } = await import('../../../src/ui-next/js/config-draft.js')
 const { saveDraft, sanitizeDiff, sourceSummary, expiryStates } = await import('../../../src/ui-next/js/save-flow.js')
 const { buildClientExport, CLIENT_EXPORT_FIELDS } = await import('../../../src/ui-next/js/views/clients.js')
@@ -147,50 +152,40 @@ test('状态完备：loading / ready / error 可由 phaseOf 区分，error 不�
   assert.equal(empty.status, null)
 })
 
-test('401 会话失效：清空状态与已渲染敏感投影并锁屏；功能级 403 只做局部错误', async () => {
+test('401 兜底：清空状态与已渲染敏感投影并显式报错（无令牌锁屏）；功能级 403 只做局部错误', async () => {
   resetAppState()
-  setToken('stale-token')
   state.status = { configVersion: 7, providers: [{ id: 'SENSITIVE-PROVIDER' }], global: { requests: 42 } }
   state.config = sampleConfig({ defaults: { clientKey: '********' } })
   const root = document.getElementById('view-root')
   root.textContent = 'SENSITIVE-QUOTA-42'
-  const overlay = document.getElementById('auth-overlay')
-  overlay.hidden = true
 
   app.handleUnauthorizedUi({ status: 401 })
   assert.equal(state.status, null, '401 后状态必须清空')
   assert.equal(state.config, null)
   assert.equal(phaseOf('status'), 'idle')
   assert.equal(root.textContent.includes('SENSITIVE-QUOTA-42'), false, '旧 DOM 文本必须被清除')
-  assert.equal(root.textContent.includes('控制面已锁定'), true, '应跳转登录/锁定页')
-  assert.equal(overlay.hidden, false, '登录层应显示')
-  assert.equal(getToken(), '', '令牌必须清除')
+  assert.match(root.textContent, /无法连接本地网关|管理请求未授权/, '应显示显式错误，不锁屏')
 
-  // api 层：401 必须走会话失效（清空 + 清 token）
+  // api 层：401 兜底清空已渲染投影（不再有令牌可清）
   resetAppState()
-  setToken('token-401')
   state.config = sampleConfig()
   stubFetch(() => jsonRes(401, { error: 'unauthorized' }))
   await assert.rejects(api.config(), (e) => e instanceof ApiError && e.status === 401)
   assert.equal(state.config, null, '401 后必须清空已渲染投影')
-  assert.equal(getToken(), '', '401 清除令牌')
 
-  // api 层：功能级 403 绝不能当会话失效（不清 token / 不清数据 / 不锁屏）
+  // api 层：功能级 403 绝不能当会话失效（不清数据 / 不锁屏）
   resetAppState()
   setToken('token-keep')
   state.status = { configVersion: 8, providers: [{ id: 'KEEP-VIEW-DATA' }] }
   state.config = sampleConfig()
   const root2 = document.getElementById('view-root')
   root2.textContent = 'KEEP-VIEW-DATA'
-  const overlay2 = document.getElementById('auth-overlay')
-  overlay2.hidden = true
   stubFetch(() => jsonRes(403, { error: 'write disabled', code: 'write_disabled' }))
   await assert.rejects(api.config(), (e) => e instanceof ApiError && e.status === 403 && e.data && e.data.code === 'write_disabled')
-  assert.equal(getToken(), 'token-keep', '功能级 403 不得清除令牌')
+  assert.equal(getToken(), 'token-keep', '功能级 403 不得清除本地状态')
   assert.notEqual(state.config, null, '功能级 403 不得清空其它视图数据')
   assert.notEqual(state.status, null)
   assert.equal(root2.textContent.includes('KEEP-VIEW-DATA'), true, 'DOM 不得被清空')
-  assert.equal(overlay2.hidden, true, '功能级 403 不得锁屏')
 })
 
 test('409 冲突：保留用户草稿逐字段不变，不覆盖用户输入', async () => {

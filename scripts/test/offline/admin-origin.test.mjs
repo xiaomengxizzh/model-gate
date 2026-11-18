@@ -80,13 +80,12 @@ test('MG-001 数据面：跨源网页不能借网关凭据发请求，非浏览�
   assert.match(blockedBody.error.message, /跨源/)
 })
 
-test('MG-001 远程对端（只绑回环）：匿名远程管理写与读被拒，配好令牌后可用，数据面保持开放', { timeout: 40000 }, async (t) => {
-  // M0-1b：网关只绑 127.0.0.1，绝不对全网卡监听（默认套件不得暴露 LAN 端口）。
-  // 用 127.0.0.2 作为客户端源地址模拟"非回环对端"：网关的 isLoopbackPeer 只认 127.0.0.1/::1，
-  // 因此服务端看到 remoteAddress=127.0.0.2 就按远程管理请求处理，无需真实 LAN。
+test('MG-001 远程对端：无令牌下远程管理一律 403；allowRemote 才放行；数据面保持开放', { timeout: 40000 }, async (t) => {
+  // 网关只绑 127.0.0.1，绝不对全网卡监听（默认套件不得暴露 LAN 端口）。
+  // 用 127.0.0.2 作为客户端源地址模拟"非回环对端"：网关的 isLoopbackPeer 只认 127.0.0.1/::1。
   const REMOTE_SRC = '127.0.0.2'
   const upstream = await startMockUpstream()
-  // 无令牌：远程只能读健康检查，管理面一律 403
+  // 管理面无令牌：远程只能读健康检查，管理面一律 403（新的安全下界）
   const anon = await startGateway({
     name: 'origin-remote-anon',
     config: {
@@ -94,30 +93,29 @@ test('MG-001 远程对端（只绑回环）：匿名远程管理写与读被拒�
       models: { demo: { provider: 'mock', api: 'openai', forceNoStream: true } },
     },
   })
-  t.after(async () => { await anon.stop() })
+  t.after(async () => { await anon.stop(); await upstream.stop() })
   assert.equal((await raw(anon.base + '/healthz', { localAddress: REMOTE_SRC })).status, 200)
   const remoteStatus = await raw(anon.base + '/api/status', { localAddress: REMOTE_SRC })
   assert.equal(remoteStatus.status, 403)
   assert.match(remoteStatus.body, /远程管理请求/)
   assert.equal((await raw(anon.base + '/api/config/save', { localAddress: REMOTE_SRC, method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 403)
-  assert.equal((await raw(anon.base + '/api/admin-token', { localAddress: REMOTE_SRC, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: 'remote-set' }) })).status, 403)
-  // 本机访问同一实例仍然开放（本地初始化语义保留）
+  assert.equal((await raw(anon.base + '/api/codex/policy', { localAddress: REMOTE_SRC })).status, 403)
+  assert.equal((await raw(anon.base + '/api/admin-token', { localAddress: REMOTE_SRC, method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 404, '管理令牌端点已删除')
+  // 本机访问同一实例仍然开放
   assert.equal((await anon.get('/api/status')).status, 200)
   // 数据面不被来源策略削弱
   assert.equal((await raw(anon.base + '/v1/chat/completions', { localAddress: REMOTE_SRC, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'demo', messages: [{ role: 'user', content: 'hi' }] }) })).status, 200)
-  await anon.stop()
 
-  // 有令牌：远程带凭据可用，缺凭据 401
-  const withToken = await startGateway({
-    name: 'origin-remote-token',
-    env: { MG_ADMIN_TOKEN: 'remote-admin' },
+  // 显式 allowRemote：远程无令牌也可用（管理面无令牌下的显式放宽）
+  const allowed = await startGateway({
+    name: 'origin-remote-allowed',
+    env: { MG_ADMIN_ALLOW_REMOTE: '1' },
     config: {
       providers: { mock: { baseUrl: upstream.base } },
       models: { demo: { provider: 'mock', api: 'openai', forceNoStream: true } },
     },
   })
-  t.after(async () => { await withToken.stop(); await upstream.stop() })
-  assert.equal((await raw(withToken.base + '/api/status', { localAddress: REMOTE_SRC })).status, 401)
-  assert.equal((await raw(withToken.base + '/api/status', { localAddress: REMOTE_SRC, headers: { authorization: 'Bearer remote-admin' } })).status, 200)
-  assert.equal((await raw(withToken.base + '/api/config/save', { localAddress: REMOTE_SRC, method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer remote-admin' }, body: '{}' })).status, 200)
+  t.after(async () => { await allowed.stop() })
+  assert.equal((await raw(allowed.base + '/api/status', { localAddress: REMOTE_SRC })).status, 200)
+  assert.equal((await raw(allowed.base + '/api/config/save', { localAddress: REMOTE_SRC, method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 200)
 })

@@ -1,5 +1,4 @@
 import http from 'node:http'
-import { randomBytes } from 'node:crypto'
 import { pipeline, Transform } from 'node:stream'
 import { readFileSync, chmodSync, existsSync, copyFileSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -310,18 +309,13 @@ function configProjection(state) {
 }
 
 function pct(arr, p) { if (!arr || !arr.length) return null; const a = [...arr].sort((x, y) => x - y); const i = Math.min(a.length - 1, Math.max(0, Math.ceil(a.length * p / 100) - 1)); return Math.round(a[i]) }
+// 常量时间比较仅用于数据面客户端 Key（Authorization: Bearer <clientKey>）。
+// 管理面已按所有者授权彻底移除令牌概念，不再做任何令牌比对。
 function safeTokenCmp(a, b) {
   if (!a || !b || a.length !== b.length) return false
   let d = 0
   for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i)
   return d === 0
-}
-function adminOk(req, state) {
-  if (!state.adminToken) return true
-  const ah = req.headers['authorization'] || ''
-  if (ah.slice(0, 7).toLowerCase() === 'bearer ') return safeTokenCmp(ah.slice(7).trim(), state.adminToken)
-  const x = req.headers['x-mg-admin']
-  return !!x && safeTokenCmp(String(x), state.adminToken)
 }
 // ── 来源策略（MG-001）：Host/DNS 重绑定 + 跨源管理请求 ──
 // Host 只接受 IP 字面量与白名单名字：DNS 重绑定必须借道域名，因此未经 server.allowedHosts 声明的域名一律拒绝。
@@ -354,59 +348,12 @@ function isLoopbackPeer(req) {
   return a === '::1' || a === '127.0.0.1' || a === '::ffff:127.0.0.1' || a.startsWith('::ffff:127.')
 }
 // —— P0-2：Codex 管理面入口（M4-1b）——
-// 与旧 /api/* 的管理语义分开：/api/codex/* 一律要求“显式管理员”（正确管理令牌），
-// 未设置令牌时不再有任何 loopback 放行；且必须在读请求体之前完成判定。
+// 所有者授权的安全降级：管理面不设任何令牌。入口只做 Host/Origin + 回环/远程开关校验，
+// 然后向模块传显式管理员标记与审计主体；不再读请求里的 Bearer/x-mg-admin 作为准入凭据。
 const CODEX_MANAGED_ROOT_ENV = 'MG_CODEX_MANAGED_ROOT'
 const CODEX_MANAGED_ROOT_ID = 'managed-root'
-
-function managementTokenOf(req) {
-  const ah = req.headers['authorization'] || ''
-  if (String(ah).slice(0, 7).toLowerCase() === 'bearer ') return String(ah).slice(7).trim()
-  const x = req.headers['x-mg-admin']
-  return x == null ? '' : String(x).trim()
-}
-
-// 返回 { explicitAdmin:true, adminSubject } 或 null。adminSubject 是令牌的不可逆短哈希
-// （稳定、便于审计关联；日志/响应永不含令牌本体）。
-function explicitAdminOf(req, state) {
-  const supplied = managementTokenOf(req)
-  if (!supplied) return null
-  if (state.adminToken && safeTokenCmp(supplied, state.adminToken)) {
-    return { explicitAdmin: true, adminSubject: 'admin-' + sha256Hex(String(state.adminToken)).slice(0, 16) }
-  }
-  // MG-FIX-P1-04：本机管理会话令牌——由 POST /api/admin/unlock 在回环+同源校验通过后签发，
-  // 仅存进程内存（重启即失效）、不落盘、不写日志，作用域等效显式管理员但可随时被本地会话丢弃。
-  // 它不是“回环地址=永久管理员”：必须先经解锁端点取得令牌，且仍受下面的 peer/remote 检查约束。
-  if (localAdminSessionValid(state, supplied)) {
-    return { explicitAdmin: true, adminSubject: 'admin-local-session-' + sha256Hex(supplied).slice(0, 16), localSession: true }
-  }
-  return null
-}
-
-// 本机管理会话：token -> expiresAt(ms)。纯内存、重启即失效。
-const LOCAL_ADMIN_SESSION_TTL_MS = 30 * 60 * 1000 // 30 分钟
-function localAdminSessionValid(state, token) {
-  const sessions = state && state.localAdminSessions
-  if (!sessions || !(sessions instanceof Map)) return false
-  const exp = sessions.get(String(token))
-  if (typeof exp !== 'number') return false
-  if (exp <= Date.now()) { sessions.delete(String(token)); return false }
-  return true
-}
-function issueLocalAdminSession(state) {
-  if (!(state.localAdminSessions instanceof Map)) state.localAdminSessions = new Map()
-  // 容量保护：清理过期项，最多保留少量会话，避免内存无限增长。
-  const now = Date.now()
-  for (const [t, exp] of state.localAdminSessions) if (typeof exp !== 'number' || exp <= now) state.localAdminSessions.delete(t)
-  if (state.localAdminSessions.size >= 8) {
-    const oldest = [...state.localAdminSessions.entries()].sort((a, b) => a[1] - b[1])[0]
-    if (oldest) state.localAdminSessions.delete(oldest[0])
-  }
-  const token = randomBytes(32).toString('hex')
-  const expiresAt = now + LOCAL_ADMIN_SESSION_TTL_MS
-  state.localAdminSessions.set(token, expiresAt)
-  return { token, expiresAt }
-}
+// 管理面审计主体：固定非空常量，满足模块写接口的 adminSubject 门禁；不含任何凭据，日志/响应永不含密钥值。
+const ADMIN_SUBJECT_LOCAL = 'admin-local'
 
 // 远程管理显式开关：仅 server.allowRemote=true 或 MG_ADMIN_ALLOW_REMOTE=1 时放行非回环 peer。
 function remoteManagementAllowed(state) {
@@ -544,7 +491,7 @@ function buildStatus(state) {
     return { name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps, keySet: !!(state.cfg._keys && state.cfg._keys[keyId]), ...virtualExpiryProjection(meta.expiresAt), note: meta.note || '', requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate: (dk.hit + dk.miss) > 0 ? Math.round(dk.hit / (dk.hit + dk.miss) * 1000) / 10 : null }
   })
   return {
-    needAuth: !!state.adminToken,
+    needAuth: false,
     configVersion: state.cfg.configVersion || 0,
     virtualModels,
     server: { maxBodyBytes: (state.cfg.server && state.cfg.server.maxBodyBytes) || 0, keyEncrypted: !!(process.env.MG_KEYS_MASTER) || keysFileEncrypted(state.paths.keys), host: (state.cfg.server && state.cfg.server.host) || '127.0.0.1', port: (state.cfg.server && state.cfg.server.port) || 8787 },
@@ -611,15 +558,15 @@ function staticModels(cfg) {
   return { object: 'list', data }
 }
 
-// 日志脱敏词表（MG-005）：上游 Key（环境变量/注册表/面板）、extraHeaders 值、客户端/管理令牌、代理内嵌凭据。
+// 日志脱敏词表（MG-005）：上游 Key（环境变量/注册表/面板）、extraHeaders 值、客户端令牌、代理内嵌凭据。
 // 每次 reloadConfig 重新收集，热更新 Key 后立即生效，不必重启进程。
+// 管理面令牌已按所有者授权删除：这里不再收集 MG_ADMIN_TOKEN。
 function collectSecrets(cfg) {
   const out = []
   for (const d of Object.values(cfg.providers || {})) { if (d && d.apiKeyEnv && process.env[d.apiKeyEnv]) out.push(process.env[d.apiKeyEnv]) }
   for (const d of Object.values(cfg.providers || {})) { for (const v of Object.values((d && d.extraHeaders) || {})) if (v) out.push(String(v)) }
   for (const v of Object.values(cfg._keys || {})) if (v && typeof v === 'string') out.push(v)
   if (process.env.MG_CLIENT_KEY) out.push(process.env.MG_CLIENT_KEY)
-  if (process.env.MG_ADMIN_TOKEN) out.push(process.env.MG_ADMIN_TOKEN)
   const proxyUrls = [(cfg.defaults && cfg.defaults.proxy) || '']
   for (const d of Object.values(cfg.providers || {})) if (d && typeof d.proxy === 'string') proxyUrls.push(d.proxy)
   for (const u of proxyUrls) {
@@ -669,8 +616,6 @@ function reloadConfig(state) {
   state.ledgerOptions = ledgerOptionsOf(state.cfg)
   initForwardLedger(state.cfg, { ledgerOptions: state.ledgerOptions }, state.log)
   if (state.log && state.log.setSecrets) state.log.setSecrets(collectSecrets(state.cfg))
-  // 管理令牌优先级：环境变量 MG_ADMIN_TOKEN > server.adminToken > 面板设置（keys.__mg_admin）
-  state.adminToken = process.env.MG_ADMIN_TOKEN || (state.cfg.server && state.cfg.server.adminToken) || (state.cfg._keys && state.cfg._keys.__mg_admin) || ''
   const ids = Object.keys(state.cfg.providers || {})
   for (const id of ids) if (!state.stats.byProvider[id]) state.stats.byProvider[id] = { requests:0, errors:0, retries:0, latencySum:0, latencyCount:0, tokens:0 }
   pruneStateCapacity(state)
@@ -2797,13 +2742,9 @@ function makeHandler(state) {
   const log = state.log
   const logFile = () => state.cfg.server && state.cfg.server.logFile
   async function requireAdmin(req, res) {
-    if (!adminOk(req, state)) {
-      sendJson(res, 401, { error: '未授权：请在控制面板设置管理令牌（MG_ADMIN_TOKEN）' })
-      return false
-    }
-    // 未配置令牌时的"本地初始化"不能延伸到网络：远程管理请求必须先有令牌（MG-001）
-    if (!state.adminToken && !isLoopbackPeer(req)) {
-      sendJson(res, 403, { error: '拒绝远程管理请求：本实例未启用管理令牌，管理 API 仅允许本机访问；请先在本机设置 MG_ADMIN_TOKEN（或 server.adminToken）' })
+    // 管理面无令牌：只保留来源下界（回环，除非显式 allowRemote 的入口另有校验）。
+    if (!isLoopbackPeer(req) && !remoteManagementAllowed(state)) {
+      sendJson(res, 403, { error: '拒绝远程管理请求：管理面仅允许本机访问（回环或显式 allowRemote）' })
       return false
     }
     return true
@@ -2857,111 +2798,52 @@ function makeHandler(state) {
         res.writeHead(410, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' })
         res.end(req.method === 'HEAD' ? undefined : LEGACY_CONSOLE_RETIRED); return
       }
-      if (path === '/api/auth' && req.method === 'GET') { sendJson(res, 200, { needAuth: !!state.adminToken, startedAt: state.st.startedAt }); return }
+      // 兼容端点：管理面已无令牌，needAuth 恒为 false。保留端点供旧客户端读取 startedAt。
+      if (path === '/api/auth' && req.method === 'GET') { sendJson(res, 200, { needAuth: false, startedAt: state.st.startedAt }); return }
 
-      // MG-FIX-P1-04：本机管理会话解锁。普通状态（未设置全局管理令牌）下管理面只读且写操作 403；
-      // 用户在本机 GUI 主动点击“解锁聚合管理”后，回环 + 同源/Host（上方已全局校验）取得一个
-      // 短时、纯内存、重启即失效的 local-admin 会话令牌，使 /api/aggregation/* 与 /api/codex/*
-      // 的显式管理员校验通过。绝不把“回环地址”当永久管理员，也不放宽远程/跨源入口。
+      // 兼容端点：旧客户端的“本机解锁”请求在令牌功能删除后变为空操作。
+      // 只消费请求体并返回 deprecated，绝不签发任何令牌，避免旧客户端因 404 反复重试。
       if (path === '/api/admin/unlock' && req.method === 'POST') {
-        // peer 必须是回环（除非所有者显式 allowRemote，语义与其余管理面一致）。
-        if (!isLoopbackPeer(req) && !remoteManagementAllowed(state)) {
-          log && log.warn('admin unlock denied', 'remote_forbidden', path)
-          sendJson(res, 403, { ok: false, code: 'admin_unlock_denied', error: '本机管理会话只允许回环来源；远程管理需显式 allowRemote' })
-          return
-        }
-        // 已设置全局管理令牌时，解锁也必须出示它（未授权者不能仅凭本机连接提权）。
-        if (state.adminToken && !adminOk(req, state)) {
-          log && log.warn('admin unlock denied', 'admin_token_required', path)
-          sendJson(res, 403, { ok: false, code: 'admin_unlock_denied', error: '已设置全局管理令牌：解锁本机管理会话需先提供该令牌' })
-          return
-        }
         try { await collectBody(req, 64 * 1024) } catch { /* body 无业务语义，仅消费以释放连接 */ }
-        const session = issueLocalAdminSession(state)
-        // A5 LOW-1：令牌承载响应显式禁止缓存/代理存储（纵深防御，浏览器/中间件不得留存会话令牌）。
-        const unlockBody = JSON.stringify({ ok: true, token: session.token, scope: 'local-admin', expiresAt: session.expiresAt })
-        res.writeHead(200, {
-          'content-type': 'application/json; charset=utf-8',
-          'content-length': Buffer.byteLength(unlockBody),
-          'cache-control': 'no-store, no-cache, must-revalidate, private',
-          'pragma': 'no-cache',
-        })
-        res.end(unlockBody)
+        sendJson(res, 200, { ok: true, needAuth: false, deprecated: true })
         return
       }
       // E6 管理面：/api/codex/*（P0-2 / M4-1b）。
-      // 顺序硬约束：Host/Origin 已在上面全局校验 → 可信 peer → 显式管理员 → 才读 body → 派发。
-      // 未设置 adminToken 时这里没有任何 loopback 放行：/api/codex/* 一律 403 explicit_admin_required。
+      // 顺序硬约束：Host/Origin 已在上面全局校验 → 可信 peer → 才读 body → 派发。
+      // 所有者授权的安全降级：管理面无令牌，入口完成来源校验后传固定的显式管理员标记。
       if (isCodexApiPath(path)) {
         if (!isLoopbackPeer(req) && !remoteManagementAllowed(state)) {
           log && log.warn('codex admin denied', 'remote_forbidden', path)
           sendCodexDenied(res, 403, 'remote_forbidden', '拒绝非本机来源的 Codex 管理请求：只有回环或显式 allowRemote 可用')
           return
         }
-        const admin = explicitAdminOf(req, state)
-        if (!admin) {
-          log && log.warn('codex admin denied', 'explicit_admin_required', path)
-          sendCodexDenied(res, 403, 'explicit_admin_required', 'Codex 管理接口要求显式管理员令牌（未设置/未携带/错误令牌一律拒绝）')
-          return
-        }
         const rawBody = (req.method === 'POST')
           ? await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
           : undefined
-        // 入口已完成 Host/Origin/peer/显式管理员校验；isLocal=true 让模块侧不再重复用 socket 判来源
+        // 入口已完成 Host/Origin/peer 校验；isLocal=true 让模块侧不再重复用 socket 判来源
         // （allowRemote 场景下 peer 非回环，但入口已显式放行）。
-        const out = await handleCodexApi({ method: req.method, url, path, cfg: state.cfg, log, req, res, rawBody, explicitAdmin: admin.explicitAdmin, adminSubject: admin.adminSubject, managedRoot: state.managedRoot === true, isLocal: true })
+        const out = await handleCodexApi({ method: req.method, url, path, cfg: state.cfg, log, req, res, rawBody, explicitAdmin: true, adminSubject: ADMIN_SUBJECT_LOCAL, managedRoot: state.managedRoot === true, isLocal: true })
         if (out) sendJson(res, out.status, out.body)
         return
       }
 
       // 聚合模式管理面：/api/aggregation/*（ADR-0003 §5）。
-      // 与 /api/codex/* 同一顺序硬约束：Host/Origin 已全局校验 → 可信 peer → 显式管理员 → 读 body → 派发。
-      // 未设置 adminToken 时没有任何回环放行：一律 403 explicit_admin_required。
+      // 与 /api/codex/* 同一顺序硬约束：Host/Origin 已全局校验 → 可信 peer → 读 body → 派发。
+      // 所有者授权的安全降级：管理面无令牌，不再有 403 explicit_admin_required 缺令牌分支。
       if (isAggregationApiPath(path)) {
         if (!isLoopbackPeer(req) && !remoteManagementAllowed(state)) {
           log && log.warn('aggregation admin denied', 'remote_forbidden', path)
           sendCodexDenied(res, 403, 'remote_forbidden', '拒绝非本机来源的聚合管理请求：只有回环或显式 allowRemote 可用')
           return
         }
-        const admin = explicitAdminOf(req, state)
-        if (!admin) {
-          log && log.warn('aggregation admin denied', 'explicit_admin_required', path)
-          sendCodexDenied(res, 403, 'explicit_admin_required', '聚合管理接口要求显式管理员令牌（未设置/未携带/错误令牌一律拒绝）')
-          return
-        }
         const rawBody = req.method === 'POST'
           ? await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
           : undefined
-        const out = await handleAggregationApi({ method: req.method, path, cfg: state.cfg, log, rawBody, explicitAdmin: admin.explicitAdmin, managedRoot: state.managedRoot === true, isLocal: true, reload: () => reloadConfig(state), catalogRuntime: () => codexCatalogHealth(state.cfg) })
+        const out = await handleAggregationApi({ method: req.method, path, cfg: state.cfg, log, rawBody, explicitAdmin: true, managedRoot: state.managedRoot === true, isLocal: true, reload: () => reloadConfig(state), catalogRuntime: () => codexCatalogHealth(state.cfg) })
         if (out) sendJson(res, out.status, out.body)
         return
       }
 
-      // 面板设置管理令牌：写入加密 keys 库并热生效。未启用鉴权时开放（本地初始化）；已启用时需携带当前令牌。
-      if (path === '/api/admin-token' && req.method === 'POST') {
-        if (state.adminToken && !adminOk(req, state)) { sendJson(res, 401, { error: '未授权：修改管理令牌需携带当前令牌' }); return }
-        if (!state.adminToken && !isLoopbackPeer(req)) { sendJson(res, 403, { error: '拒绝远程初始化：未启用管理令牌时只允许本机设置令牌（MG_ADMIN_TOKEN）' }); return }
-        const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)) || {}
-        const token = typeof body.token === 'string' ? body.token.trim() : ''
-        let tx
-        try { tx = beginStoreWrite(state) } catch (error) { const f = transactionFailure(error); sendJson(res, f.status, { error: f.error, code: f.code }); return }
-        try {
-          const keys = Object.assign({}, readKeysFresh(state.paths.keys))
-          if (token) keys.__mg_admin = token
-          else delete keys.__mg_admin
-          const enc = keysEncrypt(keys)
-          if (!enc) { sendJson(res, 400, { error: '无法加密 keys.local.json：缺少主密钥，已拒绝写入' }); return }
-          tx.commit({ files: { [TARGET_KEYS]: enc }, operation: 'admin.token', publish: () => reloadConfig(state) })
-          hardenKeyFile(state.paths.keys)
-          sendJson(res, 200, { ok: true, needAuth: !!state.adminToken })
-        } catch (error) {
-          const f = transactionFailure(error)
-          sendJson(res, f.status, { error: f.error, code: f.code })
-        } finally {
-          tx.release()
-        }
-        return
-      }
 
       if (path === '/api/status' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; sendJson(res, 200, buildStatus(state)); return }
       if (path === '/api/native-usage' && req.method === 'GET') {
@@ -3857,9 +3739,6 @@ export function start(opts = {}) {
     ledgerOptions,
     adapterFactory: opts.adapterFactory,
     chatgptPlan: opts.chatgptPlan,
-    adminToken: process.env.MG_ADMIN_TOKEN || (cfg.server && cfg.server.adminToken) || (cfg._keys && cfg._keys.__mg_admin) || '',
-    // MG-FIX-P1-04：本机管理会话令牌仓库，纯内存，重启即失效，永不落盘/写日志。
-    localAdminSessions: new Map(),
     paths: cfg._paths || configPaths(),
     // N06：运行时可观测收据（有界内存 ring；request/attempt/usage 三类事件，终态去重）。
     observability: createObservability({ capacity: (cfg.defaults && cfg.defaults.observability && cfg.defaults.observability.capacity) || undefined }),
@@ -4000,9 +3879,8 @@ export function start(opts = {}) {
   }, 30000).unref() })()
   const bindHost = String((cfg.server && cfg.server.host) || '127.0.0.1').toLowerCase()
   const loopbackBind = bindHost === '::1' || bindHost === 'localhost' || bindHost.startsWith('127.')
-  if (state.adminToken) log.info('管理 API 已启用令牌保护（MG_ADMIN_TOKEN）')
-  else if (loopbackBind) log.warn('未设置 MG_ADMIN_TOKEN：管理 API 仅允许本机访问（远程管理请求返回 403）')
-  else log.error('非回环绑定 ' + bindHost + ' 且未设置管理令牌：远程管理 API 将被拒绝（403），数据面仍按客户端 Key 策略开放')
+  if (loopbackBind) log.warn('管理面无令牌（所有者授权的安全降级）：仅回环 + Host/Origin 保护；远程管理请求返回 403')
+  else log.error('非回环绑定 ' + bindHost + '：管理面无令牌，仅 Host/Origin 与来源开关保护；数据面仍按客户端 Key 策略开放')
   hardenKeyFile(state.paths.keys)
   const server = opts.server || http.createServer(makeHandler(state))
   const host = (cfg.server && cfg.server.host) || '127.0.0.1'

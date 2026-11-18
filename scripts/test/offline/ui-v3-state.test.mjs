@@ -88,7 +88,12 @@ const {
   invalidateProductStatus, setProductPhase, onProductStatus, FRESHNESS_BUDGET, phaseOf,
   markAuthPending, markAuthResolved, canReadControlPlane,
 } = store
-const { api, ApiError, setToken, getToken, clearToken } = await import('../../../src/ui-next/js/api.js')
+const { api, ApiError } = await import('../../../src/ui-next/js/api.js')
+// 管理面无令牌：测试内保留本地桩，仅用于验证“取消/局部错误不误清本地状态”。
+let __testToken = ''
+const setToken = (v) => { __testToken = String(v || '') }
+const getToken = () => __testToken
+const clearToken = () => { __testToken = '' }
 const { ensureDraft, clearDraft, dirtyDraft } = await import('../../../src/ui-next/js/config-draft.js')
 const app = await import('../../../src/ui-next/app.js')
 
@@ -234,10 +239,9 @@ test('③ 外部 signal 取消标记 aborted，且不当作 401', async () => {
   off()
 })
 
-// ④ 401：清 token + 清 state.product + emit unauthorized。
-test('④ 401 清空 token 与产品快照并 emit unauthorized', async () => {
+// ④ 401 兜底：清空产品快照并 emit unauthorized（管理面无令牌，不再清 token）。
+test('④ 401 清空产品快照并 emit unauthorized', async () => {
   resetEnv()
-  setToken('session-token')
   stubFetch(standardRoutes(() => jsonRes(200, statusBody('before-401'))))
   await refreshProduct({ force: true })
   assert.ok(state.product, '先建立可用的共享快照')
@@ -245,7 +249,6 @@ test('④ 401 清空 token 与产品快照并 emit unauthorized', async () => {
   const off = store.on('unauthorized', () => { unauthorized += 1 })
   stubFetch(() => jsonRes(401, { error: 'unauthorized' }))
   await refreshProduct({ force: true })
-  assert.equal(getToken(), '', '401 必须清除管理令牌')
   assert.equal(state.product, null, '401 必须清空 state.product')
   assert.equal(state.status, null, '401 必须清空状态快照')
   assert.equal(state.aggregation, null)
@@ -413,59 +416,40 @@ test('⑩ 断网：清掉旧成功投影并进入 recoverable_error', async () =
   assert.equal(state.product, product)
 })
 
-// UX-04 R2：鉴权前置。auth 未确定或 needAuth 且无 token 时零管理面请求；
-// 令牌注入后恢复读取；403 仍是局部拒绝（不清 token、不锁屏）。
-test('⑪ 鉴权前置：未确定/缺令牌时零管理面请求，注入令牌后恢复且 403 不清 token', async () => {
+// 管理面无令牌（2026-11-18 安全降级）：旧的鉴权前置门已退役，读取不再因缺令牌被阻断。
+// 这里验证新下界：无令牌也能直接读管理面；请求不携带 Authorization；403 仍是局部拒绝。
+test('⑪ 无令牌直接读取管理面；请求不携带令牌；403 只做局部拒绝', async () => {
   resetEnv()
   const managementRequests = () => fetchLog.filter((x) =>
     /\/api\/(status|config)(\?|$)/.test(x.url) || x.url.includes('/api/aggregation/'))
-  stubFetch((url) => {
-    if (url.includes('/api/auth')) return jsonRes(200, { needAuth: true, startedAt: 1 })
-    if (url.includes('/api/status')) return jsonRes(401, { error: 'unauthorized' })
-    if (url.includes('/api/aggregation/')) return jsonRes(403, { error: 'explicit admin required', code: 'explicit_admin_required' })
-    return jsonRes(404, {})
-  })
+  const route = standardRoutes(() => jsonRes(200, statusBody('authed')))
+  stubFetch((url) => (url.includes('/api/auth') ? jsonRes(200, { needAuth: false, startedAt: 1 }) : route(url)))
 
-  // 1) /api/auth 尚未 resolve：所有入口都不得读管理面。
-  state.auth = { needAuth: false, startedAt: 0 }
+  // 1) 兼容的 markAuthPending 已是空操作，恒放行。
   markAuthPending()
-  assert.equal(canReadControlPlane(), false)
-  await refreshProduct({ force: true })
-  await store.loadStatus()
-  await store.loadConfig()
-  await store.loadAll()
-  assert.equal(managementRequests().length, 0, 'auth 未确定时管理面 fetch 必须为 0')
-  assert.equal(fetchLog.length, 0, '连状态/配置/聚合都不应发请求')
-
-  // 2) auth resolve 为 needAuth=true、但还没有令牌：仍然 0 请求。
-  await store.loadAuth()
-  assert.equal(fetchLog.filter((x) => x.url.includes('/api/auth')).length, 1, '只允许 /api/auth 探测')
-  assert.equal(canReadControlPlane(), false)
-  await refreshProduct({ force: true })
-  await store.loadStatus()
-  await store.loadAll()
-  assert.equal(managementRequests().length, 0, 'needAuth 且无 token 时管理面 fetch 必须为 0')
-  assert.equal(getToken(), '')
-
-  // 3) 注入令牌后恢复读取真实快照。
-  setToken('a5-browser-fixture-token')
   assert.equal(canReadControlPlane(), true)
-  stubFetch(standardRoutes(() => jsonRes(200, statusBody('authed'))))
   await refreshProduct({ force: true })
-  assert.equal(statusCount(), 1, '有 token 后必须恢复 /api/status 读取')
-  assert.ok(fetchLog.some((x) => x.url.includes('/api/aggregation/health')), '聚合接口也必须恢复读取')
+  assert.ok(managementRequests().length > 0, '管理面读取不得再被令牌门禁阻断')
+  assert.equal(statusCount(), 1, '无令牌也必须读取 /api/status')
   assert.notEqual(state.product, null)
 
-  // 4) 聚合 403 仍是局部拒绝：不清 token、不锁屏、投影 denied。
+  // 2) /api/auth 仍兼容返回 needAuth:false，但不产生门禁。
+  const auth = await store.loadAuth()
+  assert.equal(auth.needAuth, false)
+  assert.equal(canReadControlPlane(), true)
+
+  // 3) 所有管理请求都不得携带 Authorization（管理面已无令牌）。
+  assert.equal(fetchLog.every((x) => !(x.opts && x.opts.headers && x.opts.headers.authorization)), true, '请求不得携带令牌头')
+
+  // 4) 聚合 403 仍是局部拒绝：不锁屏、投影 denied。
   let unauthorized = 0
   const off = store.on('unauthorized', () => { unauthorized += 1 })
   stubFetch((url) => {
     if (url.includes('/api/status')) return jsonRes(200, statusBody('denied'))
-    if (url.includes('/api/aggregation/health')) return jsonRes(403, { error: 'explicit admin required', code: 'explicit_admin_required' })
+    if (url.includes('/api/aggregation/health')) return jsonRes(403, { error: 'remote forbidden', code: 'remote_forbidden' })
     return aggregationResponse(url)
   })
   await refreshProduct({ force: true })
-  assert.equal(getToken(), 'a5-browser-fixture-token', '403 不得清 token')
   assert.equal(unauthorized, 0, '403 不得触发锁屏/unauthorized')
   assert.equal(productStatus().error && productStatus().error.kind, 'denied')
   assert.notEqual(state.status, null)

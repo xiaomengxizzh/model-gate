@@ -40,8 +40,8 @@ test('native usage: read-only aggregation from Codex session logs', { timeout: 3
   const gw = await startGateway({ name: 'native-usage', env: { MG_ADMIN_TOKEN: TOKEN, MG_NATIVE_USAGE_DIR: '' }, config: { defaults: { nativeUsageDir: dir } } })
   t.after(() => gw.stop())
 
-  assert.equal((await gw.get('/api/native-usage')).status, 401)
-  const res = await gw.get('/api/native-usage?days=7', AUTH)
+  assert.equal((await gw.get('/api/native-usage')).status, 200, '管理面无令牌，回环直接可读')
+  const res = await gw.get('/api/native-usage?days=7')
   assert.equal(res.status, 200)
   const data = await res.json()
   assert.equal(data.enabled, true)

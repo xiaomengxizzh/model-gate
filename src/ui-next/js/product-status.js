@@ -42,8 +42,8 @@ export const HOME_STATES = Object.freeze([
   'locked', 'loading', 'cannot_detect_codex', 'needs_go_key', 'go_key_invalid',
   'ready_to_enable', 'preview_pending', 'write_in_progress', 'needs_codex_restart',
   'ready', 'conflict', 'recoverable_error', 'read_only_unknown',
-  // 聚合管理接口要求显式管理员令牌（403 explicit_admin_required）：这不是"读取失败"，
-  // 也不是版本不支持，而是需要先设置令牌才能管理聚合。
+  // 管理面已无令牌；以下两个状态仅为兼容保留，实际不会再因“缺少令牌”进入。
+  // 403 现在只可能来自来源/Host/Origin 校验（remote_forbidden / host / origin）。
   'needs_admin_token',
   // 配置漂移：所有聚合端点都读取成功（200），只是 state 基线落后于 config.toml。
   // 这是"需要重新对齐"，不是"读取失败"，必须与 recoverable_error 分开。
@@ -432,16 +432,15 @@ export function nextPrimaryAction (ps) {
   const codex = obj(p.codex) || {}
   switch (state) {
     case 'locked':
-      return { id: 'unlock', label: '解锁控制台', kind: 'unlock', route: null, detail: '输入管理员令牌后读取真实状态。' }
+      return { id: 'retry', label: '重试读取状态', kind: 'reload', route: null, detail: '管理面暂时不可用，请确认网关在运行后重试。' }
     case 'loading':
       return { id: 'wait', label: '正在读取状态…', kind: 'wait', route: null, detail: '还没有取得真实数据，不显示任何成功状态。' }
     case 'read_only_unknown':
       return { id: 'check-version', label: '查看高级诊断', kind: 'route', route: '#/aggregation', detail: '当前实例不支持聚合管理，请确认版本后重试。' }
     case 'needs_admin_token':
-      // P1-04：主操作是“本机解锁管理会话”（POST /api/admin/unlock），不是跳设置页的死循环。
-      return { id: 'unlock-admin', label: '解锁聚合管理', kind: 'local-admin-unlock', route: null,
-        detail: '聚合管理被拒绝（403 ' + (str((obj(p.error) && p.error.code) || (obj(p.aggregation) && obj(p.aggregation.error) && obj(p.aggregation.error).code)) || 'aggregation_admin_required') + '）。' +
-          'Codex 侧已生效的配置不受影响；可在本机开启临时管理会话，解锁前不会发起任何写入。' }
+      return { id: 'recheck-admin', label: '重新检测聚合管理', kind: 'reload', route: null,
+        detail: '聚合管理被拒绝（403 ' + (str((obj(p.error) && p.error.code) || (obj(p.aggregation) && obj(p.aggregation.error) && obj(p.aggregation.error).code)) || 'remote_forbidden') + '）。' +
+          '管理面已无令牌；请确认从本机回环访问，且 Host/Origin 通过校验。' }
     case 'cannot_detect_codex':
       return { id: 'locate-codex', label: '查看如何安装/定位 Codex', kind: 'route', route: '#/connections?step=codex', detail: '需要先有原版 Codex Desktop。' }
     case 'needs_go_key':
@@ -496,7 +495,7 @@ export function homeStateOf (ps) {
   if (p.phase === 'write_in_progress') return 'write_in_progress'
   if (p.aggregation && p.aggregation.supported === false) return 'read_only_unknown'
   if (!p.official || !p.go || !p.codex || !p.aggregation) return 'recoverable_error'
-  // 403 explicit_admin_required 排在通用错误之前：它不是"读取失败"，而是缺少管理令牌。
+  // 403 denied 排在通用错误之前：管理面无令牌，这里指来源/Host/Origin 校验被拒。
   if (p.error && p.error.kind === 'denied') return 'needs_admin_token'
   if (p.error && p.error.kind && p.error.kind !== 'none') {
     if (p.error.kind === 'conflict') return 'conflict'
@@ -546,14 +545,14 @@ export function overallOf (ps) {
     case 'read_only_unknown':
       return { level: 'unknown', label: '状态未知（实例版本不支持）', detail: '当前实例没有聚合管理接口。' }
     case 'needs_admin_token':
-      return { level: 'action', label: '只读：聚合管理未解锁', detail: '聚合接口返回 403（要求显式管理员身份，当前实例没有全局管理令牌）。状态为只读，Codex 侧已生效的配置不受影响；点击“解锁聚合管理”可在本机开启临时管理会话，或在设置里写入 MG_ADMIN_TOKEN。解锁前不会发起任何写入。' }
+      return { level: 'action', label: '只读：聚合管理被来源校验拒绝', detail: '聚合接口返回 403（来源/Host/Origin 校验未通过）。管理面无令牌，请从本机回环访问；Codex 侧已生效的配置不受影响。' }
     // 漂移：聚合端点全部 200，状态已取到；只是对齐基线落后，不是"读取失败"。
     case 'needs_realign':
       return { level: 'action', label: '配置需要重新对齐', detail: '聚合状态已正常读取；config.toml 与对齐基线不一致，重新对齐只更新 state、不改配置内容。' }
     case 'recoverable_error':
       return { level: 'error', label: '出现问题：读取失败', detail: '控制台没有取得真实状态，可安全重试。' }
     case 'locked':
-      return { level: 'locked', label: '控制面已锁定', detail: '输入管理员令牌后查看真实状态。' }
+      return { level: 'locked', label: '控制面暂不可用', detail: '请确认网关正在运行后重试；管理面无令牌锁屏。' }
     case 'writing':
     case 'write_in_progress':
       return { level: 'action', label: '正在写入配置', detail: '不要关闭页面；失败会回滚。' }
@@ -621,9 +620,6 @@ export function deriveProductStatus (input) {
   }
   if (ps.aggregation.supported) {
     ps.secondary.push({ id: 'advanced', label: '查看高级诊断', kind: 'route', route: '#/aggregation' })
-  }
-  if (ps.state === 'needs_admin_token') {
-    ps.secondary.push({ id: 'set-admin-token', label: '改用管理令牌', kind: 'route', route: '#/settings?section=admin-token', detail: '需要远程/多设备管理时，可在设置里写入 MG_ADMIN_TOKEN。' })
   }
   if (ps.state !== 'ready' && ps.state !== 'loading' && ps.aggregation.mode === 'aggregated') {
     ps.secondary.push({ id: 'refresh', label: '重新检测', kind: 'reload', route: null })

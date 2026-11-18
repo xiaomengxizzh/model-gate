@@ -6,6 +6,8 @@
 
 **冻结条件**：Q04 PASS 且 CLI 管理 API 版本、fixture、generation 冻结（N03 交付物）后，由 Lead 与 E 复核本文的端点表；届时把 GAP 表按“已补 / 仍缺 / 不承诺”三态定稿。冻结前任何字段都可能调整，不允许把本文当 API 已经存在的依据。
 
+> **2026-11-18 所有者授权变更（适用于本文所有“令牌/锁屏/needAuth/解锁”段落）**：管理令牌功能已从网关彻底删除。管理面不再签发或校验任何 Bearer / `x-mg-admin` 凭据，`/api/admin-token` 已移除，`POST /api/admin/unlock` 退化为返回 `{ok:true,needAuth:false,deprecated:true}` 的空操作，`/api/auth` 恒为 `needAuth:false`。唯一安全下界是**回环对端 + Host/Origin 校验**。因此本文中原先依赖“单管理员令牌”的门禁/锁屏/GAP 描述均已失效或改为历史说明；下表凡提到令牌处按本段解释。
+
 ## 0. 术语与统一口径
 
 | 术语 | 含义 | 不表示 |

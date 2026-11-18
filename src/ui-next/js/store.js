@@ -6,8 +6,8 @@
 //    不允许各视图再维护私有缓存，否则会出现“首页未配置、聚合页已启用”。
 //  * 并发刷新用 epoch + AbortController：旧响应绝不覆盖新快照。
 //  * FRESHNESS_BUDGET 内不重复请求；只有可见路由才自动刷新。
-//  * 401 清空快照（含 state.product）；403 只记局部错误，不清 token。
-import { api, clearToken, setUnauthorizedHandler, hasToken } from './api.js'
+//  * 401 兜底清空快照（含 state.product）；管理面已无令牌，不会再有 401。
+import { api, setUnauthorizedHandler } from './api.js'
 import { deriveProductStatus, classifyAggregationError } from './product-status.js'
 
 // 数据阶段：idle / loading / ready / empty / error。unknown 由视图在“字段缺失”时显式渲染，
@@ -18,7 +18,6 @@ export const DATA_PHASES = ['idle', 'loading', 'ready', 'empty', 'error']
 export const FRESHNESS_BUDGET = Object.freeze({ aggregation: 5000, product: 8000 })
 
 export const state = {
-  auth: { needAuth: false, startedAt: 0 },
   status: null,
   config: null,
   loadedAt: 0,
@@ -84,32 +83,18 @@ function isVisible(section) {
   return false
 }
 
-// —— 鉴权前置门（UX-04 R2）——
-// 在 /api/auth 返回、且必要令牌就位之前，绝不发起管理面读取：
-// 否则首屏会先打 /api/status（401）和 /api/aggregation/*（explicitAdmin 403），
-// 控制台噪声会掩盖真实错误（A5 浏览器 UI-13 验收）。
-let authGatePending = false
-
-// app 在接线最早期调用：/api/auth 尚未 resolve。
-export function markAuthPending() {
-  authGatePending = true
-}
-
-// 测试与显式解锁路径使用；loadAuth 成功时也会自动解除。
-export function markAuthResolved() {
-  authGatePending = false
-}
+// —— 鉴权前置门已退役 ——
+// 所有者授权删除管理令牌后，/api/auth 只返回 needAuth:false，管理面无 401/令牌门禁。
+// 保留这些导出为空操作/恒放行，供旧调用方与测试继续引用，不再阻断任何读取。
+export function markAuthPending() {}
+export function markAuthResolved() {}
 
 export function canReadControlPlane() {
-  if (authGatePending) return false
-  if (!state.auth) return false
-  if (state.auth.needAuth === true && !hasToken()) return false
   return true
 }
 
 function isAuthed() {
-  if (!state.auth) return false
-  return state.auth.needAuth === false || hasToken()
+  return true
 }
 
 function fulfillment(result) {
@@ -401,16 +386,14 @@ export function refreshAggregation(opts = {}) {
   return refreshProduct(Object.assign({}, opts, { section: 'aggregation' }))
 }
 
+// 兼容入口：管理面无令牌，/api/auth 仅作健康检查并返回 startedAt；不再产生任何门禁状态。
 export async function loadAuth() {
-  // resolve 之前一律视为未确定：管理面读取保持关闭。
-  authGatePending = true
   setPhase('auth', 'loading')
   try {
     const data = await api.auth()
-    state.auth = { needAuth: !!data.needAuth, startedAt: Number(data.startedAt) || 0 }
-    authGatePending = false
+    const auth = { needAuth: false, startedAt: Number(data.startedAt) || 0 }
     setPhase('auth', 'ready')
-    return state.auth
+    return auth
   } catch (e) {
     setPhase('auth', 'error')
     throw e
@@ -500,7 +483,7 @@ export function resetData() {
   state.productLoadedAt = 0
   state.aggregationLoadedAt = 0
   state.productPhase = null
-  state.phase = { auth: state.auth ? 'idle' : 'idle', status: 'idle', config: 'idle', logs: 'idle' }
+  state.phase = { auth: 'idle', status: 'idle', config: 'idle', logs: 'idle' }
   productState.stale = true
   productState.phase = null
   productState.statusError = null
@@ -512,10 +495,9 @@ export function resetData() {
   notifyProductCleared('reset')
 }
 
-// 401 的统一收口：清 token、清敏感状态（含产品快照）、通知界面跳登录。
+// 401 兜底收口：管理面已无令牌，这里只清敏感状态（含产品快照）并通知界面；
 // 403 不进入这里：功能级权限由视图做局部错误。
 export function handleUnauthorized(info) {
-  clearToken()
   resetData()
   emit('unauthorized', info || {})
 }
@@ -539,7 +521,6 @@ export function deriveWarnings() {
   const s = state.status
   const c = state.config
   if (!s) return out
-  if (!state.auth.needAuth) out.push({ kind: 'warn', title: '管理面未启用令牌', detail: '仅本机可管理。若网关绑定非回环地址，请设置 MG_ADMIN_TOKEN 或 server.adminToken。' })
   const providers = Array.isArray(s.providers) ? s.providers : []
   const models = Array.isArray(s.models) ? s.models : []
   if (!providers.length) out.push({ kind: 'warn', title: '尚未配置任何上游', detail: '请先在「上游供应商」新增 Provider，再配置模型。' })

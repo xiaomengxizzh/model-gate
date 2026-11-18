@@ -4,7 +4,7 @@
 
 `MG_CONFIG_DIR` 控制 gateway.local.json、keys.local.json 和 stats.json 的位置；`MG_CONFIG` 指主模板。只设置 MG_CONFIG 不足以隔离写盘。日志路径来自 server.logFile，未设时落到用户目录；开发实例需显式设为自己的临时目录。
 
-默认绑定回环。设置 `MG_ADMIN_TOKEN` 保护管理接口、`MG_CLIENT_KEY` 保护数据面；虚拟模型 Key 只作用于该入口。没有全局 Key 时，其他未绑 Key 的入口仍允许匿名访问。环境变量令牌优先于配置和面板值；通过面板清除令牌不会移除进程环境值。
+默认绑定回环。管理面无令牌（2026-11-18 所有者授权的安全降级），仅靠回环对端 + Host/Origin 校验保护；`MG_ADMIN_TOKEN` / `server.adminToken` 不再被读取，环境变量残留对行为无影响。`MG_CLIENT_KEY` 保护数据面；虚拟模型 Key 只作用于该入口。没有全局 Key 时，其他未绑 Key 的入口仍允许匿名访问。
 
 生产服务应先查看实际监听与启动来源，再判断是否需要重启。Windows 的 start.bat 会清理占端口的 node；Linux 用户服务、托盘和环境变量属于本机部署，不由仓库状态证明。源码更新后需重启拥有该源码的进程才会加载 JS；面板 HTML 则逐请求读盘。
 
@@ -15,7 +15,7 @@ provider Key 支持环境变量或加密 keys 库。主密钥来自 MG_KEYS_MAST
 ## 排错顺序
 
 1. `/healthz` 检查进程响应，不证明模型能调用。
-2. `/api/auth` 查询是否启用管理门禁；使用正确管理令牌读取状态。
+2. `/api/auth` 返回 `needAuth:false`（兼容探测）；直接读取 `/api/status`，若 403 请检查回环来源与 Host/Origin，而非令牌。
 3. 核对模型、协议、providerModels 和环境变量来源，只检查存在性，不输出凭据值。
 4. 先用 mock 复现；面板模型“测”会发真实计费请求，需按本轮任务授权执行。
 5. 检查日志元数据、失败状态、兜底链与时间预算。日志可能含上游错误摘要，不应直接公开整份日志。

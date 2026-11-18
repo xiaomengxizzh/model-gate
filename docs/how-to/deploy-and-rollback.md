@@ -49,7 +49,7 @@ MG_CONFIG_DIR="$MG_DEMO_DIR" MG_CONFIG="$MG_DEMO_DIR/gateway.json" node src/inde
 
 另开终端 `curl --fail http://127.0.0.1:8792/healthz` 应返回 `ok`，`/v1/models` 返回空列表。Ctrl+C 结束自己启动的进程。
 
-投入生产时设置 `MG_ADMIN_TOKEN`（管理面）与 `MG_CLIENT_KEY`（数据面），再用你的服务管理器启动。**源码就位不等于生产已部署**：必须重启实际运行该源码的进程，JavaScript 才生效（管理的面板 HTML 是逐请求读盘，属例外）。生产端口 8787、systemd 单元与真实上游账号都是本机部署事实，不由仓库状态证明。
+投入生产时只需设置 `MG_CLIENT_KEY`（数据面）；管理令牌已删除，不再需要 `MG_ADMIN_TOKEN`（2026-11-18 所有者授权安全降级，管理面仅回环 + Host/Origin 保护）。再用你的服务管理器启动。**源码就位不等于生产已部署**：必须重启实际运行该源码的进程，JavaScript 才生效（管理的面板 HTML 是逐请求读盘，属例外）。生产端口 8787、systemd 单元与真实上游账号都是本机部署事实，不由仓库状态证明。
 
 ## 升级
 
@@ -73,7 +73,7 @@ cp -a "$DEPLOY"/config/*.json "$BK"/ 2>/dev/null || true
 5. 重启进程，然后核对：
    ```bash
    curl --fail http://127.0.0.1:8787/healthz
-   curl --fail -H "Authorization: Bearer $MG_ADMIN_TOKEN" http://127.0.0.1:8787/api/status
+   curl --fail http://127.0.0.1:8787/api/status
    ```
    判据：`healthz` 为 `ok`；`/api/status` 的 `configVersion` 与升级前一致（面板保存后才 +1）；日志无启动异常。
 6. 记录日期、升级前后提交 sha、执行命令与结果、未验证项。**mock 全绿不等于真实上游验收**，后者需要单独授权与单独记录。
@@ -110,7 +110,7 @@ git -C "$DEPLOY" reset --hard <升级前记录的 sha>
 - **直连（`mode=official`）不需要停网关服务。** 直连即 MG-R001 的退出聚合状态：网关进程可以保持运行，只是不在请求路径上（客户端直连官方）。切回/保持在直连是配置层的接入方式切换，不是停服动作；只要完成配置切换并完全退出、重开 Codex GUI 即生效。**停止网关服务（`systemctl stop`）是独立的运维动作**，用于升级、回滚、排障或释放端口，不应被描述成"切换到直连的必要步骤"。三模式语义见[三模式接入方式映射](../product/2026-11-18-three-mode-access-mapping.md)。
 - 用 `SIGTERM`（`systemctl stop` 发的就是它）。2026-11-08 隔离实例实测：进程立即退出，退出状态 **143**（128+15 信号退出），日志没有关闭记录，端口随即释放。
 - `stats.json` 周期写盘（约 30s 一次），停止前如需最新计数先等一个写盘周期；统一优雅关闭仍在计划项（开发计划 MG-007），本轮不声称支持。
-- 重启后先 `curl --fail /healthz`，再 `/api/status` 核对 `configVersion` 与模型清单；面板登录状态按实例 `startedAt` 判定，重启后需要重新输入令牌。
+- 重启后先 `curl --fail /healthz`，再 `/api/status` 核对 `configVersion` 与模型清单；管理面无令牌，无需登录/解锁。
 
 ## systemd 与凭据边界
 
@@ -133,7 +133,7 @@ User=modelgateway
 WantedBy=multi-user.target
 ```
 
-- `/etc/model-gateway/env` 权限 0600，放 `MG_ADMIN_TOKEN`、`MG_CLIENT_KEY` 与各上游 `apiKeyEnv`；环境变量令牌优先于配置与面板值。
+- `/etc/model-gateway/env` 权限 0600，放 `MG_CLIENT_KEY` 与各上游 `apiKeyEnv`；`MG_ADMIN_TOKEN` 已废弃，无需再放（残留也无效）。
 - provider Key 走环境变量或加密 keys 库，不进 `gateway.json` / `gateway.local.json`、不进日志与提交。
 - 修改源码后只有重启该单元才加载新 JS；升级后记得 `systemctl restart` 并复查 `/healthz`。
 

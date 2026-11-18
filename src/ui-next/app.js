@@ -1,8 +1,7 @@
 // ModelGate Next bootstrap: auth, routing, shared snapshots, theme.
 import { clear, h } from './js/dom.js'
-import { api, setToken, hasToken, clearToken } from './js/api.js'
 import {
-  state, loadAuth, loadAll, loadStatus, resetData, on, phaseOf, handleUnauthorized,
+  state, loadAuth, loadAll, loadStatus, on, phaseOf, handleUnauthorized,
   productStatus, aggregationState, refreshProduct, refreshAggregation, shouldRefresh,
   invalidateProductStatus, onProductStatus, canReadControlPlane, markAuthPending,
 } from './js/store.js'
@@ -86,10 +85,6 @@ function updateChrome() {
     detailEl.textContent = providers.length + ' 个上游 · 配置版本 ' + (s.configVersion ?? '—')
     pulse.className = 'pulse ' + (open ? 'is-warn' : 'is-good')
     sideVersion.textContent = 'v' + (s.configVersion ?? '—')
-  } else if (state.auth && state.auth.needAuth) {
-    statusEl.textContent = '等待解锁'
-    detailEl.textContent = '输入管理令牌后读取本地控制面'
-    pulse.className = 'pulse is-warn'
   } else {
     statusEl.textContent = '尚未连接'
     detailEl.textContent = '无法读取本地控制面'
@@ -113,7 +108,7 @@ export function renderLoading() {
   updateChrome()
 }
 
-// 401 会话失效：清掉所有已渲染的敏感投影（配置、目录、额度、历史），再跳登录。
+// 401 兜底：管理面已无令牌/锁屏，这里只清空已渲染的敏感投影并显式报错。
 // 403 功能级拒绝不进这里，由对应视图局部提示。
 export function clearControlPlaneDom() {
   const root = document.getElementById('view-root')
@@ -130,14 +125,12 @@ export function clearControlPlaneDom() {
 
 export function onUnauthorized(info) {
   const status = info && info.status
-  const message = status === 403 ? '管理请求被拒绝（403）：来源/令牌校验未通过，请重新输入管理令牌。' : '管理令牌已失效，请重新输入。'
   clearControlPlaneDom()
-  renderLocked(message)
-  showAuth(message)
+  renderFatal(new Error(status === 403 ? '管理请求被拒绝（403）：来源/Host/Origin 校验未通过' : '管理请求未授权（401），已清空敏感投影'))
   updateChrome()
 }
 
-// 供 api/store 之外的显式入口（例如测试或窗口锁定事件）一次性完成：清状态 + 清 DOM + 跳登录。
+// 供 api/store 之外的显式入口一次性完成：清状态 + 清 DOM + 显式报错（无令牌锁屏）。
 export function handleUnauthorizedUi(info) {
   handleUnauthorized(info)
   onUnauthorized(info)
@@ -153,18 +146,6 @@ export function isEditing() {
   return isDialogOpen() || dirtyDraft()
 }
 
-function renderLocked(message) {
-  const root = document.getElementById('view-root')
-  if (!root) return
-  clear(root)
-  root.append(h('header', { class: 'page-head' }, h('div', null,
-    h('p', { class: 'eyebrow', text: 'CONTROL PLANE / LOCKED' }),
-    h('h1', { text: '控制面已锁定' }),
-    h('p', { text: '请输入管理员令牌解锁。令牌仅保存在本标签页内存，不会写入持久存储。' }))),
-    callout('info', h('strong', { text: '只读保护：' }), ' 解锁前不会读取状态、配置、日志或任何上游数据。'),
-    h('button', { class: 'btn btn-primary', type: 'button', text: '输入管理员令牌', onclick: () => showAuth(message) }))
-  updateChrome()
-}
 function renderFatal(err) {
   const root = document.getElementById('view-root')
   if (!root) return
@@ -225,8 +206,6 @@ export function renderRoute(route) {
       aggregationState: () => aggregationState(),
       refreshProduct: (opts = {}) => refreshProduct(Object.assign({ reason: 'view' }, opts)),
       refreshAggregation: (opts = {}) => refreshAggregation(Object.assign({ reason: 'view' }, opts)),
-      // P1-04：首页“解锁聚合管理”主操作 → 本机临时管理会话；无此端点时视图降级到设置页。
-      unlockAdmin: (action) => unlockAdminLocal(action),
     })
   } catch (e) {
     console.error(e)
@@ -328,32 +307,19 @@ export async function notifyAggregationChanged(reason = 'aggregation-changed') {
 }
 export const invalidateAndRefresh = notifyAggregationChanged
 
-function showAuth(message) {
-  const overlay = document.getElementById('auth-overlay')
-  if (!overlay) return
-  overlay.hidden = false
-  const err = document.getElementById('auth-error')
-  err.textContent = message || ''
-  const input = document.getElementById('admin-token')
-  if (input) setTimeout(() => input.focus(), 40)
-}
-function hideAuth() { const o = document.getElementById('auth-overlay'); if (o) o.hidden = true }
-
 export async function bootstrap(rethrow = false) {
   initTheme()
   updateChrome()
   // 首屏在任何一个 API 返回前就显示 loading 骨架（不显示 0/旧缓存）。
   renderLoading()
   try {
-    const auth = await loadAuth()
-    if (auth.needAuth && !hasToken()) { renderLocked(); showAuth(); return }
+    // 兼容入口：读取 /api/auth（needAuth 恒 false），不再有令牌门禁/锁屏。
+    await loadAuth()
     await loadAll()
     // 首屏同时建立共享快照（status 复用刚读到的结果，聚合四接口并行补齐）。
     await refreshProduct({ reason: 'bootstrap', force: true, reuseStatus: true })
-    hideAuth()
     renderRoute(routeFromHash())
   } catch (e) {
-    if (e && e.status === 401) { renderLocked(); showAuth('需要有效的管理员令牌'); return }
     if (rethrow) throw e
     renderFatal(e)
   }
@@ -371,11 +337,9 @@ async function manualRefresh() {
     renderLoading()
     await running
     await refreshProduct({ reason: 'manual', force: true, reuseStatus: true })
-    hideAuth()
     renderRoute(currentRoute)
     toast('已读取网关最新状态', 'success')
   } catch (e) {
-    if (e && e.status === 401) { renderLocked(); showAuth('令牌已失效或未通过验证'); return }
     renderRoute(currentRoute)
     toast('刷新失败：' + e.message, 'error')
   } finally {
@@ -384,55 +348,8 @@ async function manualRefresh() {
   }
 }
 
-// P1-04：没有全局管理令牌时，聚合 API 返回 403 explicit_admin_required。
-// 通过本机临时管理会话解锁（POST /api/admin/unlock），token 只在模块内存；
-// 端点缺失(404)或被拒(403)时如实提示并降级，不重复轮询造成死循环。
-async function unlockAdminLocal() {
-  try {
-    const res = await api.adminUnlock()
-    if (!res || res.ok !== true || !res.token) throw new Error('解锁响应缺少可用的管理会话令牌')
-    setToken(res.token)
-    await loadAll()
-    await refreshProduct({ reason: 'admin-unlock', force: true, reuseStatus: true })
-    renderRoute(currentRoute)
-    toast('聚合管理已在本机解锁', 'success')
-  } catch (e) {
-    const status = e && e.status
-    if (status === 404) {
-      toast('当前网关版本尚不支持本机解锁；请在「安全与设置」写入 MG_ADMIN_TOKEN', 'error')
-      if (typeof location !== 'undefined') location.hash = '#/settings?section=admin-token'
-    } else if (status === 403) {
-      toast('本机解锁被拒绝（403）：' + ((e && e.message) || '来源或 Host 校验未通过'), 'error')
-    } else {
-      toast('解锁失败：' + ((e && e.message) || '未知错误'), 'error')
-    }
-  }
-}
-
-async function unlock(e) {
-  e.preventDefault()
-  const input = document.getElementById('admin-token')
-  const err = document.getElementById('auth-error')
-  const value = input.value.trim()
-  if (!value) { err.textContent = '请输入管理员令牌'; return }
-  setToken(value)
-  input.value = ''
-  err.textContent = ''
-  try {
-    await loadAll()
-    await refreshProduct({ reason: 'unlock', force: true, reuseStatus: true })
-    hideAuth()
-    renderRoute(currentRoute)
-    toast('控制面已解锁', 'success')
-  } catch (e2) {
-    clearToken()
-    if (e2 && e2.status === 401) err.textContent = '令牌未通过验证，请检查后重试。'
-    else err.textContent = '连接失败：' + (e2 && e2.message ? e2.message : '未知错误')
-  }
-}
-
 function wire() {
-  // 模块接线早于 bootstrap 的 /api/auth：先关闸，防止 router 首跳提前读管理面（401/403 噪声）。
+  // 兼容入口：旧前置门已退役，保留调用（no-op）不影响读取。
   markAuthPending()
   document.querySelectorAll('.nav-link').forEach((b) => b.addEventListener('click', () => { location.hash = '#/' + b.dataset.route }))
   document.getElementById('refresh').addEventListener('click', manualRefresh)
@@ -457,11 +374,9 @@ function wire() {
   }
   const settingsBtn = document.getElementById('topbar-settings')
   if (settingsBtn) settingsBtn.addEventListener('click', () => { location.hash = '#/settings' })
-  document.getElementById('auth-form').addEventListener('submit', unlock)
   on('unauthorized', onUnauthorized)
   // 快照变化只更新外壳（侧栏/时间）；视图级重绘由当前路由的刷新流程控制。
   onProductStatus(() => updateChrome())
-  window.addEventListener('mg:lock', () => { clearToken(); resetData(); renderFatal(new Error('控制台已锁定')); showAuth('控制台已锁定，请输入管理员令牌。') })
   window.addEventListener('beforeunload', (e) => { if (dirtyDraft()) { e.preventDefault(); e.returnValue = '' } })
   window.addEventListener('online', () => {
     toast('网络已恢复', 'success')
