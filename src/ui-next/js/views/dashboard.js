@@ -140,10 +140,15 @@ function aggregationDetail (agg) {
     const restart = item.needsRestart === true ? '需要重新打开 Codex 后才生效。' : ''
     return 'Codex 配置已指向 ModelGate；官方 GPT 与 ' + GO_MODEL_DISPLAY + ' 都通过原版 Codex 使用。' + backup + restart
   }
-  if (item.mode === 'official') {
-    return '当前是原版 Codex 官方模式，未启用聚合；可随时在此继续接入。'
+  if (item.mode === 'route') {
+    const restart = item.needsRestart === true ? '请完全退出并重新打开 Codex 才能使用新模式（退出后也要重启）。' : ''
+    return 'Codex 配置走纯 DeepSeek 路由，不发起 GPT 调用。' + restart
   }
-  return '没有取得可识别的聚合模式；请刷新重试或查看高级诊断。'
+  if (item.mode === 'official') {
+    return '当前是官方直连模式，不经 ModelGate，使用 Codex 官方默认配置。'
+  }
+  if (item.drifted === true) return '检测到配置漂移，请重新检测；不显示成直连。'
+  return '没有取得可识别的接入方式；请刷新重试或查看高级诊断。'
 }
 
 function overallTag (overall) {
@@ -217,9 +222,12 @@ export function buildStatusRows (product) {
 
 export function buildAggregationCard (product) {
   const agg = (product && product.aggregation) || {}
-  const modeText = agg.mode === 'aggregated' ? '已启用聚合' : agg.mode === 'official' ? '官方模式' : '状态未知'
-  const modeKind = agg.mode === 'aggregated' ? 'good' : agg.mode === 'official' ? 'info' : 'muted'
-  return card('聚合模式', '只用用户能理解的方式描述当前模式与可恢复性。',
+  const modeText = agg.mode === 'aggregated' ? '聚合（GPT 父 + DeepSeek 子）'
+    : agg.mode === 'route' ? '路由（纯 DeepSeek，无 GPT）'
+      : agg.mode === 'official' ? '官方直连（不经 ModelGate）'
+        : '状态未知'
+  const modeKind = agg.mode === 'aggregated' ? 'good' : agg.mode === 'route' ? 'info' : agg.mode === 'official' ? 'muted' : 'warn'
+  return card('接入方式', '只用用户能理解的方式描述当前接入方式与可恢复性。',
     h('div', { class: 'list' },
       h('div', { class: 'list-row', 'data-status': 'aggregation' },
         h('div', { class: 'grow' },

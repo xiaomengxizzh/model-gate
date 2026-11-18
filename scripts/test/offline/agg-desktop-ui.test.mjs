@@ -14,7 +14,7 @@ async function loadView () {
   return import(new URL('../../../src/ui-next/js/views/aggregation.js', import.meta.url))
 }
 
-test('聚合视图：模块解析并导出稳定契约与 ADR §5 的 8 条路径', async () => {
+test('聚合视图：模块解析并导出稳定契约与冻结 HTTP 面（含三模式 switch/rollback/modes）', async () => {
   const mod = await loadView()
   assert.equal(mod.AGGREGATION_VIEW_CONTRACT, 'mg-ui-aggregation/1')
   assert.equal(typeof mod.render, 'function')
@@ -26,6 +26,9 @@ test('聚合视图：模块解析并导出稳定契约与 ADR §5 的 8 条路�
   assert.equal(ep.models, '/api/aggregation/models')
   assert.equal(ep.health, '/api/aggregation/health')
   assert.equal(ep.diagnostics, '/api/aggregation/diagnostics')
+  assert.equal(ep.modes, '/api/aggregation/modes')
+  assert.equal(ep.switch, '/api/aggregation/switch')
+  assert.equal(ep.rollback, '/api/aggregation/rollback')
   assert.equal(ep.activate, '/api/aggregation/activate')
   assert.equal(ep.deactivate, '/api/aggregation/deactivate')
   assert.equal(Object.isFrozen(ep), true)
@@ -95,7 +98,7 @@ test('聚合视图源码：无注入 sink、无持久化、覆盖激活/退出/�
   assert.doesNotMatch(src, /insertAdjacentHTML/)
   assert.doesNotMatch(src, /localStorage\.(set|get)Item|sessionStorage|indexedDB/)
   assert.doesNotMatch(src, /from\s+['"][^'"]*codex\//, '视图不得 import 后端实现')
-  for (const ep of ['/api/aggregation/activate', '/api/aggregation/deactivate', '/api/aggregation/providers', '/api/aggregation/models', '/api/aggregation/health', '/api/aggregation/diagnostics']) {
+  for (const ep of ['/api/aggregation/activate', '/api/aggregation/deactivate', '/api/aggregation/modes', '/api/aggregation/switch', '/api/aggregation/rollback', '/api/aggregation/providers', '/api/aggregation/models', '/api/aggregation/health', '/api/aggregation/diagnostics']) {
     assert.ok(src.includes(ep), 'missing endpoint: ' + ep)
   }
   assert.match(src, /不是“0 个模型”/, '失败路径必须明确否定 0')

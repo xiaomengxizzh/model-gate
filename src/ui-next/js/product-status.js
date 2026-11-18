@@ -381,21 +381,34 @@ export function deriveAggregation (aggregation) {
   const activation = obj(health.activation) || {}
   const nativeCompaction = obj(health.nativeCompaction) || obj(detect.nativeCompaction) || null
   const compactionBlocked = !!(nativeCompaction && nativeCompaction.blocked === true)
-  const modeKnown = mode === 'aggregated' || mode === 'official'
+  const modeKnown = mode === 'aggregated' || mode === 'route' || mode === 'official'
+  const drifted = health.drifted === true
+  const modeText = mode === 'aggregated'
+    ? '聚合模式（GPT 父 + DeepSeek 子）'
+    : mode === 'route'
+      ? '路由模式（纯 DeepSeek，无 GPT）'
+      : mode === 'official'
+        ? '官方直连（不经 ModelGate）'
+        : '状态未知'
+  const modeDetail = mode === 'aggregated'
+    ? 'Codex 配置已指向 ModelGate；官方 GPT 与 ' + GO_TARGET_MODEL + ' 都通过原版 Codex 使用。'
+      + (compactionBlocked ? ' 原生压缩状态：尚未验证/存在阻断（不声称已通过，详见高级诊断）。' : '')
+    : mode === 'route'
+      ? 'Codex 配置走纯 DeepSeek 路由（父=子=' + GO_TARGET_PUBLIC_ID + '），不发起 GPT 调用。'
+      : mode === 'official'
+        ? '当前是官方直连模式，不经 ModelGate，使用 Codex 官方默认配置。'
+        : '后端没有返回可识别模式；不把它当成"已启用"或"未启用"。'
   return Object.assign(base, {
     mode: mode || 'unknown',
     modeKnown,
+    previousMode: str(health.previousMode) || null,
+    drifted,
     configSha: str(activation.appliedSha || state.appliedSha) || null,
     backupAvailable: backup.available === true,
     needsRestart: health.needsRestart === true || activation.needsRestart === true,
     nativeCompaction: compactionBlocked ? { blocked: true, detail: str(nativeCompaction.detail) || null } : null,
-    label: mode === 'aggregated' ? '聚合模式已启用' : mode === 'official' ? '官方模式（未聚合）' : '状态未知',
-    detail: mode === 'aggregated'
-      ? 'Codex 配置已指向 ModelGate；官方 GPT 与 ' + GO_TARGET_MODEL + ' 都通过原版 Codex 使用。'
-        + (compactionBlocked ? ' 原生压缩状态：尚未验证/存在阻断（不声称已通过，详见高级诊断）。' : '')
-      : mode === 'official'
-        ? '当前是原版 Codex 官方模式，未启用聚合。'
-        : '后端没有返回可识别模式；不把它当成"已启用"或"未启用"。',
+    label: drifted && modeKnown ? modeText + ' · 配置漂移（需重新检测）' : modeText,
+    detail: modeDetail + (drifted && modeKnown ? ' 检测到配置漂移，请重新检测；不显示成直连。' : ''),
   })
 }
 
@@ -461,7 +474,7 @@ export function nextPrimaryAction (ps) {
       }
     }
     default:
-      return aggregation.mode === 'aggregated' || codex.restartNeeded === false
+      return aggregation.mode === 'aggregated' || aggregation.mode === 'route' || codex.restartNeeded === false
         ? { id: 'use-codex', label: '在 Codex 中使用', kind: 'route', route: '#/connections?step=use', detail: '' }
         : { id: 'connect-go', label: '连接 OpenCode Go', kind: 'route', route: '#/connections?step=key', detail: '' }
   }
@@ -491,11 +504,12 @@ export function homeStateOf (ps) {
   if (!p.go.credentialPresent) return 'needs_go_key'
   if (!p.go.targetModelConfigured) return 'ready_to_enable'
   // 聚合模式未知时不得提示"启用聚合"：那可能在不确定的情况下二次写入。
-  if (p.aggregation.modeKnown === false || p.aggregation.mode === 'unknown') return 'recoverable_error'
-  if (p.aggregation.mode !== 'aggregated') return 'ready_to_enable'
+  // unknown / 配置漂移都不当成直连。
+  if (p.aggregation.modeKnown === false || p.aggregation.mode === 'unknown' || p.aggregation.drifted === true) return 'recoverable_error'
+  // 只有官方直连还需要"启用"；路由/聚合都已完成接入，直接进入重启判定。
+  if (p.aggregation.mode === 'official') return 'ready_to_enable'
   if (p.codex.restartNeeded === true) return 'needs_codex_restart'
-  if (p.aggregation.mode === 'aggregated' && p.codex.restartNeeded === false) return 'ready'
-  return 'needs_codex_restart'
+  return 'ready'
 }
 
 export function overallOf (ps) {

@@ -32,30 +32,123 @@ export const AGGREGATION_ENDPOINTS = Object.freeze({
   models: '/api/aggregation/models',
   health: '/api/aggregation/health',
   diagnostics: '/api/aggregation/diagnostics',
+  // 三模式（直连/路由/聚合）契约面。activate/deactivate 保留向后兼容旧 UI 路径。
+  modes: '/api/aggregation/modes',
+  switch: '/api/aggregation/switch',
+  rollback: '/api/aggregation/rollback',
   activate: '/api/aggregation/activate',
   deactivate: '/api/aggregation/deactivate',
 })
+
+// 三模式元数据（对外一律用「接入方式」措辞；不声称已写入契约）。
+export const THREE_MODES = Object.freeze([
+  { id: 'official', label: '官方直连', description: '不经 ModelGate，使用 Codex 官方默认配置。' },
+  { id: 'route', label: '路由', description: '纯 DeepSeek（父=子=mg-opencodego-deepseek-v4-1-flash），零 GPT 调用。' },
+  { id: 'aggregated', label: '聚合', description: 'GPT 父（默认 gpt-6-luna）+ DeepSeek 子。' },
+])
+
+// 父模型默认与验收标记：只有 luna 是已签收/PASS_REAL，其余一律 UNVERIFIED。
+export const DEFAULT_PARENT_MODEL = 'gpt-6-luna'
+export const PASS_REAL_PARENT_MODEL = 'gpt-6-luna'
 
 const AGG = {
   fetched: false,
   loading: false,
   routeMissing: false,
   health: null,
+  modes: null,
+  selectedMode: null,
+  selectedParent: DEFAULT_PARENT_MODEL,
   providers: null,
   models: null,
   diagnostics: null,
   loadedAt: 0,
   healthError: null,
+  modesError: null,
   providersError: null,
   modelsError: null,
   diagnosticsError: null,
 }
 
 // —— 纯函数（可在无 DOM 环境下测试）——
-export function modeLabel (mode) {
-  if (mode === 'aggregated') return { label: '聚合模式已启用', kind: 'good' }
-  if (mode === 'official') return { label: '官方模式', kind: 'muted' }
-  return { label: '状态未知', kind: 'warn' }
+// 三模式标签：直连/路由/聚合 + 未知。drifted（配置漂移）单独降级为 warn，
+// 但绝不把 unknown 显示成直连。
+export function modeLabel (mode, drifted) {
+  const drift = drifted === true
+  let base
+  switch (mode) {
+    case 'official':
+      base = { mode: 'official', label: '官方直连（不经 ModelGate）', kind: 'muted' }
+      break
+    case 'route':
+      base = { mode: 'route', label: '路由模式（纯 DeepSeek，无 GPT）', kind: 'info' }
+      break
+    case 'aggregated':
+      base = { mode: 'aggregated', label: '聚合模式（GPT 父 + DeepSeek 子）', kind: 'good' }
+      break
+    default:
+      base = { mode: 'unknown', label: '状态未知', kind: 'warn' }
+  }
+  if (drift && base.mode !== 'unknown') {
+    return Object.assign({}, base, { label: base.label + ' · 配置漂移（需重新检测）', kind: 'warn', drifted: true })
+  }
+  return Object.assign({}, base, { drifted: false })
+}
+
+// 父模型选项：来源 GET /api/aggregation/modes 的 selectableParents。
+// 只有 luna 标注「已签收/PASS_REAL」，其余一律「未验证（UNVERIFIED）」——不得暗示同等可信。
+export function selectableParentModels (modesPayload) {
+  const p = modesPayload && typeof modesPayload === 'object' ? modesPayload : {}
+  const modes = Array.isArray(p) ? p : (Array.isArray(p.modes) ? p.modes : [])
+  const aggregated = modes.find((m) => m && m.id === 'aggregated') || {}
+  const raw = Array.isArray(p.selectableParents)
+    ? p.selectableParents
+    : (Array.isArray(aggregated.selectableParents) ? aggregated.selectableParents : [])
+  const seen = new Set()
+  const options = []
+  for (const item of raw) {
+    const id = typeof item === 'string' ? item : (item && (item.id || item.model || item.name))
+    const key = id == null ? '' : String(id)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    const passReal = key === PASS_REAL_PARENT_MODEL
+    options.push({
+      id: key,
+      verified: passReal,
+      label: key + (passReal ? '（已签收/PASS_REAL）' : ' — 未验证（UNVERIFIED）'),
+      kind: passReal ? 'good' : 'warn',
+    })
+  }
+  // 默认项始终可见（后端未列出时也给出可选项，但标明是否验证）。
+  if (!seen.has(DEFAULT_PARENT_MODEL)) {
+    options.unshift({
+      id: DEFAULT_PARENT_MODEL,
+      verified: true,
+      label: DEFAULT_PARENT_MODEL + '（已签收/PASS_REAL）',
+      kind: 'good',
+    })
+  }
+  return options
+}
+
+// 切换请求体：mode + 可选 parentModel + consentToken + expectedSha。
+// 预览（未确认）阶段不带 token/expectedSha，由 confirm 阶段补齐。
+export function buildSwitchRequest (preview, consent, mode, parentModel) {
+  const p = preview || {}
+  const body = { mode: mode || 'aggregated' }
+  if (parentModel) body.parentModel = String(parentModel)
+  body.consentToken = consent ? (p.consentToken || '') : ''
+  body.expectedSha = p.expectedSha == null ? '' : String(p.expectedSha)
+  return body
+}
+
+// 回滚请求体：契约只接受 consentToken + expectedSha；目标模式由服务端取 previousMode。
+export function buildRollbackRequest (preview, consent) {
+  const p = preview || {}
+  return {
+    consentToken: consent ? (p.consentToken || '') : '',
+    expectedSha: p.expectedSha == null ? '' : String(p.expectedSha),
+  }
 }
 
 // 发现诚实性：failed / partial / complete-empty / complete / unknown 五种状态。
@@ -162,16 +255,26 @@ function versionCell (info) {
 
 // 重启提示判定（纯函数，可在无 DOM 环境测试）：
 // 服务端用只读的客户端进程启动时间与写入时间比对，重启后提示自动消失。
+// 三模式：route / aggregated 切换后都需要重启；切回 official 时若 reason=client_running_after_exit
+// 同样需要重启（退出后也要重启）。unknown 不当成"无需重启"。
 export function restartNotice (restart, mode) {
-  if (mode !== 'aggregated') {
-    return { needed: false, tone: 'muted', label: '无需重启', detail: '当前不是聚合模式，配置未改向 ModelGate。' }
-  }
   const r = restart && typeof restart === 'object' ? restart : null
+  const reason = r ? String(r.reason || '') : ''
+  const afterExit = reason === 'client_running_after_exit'
+  const changedMode = mode === 'aggregated' || mode === 'route' || (mode === 'official' && afterExit)
+
+  // 未改接入方式（官方直连且没有"切回"信号）：无需重启。绝不显示"立即生效"。
+  if (!changedMode) {
+    return { needed: false, tone: 'muted', label: '无需重启', detail: '当前是官方直连模式（不经 ModelGate），配置未改向 ModelGate。' }
+  }
   if (!r) {
     return { needed: true, tone: 'warn', label: '需要重启 Codex 生效', detail: '服务端未返回重启判定；配置在客户端下次启动后生效，请完全退出并重新打开 Codex Desktop。' }
   }
   if (r.reason === 'client_restarted_after_apply') {
-    return { needed: false, tone: 'good', label: '已检测到客户端重启', detail: '原版 Desktop 在写入后启动过，新配置已加载；请在新会话的模型选择器里核对官方模型与聚合模型。' }
+    return { needed: false, tone: 'good', label: '已检测到客户端重启', detail: '原版 Desktop 在写入后启动过，新配置已加载；请在新会话的模型选择器里核对官方模型与模式对应模型。' }
+  }
+  if (r.reason === 'client_running_after_exit') {
+    return { needed: true, tone: 'warn', label: '退出后也要重启 Codex', detail: '已从路由/聚合模式切回官方直连，但 Codex 仍以旧配置运行。请完全退出并重新打开 Codex Desktop（退出后也要重启）才能使用新模式。' }
   }
   if (r.reason === 'client_running_with_old_config') {
     return { needed: true, tone: 'warn', label: '需要重启 Codex 生效', detail: '检测到 Codex 仍是写入前启动的进程，运行中的会话继续使用旧配置。请完全退出 Codex Desktop（不是只关窗口）再重新打开。' }
@@ -221,19 +324,22 @@ function looksMissingRoute (err) {
 async function loadAggregation (ctx = {}) {
   if (AGG.loading) return
   AGG.loading = true
-  const [health, providers, models, diagnostics] = await Promise.allSettled([
+  const [health, modes, providers, models, diagnostics] = await Promise.allSettled([
     request(AGGREGATION_ENDPOINTS.health),
+    request(AGGREGATION_ENDPOINTS.modes),
     request(AGGREGATION_ENDPOINTS.providers),
     request(AGGREGATION_ENDPOINTS.models),
     request(AGGREGATION_ENDPOINTS.diagnostics),
   ])
-  const results = { health, providers, models, diagnostics }
+  const results = { health, modes, providers, models, diagnostics }
   AGG.routeMissing = Object.values(results).some((r) => r.status === 'rejected' && looksMissingRoute(r.reason))
   AGG.health = health.status === 'fulfilled' ? health.value : null
+  AGG.modes = modes.status === 'fulfilled' ? modes.value : null
   AGG.providers = providers.status === 'fulfilled' ? providers.value : null
   AGG.models = models.status === 'fulfilled' ? models.value : null
   AGG.diagnostics = diagnostics.status === 'fulfilled' ? diagnostics.value : null
   AGG.healthError = health.status === 'rejected' ? health.reason : null
+  AGG.modesError = modes.status === 'rejected' ? modes.reason : null
   AGG.providersError = providers.status === 'rejected' ? providers.reason : null
   AGG.modelsError = models.status === 'rejected' ? models.reason : null
   AGG.diagnosticsError = diagnostics.status === 'rejected' ? diagnostics.reason : null
@@ -257,40 +363,104 @@ function routeNotice (ctx) {
       h('button', { class: 'btn btn-sm', type: 'button', text: '重新探测', onclick: () => reload(ctx) })))
 }
 
+function currentModeOf (health) {
+  const detect = (health && (health.detect || health.desktop)) || {}
+  const raw = (health && health.mode) || (detect.config && detect.config.mode)
+  return THREE_MODES.some((m) => m.id === raw) ? raw : 'unknown'
+}
+
+// 三模式单选 + 父模型选择器（对外措辞：接入方式）。
+// 父选择器仅在选中「聚合」时显示；路由模式固定 DeepSeek 父，不显示父选择。
+// 返回 getSelection()，供本视图与 connections.js 向导共用同一套判定。
+export function modeChooser (opts = {}) {
+  const current = THREE_MODES.some((m) => m.id === opts.current) ? opts.current : 'official'
+  const parents = Array.isArray(opts.parents) ? opts.parents : []
+  let selected = THREE_MODES.some((m) => m.id === opts.selected) ? opts.selected : current
+  let parent = opts.parent || DEFAULT_PARENT_MODEL
+
+  const parentSelect = h('select', null,
+    ...(parents.length
+      ? parents.map((p) => h('option', { value: p.id, text: p.label, selected: p.id === parent }))
+      : [h('option', { value: DEFAULT_PARENT_MODEL, text: DEFAULT_PARENT_MODEL + '（已签收/PASS_REAL）' })]))
+  parentSelect.addEventListener('change', () => { parent = parentSelect.value })
+  const parentField = field('GPT 父模型（仅聚合模式）', parentSelect, {
+    help: '只有 ' + PASS_REAL_PARENT_MODEL + ' 已签收/PASS_REAL；其它订阅内模型均为未验证（UNVERIFIED）。路由模式固定 DeepSeek 父，不显示此项。',
+  })
+
+  const radios = THREE_MODES.map((m) => {
+    const input = h('input', {
+      type: 'radio', name: 'mg-agg-mode', value: m.id, checked: m.id === selected,
+      onchange: () => {
+        selected = m.id
+        parentField.hidden = m.id !== 'aggregated'
+        if (typeof opts.onChange === 'function') opts.onChange(selected)
+      },
+    })
+    return h('label', { class: 'mode-choice', style: { display: 'flex', gap: '8px', alignItems: 'flex-start', margin: '4px 0' } },
+      input,
+      h('span', null,
+        h('strong', { text: m.label }),
+        h('span', { class: 'hint', text: ' — ' + m.description })))
+  })
+  parentField.hidden = selected !== 'aggregated'
+
+  const node = h('div', { class: 'mode-chooser' }, h('div', null, radios), parentField)
+  return {
+    node,
+    getSelection: () => ({ mode: selected, parentModel: selected === 'aggregated' ? parent : null }),
+  }
+}
+
 function overviewCard (ctx) {
   const health = AGG.health || {}
   const detect = health.detect || health.desktop || {}
   const activation = health.activation || {}
-  const mode = health.mode || (detect.config && detect.config.mode) || 'unknown'
-  const m = modeLabel(mode)
+  const mode = currentModeOf(health)
+  const previous = health.previousMode || null
+  const drifted = health.drifted === true
+  const m = modeLabel(mode, drifted)
   const restart = health.restart || activation.restart || null
   const rn = restartNotice(restart, mode)
   const backup = health.backup || activation.backup || { available: false }
   const canToggle = !AGG.routeMissing
-  const button = mode === 'aggregated'
-    ? h('button', { class: 'btn btn-danger', type: 'button', disabled: !canToggle, text: '退出并恢复', onclick: () => beginDeactivate(ctx) })
-    : h('button', { class: 'btn btn-primary', type: 'button', disabled: !canToggle, text: '启用聚合', onclick: () => beginActivate(ctx) })
+  const parents = selectableParentModels(AGG.modes)
+  const switchBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '切换接入方式' })
+  switchBtn.disabled = !canToggle
+  const chooser = modeChooser({
+    current: mode, parents, selected: AGG.selectedMode, parent: AGG.selectedParent,
+    onChange: (sel) => { switchBtn.disabled = !canToggle || sel === mode },
+  })
+  switchBtn.disabled = !canToggle || chooser.getSelection().mode === mode
+  switchBtn.addEventListener('click', () => {
+    const sel = chooser.getSelection()
+    AGG.selectedMode = sel.mode
+    AGG.selectedParent = sel.parentModel || DEFAULT_PARENT_MODEL
+    beginSwitch(ctx, sel.mode, sel.parentModel)
+  })
+  const canRollback = canToggle && (mode === 'aggregated' || mode === 'route')
+  const rollbackBtn = h('button', { class: 'btn', type: 'button', text: '回到上一模式', disabled: !canRollback, onclick: () => beginRollback(ctx) })
+  if (previous) rollbackBtn.title = '上一模式：' + modeLabel(previous).label
 
   const body = h('div', null,
     callout('info',
-      h('strong', { text: '一次性确认：' }),
-      ' 进入聚合模式只改 ModelGate 拥有的 4 个顶层字段与 [features] 的 2 个白名单键；写入前展示差异并要你确认一次，写入后自动验证网关与目录。不编辑 TOML、不碰 auth.json、不重启你的 Codex。'),
+      h('strong', { text: '接入方式（三选一）：' }),
+      ' 官方直连不经 ModelGate；路由模式纯 DeepSeek、零 GPT 调用；聚合模式用 GPT 父 + DeepSeek 子。切换前展示差异并要你确认一次，写入后自动验证。不编辑 TOML、不碰 auth.json。'),
     h('div', { class: 'toolbar', style: { margin: '4px 0 10px' } },
       tag(m.label, m.kind),
       tag(AGG.health ? '网关 ' + (health.gateway && health.gateway.status ? 'HTTP ' + health.gateway.status : (health.gateway && health.gateway.ok ? '健康' : '未返回')) : '健康接口未返回', health.gateway && (health.gateway.ok !== false) ? 'good' : 'warn'),
       tag(rn.label, rn.tone)),
-    h('p', { class: 'hint', text: '目标模型固定为 ' + GO_TARGET_LABEL + '；日常接入请到「模型与账号」只填一个 OpenCode Go API Key，本页保留一键启停与高级诊断。' }),
+    chooser.node,
+    h('div', { class: 'toolbar', style: { margin: '10px 0' } }, switchBtn, rollbackBtn),
     h('p', { class: 'hint', text: '接入前备份：' + (backup.available ? ('可用 · ' + (backup.matches ? '与接入前快照一致' : '快照不一致（不可回滚）')) : '无（尚未接入，或接入前文件不存在）') }),
     rn.needed
       ? callout('warn', h('strong', { text: rn.label + '：' }), ' ' + rn.detail)
       : callout('good', h('strong', { text: rn.label + '：' }), ' ' + rn.detail),
+    callout('warn', h('strong', { text: '切换后请完全退出并重新打开 Codex 才能使用新模式。' }), ' 运行中的 Codex 仍读取旧配置；本页不会声称"立即生效"。'),
     h('div', { class: 'toolbar', style: { marginTop: '10px' } },
-      button,
       h('button', { class: 'btn', type: 'button', text: '模型与账号', onclick: () => { location.hash = '#/connections' } }),
       h('button', { class: 'btn btn-sm', type: 'button', text: '重新检测', onclick: () => { AGG.fetched = false; loadAggregation(ctx) } })))
 
-  return card('聚合模式与 Desktop 接入',
-    '选择聚合模式后由 ModelGate 自动完成配置、备份与验证；退出时只回滚它自己改过的字节。',
+  return card('接入方式', '选择官方直连 / 路由 / 聚合；切换时只回滚 ModelGate 改过的字节。',
     body,
     { foot: '契约 mg-codex-desktop/1 · 写入 = config.js 事务（sha256 + 备份 + 原子写 + 写后校验）· 浏览器不接触本地文件' })
 }
@@ -531,54 +701,97 @@ async function removeProvider (id, ctx) {
   }
 }
 
-function showRestartPrompt (extra) {
+function showRestartPrompt (extra, targetMode) {
+  const heading = '请完全退出并重新打开 Codex 才能使用新模式'
   const d = dialog({
-    title: '接入已通过验证',
-    desc: '配置已写入并通过网关/目录/解析三项验证；Codex 需要重启后才会读取新配置。',
+    title: '接入方式已切换，需要重启 Codex',
+    desc: heading + '；运行中的 Codex 仍读取旧配置，本页不会声称"立即生效"。',
     content: h('div', null,
+      callout('warn', h('strong', { text: heading + '。' }), ' 这是切换生效的必要条件，不是可选项。'),
       extra ? callout('good', h('strong', { text: '验证结果：' }), extra) : null,
+      targetMode ? h('p', { class: 'hint', text: '新模式：' + modeLabel(targetMode).label + '。' }) : null,
       h('ol', { style: { margin: '6px 0 0 18px', padding: 0 } },
         h('li', { text: '完全退出 Codex Desktop（不是只关窗口）。' }),
         h('li', { text: '重新打开 Codex Desktop，进入一个新会话。' }),
-        h('li', { text: '在模型选择器里依次核对官方模型与每个 OpenCode 模型都能被选中。' }),
+        h('li', { text: '在模型选择器里核对新模式对应的模型（官方 / 路由 DeepSeek / 聚合 GPT 父 + DeepSeek 子）。' }),
         h('li', { text: '各发一条最小消息，回到「监控与诊断」核对请求落到正确供应商。' })),
       h('p', { class: 'hint', text: '重启完成后本页会自动比对客户端启动时间并撤掉重启提示；如果一直提示，说明检测到的仍是旧进程。' })),
     actions: [h('button', { class: 'btn btn-primary', type: 'button', text: '我知道了', onclick: () => d.close() })],
   })
 }
 
+// 切换/回滚成功后的统一回执：刷新快照并弹出重启提示（含"退出后也要重启"措辞）。
+function afterModeChange (ctx, res, targetMode) {
+  toast('接入方式已切换并通过验证', 'success')
+  const reloadPromise = reload(ctx)
+  showRestartPrompt(res && res.verification
+    ? ('配置 ' + shaShort(res.sha) + ' · 网关 ' + (res.verification.gateway ? res.verification.gateway.status : '已校验'))
+    : null, targetMode)
+  return reloadPromise
+}
+
+// 预览表必须能显示删除行（如切到路由时删除 openai_base_url）。
+function diffRowKind (kind) {
+  if (kind === 'remove' || kind === 'delete' || kind === 'del') return { text: '删除', tone: 'bad' }
+  if (kind === 'add') return { text: '新增', tone: 'info' }
+  if (kind === 'replace') return { text: '覆盖', tone: 'warn' }
+  return { text: '不变', tone: 'muted' }
+}
+
 function diffRowsTable (rows) {
   return table([
     { label: '字段', render: (r) => h('span', { class: 'mono', text: r.path }) },
-    { label: '变更', render: (r) => tag(r.kind === 'add' ? '新增' : r.kind === 'replace' ? '覆盖' : '不变', r.kind === 'replace' ? 'warn' : r.kind === 'add' ? 'info' : 'muted') },
+    { label: '变更', render: (r) => { const k = diffRowKind(r.kind); return tag(k.text, k.tone) } },
     { label: '当前值', render: (r) => h('span', { class: 'mono-break muted', text: r.from == null ? '—（文件中没有）' : r.from }) },
-    { label: '写入后', render: (r) => h('span', { class: 'mono-break', text: r.to }) },
+    { label: '写入后', render: (r) => h('span', { class: 'mono-break', text: r.to == null ? '—（删除该字段）' : r.to }) },
   ], rows)
 }
 
-function showConsent (preview, ctx) {
+function showConsent (preview, ctx, meta) {
+  const m = meta || {}
+  const isSwitch = m.kind === 'switch'
+  const isRollback = m.kind === 'rollback'
   const rows = (preview && Array.isArray(preview.rows)) ? preview.rows : []
   const conflicts = (preview && Array.isArray(preview.conflicts)) ? preview.conflicts : []
   const preserved = preview && preview.preserved ? preview.preserved : {}
-  const confirm = h('button', { class: 'btn btn-primary', type: 'button', text: '确认并写入 ' + (rows.filter((r) => r.kind !== 'same').length) + ' 项' })
+  const changeCount = rows.filter((r) => r.kind !== 'same').length
+  const removeCount = rows.filter((r) => r.kind === 'remove' || r.kind === 'delete' || r.kind === 'del').length
+  const confirm = h('button', { class: 'btn btn-primary', type: 'button', text: '确认并写入 ' + changeCount + ' 项' })
+  const title = isRollback ? '确认回到上一模式' : isSwitch ? '确认切换接入方式' : '确认进入聚合模式'
   const body = h('div', null,
+    isSwitch && m.mode ? h('p', { class: 'hint', text: '目标接入方式：' + modeLabel(m.mode).label + (m.parentModel ? ' · 父模型 ' + m.parentModel : '') }) : null,
+    isRollback ? callout('warn', h('strong', { text: '回到上一模式：' }), ' 将撤销 ModelGate 最近一次写入的字节；若期间配置被改，会返回 409 + 三方差异，不会覆盖。') : null,
     callout('info', h('strong', { text: '只写 ModelGate 拥有的字段：' }), ' 其它行（MCP / projects / 权限 / 注释 / 你自己的 [model_providers.*]）逐字节保留。写入前会再次校验 sha256；期间若文件被改，会中止而不是覆盖。'),
     preview && preview.firstRun ? callout('warn', h('strong', { text: '首次设置：' }), ' 将在 Codex 用户级配置中新增下面这些字段。') : null,
     conflicts.length ? callout('warn', h('strong', { text: '将覆盖 ' + conflicts.length + ' 个已有值：' }), conflicts.map((c) => c.path).join('、')) : null,
+    removeCount ? callout('warn', h('strong', { text: '将删除 ' + removeCount + ' 个字段：' }), ' 例如切换到路由模式时删除 openai_base_url；删除行已在下方差异表标为「删除」。') : null,
     diffRowsTable(rows),
     h('p', { class: 'hint', text: '只读保留：顶层 ' + ((preserved.topLevelKeys || []).join('、') || '无') + ' · 段 ' + ((preserved.sections || []).join('、') || '无') + (preserved.mcpServers && preserved.mcpServers.length ? ' · MCP ' + preserved.mcpServers.join('、') : '') }),
     (preview && preview.warnings && preview.warnings.length) ? callout('warn', h('strong', { text: '注意：' }), preview.warnings.join(' ')) : null,
     preview && preview.catalog ? h('p', { class: 'hint', text: '目录：' + (preview.catalog.ok ? preview.catalog.modelCount + ' 个模型（含目标模型）' : '当前不可用（' + preview.catalog.state + '）：' + (preview.catalog.reason || '')) }) : null,
     h('p', { class: 'hint', text: '写入后会自动验证：配置解析 + 目录含目标模型 + 网关 /healthz；任何一项失败会自动回滚到写入前字节。' }))
-  const d = dialog({ title: '确认进入聚合模式', desc: '这是一次性确认；退出聚合时只回滚 ModelGate 改过的字节。', wide: true, content: body, actions: [
+  const d = dialog({ title, desc: '这是一次性确认；切换后请完全退出并重新打开 Codex 才能使用新模式。', wide: true, content: body, actions: [
     h('button', { class: 'btn', type: 'button', text: '取消', onclick: () => d.close() }), confirm,
   ] })
   confirm.addEventListener('click', async () => {
     confirm.disabled = true
     confirm.textContent = '写入并验证中…'
     try {
-      const res = await request(AGGREGATION_ENDPOINTS.activate, { method: 'POST', body: buildActivateRequest(preview, true), timeoutMs: 60000 })
+      let endpoint = AGGREGATION_ENDPOINTS.activate
+      let requestBody = buildActivateRequest(preview, true)
+      if (isSwitch) {
+        endpoint = AGGREGATION_ENDPOINTS.switch
+        requestBody = buildSwitchRequest(preview, true, m.mode, m.parentModel)
+      } else if (isRollback) {
+        endpoint = AGGREGATION_ENDPOINTS.rollback
+        requestBody = buildRollbackRequest(preview, true)
+      }
+      const res = await request(endpoint, { method: 'POST', body: requestBody, timeoutMs: 60000 })
       d.close()
+      if (isSwitch || isRollback) {
+        await afterModeChange(ctx, res, isRollback ? null : m.mode)
+        return
+      }
       toast('聚合模式已启用并通过验证', 'success')
       await reload(ctx)
       showRestartPrompt(res && res.verification ? ('配置 ' + shaShort(res.sha) + ' · 目录 ' + (res.verification.catalog ? res.verification.catalog.modelCount + ' 个模型' : '已校验') + ' · 网关 ' + (res.verification.gateway ? res.verification.gateway.status : '已校验')) : null)
@@ -589,7 +802,12 @@ function showConsent (preview, ctx) {
         await loadAggregation(ctx)
         return
       }
-      toast('接入失败：' + (e && e.message ? e.message : '未知错误'), 'error')
+      if (e && e.status === 422) {
+        toast('切换被前置条件阻止（422），未写入', 'error')
+        await loadAggregation(ctx)
+        return
+      }
+      toast((isSwitch || isRollback ? '切换失败：' : '接入失败：') + (e && e.message ? e.message : '未知错误'), 'error')
       await loadAggregation(ctx)
     }
   })
@@ -612,6 +830,47 @@ async function beginActivate (ctx) {
     if (e && e.status === 409) { toast('另一个操作正在进行或配置已被修改，请稍后重试', 'error'); await loadAggregation(ctx); return }
     if (e && e.status === 404) { AGG.routeMissing = true; ctx.rerender && ctx.rerender(); return }
     toast('无法开始接入：' + (e && e.message ? e.message : '未知错误'), 'error')
+  }
+}
+
+// 三模式切换：无 token → 428 + preview → 确认后带 consentToken + expectedSha 提交。
+async function beginSwitch (ctx, mode, parentModel) {
+  const target = THREE_MODES.some((m) => m.id === mode) ? mode : 'official'
+  try {
+    const res = await request(AGGREGATION_ENDPOINTS.switch, { method: 'POST', body: buildSwitchRequest(null, false, target, parentModel) })
+    if (res && res.preview) { showConsent(res.preview, ctx, { kind: 'switch', mode: target, parentModel }); return }
+    if (res && res.ok !== false && res && res.mode) { await afterModeChange(ctx, res, res.mode || target); return }
+    toast('服务端未返回可用的预览', 'error')
+  } catch (e) {
+    const data = e && e.data ? e.data : null
+    if ((e && e.status === 428) || (data && (data.code === 'consent_required' || data.preview))) {
+      if (data && data.preview) { showConsent(data.preview, ctx, { kind: 'switch', mode: target, parentModel }); return }
+      toast('需要确认，但服务端未返回预览内容', 'error'); return
+    }
+    if (e && e.status === 409) { toast('配置已被修改或另一操作在进行，未写入；请重新检测', 'error'); await loadAggregation(ctx); return }
+    if (e && e.status === 422) { toast('切换被前置条件阻止（422），未写入', 'error'); await loadAggregation(ctx); return }
+    if (e && e.status === 404) { AGG.routeMissing = true; ctx.rerender && ctx.rerender(); return }
+    toast('无法切换：' + (e && e.message ? e.message : '未知错误'), 'error')
+  }
+}
+
+// 回到上一模式（rollback 到 previousMode）：同样的 428 预览 → 确认流程。
+async function beginRollback (ctx) {
+  try {
+    const res = await request(AGGREGATION_ENDPOINTS.rollback, { method: 'POST', body: buildRollbackRequest(null, false) })
+    if (res && res.preview) { showConsent(res.preview, ctx, { kind: 'rollback' }); return }
+    if (res && res.ok !== false && res && res.mode) { await afterModeChange(ctx, res, res.mode); return }
+    toast('服务端未返回可用的预览', 'error')
+  } catch (e) {
+    const data = e && e.data ? e.data : null
+    if ((e && e.status === 428) || (data && (data.code === 'consent_required' || data.preview))) {
+      if (data && data.preview) { showConsent(data.preview, ctx, { kind: 'rollback' }); return }
+      toast('需要确认，但服务端未返回预览内容', 'error'); return
+    }
+    if (e && e.status === 409) { toast('配置已被修改，未回滚；请重新检测', 'error'); await loadAggregation(ctx); return }
+    if (e && e.status === 422) { toast('回滚被前置条件阻止（422），未写入', 'error'); await loadAggregation(ctx); return }
+    if (e && e.status === 404) { AGG.routeMissing = true; ctx.rerender && ctx.rerender(); return }
+    toast('无法回滚：' + (e && e.message ? e.message : '未知错误'), 'error')
   }
 }
 
@@ -690,8 +949,11 @@ export function render (root, ctx = {}) {
     root.append(callout('danger', h('strong', { text: '聚合健康接口读取失败：' }), AGG.healthError.message || '未知错误',
       h('div', { class: 'toolbar', style: { marginTop: '8px' } }, h('button', { class: 'btn btn-sm', type: 'button', text: '重试', onclick: () => { AGG.fetched = false; loadAggregation(ctx) } }))))
   }
+  const mode = currentModeOf(AGG.health)
+  const drifted = !!(AGG.health && AGG.health.drifted === true)
+  const modeMetric = modeLabel(mode, drifted)
   root.append(h('div', { class: 'grid grid-4' },
-    metric('模式', (AGG.health && AGG.health.mode === 'aggregated') ? '聚合' : (AGG.health && AGG.health.mode === 'official') ? '官方' : '未知', '来自服务端配置分类', 'check'),
+    metric('接入方式', modeMetric.label, '来自服务端 health.mode' + (drifted ? ' · 已漂移' : ''), 'check'),
     metric('供应商', AGG.providers ? fmtInt((Array.isArray(AGG.providers) ? AGG.providers : (AGG.providers.providers || [])).length) : '未知', '来自聚合注册表', 'plus'),
     metric('模型（口径见下）', summarizeDiscovery(AGG.diagnostics, AGG.models).countText || '未知', '部分/失败时不显示为全量', 'probe'),
     metric('备份', AGG.health && AGG.health.backup && AGG.health.backup.available ? '可用' : '无', '接入前字节快照', 'key')))
@@ -700,5 +962,5 @@ export function render (root, ctx = {}) {
     h('strong', { text: '本页不冒充真实验收：' }),
     ' UI 只能证明接口返回与配置事务成功；原版 Desktop 模型选择器是否出现全部模型、每个模型是否落到正确供应商，必须在真实 GUI 中按交付报告的手动脚本核对（PASS_MOCK ≠ PASS_REAL）。'))
   root.append(advancedSection(ctx))
-  root.append(h('p', { class: 'page-note', text: '数据来源：' + AGGREGATION_ENDPOINTS.health + ' / providers / models / diagnostics；操作走 activate / deactivate。读取于 ' + (AGG.loadedAt ? fmtTime(AGG.loadedAt) : '—') + '。' }))
+  root.append(h('p', { class: 'page-note', text: '数据来源：' + AGGREGATION_ENDPOINTS.health + ' / modes / providers / models / diagnostics；切换走 switch / rollback（activate / deactivate 仅兼容旧路径）。读取于 ' + (AGG.loadedAt ? fmtTime(AGG.loadedAt) : '—') + '。' }))
 }

@@ -30,6 +30,13 @@ import {
   restartNotice,
   describeThreeWay,
   buildActivateRequest,
+  buildSwitchRequest,
+  buildRollbackRequest,
+  modeLabel,
+  modeChooser,
+  selectableParentModels,
+  DEFAULT_PARENT_MODEL,
+  THREE_MODES,
 } from './aggregation.js'
 
 export const CONNECTIONS_VIEW_CONTRACT = 'mg-ui-connections/1'
@@ -929,12 +936,19 @@ function modelPanel (ctx) {
 }
 
 // —— 步骤 3：预览 + 一次确认 ——
+function diffKind (kind) {
+  if (kind === 'remove' || kind === 'delete' || kind === 'del') return { text: '删除', tone: 'bad' }
+  if (kind === 'add') return { text: '新增', tone: 'info' }
+  if (kind === 'replace') return { text: '覆盖', tone: 'warn' }
+  return { text: '不变', tone: 'muted' }
+}
+
 function diffTable (rows) {
   return table([
     { label: '字段', render: (r) => h('span', { class: 'mono', text: r.path }) },
-    { label: '变更', render: (r) => tag(r.kind === 'add' ? '新增' : r.kind === 'replace' ? '覆盖' : '不变', r.kind === 'replace' ? 'warn' : r.kind === 'add' ? 'info' : 'muted') },
+    { label: '变更', render: (r) => { const k = diffKind(r.kind); return tag(k.text, k.tone) } },
     { label: '当前值', render: (r) => h('span', { class: 'mono-break muted', text: r.from == null ? '—（文件中没有）' : r.from }) },
-    { label: '写入后', render: (r) => h('span', { class: 'mono-break', text: r.to }) },
+    { label: '写入后', render: (r) => h('span', { class: 'mono-break', text: r.to == null ? '—（删除该字段）' : r.to }) },
   ], rows)
 }
 
@@ -961,8 +975,10 @@ function renderConflict (host, outcome, ctx) {
       h('button', { class: 'btn btn-primary', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) })))
 }
 
-function renderPreview (host, outcome, ctx, live) {
+function renderPreview (host, outcome, ctx, live, meta) {
   const s = outcome.summary
+  const m = meta || {}
+  const removeCount = s.changeRows.filter((r) => r.kind === 'remove' || r.kind === 'delete' || r.kind === 'del').length
   const confirm = h('button', { class: 'btn btn-primary', type: 'button', text: '确认写入并验证' })
   if (!s.consentToken) confirm.disabled = true
   const body = h('div', null,
@@ -982,6 +998,7 @@ function renderPreview (host, outcome, ctx, live) {
         '。这是 Codex 原生父子代理配置，退出聚合时按托管语义自动恢复；不启用任何自造调度。')
       : null,
     s.conflicts.length ? callout('warn', h('strong', { text: '将覆盖 ' + s.conflicts.length + ' 个已有值：' }), s.conflicts.join('、')) : null,
+    removeCount ? callout('warn', h('strong', { text: '将删除 ' + removeCount + ' 个字段：' }), ' 例如切到路由模式删除 openai_base_url；删除行已在差异表标为「删除」。') : null,
     s.consentToken ? null : callout('warn', h('strong', { text: '缺少确认令牌：' }), ' 服务端没有返回 consentToken，无法安全写入；请重新检测后再预览。'),
     diffTable(s.changeRows),
     h('p', { class: 'hint', text: '备份：' + (s.backupAvailable ? '写入前快照可用（失败可自动回滚）' : '无（当前文件不存在或尚未接入，失败将保持原样）') }),
@@ -999,18 +1016,27 @@ function renderPreview (host, outcome, ctx, live) {
     confirm.textContent = '写入并验证中…'
     live.textContent = '正在写入并验证 Codex 配置…'
     try {
-      const payload = buildActivateRequest(outcome.preview, true)
-      const res = await viewPost(ctx)(AGGREGATION_ENDPOINTS.activate, payload)
-      showActivationOutcome(host, classifyActivation(res), ctx, live)
+      let endpoint = AGGREGATION_ENDPOINTS.activate
+      let payload = buildActivateRequest(outcome.preview, true)
+      if (m.kind === 'switch') {
+        endpoint = AGGREGATION_ENDPOINTS.switch
+        payload = buildSwitchRequest(outcome.preview, true, m.selection && m.selection.mode, m.selection && m.selection.parentModel)
+      } else if (m.kind === 'rollback') {
+        endpoint = AGGREGATION_ENDPOINTS.rollback
+        payload = buildRollbackRequest(outcome.preview, true)
+      }
+      const res = await viewPost(ctx)(endpoint, payload)
+      showActivationOutcome(host, classifyActivation(res), ctx, live, m)
     } catch (error) {
-      showActivationOutcome(host, classifyActivation(error), ctx, live)
+      showActivationOutcome(host, classifyActivation(error), ctx, live, m)
     }
   })
 }
 
-function showActivationOutcome (host, outcome, ctx, live) {
+function showActivationOutcome (host, outcome, ctx, live, meta) {
+  const m = meta || {}
   if (outcome.kind === 'preview') {
-    renderPreview(host, outcome, ctx, live)
+    renderPreview(host, outcome, ctx, live, m)
     return
   }
   if (outcome.kind === 'conflict') {
@@ -1032,21 +1058,19 @@ function showActivationOutcome (host, outcome, ctx, live) {
   }
   if (outcome.kind === 'applied') {
     const r = receiptSummary(outcome.receipt)
+    const isModeChange = m.kind === 'switch' || m.kind === 'rollback'
+    const title = isModeChange ? '接入方式已切换并通过验证。' : '聚合模式已启用并通过验证。'
     clear(host)
-    live.textContent = '聚合模式已启用并通过验证。'
+    live.textContent = title
     host.append(
       callout('good',
-        h('strong', { text: '聚合模式已启用并通过验证。' }),
+        h('strong', { text: title }),
         r.catalogCount == null ? '' : ' 目录 ' + r.catalogCount + ' 个模型（含目标模型）。',
         r.gatewayStatus == null ? '' : ' 网关 HTTP ' + r.gatewayStatus + '。'),
-      r.reloadApplied
-        ? callout('info', h('strong', { text: '网关进程已重载新配置。' }), ' 接下来需要重启 Codex Desktop 才能加载新配置。')
-        : callout('warn',
-          h('strong', { text: '配置已写入磁盘，但网关进程没有重载：' }),
-          ' 需要重启网关后才会按新配置工作（原因：' + (r.reloadReason || '未知') + '）。本页不会谎称已生效。'),
+      callout('warn', h('strong', { text: '请完全退出并重新打开 Codex 才能使用新模式。' }), ' 运行中的 Codex 仍读取旧配置；不会"立即生效"。'),
       h('div', { class: 'toolbar' },
         h('button', { class: 'btn btn-primary', type: 'button', text: '下一步：重新打开 Codex', onclick: () => goToStep('restart') })))
-    toast('聚合模式已启用并通过验证', 'success')
+    toast(title, 'success')
     refreshAll(ctx)
     return
   }
@@ -1061,48 +1085,58 @@ function showActivationOutcome (host, outcome, ctx, live) {
       h('button', { class: 'btn btn-primary', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) })))
 }
 
+// 三模式切换（直连/路由/聚合）：无 token → 428 预览 → 一次确认 → 带 token 提交。
+async function runModeChange (ctx, kind, selection, host, live) {
+  const endpoint = kind === 'switch' ? AGGREGATION_ENDPOINTS.switch : AGGREGATION_ENDPOINTS.rollback
+  const body = kind === 'switch'
+    ? buildSwitchRequest(null, false, selection && selection.mode, selection && selection.parentModel)
+    : buildRollbackRequest(null, false)
+  live.textContent = '正在生成接入方式变更预览（不写入）…'
+  try {
+    const res = await viewPost(ctx)(endpoint, body)
+    showActivationOutcome(host, classifyActivation(res), ctx, live, { kind, selection })
+  } catch (error) {
+    showActivationOutcome(host, classifyActivation(error), ctx, live, { kind, selection })
+  }
+}
+
 function enablePanel (ctx) {
   const snapshot = aggregationOf(ctx)
   const health = snapshot && snapshot.health ? snapshot.health : null
   const mode = health && health.mode ? String(health.mode) : 'unknown'
+  const known = THREE_MODES.some((mm) => mm.id === mode)
+  const drifted = !!(health && health.drifted === true)
+  const m = modeLabel(known ? mode : 'unknown', drifted)
+  const parents = selectableParentModels(snapshot && snapshot.modes)
   const host = h('div')
   const live = h('p', { class: 'hint', role: 'status', 'aria-live': 'polite' })
-  const previewBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '预览变更（不写入）' })
-  if (!snapshot) {
-    host.append(callout('info', h('strong', { text: '正在读取真实聚合状态。' }), ' 快照到达前不会推测是否已启用，也不会写入任何配置。'))
-  } else if (mode === 'aggregated') {
-    host.append(
-      callout('good', h('strong', { text: '聚合模式已启用。' }), ' 如需撤销 ModelGate 写入的字节，请使用「退出并恢复」。'),
-      h('div', { class: 'toolbar' },
-        h('button', { class: 'btn btn-sm', type: 'button', text: '查看退出并恢复', onclick: () => goToStep('revert') })))
-  } else if (mode === 'official') {
-    host.append(callout('info', h('strong', { text: '当前是原版官方模式（未聚合）。' }), ' 点击预览可以看到将写入的字段；预览本身不写任何字节。'))
-  } else {
-    host.append(callout('warn', h('strong', { text: '聚合模式未知。' }), ' 服务端没有返回可识别模式；预览会重新检测，不会盲目写入。'))
-  }
 
-  previewBtn.addEventListener('click', async () => {
-    previewBtn.disabled = true
-    previewBtn.textContent = '正在生成预览…'
-    live.textContent = '正在生成预览（不写入）…'
-    try {
-      const res = await viewPost(ctx)(AGGREGATION_ENDPOINTS.activate, {})
-      showActivationOutcome(host, classifyActivation(res), ctx, live)
-    } catch (error) {
-      showActivationOutcome(host, classifyActivation(error), ctx, live)
-    } finally {
-      previewBtn.disabled = false
-      previewBtn.textContent = '预览变更（不写入）'
-    }
+  const switchBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '切换接入方式' })
+  switchBtn.disabled = !snapshot
+  const chooser = modeChooser({
+    current: known ? mode : 'official', parents,
+    onChange: (sel) => { switchBtn.disabled = !snapshot || sel === mode },
   })
+  switchBtn.disabled = !snapshot || chooser.getSelection().mode === mode
+  switchBtn.addEventListener('click', () => runModeChange(ctx, 'switch', chooser.getSelection(), host, live))
 
-  const actions = h('div', { class: 'toolbar' }, snapshot && mode !== 'aggregated' ? previewBtn : null)
-  return card('启用聚合', '进入聚合模式会改写 Codex 接入配置；先预览、再一次确认，失败自动回滚。',
+  const canRollback = !!(snapshot && (mode === 'aggregated' || mode === 'route'))
+  const rollbackBtn = h('button', { class: 'btn', type: 'button', text: '回到上一模式', disabled: !canRollback, onclick: () => runModeChange(ctx, 'rollback', null, host, live) })
+
+  host.append(
+    snapshot
+      ? (known
+        ? callout('info', h('strong', { text: '当前接入方式：' + m.label + '。' }), ' 选择目标方式后点「切换接入方式」；预览不写任何字节，确认后才写入。')
+        : callout('warn', h('strong', { text: '接入方式未知。' }), ' 服务端没有返回可识别模式；预览会重新检测，不会盲目写入。'))
+      : callout('info', h('strong', { text: '正在读取真实聚合状态。' }), ' 快照到达前不会推测是否已启用，也不会写入任何配置。'))
+
+  return card('选择接入方式', '官方直连 / 路由（纯 DeepSeek）/ 聚合（GPT 父 + DeepSeek 子）；切换前预览，确认后一次写入。',
     h('div', null,
       callout('info',
         h('strong', { text: '一次性确认：' }),
-        ' 只改 ModelGate 拥有的顶层字段与 [features] 白名单键；不编辑 TOML、不碰 auth.json，也不重启你的 Codex。'),
-      actions,
+        ' 只改 ModelGate 拥有的键；不编辑 TOML、不碰 auth.json。切换成功后请完全退出并重新打开 Codex 才能使用新模式，不会"立即生效"。'),
+      chooser.node,
+      h('div', { class: 'toolbar', style: { margin: '10px 0' } }, switchBtn, rollbackBtn),
       live,
       host))
 }
@@ -1125,23 +1159,29 @@ function restartPanel (ctx) {
         h('button', { class: 'btn btn-primary', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) })))
     return card('重新打开 Codex', '重启结论只来自真实进程探测。', body)
   }
-  if (mode !== 'aggregated' && mode !== 'official') {
+  if (!THREE_MODES.some((mm) => mm.id === mode)) {
     body.append(
       callout('warn',
         h('strong', { text: '无法确认是否需要重启：' }),
-        ' 服务端没有返回可识别的聚合模式；不把它当成"无需重启"。'),
+        ' 服务端没有返回可识别的接入方式；不把它当成"无需重启"。'),
       h('div', { class: 'toolbar' },
         h('button', { class: 'btn btn-primary', type: 'button', text: '重新检测', onclick: () => refreshAll(ctx) })))
     return card('重新打开 Codex', '重启结论只来自真实进程探测。', body)
   }
   const notice = restartNotice(restart, mode)
   const needs = notice.needed === true
+  const modelHint = mode === 'aggregated'
+    ? '核对官方 GPT 与 ' + GO_TARGET_LABEL + ' 都能被选中。'
+    : mode === 'route'
+      ? '核对路由模型 ' + GO_TARGET_LABEL + ' 被选中（纯 DeepSeek，无 GPT 调用）。'
+      : '核对官方 GPT 模型可用（已切回官方直连）。'
   body.append(
     callout(needs ? 'warn' : 'good', h('strong', { text: notice.label + '：' }), ' ' + notice.detail),
+    callout('warn', h('strong', { text: '请完全退出并重新打开 Codex 才能使用新模式。' }), ' 运行中的 Codex 仍读取旧配置；退出后也要重启。'),
     h('ol', { style: { margin: '6px 0 0 18px', padding: '0' } },
       h('li', { text: '完全退出 Codex Desktop（不是只关窗口）。' }),
       h('li', { text: '重新打开 Codex Desktop，进入一个新会话。' }),
-      h('li', { text: '在模型选择器里核对官方 GPT 与 ' + GO_TARGET_LABEL + ' 都能被选中。' })),
+      h('li', { text: '在模型选择器里' + modelHint })),
     h('p', { class: 'hint', text: '检测到客户端在写入后启动过时，本页提示会自动消失；如果一直提示，说明检测到的仍是旧进程。' }),
     h('p', { class: 'hint', text: 'ModelGate 不会也不能替你启动或重启 Codex Desktop（没有受支持的启动能力，也不提供假按钮）。' }),
     h('div', { class: 'toolbar' },
@@ -1155,14 +1195,22 @@ function restartPanel (ctx) {
 // —— 步骤 5：使用 ——
 function usePanel (ctx, product) {
   const codex = product && product.codex ? product.codex : null
+  const snapshot = aggregationOf(ctx)
+  const health = snapshot && snapshot.health ? snapshot.health : null
+  const mode = health && health.mode ? String(health.mode) : 'unknown'
+  const modelLine = mode === 'route'
+    ? ' 路由模式只使用 ' + GO_TARGET_LABEL + '（纯 DeepSeek，无 GPT 调用）。'
+    : mode === 'official'
+      ? ' 官方直连模式使用 Codex 官方模型（不经 ModelGate）。'
+      : ' 官方 GPT 模型与 ' + GO_TARGET_LABEL + '。两者都在同一个模型选择器里，不需要改配置文件。'
   return card('在 Codex 中使用', 'ModelGate 已经完成配置；接下来由你在原版 Codex Desktop 里操作。',
     h('div', null,
       callout('info',
         h('strong', { text: '请在原版 Codex Desktop 的模型选择器里选择：' }),
-        ' 官方 GPT 模型与 ' + GO_TARGET_LABEL + '。两者都在同一个模型选择器里，不需要改配置文件。'),
+        modelLine),
       h('ol', { style: { margin: '6px 0 0 18px', padding: '0' } },
         h('li', { text: '完全退出并重新打开 Codex Desktop（如果上一步还没做）。' }),
-        h('li', { text: '新建会话，打开模型选择器，确认官方 GPT 与 ' + GO_TARGET_LABEL + ' 都存在。' }),
+        h('li', { text: '新建会话，打开模型选择器，确认当前接入方式对应的模型存在。' }),
         h('li', { text: '各发一条最小消息；需要核对请求归因时到「查看高级诊断」。' })),
       codex && codex.found
         ? callout('info', h('strong', { text: 'Codex 检测结果：' }), ' ' + (codex.label || '已检测到') + '。' + (codex.detail || ''))
