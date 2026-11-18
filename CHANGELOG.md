@@ -2,6 +2,23 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-19 官方模型目录根治：基线跟上 0.170（含 gpt-6.2）+ 一键刷新机制
+
+### Added
+
+- **`npm run refresh:models`**（`scripts/refresh-official-models.mjs`）：用当前 CLI 的 `codex debug models --bundled`（隔离 `CODEX_HOME`，不联网、不读 `~/.codex`、不碰 auth.json/keys、不发付费请求、不启停 8787）导出官方目录 → 结构/数量/必需 slug 校验 → 备份旧基线（带时间戳 `.bak`）→ 写新基线 → 用 `createAggregatedCatalog.publish('local')` 重发布目录 → 报告 generation 变化与新增/移除 slug。fail-closed：导出失败/JSON 异常/模型数骤降/必需 slug 缺失则在写任何文件前退出；目录发布失败会把基线回滚到备份。`--dry-run` 只预览；模型清单未变时幂等 no-op，不推进世代。用法与前置见 `docs/reference/codex-catalog.md` §7.1。
+
+### Changed
+
+- **官方基线重建为纯 0.170 官方导出（14 个模型）**：`config/codex-models-baseline.json`（运行时产物，`.gitignore`）由 11 → 14。新增 `gpt-6.2-sol`、`gpt-6.2-astra`、`gpt-daybreak-blue-latest`、`gpt-daybreak-red-latest`、`gpt-5.5`；官方 0.170 已退役 `gpt-6-chat-thinking`、`gpt-reserve`（两者原为 `visibility:hide`，`config.toml` / gateway `config.models` 中仍按 `chatgptplan` 官方直连映射，路由不受影响）。经所有者确认采用「纯官方覆盖」而非「保留旧 11 合并」。
+- **本地聚合目录重发布**：`config/aggregation/catalog/local/current.json` + `state.json` generation 8 → 9，14 官方 + 1 第三方（`mg-opencodego-deepseek-v4-1-flash` 绑定不变），第三方发现快照与 invalidModels 未变。回滚锚点：基线 `.bak` + 目录 `versions/v000008-4a5762d5.json`（`--rollback prev`）。
+
+### 诚实边界（MG-R012 / 未验证）
+
+- **gpt-6.2 仅"可见但 UNVERIFIED"**：新模型只进目录供选择，**未改 `config.toml` 的 `model`（仍 `gpt-6-luna`）、未改任何测试政策、未用它做真实推理**。真实验收仍锁 `gpt-6-luna`；放宽需所有者书面批准。
+- **未启停服务**：8787 由所有者统一重启并验证 `/v1/models` 含 `gpt-6.2`；本轮未重启、未发付费请求、未做真机 GUI。
+- **API Key 约束**：全程未记录/打印/上传任何明文密钥；脚本输出只有 slug、计数、sha256、世代与回滚命令，不含凭据。
+
 ## [Unreleased] —— 2026-11-18 三模式文档与验收口径（直连 / 路由 / 聚合）
 
 ### Added

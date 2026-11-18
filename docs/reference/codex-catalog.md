@@ -210,6 +210,38 @@ node scripts/codex-catalog.mjs --rollback prev --out <file> --state-dir <state>
 
 退出码：`0` 成功；`2` 用法/路径守卫；`3` 校验或生成失败；`4` 身份冲突（重绑定/ID 冲突）；`5` IO；`6` codex 校验失败。
 
+### 7.1 一键刷新官方基线（`npm run refresh:models`）
+
+`codex-catalog.mjs` 只负责"给定基线 → 生成目录"。基线本身来自官方 CLI 的本地目录导出，需要随客户端版本刷新；这一步由 `scripts/refresh-official-models.mjs` 承担：
+
+```bash
+# 前置：先把 Codex CLI 升级到自带所需模型的版本（本机实测 0.170.0 含 gpt-6.2-sol/astra）
+npm run refresh:models            # 导出 → 校验 → 备份 → 写基线 → 重发布目录
+npm run refresh:models -- --dry-run  # 只导出/校验并预览差异，不写任何文件
+MG_CODEX_BIN=/path/to/codex npm run refresh:models   # 指定 CLI
+```
+
+行为：
+
+1. 用隔离 `CODEX_HOME` 跑 `codex debug models --bundled` 导出官方目录；**不联网、不读 `~/.codex`、不碰 auth.json/keys、不发付费请求、不启停 8787**。
+2. fail-closed 校验：`validateCatalog` 全过、模型数 ≥ 12 且相对上次最多退役 3 个、`MG_REFRESH_REQUIRED_SLUGS`（默认含 `gpt-6.2-sol`/`gpt-6.2-astra` 与既有核心 slug）全部存在。任一失败在写文件前退出。
+3. 备份当前基线到 `config/codex-models-baseline.json.bak-<UTC 时间戳>`（mode 0600），写新基线（保留信封字段，`models` 以导出为准）。
+4. 调 `createAggregatedCatalog.publish('local', { cfg })` 用新基线重发布 `current.json` + `state.json`（generation 递增；第三方发现快照/绑定不变）。
+5. 输出 JSON 报告：CLI 版本、基线新旧 sha、模型数、新增/移除 slug、generation 变化、回滚命令。
+6. 幂等：导出模型清单与当前基线逐字节同构时返回 `mode:"noop"`，不写文件、不推进世代。
+
+回滚（脚本报告末尾原样给出）：
+
+```bash
+cp <baseline.bak> config/codex-models-baseline.json
+node scripts/codex-catalog.mjs --rollback prev \
+  --out config/aggregation/catalog/local/current.json \
+  --state-dir config/aggregation/catalog/local
+# 然后由所有者统一重启网关并验证 /v1/models
+```
+
+MG-R012 边界：新模型（如 `gpt-6.2-sol/astra`）**只加入目录"可见可选"**，不改 `config.toml` 的 `model`（仍 `gpt-6-luna`）、不改测试政策、不做真实推理；真实验收仍锁 `gpt-6-luna`，放宽需所有者书面批准。
+
 ## 8. 校验闸门（fail-closed）
 
 任何错误都在落盘前抛出，不会留下"半个目录"：
