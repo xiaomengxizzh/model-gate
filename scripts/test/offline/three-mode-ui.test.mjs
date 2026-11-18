@@ -356,9 +356,69 @@ test('drifted：落地页显示"需要重新对齐"而非"读取失败"，卡片
   for (const btn of ctas) assert.equal(btn.disabled, true, '漂移时切换按钮禁用')
 })
 
+// ============ 顶栏参考图（紫 M logo + V2 + 副标题 + 真实快照状态下拉）============
+test('顶栏静态结构：紫 M 图形 + ModelGate + V2 + 副标题 + 状态下拉 + 分隔线 + 设置按钮', () => {
+  const html = readFileSync(join(ROOT, 'src/ui-next/index.html'), 'utf8')
+  assert.match(html, /class="topbar-logo"[^>]*>M<[^>]*>/, '缺少紫 M 图形')
+  assert.match(html, /<strong>ModelGate<\/strong>/, '缺少粗体 ModelGate 文字')
+  assert.match(html, /class="topbar-v2">V2</, '缺少 V2 标签')
+  assert.match(html, /AI 模型网关 · 连接 \/ 路由 \/ 聚合/, '缺少副标题')
+  assert.match(html, /id="conn-chip"/, '缺少状态胶囊')
+  assert.match(html, /id="conn-text">未连接</, '无快照时默认文案是未连接')
+  assert.match(html, /class="status-caret"/, '缺少下拉箭头')
+  assert.match(html, /id="status-menu-panel"/, '缺少真实快照下拉明细')
+  assert.match(html, /class="topbar-divider"/, '缺少分隔线')
+  assert.match(html, /id="topbar-settings"/, '缺少设置按钮')
+  assert.match(html, /<\/svg>设置\s*<\/button>/, '设置按钮缺少文案')
+
+  const css = readFileSync(join(ROOT, 'src/ui-next/styles.css'), 'utf8')
+  assert.match(css, /--purple:\s*#6d5efc/, '主色必须是 #6d5efc')
+  assert.match(css, /\.topbar-logo\{[^}]*var\(--purple\)/, 'logo 用紫色主色')
+  assert.match(css, /\.topbar-v2\{[^}]*var\(--purple\)/, 'V2 标签用紫色主色')
+  assert.match(css, /\.status-menu-panel\{/, '下拉面板需有样式')
+  assert.match(css, /\.topbar-divider\{/, '分隔线需有样式')
+})
+
+test('顶栏状态来自快照非写死：未连接 / 已连接 / 需重新对齐 三态', async () => {
+  const { topbarStatusOf } = await loadStatus()
+  // 取不到任何后端快照才「未连接」
+  assert.equal(topbarStatusOf(null, null).label, '未连接')
+  assert.equal(topbarStatusOf(null, {}).label, '未连接')
+  // 已取到 status → 已连接；模式来自 health/modes 快照
+  const route = { health: { mode: 'route' }, modes: { current: 'route' } }
+  const connected = topbarStatusOf({ configVersion: 7 }, route)
+  assert.equal(connected.label, '已连接')
+  assert.equal(connected.mode, 'route')
+  assert.match(connected.detail, /路由模式/)
+  // 没有 status、但有聚合 health/modes 快照也算取到状态
+  assert.equal(topbarStatusOf(null, route).label, '已连接')
+  // drifted → 需重新对齐（复用 HOME_STATES 的 needs_realign，不是"读取失败"）
+  const drifted = topbarStatusOf({ configVersion: 7 }, { health: { mode: 'aggregated', drifted: true }, drifted: true })
+  assert.equal(drifted.label, '需重新对齐')
+  assert.equal(drifted.state, 'needs_realign')
+  assert.doesNotMatch(drifted.detail, /读取失败/)
+  // unknown 不伪装成具体模式
+  const unknown = topbarStatusOf(null, { health: { mode: 'weird' } })
+  assert.equal(unknown.label, '已连接')
+  assert.equal(unknown.mode, 'unknown')
+  // 不同快照得出不同文案 —— 证明文案是推导出来的，不是写死
+  assert.notEqual(topbarStatusOf(null, null).label, connected.label)
+  assert.notEqual(drifted.label, connected.label)
+})
+
+test('顶栏下拉绑定共享快照：app.js 调用 topbarStatusOf(status, aggregationState())', () => {
+  const app = readFileSync(join(ROOT, 'src/ui-next/app.js'), 'utf8')
+  assert.match(app, /import \{ topbarStatusOf \}/)
+  assert.match(app, /topbarStatusOf\(s, aggregationState\(\)\)/, '顶栏必须消费 health/modes 快照')
+  assert.match(app, /getElementById\('status-menu-gateway'\)/)
+  assert.match(app, /getElementById\('status-menu-mode'\)/)
+  assert.match(app, /getElementById\('topbar-settings'\)/)
+})
+
 test('apikey 审计：改动前端源文件无明文密钥、无新增 token 输入框、无上传', () => {
   const files = [
     'src/ui-next/index.html',
+    'src/ui-next/app.js',
     'src/ui-next/js/router.js',
     'src/ui-next/js/product-status.js',
     'src/ui-next/js/views/connections.js',

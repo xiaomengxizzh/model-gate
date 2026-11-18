@@ -9,6 +9,7 @@ import {
 import { ROUTES, routeFromHash, startRouter } from './js/router.js'
 import { toast, callout, closeDialog } from './js/components.js'
 import { dirtyDraft } from './js/config-draft.js'
+import { topbarStatusOf } from './js/product-status.js'
 import * as dashboard from './js/views/dashboard.js'
 import * as connections from './js/views/connections.js'
 import * as providers from './js/views/providers.js'
@@ -53,13 +54,29 @@ function initTheme() {
   applyTheme(theme === 'dark' ? 'dark' : 'light')
 }
 
+// 顶栏状态胶囊与下拉明细：文案一律由 topbarStatusOf 从真实快照推导，绝不写死。
+function updateTopbar(view) {
+  const chip = document.getElementById('conn-chip')
+  const connText = document.getElementById('conn-text')
+  const gatewayEl = document.getElementById('status-menu-gateway')
+  const modeEl = document.getElementById('status-menu-mode')
+  const detailEl = document.getElementById('status-menu-detail')
+  if (connText) connText.textContent = view.label
+  if (chip) {
+    chip.className = 'conn-chip ' + (view.level === 'good' ? 'is-good' : view.level === 'warn' ? 'is-warn' : 'is-bad')
+    chip.setAttribute('aria-label', '网关连接状态：' + view.label)
+    chip.title = view.detail
+  }
+  if (gatewayEl) gatewayEl.textContent = view.gateway ? '在线' : '未连接'
+  if (modeEl) modeEl.textContent = view.mode === 'unknown' ? '未知' : view.mode
+  if (detailEl) detailEl.textContent = view.detail
+}
+
 function updateChrome() {
   const s = state.status
   const statusEl = document.getElementById('side-status')
   const detailEl = document.getElementById('side-detail')
   const pulse = document.getElementById('side-pulse')
-  const chip = document.getElementById('conn-chip')
-  const connText = document.getElementById('conn-text')
   const footTime = document.getElementById('foot-time')
   const sideVersion = document.getElementById('side-version')
   if (s) {
@@ -68,22 +85,18 @@ function updateChrome() {
     statusEl.textContent = open ? '部分上游熔断' : '网关在线'
     detailEl.textContent = providers.length + ' 个上游 · 配置版本 ' + (s.configVersion ?? '—')
     pulse.className = 'pulse ' + (open ? 'is-warn' : 'is-good')
-    chip.className = 'conn-chip ' + (open ? 'is-warn' : 'is-good')
-    connText.textContent = open ? '降级' : '已连接'
     sideVersion.textContent = 'v' + (s.configVersion ?? '—')
   } else if (state.auth && state.auth.needAuth) {
     statusEl.textContent = '等待解锁'
     detailEl.textContent = '输入管理令牌后读取本地控制面'
     pulse.className = 'pulse is-warn'
-    chip.className = 'conn-chip is-warn'
-    connText.textContent = '已锁定'
   } else {
     statusEl.textContent = '尚未连接'
     detailEl.textContent = '无法读取本地控制面'
     pulse.className = 'pulse is-bad'
-    chip.className = 'conn-chip is-bad'
-    connText.textContent = '未连接'
   }
+  // 顶栏消费共享快照：status + aggregation.health/modes/drifted（不是写死"未连接"）。
+  updateTopbar(topbarStatusOf(s, aggregationState()))
   if (footTime) footTime.textContent = state.loadedAt ? '最近刷新 ' + new Date(state.loadedAt).toLocaleTimeString('zh-CN', { hour12: false }) : ''
 }
 
@@ -426,6 +439,24 @@ function wire() {
   document.getElementById('theme-toggle').addEventListener('click', () => {
     applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark')
   })
+  // 顶栏状态下拉：只展示共享快照推导出的文案，不发起任何新请求。
+  const statusChip = document.getElementById('conn-chip')
+  const statusPanel = document.getElementById('status-menu-panel')
+  if (statusChip && statusPanel) {
+    statusChip.addEventListener('click', () => {
+      const open = statusPanel.hidden
+      statusPanel.hidden = !open
+      statusChip.setAttribute('aria-expanded', open ? 'true' : 'false')
+    })
+    document.addEventListener('click', (e) => {
+      if (!statusPanel.hidden && e && e.target && !statusPanel.contains(e.target) && !statusChip.contains(e.target)) {
+        statusPanel.hidden = true
+        statusChip.setAttribute('aria-expanded', 'false')
+      }
+    })
+  }
+  const settingsBtn = document.getElementById('topbar-settings')
+  if (settingsBtn) settingsBtn.addEventListener('click', () => { location.hash = '#/settings' })
   document.getElementById('auth-form').addEventListener('submit', unlock)
   on('unauthorized', onUnauthorized)
   // 快照变化只更新外壳（侧栏/时间）；视图级重绘由当前路由的刷新流程控制。

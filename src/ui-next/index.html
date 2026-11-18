@@ -62,15 +62,36 @@
 
     <div class="workspace">
       <header class="topbar">
-        <div class="crumbs">
-          <span class="eyebrow">MODELGATE</span><span class="crumb-sep">/</span><strong id="current-view">首页</strong>
+        <div class="topbar-brand">
+          <span class="topbar-logo" aria-hidden="true">M</span>
+          <span class="topbar-brand-copy">
+            <span class="topbar-title-row"><strong>ModelGate</strong><span class="topbar-v2">V2</span></span>
+            <span class="topbar-subtitle">AI 模型网关 · 连接 / 路由 / 聚合</span>
+          </span>
         </div>
         <div class="top-actions">
-          <span class="conn-chip" id="conn-chip"><span class="dot"></span><span id="conn-text">未连接</span></span>
+          <div class="status-menu">
+            <button class="conn-chip" id="conn-chip" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="网关连接状态">
+              <span class="dot"></span><span id="conn-text">未连接</span><span class="status-caret" aria-hidden="true">⌄</span>
+            </button>
+            <div class="status-menu-panel" id="status-menu-panel" hidden>
+              <p class="status-menu-title">实时状态快照</p>
+              <dl class="status-menu-list">
+                <div class="status-menu-row"><dt>网关</dt><dd id="status-menu-gateway">—</dd></div>
+                <div class="status-menu-row"><dt>模式</dt><dd id="status-menu-mode">—</dd></div>
+                <div class="status-menu-row"><dt>说明</dt><dd id="status-menu-detail">—</dd></div>
+              </dl>
+            </div>
+          </div>
+          <span class="topbar-divider" aria-hidden="true"></span>
+          <button class="btn topbar-settings" type="button" id="topbar-settings">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 6.5a3.5 3.5 0 100 7 3.5 3.5 0 000-7M10 2v3M10 15v3M2 10h3M15 10h3M4.3 4.3l2.1 2.1M13.6 13.6l2.1 2.1M15.7 4.3l-2.1 2.1M6.4 13.6l-2.1 2.1"/></svg>设置
+          </button>
           <button class="icon-btn" type="button" id="theme-toggle" aria-label="切换明暗主题" title="切换明暗主题">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2a8 8 0 108 8 6.5 6.5 0 01-8-8z"/></svg>
           </button>
           <button class="btn" type="button" id="refresh"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 10a6 6 0 11-2-4.5M16 3v4h-4"/></svg>刷新</button>
+          <span class="sr-only" id="current-view">首页</span>
         </div>
       </header>
       <main class="main" id="view-root" tabindex="-1" aria-live="polite">

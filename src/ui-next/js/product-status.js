@@ -630,3 +630,43 @@ export function deriveProductStatus (input) {
   }
   return ps
 }
+
+// 顶栏状态胶囊：真实消费 store 的 health/modes 快照（参考图「● 未连接 ⌄」）。
+// 本函数保持纯函数，便于离线断言"文案来自快照、不是写死"：
+//   * status = /api/status 投影（网关在线证据）；
+//   * aggregation = aggregationState()，其 health/modes/drifted 来自共享只读快照。
+// 诚实性：只有确实没有任何快照时才显示「未连接」；drifted 显示「需重新对齐」
+// （复用 HOME_STATES 里的 needs_realign 语义，不新增状态名）；取到快照才显示「已连接」
+// 并把当前模式带入下拉明细。unknown 不伪装成某个具体模式。
+export function topbarStatusOf (status, aggregation) {
+  const s = obj(status)
+  const a = obj(aggregation)
+  const health = a ? obj(a.health) : null
+  const modes = a ? obj(a.modes) : null
+  const drifted = !!(a && a.drifted === true) || !!(health && health.drifted === true)
+  const mode = str(health && health.mode) || str(modes && modes.current) || 'unknown'
+  const modeKnown = mode === 'aggregated' || mode === 'route' || mode === 'official'
+  const gateway = !!s
+  const modeDetail = mode === 'aggregated'
+    ? '聚合模式（GPT 父 + DeepSeek 子）'
+    : mode === 'route'
+      ? '路由模式（纯 DeepSeek，无 GPT）'
+      : mode === 'official'
+        ? '官方直连（不经 ModelGate）'
+        : '当前模式未知'
+  // 取不到任何后端快照 —— 唯一允许显示「未连接」的情形。
+  if (!gateway && !health && !modes) {
+    return { state: 'offline', label: '未连接', level: 'bad', mode: 'unknown', gateway: false, detail: '尚未从网关取得状态快照。' }
+  }
+  // 配置漂移：端点读取成功，只是对齐基线落后；不显示成"读取失败"。
+  if (drifted) {
+    return {
+      state: 'needs_realign', label: '需重新对齐', level: 'warn', mode, gateway,
+      detail: (modeKnown ? modeDetail + '；' : '') + '配置与对齐基线不一致，需要重新对齐。',
+    }
+  }
+  if (modeKnown) {
+    return { state: 'connected', label: '已连接', level: 'good', mode, gateway, detail: modeDetail }
+  }
+  return { state: 'connected', label: '已连接', level: 'good', mode: 'unknown', gateway, detail: '网关已响应；当前模式未知。' }
+}
