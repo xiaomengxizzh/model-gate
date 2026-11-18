@@ -318,7 +318,8 @@ test('loading 骨架：首屏/刷新/切路由在数据到达前可达，旧数�
   releaseStatus()
   releaseConfig()
   await booting
-  assert.ok(root.textContent.includes('一切模型，尽在掌控。'), '数据到达后应切换为真实视图')
+  // 「用量」导航现在渲染真实图表页（原状态落地页保留为 dashboard.renderHome）。
+  assert.ok(root.textContent.includes('请求趋势'), '数据到达后应切换为真实用量视图')
 })
 
 test('clients：功能级 403 只做局部提示，页面正常渲染、会话与其它数据保留', async () => {

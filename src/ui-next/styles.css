@@ -713,3 +713,78 @@ table.data.is-compact td{padding:6px var(--space-3)}
   *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}
   .spinner,.primary-action-spinner{animation:none!important}
 }
+
+/* ---------- 16. 用量页（紫色系图表） ---------- */
+.usage-controls{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap;margin-bottom:var(--space-4)}
+.usage-segmented{display:inline-flex;align-items:center;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-pill);padding:5px;box-shadow:var(--shadow-sm)}
+.usage-seg{border:0;background:transparent;color:var(--muted);font-size:var(--text-sm);font-weight:var(--weight-medium);padding:8px 18px;border-radius:var(--radius-pill);white-space:nowrap;cursor:pointer;transition:background var(--motion-fast) var(--ease),color var(--motion-fast) var(--ease)}
+.usage-seg:hover{color:var(--ink);background:var(--soft)}
+.usage-seg.is-active{background:var(--purple);color:#fff;box-shadow:0 3px 10px rgba(109,94,252,.3)}
+.usage-filters{display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap}
+.usage-select{min-height:var(--control-h);border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink);padding:0 var(--space-3);font-size:var(--text-sm)}
+.usage-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--space-3);margin-bottom:var(--space-4)}
+.usage-metric{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm);padding:var(--space-4);min-width:0}
+.usage-metric-top{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2)}
+.usage-metric-label{font-size:var(--text-sm);color:var(--muted)}
+.usage-metric-icon{width:34px;height:34px;flex:none;display:grid;place-items:center;border-radius:var(--radius-sm);background:var(--purple-soft);color:var(--purple-ink);font-size:17px}
+.usage-metric-value{font-size:30px;line-height:1.2;font-weight:var(--weight-bold);margin-top:var(--space-2);font-variant-numeric:tabular-nums}
+.usage-metric-sub{display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap;margin-top:6px;font-size:var(--text-xs);color:var(--muted)}
+.usage-delta{font-weight:var(--weight-bold)}
+.usage-delta.is-up{color:var(--good)}
+.usage-delta.is-down{color:var(--danger)}
+.usage-panels{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(280px,1fr) minmax(280px,1fr);gap:var(--space-4);align-items:start}
+.usage-panels .card{min-width:0}
+.usage-trend-card .chart{height:210px}
+.donut-wrap{display:flex;align-items:center;gap:var(--space-4);flex-wrap:wrap}
+.donut-chart{width:150px;height:150px;flex:none}
+.donut-center-value{font-size:19px;font-weight:var(--weight-bold);fill:var(--ink)}
+.donut-center-label{font-size:12px;fill:var(--muted)}
+.donut-legend{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px;min-width:0;flex:1}
+.donut-legend li{display:flex;align-items:center;gap:8px;font-size:var(--text-sm);min-width:0}
+.donut-dot{width:9px;height:9px;border-radius:50%;flex:none}
+.donut-legend-label{color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.donut-legend-pct{margin-left:auto;font-variant-numeric:tabular-nums}
+.usage-more{color:var(--purple-ink);font-size:var(--text-sm);text-decoration:none}
+.usage-more:hover{text-decoration:underline}
+.usage-recent-card .table-wrap{margin-bottom:var(--space-2)}
+
+/* ---------- 17. 设置页（5 tab + 三栏） ---------- */
+.settings-panel{margin-top:var(--space-4)}
+.settings-columns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-4);align-items:start}
+.settings-col-card{min-width:0}
+.setting-rows{display:flex;flex-direction:column;gap:var(--space-3)}
+.setting-row{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);min-width:0}
+.setting-row-main{display:flex;flex-direction:column;gap:2px;min-width:0}
+.setting-label{font-size:var(--text-sm);color:var(--ink)}
+.setting-sub,.setting-hint{font-size:var(--text-xs);color:var(--muted)}
+.setting-hint{margin-top:var(--space-1)}
+.setting-readonly{font-size:var(--text-sm);color:var(--ink-2);word-break:break-all}
+.setting-copy{display:flex;align-items:center;gap:6px;min-width:0}
+.setting-select,.setting-number input{min-height:36px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--soft);color:var(--ink);font-size:var(--text-sm);padding:0 var(--space-2);max-width:170px}
+.setting-select:disabled,.setting-number input:disabled{color:var(--muted);cursor:not-allowed;opacity:.85}
+.setting-number{display:flex;align-items:center;gap:6px}
+.setting-number input{width:80px}
+.setting-unit{font-size:var(--text-xs);color:var(--muted)}
+.setting-switch{position:relative;display:inline-flex;align-items:center;cursor:not-allowed}
+.setting-switch input{position:absolute;opacity:0;width:1px;height:1px}
+.setting-switch-track{width:38px;height:22px;border-radius:var(--radius-pill);background:var(--line-strong);display:inline-block;position:relative;transition:background var(--motion-fast) var(--ease)}
+.setting-switch-track::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.2);transition:transform var(--motion-fast) var(--ease)}
+.setting-switch input:checked + .setting-switch-track{background:var(--purple)}
+.setting-switch input:checked + .setting-switch-track::after{transform:translateX(16px)}
+.setting-mode-current{font-size:var(--text-title);font-weight:var(--weight-semibold);color:var(--purple-ink);margin-bottom:var(--space-2)}
+
+@media (max-width:1200px){
+  .usage-panels{grid-template-columns:minmax(0,1fr) minmax(280px,1fr)}
+  .usage-trend-card{grid-column:1 / -1}
+}
+@media (max-width:900px){
+  .usage-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .settings-columns{grid-template-columns:minmax(0,1fr)}
+  .usage-panels{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width:540px){
+  .usage-controls{align-items:stretch}
+  .usage-segmented{width:100%;justify-content:space-between}
+  .usage-seg{padding:8px 10px;font-size:var(--text-xs)}
+  .usage-metrics{grid-template-columns:minmax(0,1fr)}
+}

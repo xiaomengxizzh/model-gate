@@ -426,24 +426,75 @@ export function lineChart (points, opts = {}) {
   const W = 620, H = 190, padL = 8, padR = 8, top = 10, bottom = 160
   const max = Math.max(...data.map((p) => p.v)) * 1.15 || 1
   const min = 0
+  const color = o.color || 'var(--accent)'
   const x = (i) => padL + i * (W - padL - padR) / (data.length - 1)
   const y = (v) => bottom - ((v - min) / (max - min)) * (bottom - top)
   const line = data.map((p, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(p.v).toFixed(1)).join(' ')
   const area = line + ' L' + x(data.length - 1).toFixed(1) + ' ' + bottom + ' L' + x(0).toFixed(1) + ' ' + bottom + ' Z'
   const peak = Math.max(...data.map((p) => p.v))
-  const s = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'chart', role: 'img', 'aria-label': o.label || ('趋势图，峰值 ' + fmtNum(peak)) })
+  const s = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'chart' + (o.color ? ' chart-colored' : ''), role: 'img', 'aria-label': o.label || ('趋势图，峰值 ' + fmtNum(peak)) })
   for (const gy of [top, (top + bottom) / 2, bottom]) {
     s.append(svg('line', { x1: padL, y1: gy, x2: W - padR, y2: gy, class: 'chart-grid' }))
   }
-  s.append(svg('path', { d: area, fill: 'color-mix(in srgb, var(--accent) 12%, transparent)', stroke: 'none' }))
-  s.append(svg('path', { d: line, fill: 'none', stroke: 'var(--accent)', 'stroke-width': '2.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }))
+  s.append(svg('path', { d: area, fill: 'color-mix(in srgb, ' + color + ' 12%, transparent)', stroke: 'none' }))
+  s.append(svg('path', { d: line, fill: 'none', stroke: color, 'stroke-width': '2.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }))
   const last = data[data.length - 1]
-  s.append(svg('circle', { cx: x(data.length - 1), cy: y(last.v), r: 3.2, fill: 'var(--accent)' }))
+  s.append(svg('circle', { cx: x(data.length - 1), cy: y(last.v), r: 3.2, fill: color }))
+  const axisLabel = typeof o.axisLabel === 'function' ? o.axisLabel : fmtClock
   const axis = h('div', { class: 'chart-axis' },
-    h('span', { text: fmtClock(data[0].t) }),
+    h('span', { text: axisLabel(data[0].t) }),
     h('span', { text: (o.unit || '') + '峰值 ' + (o.format ? o.format(peak) : fmtNum(peak)) }),
-    h('span', { text: fmtClock(last.t) }))
+    h('span', { text: axisLabel(last.t) }))
   return h('div', null, s, axis)
+}
+
+// 纯 SVG 环形图：每段一个 circle stroke-dasharray，无第三方依赖。
+// segments: [{ label, value, color? }]；颜色可用调用方传入，未传按调色板顺序取。
+// 所有可见数字都来自真实数据；0/空只出空态，不画占位扇区。
+export function donutChart (segments, opts = {}) {
+  const o = opts || {}
+  const palette = ['#6d5efc', '#3b82f6', '#94a3b8', '#f59e0b', '#10b981', '#ec4899']
+  const data = (Array.isArray(segments) ? segments : [])
+    .map((s) => ({
+      label: String((s && s.label) != null ? s.label : '未命名'),
+      value: Number(s && s.value),
+      color: String((s && s.color) != null ? s.color : ''),
+    }))
+    .filter((s) => Number.isFinite(s.value) && s.value > 0)
+  const total = data.reduce((sum, s) => sum + s.value, 0)
+  if (!data.length || total <= 0) {
+    return empty(o.emptyTitle || '暂无分布数据', o.emptyDesc || '当前窗口没有可统计的真实请求。')
+  }
+  const C = 70, R = 54, SW = 16
+  const circumference = 2 * Math.PI * R
+  const s = svg('svg', {
+    viewBox: '0 0 140 140',
+    class: 'donut-chart',
+    role: 'img',
+    'aria-label': o.label || ('用量分布环形图，共 ' + fmtNum(total) + ' 次'),
+  })
+  s.append(svg('circle', { cx: C, cy: C, r: R, fill: 'none', stroke: 'var(--soft)', 'stroke-width': SW }))
+  let acc = 0
+  data.forEach((seg, i) => {
+    const frac = seg.value / total
+    const dash = Math.max(0, circumference * frac - 2)
+    s.append(svg('circle', {
+      cx: C, cy: C, r: R, fill: 'none',
+      stroke: seg.color || palette[i % palette.length],
+      'stroke-width': SW,
+      'stroke-dasharray': dash.toFixed(2) + ' ' + (circumference - dash).toFixed(2),
+      'stroke-dashoffset': (-circumference * acc).toFixed(2),
+      transform: 'rotate(-90 ' + C + ' ' + C + ')',
+    }))
+    acc += frac
+  })
+  s.append(svg('text', { x: C, y: C - 2, class: 'donut-center-value', 'text-anchor': 'middle' }, o.centerValue != null ? String(o.centerValue) : fmtCompact(total)))
+  s.append(svg('text', { x: C, y: C + 16, class: 'donut-center-label', 'text-anchor': 'middle' }, o.centerLabel || '总计'))
+  const legend = h('ul', { class: 'donut-legend' }, data.map((seg, i) => h('li', null,
+    h('span', { class: 'donut-dot', style: { background: seg.color || palette[i % palette.length] }, 'aria-hidden': 'true' }),
+    h('span', { class: 'donut-legend-label', text: seg.label }),
+    h('strong', { class: 'donut-legend-pct', text: (seg.value / total * 100).toFixed(1) + '%' }))))
+  return h('div', { class: 'donut-wrap' }, s, legend)
 }
 
 export function barChart (points, opts = {}) {

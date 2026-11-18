@@ -105,7 +105,7 @@ function collect (nodes) {
 }
 function renderHome (product, ctx = {}) {
   const root = createEl('div')
-  dashboard.render(root, Object.assign({ product: () => product }, ctx))
+  dashboard.renderHome(root, Object.assign({ product: () => product }, ctx))
   return root
 }
 function primaryButtons (nodes) {
