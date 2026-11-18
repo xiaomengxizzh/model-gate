@@ -177,23 +177,27 @@ function codexCatalogView(cfg) {
   let view = null
   try {
     const base = JSON.parse(readFileSync(basePath, 'utf8'))
-    const built = buildCatalog({ base, config: cfg })
+    // 目录隔离：单个坏模型（上下文缺失/slug 冲突等）只记录到 invalidModels 并跳过，
+    // 目录仍成功构建；全局校验（基线为空/身份零碰撞等）依旧 fail-closed。
+    const built = buildCatalog({ base, config: cfg, options: { skipInvalidModels: true } })
     const bindings = built.meta.bindings || {}
     // M1-3b：目录世代记录（generation/verified/key）供 forwardChain 的 catalogScoped 授权使用；
     // 世代号由同一 cache key 的稳定哈希派生，reload 后同目录快照保持同一代。
     const generation = Math.max(1, parseInt(sha256Hex(key).slice(0, 8), 16) || 1)
     try {
       const record = generationRecordFromBuilt({ generation, built, text: JSON.stringify(built.catalog), base, config: cfg })
-      view = toCatalogView(record)
+      // toCatalogView 返回冻结对象：invalidModels 必须在冻结前并入，不能在冻结后赋值（ESM strict 下会抛错）。
+      view = Object.freeze(Object.assign({}, toCatalogView(record), { invalidModels: built.invalidModels || [] }))
     } catch (e) {
       // 世代构造失败不阻断原有目录视图，但标记 unscoped-verified，后续 authz 仍会做 URL 一致性校验。
-      view = {
+      view = Object.freeze({
         key, generation,
         models: built.catalog.models,
         bindings,
         officialSlugs: built.catalog.models.map((m) => m && m.slug).filter((s) => s && !bindings[s]),
         verified: { official: true, thirdParty: true, by: 'config-declared' },
-      }
+        invalidModels: built.invalidModels || [],
+      })
     }
   } catch (e) {
     // fail-closed 但必须可诊断：错误码/消息只进日志，不进响应；不含凭据与正文。
@@ -203,6 +207,32 @@ function codexCatalogView(cfg) {
   _codexCatalogError = null
   _codexModelsCache = view
   return view
+}
+
+// 只读目录健康：复用 codexCatalogView（含缓存），不触发任何网络请求。
+// 供聚合 /health 的 catalogRuntime 使用；错误码/消息只来自本地构建，不含凭据。
+export function codexCatalogHealth (cfg) {
+  const view = codexCatalogView(cfg)
+  if (!view) {
+    return {
+      ok: false,
+      generation: null,
+      modelCount: 0,
+      aliasPresent: false,
+      invalidModels: [],
+      error: _codexCatalogError || 'catalog_unavailable',
+    }
+  }
+  const aliasPresent = !!(view.aliases && Object.keys(view.aliases).length) ||
+    !!(view.bindings && Object.keys(view.bindings).length)
+  return {
+    ok: true,
+    generation: view.generation == null ? null : view.generation,
+    modelCount: Array.isArray(view.models) ? view.models.length : 0,
+    aliasPresent,
+    invalidModels: Array.isArray(view.invalidModels) ? view.invalidModels : [],
+    error: null,
+  }
 }
 // M1-3b：账本/授权注入（进程内单例由 forward.js 缓存；启动与 reload 都 recover）。
 function microCap(v) { const n = Number(v); return Number.isFinite(n) && n > 0 ? microFromUsd(n) : 0 }
@@ -2902,7 +2932,7 @@ function makeHandler(state) {
         const rawBody = req.method === 'POST'
           ? await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)
           : undefined
-        const out = await handleAggregationApi({ method: req.method, path, cfg: state.cfg, log, rawBody, explicitAdmin: admin.explicitAdmin, managedRoot: state.managedRoot === true, isLocal: true, reload: () => reloadConfig(state) })
+        const out = await handleAggregationApi({ method: req.method, path, cfg: state.cfg, log, rawBody, explicitAdmin: admin.explicitAdmin, managedRoot: state.managedRoot === true, isLocal: true, reload: () => reloadConfig(state), catalogRuntime: () => codexCatalogHealth(state.cfg) })
         if (out) sendJson(res, out.status, out.body)
         return
       }

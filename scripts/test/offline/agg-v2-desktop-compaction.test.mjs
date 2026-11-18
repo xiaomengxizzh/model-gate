@@ -75,9 +75,10 @@ test('provider capability：确切落点字段与枚举字面量（由捆绑 Cod
   assert.equal(section.remoteCompaction, 'unsupported')
   assert.deepEqual(section.sections['model_providers.modelgate'], {
     name: 'ModelGate',
-    base_url: 'http://127.0.0.1:18787',
+    base_url: 'http://127.0.0.1:18787/v1',
     wire_api: 'responses',
-    requires_openai_auth: true,
+    requires_openai_auth: false,
+    supports_websockets: false,
   })
   assert.deepEqual(section.sections['model_providers.modelgate.capabilities'], { remote_compaction: 'unsupported' })
 })
@@ -136,7 +137,10 @@ test('provider capability：显式授权后写入自有段并在 status/detect �
   const text = await readFile(f.configPath, 'utf8')
   assert.match(text, /^model_provider = "modelgate"$/m)
   assert.match(text, /^\[model_providers\.modelgate\]$/m)
-  assert.match(text, /^requires_openai_auth = true$/m)
+  assert.match(text, /^base_url = "http:\/\/127\.0\.0\.1:18787\/v1"$/m)
+  assert.match(text, /^requires_openai_auth = false$/m)
+  assert.match(text, /^supports_websockets = false$/m)
+  assert.equal(/^env_key\s*=|^experimental_bearer_token\s*=/m.test(text), false, '绝不写任何客户端 Key/token 字段')
   assert.match(text, /^wire_api = "responses"$/m)
   assert.match(text, /^\[model_providers\.modelgate\.capabilities\]$/m)
   assert.match(text, /^remote_compaction = "unsupported"$/m)
@@ -145,7 +149,7 @@ test('provider capability：显式授权后写入自有段并在 status/detect �
   const binding = readNativeCompactionBinding(text)
   assert.equal(binding.providerDeclared, true)
   assert.equal(binding.remoteCompaction, 'unsupported')
-  assert.equal(binding.requiresOpenAiAuth, true)
+  assert.equal(binding.requiresOpenAiAuth, false)
 
   const s = status({ configPath: f.configPath, clientProbe: false })
   assert.equal(s.nativeCompaction.mode, 'managed-provider')

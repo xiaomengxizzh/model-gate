@@ -42,6 +42,14 @@ import {
   unmanagedFingerprint,
   withManagedAgentDesired,
 } from './config.js'
+import {
+  AGGREGATION_MODES,
+  DEFAULT_PARENT_MODEL,
+  DEEPSEEK_CHILD_MODEL,
+  ROUTE_MODEL,
+  modeDescriptor,
+  resolveModeTarget,
+} from './profiles.js'
 
 export const DESKTOP_CONTRACT = 'mg-codex-desktop/1'
 export const STATE_SCHEMA = 'mg-codex-desktop-state/1'
@@ -49,7 +57,7 @@ export const JOURNAL_SCHEMA = 'mg-codex-desktop-journal/1'
 export const MAX_CATALOG_BYTES = 4 * 1024 * 1024
 export const DEFAULT_LOCK_STALE_MS = 120000
 export const DEFAULT_GATEWAY_BASE_URL = 'http://127.0.0.1:18787'
-export const MODES = Object.freeze(['official', 'aggregated', 'unknown'])
+export const MODES = Object.freeze(['official', 'route', 'aggregated', 'unknown'])
 const MAX_CONFIG_BYTES = 512 * 1024
 
 export class DesktopError extends Error {
@@ -410,43 +418,65 @@ function applyManagedAgentChildRestore (plan) {
   return { handled: true, removed: false, restored: true, sha: after.sha256 }
 }
 
-// —— 配置状态分类：official / aggregated / unknown ——
-// official：没有把请求改向任何第三方的 owned 字段（或只存在我们写入前的默认值）。
-// aggregated：openai_base_url 指向本机回环 + 本地目录存在，或状态记录与当前字节一致。
+// —— 配置状态分类：official（直连）/ route（路由）/ aggregated（聚合）/ unknown ——
+// route：model_provider="modelgate" + [model_providers.modelgate] + 回环 base_url + 目录存在。
+// aggregated：内置身份 + 回环 openai_base_url + 目录存在，或状态记录与当前字节一致。
+// official：没有任何改向字段（或只存在我们写入前的默认值）。
 // unknown：用户自己指向非回环地址、文件损坏/超限/符号链接等——给明确路径，不猜。
+// drifted：形态仍可识别，但当前字节与 state.appliedSha 不一致（本机漂移）。
 export function classifyConfigState (opts = {}) {
   const paths = resolveDesktopPaths(opts)
   const baseUrl = String(opts.baseUrl || DEFAULT_GATEWAY_BASE_URL).replace(/\/+$/, '')
   let st = null
   try { st = lstatSync(paths.configPath) } catch {}
-  if (st && st.isSymbolicLink()) return { mode: 'unknown', reason: 'symlink_config', exists: true, sha256: null, size: null }
-  if (!st) return { mode: 'official', reason: 'config_absent', exists: false, sha256: null, size: null }
+  if (st && st.isSymbolicLink()) return { mode: 'unknown', reason: 'symlink_config', exists: true, sha256: null, size: null, drifted: false }
+  if (!st) return { mode: 'official', reason: 'config_absent', exists: false, sha256: null, size: null, drifted: false }
   let snap
   let text
   try {
     snap = snapshotConfigFile(paths.configPath)
     text = readFileSync(paths.configPath, 'utf8')
   } catch (e) {
-    return { mode: 'unknown', reason: e && e.code ? e.code : 'unreadable', exists: true, sha256: null, size: null }
+    return { mode: 'unknown', reason: e && e.code ? e.code : 'unreadable', exists: true, sha256: null, size: null, drifted: false }
   }
   let owned
   try {
     owned = readOwnedFields(text)
   } catch (e) {
-    return { mode: 'unknown', reason: e && e.code ? e.code : 'parse_failed', exists: true, sha256: snap.sha256, size: snap.size }
+    return { mode: 'unknown', reason: e && e.code ? e.code : 'parse_failed', exists: true, sha256: snap.sha256, size: snap.size, drifted: false }
   }
   const state = loadState(paths)
-  if (state && state.mode === 'aggregated' && snap.sha256 === state.appliedSha) {
-    return { mode: 'aggregated', reason: 'state_record_match', exists: true, sha256: snap.sha256, size: snap.size }
+  const norm = (entry) => {
+    const v = normalizeOwnedValue(entry)
+    return typeof v === 'string' ? v.trim() : ''
   }
-  const rawUrl = normalizeOwnedValue(owned.topLevel.openai_base_url)
-  const rawCatalog = normalizeOwnedValue(owned.topLevel.model_catalog_json)
-  const url = typeof rawUrl === 'string' ? rawUrl.trim() : ''
-  const catalog = typeof rawCatalog === 'string' ? rawCatalog.trim() : ''
-  if (!url && !catalog) return { mode: 'official', reason: 'no_redirect_fields', exists: true, sha256: snap.sha256, size: snap.size }
-  const loopback = isLoopbackUrl(url) || String(baseUrl) === url.replace(/\/+$/, '')
-  if (loopback && catalog) return { mode: 'aggregated', reason: 'loopback_redirect_with_catalog', exists: true, sha256: snap.sha256, size: snap.size }
-  return { mode: 'unknown', reason: 'third_party_redirect', exists: true, sha256: snap.sha256, size: snap.size }
+  const provider = norm(owned.topLevel.model_provider)
+  const url = norm(owned.topLevel.openai_base_url)
+  const catalog = norm(owned.topLevel.model_catalog_json)
+  const section = owned.sections['model_providers.modelgate']
+  const mgBase = section && section.present ? norm(section.keys.base_url) : ''
+  const loopback = isLoopbackUrl(url) || (!!url && String(baseUrl) === url.replace(/\/+$/, ''))
+  const loopbackMg = isLoopbackUrl(mgBase) || (!!mgBase && (String(baseUrl) + '/v1' === mgBase.replace(/\/+$/, '') || String(baseUrl) === mgBase.replace(/\/+$/, '')))
+  let mode
+  let reason
+  if (provider === MANAGED_PROVIDER_ID && section && section.present && loopbackMg && catalog) {
+    mode = 'route'
+    reason = 'managed_provider_loopback_with_catalog'
+  } else if (!url && !catalog && provider !== MANAGED_PROVIDER_ID) {
+    mode = 'official'
+    reason = 'no_redirect_fields'
+  } else if (loopback && catalog) {
+    mode = 'aggregated'
+    reason = 'loopback_redirect_with_catalog'
+  } else {
+    mode = 'unknown'
+    reason = 'third_party_redirect'
+  }
+  const drifted = !!(state && state.appliedSha && snap.sha256 !== state.appliedSha && mode !== 'unknown')
+  if (state && state.mode === mode && snap.sha256 === state.appliedSha) {
+    return { mode, reason: 'state_record_match', exists: true, sha256: snap.sha256, size: snap.size, drifted: false }
+  }
+  return { mode, reason, exists: true, sha256: snap.sha256, size: snap.size, drifted }
 }
 
 function isLoopbackUrl (value) {
@@ -493,7 +523,7 @@ export function recoverInterruptedApply (opts = {}) {
   try { current = snapshotConfigFile(paths.configPath) } catch { current = null }
   if (journal.phase === 'verified') {
     saveState(paths, {
-      mode: 'aggregated',
+      mode: journal.toMode || 'aggregated',
       before: journal.before || null,
       applied: journal.applied || null,
       appliedSha: journal.applied ? journal.applied.sha256 : null,
@@ -501,6 +531,9 @@ export function recoverInterruptedApply (opts = {}) {
       backupPath: journal.backupPath || null,
       desired: journal.desired || null,
       agentChild: journal.agentChild || null,
+      previous: journal.previous || null,
+      fromMode: journal.fromMode || 'official',
+      toMode: journal.toMode || 'aggregated',
       appliedAt: journal.at || null,
       lastApply: journal.lastApply || { ok: true, recoveredAfterCrash: true, at: Date.now() },
     })
@@ -521,7 +554,7 @@ export function recoverInterruptedApply (opts = {}) {
     if (restored.ok) {
       if (childRestore) { try { applyManagedAgentChildRestore(childRestore) } catch {} }
       saveState(paths, {
-        mode: 'official',
+        mode: journal.fromMode || 'official',
         before: journal.before || null,
         applied: null,
         appliedSha: null,
@@ -529,6 +562,9 @@ export function recoverInterruptedApply (opts = {}) {
         backupPath: journal.backupPath || null,
         desired: null,
         agentChild: null,
+        previous: journal.previous || null,
+        fromMode: journal.fromMode || 'official',
+        toMode: journal.toMode || 'aggregated',
         appliedAt: null,
         lastApply: { ok: false, code: 'interrupted_apply_recovered', recoveredAfterCrash: true, at: Date.now() },
       })
@@ -634,11 +670,18 @@ export function probeDesktopClient (desktopPath, opts = {}) {
 }
 
 export function computeRestartState (opts = {}) {
-  const mode = opts.mode === 'aggregated' ? 'aggregated' : 'official'
+  const mode = MODES.includes(opts.mode) ? opts.mode : 'official'
+  const exiting = opts.lastAction === 'deactivate' || opts.action === 'deactivate' || !!opts.exitedAt
   const appliedAt = Number.isFinite(Number(opts.appliedAt)) && Number(opts.appliedAt) > 0 ? Number(opts.appliedAt) : null
   const client = opts.client && typeof opts.client === 'object' ? opts.client : { running: null, startedAt: null, source: 'unknown' }
-  const base = { client, appliedAt, evidenceAt: Number.isFinite(Number(opts.now)) ? Number(opts.now) : Date.now() }
-  if (mode !== 'aggregated') return Object.assign({ needed: false, reason: 'not_aggregated' }, base)
+  const base = { client, appliedAt, evidenceAt: Number.isFinite(Number(opts.now)) ? Number(opts.now) : Date.now(), mode, exiting }
+  // route 与 aggregated 都需要重启；退出到 official 也必须重启（写 exitedAt / lastAction）。
+  if (mode !== 'route' && mode !== 'aggregated' && !exiting) {
+    return Object.assign({ needed: false, reason: 'not_aggregated' }, base)
+  }
+  if (exiting && mode === 'official') {
+    return Object.assign({ needed: true, reason: 'exited_to_official' }, base)
+  }
   if (!appliedAt) return Object.assign({ needed: true, reason: 'applied_at_unknown' }, base)
   if (client.running === true && Number.isFinite(Number(client.startedAt))) {
     if (Number(client.startedAt) >= appliedAt) return Object.assign({ needed: false, reason: 'client_restarted_after_apply' }, base)
@@ -853,7 +896,7 @@ export function detect (opts = {}) {
     desktopInfo.bundledCodex = bundledInfo
   }
 
-  const appliedAt = state && state.mode === 'aggregated' && Number(state.appliedAt) > 0 ? Number(state.appliedAt) : null
+  const appliedAt = state && (state.mode === 'aggregated' || state.mode === 'route') && Number(state.appliedAt) > 0 ? Number(state.appliedAt) : null
   const clientRuntime = resolveClientRuntime(opts, desktopInfo)
   const restart = computeRestartState({ mode: classification.mode, appliedAt, client: clientRuntime })
   const nativeCompaction = nativeCompactionSummary(opts, classification)
@@ -893,7 +936,7 @@ export function detect (opts = {}) {
       },
     },
     state: state
-      ? { mode: state.mode, appliedAt: state.appliedAt || null, appliedSha: state.appliedSha || null, lastApply: state.lastApply || null }
+      ? { mode: state.mode, appliedAt: state.appliedAt || null, appliedSha: state.appliedSha || null, lastApply: state.lastApply || null, previous: state.previous || null }
       : null,
     backup: backupSummary(paths, state, current),
     lock: { present: lock.present, stale: !!lock.stale },
@@ -913,34 +956,106 @@ function renderTomlValue (value) {
   throw new DesktopError('unsupported_value', '不支持的配置值类型：' + typeof value, null, 422)
 }
 
-function consentTokenFor (target, beforeSha, afterSha) {
-  return sha256Hex(DESKTOP_CONTRACT + '\n' + target + '\n' + beforeSha + '\n' + afterSha)
+// 同意令牌绑定模式与父子目标：fromMode/toMode/parentModel/childModel/providerMode 任一变化即失配（428）。
+function consentModeBinding (binding = {}) {
+  return [
+    'from=' + String(binding.fromMode || ''),
+    'to=' + String(binding.toMode || ''),
+    'parent=' + String(binding.parentModel || ''),
+    'child=' + String(binding.childModel || ''),
+    'provider=' + String(binding.providerMode || ''),
+  ].join('|')
+}
+
+function consentTokenFor (target, beforeSha, afterSha, binding) {
+  return sha256Hex(DESKTOP_CONTRACT + '\n' + target + '\n' + consentModeBinding(binding) + '\n' + beforeSha + '\n' + afterSha)
 }
 
 // MG-FIX-P1-05：同意令牌同时绑定 config.toml 与子代理文件的 before/after 字节，
 // 保证"同意覆盖写什么"在 UI 与事务两侧完全一致（任一变化都会令令牌失配）。
-function agentConsentToken (target, beforeSha, afterSha, childPlan) {
-  return sha256Hex(DESKTOP_CONTRACT + '\n' + target + '\n' + beforeSha + '\n' + afterSha +
+function agentConsentToken (target, beforeSha, afterSha, childPlan, binding) {
+  return sha256Hex(DESKTOP_CONTRACT + '\n' + target + '\n' + consentModeBinding(binding) + '\n' + beforeSha + '\n' + afterSha +
     '\n' + MANAGED_AGENT_FILE + '\n' + (childPlan ? childPlan.before.sha256 + '\n' + childPlan.after.sha256 : ''))
 }
 
-// Managed Provider（provider 级原生压缩能力）默认关闭：它会切换 Codex provider 身份，
-// 依赖 requires_openai_auth 复用 ChatGPT 登录，尚未经原版 Desktop 真机验收。
+// 模式参数统一解析：preview 与 activate 共用，保证"看到什么就写什么"。
+// 未指定 mode 的旧调用方沿用 opts.model（父子相同）；显式 route 父子同别名；
+// 显式 aggregated 父为可选 GPT（默认 luna）、子为 deepseek 别名。
+function resolveModeParams (opts = {}) {
+  const explicitMode = AGGREGATION_MODES.includes(opts.mode)
+  const toMode = explicitMode ? opts.mode : 'aggregated'
+  const target = resolveModeTarget({ mode: toMode, parentModel: opts.parentModel || opts.model })
+  const model = toMode === 'route' ? ROUTE_MODEL : (opts.model || target.model)
+  const childModel = toMode === 'route' ? ROUTE_MODEL
+    : (opts.agentModel || (explicitMode && toMode === 'aggregated' ? DEEPSEEK_CHILD_MODEL : opts.model))
+  const provider = toMode === 'route' ? (opts.managedProvider || {}) : opts.managedProvider
+  return { explicitMode, toMode, target, model, childModel, provider }
+}
+
+// preview 与 activate 共用的文本合并：模式切换时走 planModeTransition，
+// 保证预览看到的 afterSha / consentToken 与实际写入完全一致。
+function computeModeMerge (paths, beforeText, desired, toMode) {
+  const transitionState = loadState(paths)
+  if (transitionState && transitionState.desired && AGGREGATION_MODES.includes(transitionState.mode) &&
+      transitionState.mode !== 'official' && transitionState.mode !== toMode) {
+    let baseText = ''
+    if (transitionState.before && transitionState.before.exists && transitionState.backupPath) {
+      try { baseText = readFileSync(transitionState.backupPath, 'utf8') } catch { baseText = '' }
+    }
+    const planned = planModeTransition({
+      baseText,
+      currentText: beforeText,
+      baseExists: !!(transitionState.before && transitionState.before.exists),
+      fromDesired: transitionState.desired,
+      toDesired: desired,
+    })
+    if (!planned.ok) {
+      throw new DesktopError('mode_transition_conflict', '模式切换与当前配置冲突，未做任何写入。', { conflicts: planned.conflicts }, 409)
+    }
+    return {
+      text: planned.text,
+      changed: diffConfigText(beforeText, planned.text),
+      warnings: [],
+      preserved: summarizePreserved(beforeText),
+      createdSections: [],
+      transitionState,
+    }
+  }
+  const merged = mergeOwnedFields(beforeText, desired)
+  return Object.assign({}, merged, { transitionState })
+}
+
+// 从调用参数推导本次切换的模式绑定；未指定 mode 时按历史聚合路径处理，保持旧调用方语义。
+function consentBindingFromOpts (opts, fromMode) {
+  const toMode = AGGREGATION_MODES.includes(opts && opts.mode) ? opts.mode : 'aggregated'
+  const target = resolveModeTarget({ mode: toMode, parentModel: opts && opts.parentModel })
+  return {
+    fromMode: fromMode || 'official',
+    toMode,
+    parentModel: target.parentModel,
+    childModel: String((opts && opts.agentModel) || '').trim() || target.childModel || '',
+    providerMode: target.providerMode,
+  }
+}
+
+// Managed Provider 段现在走"回环信任、无客户端 Key"（requires_openai_auth=false），
+// 不再依赖 ChatGPT 登录复用。裸传 managedProvider 而没有显式 mode 仍要求实验开关，
+// 防止旧调用方在不知情下切换 provider 身份；显式的 mode=route/aggregated 请求直接放行。
 function managedProviderGuard (opts) {
   if (opts.managedProvider === undefined || opts.managedProvider === null) return null
   if (opts.experimentalManagedProvider === true) return null
+  if (opts.mode === 'route' || opts.mode === 'aggregated') return null
   return {
     code: 'managed_provider_unverified',
-    message: 'Managed Provider 模式会切换 Codex provider 身份，并依赖 requires_openai_auth 复用 ChatGPT 登录；' +
-      '该运行时路径尚未经原版 Desktop 真机验收（UNVERIFIED_LOCAL_STATE）。' +
-      '确认为所有者授权且有 A5 真机方案后，显式传入 experimentalManagedProvider=true；' +
-      '默认保持内置 openai 身份（Codex 拒绝任何 [model_providers.openai*] 覆盖，因此该身份无法声明 provider capability）。',
+    message: '裸传 managedProvider 但没有显式 mode；为防误切换 Codex provider 身份，' +
+      '请显式传入 mode="route"（路由模式）或 experimentalManagedProvider=true。' +
+      '确认后使用回环信任（requires_openai_auth=false），不写 env_key / token。',
     evidence: {
       capabilityField: 'model_providers.' + MANAGED_PROVIDER_ID + '.capabilities.remote_compaction',
       literals: REMOTE_COMPACTION_LITERALS.slice(),
-      requiresOpenAiAuth: true,
+      requiresOpenAiAuth: false,
       configParse: 'PASS_MOCK (codex-cli 0.167.0-alpha.3.2 serde validation)',
-      runtimeAuth: 'UNVERIFIED',
+      runtimeAuth: 'LOOPBACK_TRUST',
     },
   }
 }
@@ -958,6 +1073,7 @@ function buildDesired (opts) {
     // 不需要手工编辑 TOML。仅当显式 managedAgent:false 时关闭（用于诊断/回退）。
     return withManagedAgentDesired(built.desired, {
       model: opts.model,
+      agentModel: opts.agentModel,
       managedAgent: opts.managedAgent,
       agentReasoningEffort: opts.agentReasoningEffort,
     })
@@ -1021,7 +1137,7 @@ function nativeCompactionSummary (opts, classification) {
   }
 }
 
-function ownedRows (existing, desired) {
+function ownedRows (existing, desired, opts = {}) {
   const rows = []
   for (const [key, value] of Object.entries(desired.topLevel || {})) {
     const entry = existing.topLevel[key] || { present: false, raw: '' }
@@ -1047,7 +1163,61 @@ function ownedRows (existing, desired) {
       })
     }
   }
+  // 模式切换需要展示"哪些自有字段会被删除"；默认不开启，避免改变既有预览的行数语义。
+  if (opts.includeRemovals === true) {
+    for (const key of OWNED_TOP_LEVEL) {
+      if (desired.topLevel && Object.prototype.hasOwnProperty.call(desired.topLevel, key)) continue
+      const entry = existing.topLevel[key]
+      if (entry && entry.present) rows.push({ path: key, owner: 'modelgate', kind: 'remove', from: entry.raw, to: null })
+    }
+    for (const [name, keys] of Object.entries(OWNED_SECTIONS)) {
+      const want = (desired.sections && desired.sections[name]) || {}
+      const section = existing.sections && existing.sections[name]
+      if (!section) continue
+      for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(want, key)) continue
+        const entry = section.keys[key]
+        if (entry && entry.present) rows.push({ path: name + '.' + key, owner: 'modelgate', kind: 'remove', from: entry.raw, to: null })
+      }
+    }
+  }
   return rows
+}
+
+// 两模式之间的一事务文本计划：先把旧的 owned 字段按基线恢复，再合并新的 owned 字段。
+// 未管理行逐字节保留（由 buildOwnedRestore / mergeOwnedFields 的 unmanagedFingerprint 自证）。
+export function planModeTransition (opts = {}) {
+  const baseText = String(opts.baseText == null ? '' : opts.baseText)
+  const currentText = String(opts.currentText == null ? '' : opts.currentText)
+  const baseExists = opts.baseExists === true
+  const fromDesired = opts.fromDesired || {}
+  const toDesired = opts.toDesired || {}
+  const fromEmpty = !(fromDesired.topLevel && Object.keys(fromDesired.topLevel).length) &&
+    !(fromDesired.sections && Object.keys(fromDesired.sections).length)
+  // 从 official（无自有字段）进入时无需先恢复，直接在当前字节上合并目标字段。
+  const restore = fromEmpty
+    ? { ok: true, text: currentText, changed: false, changedKeys: [], removeFile: false, conflicts: [] }
+    : buildOwnedRestore({ baseText, currentText, baseExists, desired: fromDesired })
+  if (!restore.ok) {
+    return { ok: false, text: null, rows: [], restore, conflicts: restore.conflicts }
+  }
+  let merged
+  try {
+    merged = mergeOwnedFields(restore.text, toDesired)
+  } catch (e) {
+    return {
+      ok: false, text: null, rows: [], restore,
+      conflicts: [{ path: '$config', reason: e && e.code ? e.code : 'merge_failed', message: e && e.message ? e.message : null }],
+    }
+  }
+  const existing = readOwnedFields(currentText)
+  const rows = ownedRows(existing, toDesired, { includeRemovals: true })
+  const conflicts = []
+  if (unmanagedFingerprint(currentText) !== unmanagedFingerprint(merged.text)) {
+    conflicts.push({ path: '$config', reason: 'unmanaged_lines_would_change' })
+  }
+  if (conflicts.length) return { ok: false, text: null, rows, restore, conflicts }
+  return { ok: true, text: merged.text, rows, restore, conflicts: [] }
 }
 
 function catalogSummary (catalogPath, model, opts = {}) {
@@ -1083,6 +1253,7 @@ function blockedFromConfigError (error) {
 export function preview (opts = {}) {
   const paths = resolveDesktopPaths(opts)
   const gatewayBaseUrl = String(opts.baseUrl || process.env.MG_DESKTOP_GATEWAY || DEFAULT_GATEWAY_BASE_URL).replace(/\/+$/, '')
+  const modeParams = resolveModeParams(opts)
   const guard = managedProviderGuard(opts)
   if (guard) {
     let snap = { exists: false, size: 0, sha256: '', mtimeMs: 0 }
@@ -1109,7 +1280,7 @@ export function preview (opts = {}) {
       consentToken: null,
       firstRun: false,
       alreadyAggregated: false,
-      catalog: catalogSummary(opts.catalogPath, opts.model, opts),
+      catalog: catalogSummary(opts.catalogPath, modeParams.model, opts),
       nativeCompaction: {
         mode: 'managed-provider',
         providerId: (opts.managedProvider && opts.managedProvider.id) || MANAGED_PROVIDER_ID,
@@ -1122,8 +1293,8 @@ export function preview (opts = {}) {
       },
     }
   }
-  const desired = buildDesired({ baseUrl: gatewayBaseUrl, model: opts.model, catalogPath: opts.catalogPath, features: opts.features, managedProvider: opts.managedProvider, managedAgent: opts.managedAgent, agentReasoningEffort: opts.agentReasoningEffort })
-  const childPlan = planManagedAgentChild(paths, opts, desired, (loadState(paths) || {}).agentChild || null)
+  const desired = buildDesired({ baseUrl: gatewayBaseUrl, model: modeParams.model, catalogPath: opts.catalogPath, features: opts.features, managedProvider: modeParams.provider, managedAgent: opts.managedAgent, agentModel: modeParams.childModel, agentReasoningEffort: opts.agentReasoningEffort })
+  const childPlan = planManagedAgentChild(paths, Object.assign({}, opts, { model: modeParams.childModel }), desired, (loadState(paths) || {}).agentChild || null)
   let before
   let beforeText = ''
   let existing
@@ -1132,7 +1303,7 @@ export function preview (opts = {}) {
     before = snapshotConfigFile(paths.configPath)
     beforeText = before.exists ? readFileSync(paths.configPath, 'utf8') : ''
     existing = readOwnedFields(beforeText)
-    merged = mergeOwnedFields(beforeText, desired)
+    merged = computeModeMerge(paths, beforeText, desired, modeParams.toMode)
   } catch (error) {
     const blocked = blockedFromConfigError(error)
     const snap = { exists: false, size: 0, sha256: '', mtimeMs: 0 }
@@ -1158,10 +1329,12 @@ export function preview (opts = {}) {
       firstRun: false,
       alreadyAggregated: false,
       agentChild: childPlan,
-      catalog: catalogSummary(opts.catalogPath, opts.model, opts),
+      catalog: catalogSummary(opts.catalogPath, modeParams.model, opts),
     }
   }
-  const rows = ownedRows(existing, desired)
+  const rows = ownedRows(existing, desired, { includeRemovals: true })
+  const previewFromMode = classifyConfigState({ configPath: paths.configPath, baseUrl: gatewayBaseUrl }).mode
+  const previewToMode = modeParams.toMode
   const afterText = merged.text
   const afterSha = sha256Hex(Buffer.from(afterText, 'utf8'))
   const expectedSha = before.exists ? before.sha256 : ''
@@ -1183,7 +1356,7 @@ export function preview (opts = {}) {
   if (!opts.managedProvider && existing.sections && existing.sections['model_providers.' + MANAGED_PROVIDER_ID] && existing.sections['model_providers.' + MANAGED_PROVIDER_ID].present) {
     warnings.push('检测到 [model_providers.' + MANAGED_PROVIDER_ID + ']（早期原型或自定义段）：默认仍使用内置 openai 身份，本次不修改该段；如需 provider 级原生压缩声明（remote_compaction）请显式启用 Managed Provider 模式。')
   }
-  const catalog = catalogSummary(opts.catalogPath, opts.model, opts)
+  const catalog = catalogSummary(opts.catalogPath, modeParams.model, opts)
   if (!String(opts.catalogPath || '').trim()) blocked.push({ code: 'catalog_path_required', message: '必须先由网关生成聚合模型目录（model_catalog_json 绝对路径），否则客户端会回落到不完整目录。' })
   else if (!catalog.ok && catalog.state !== 'missing_file') warnings.push('目录当前不可用（' + catalog.state + '）：' + catalog.reason)
   if (childPlan.conflict) {
@@ -1198,7 +1371,10 @@ export function preview (opts = {}) {
     contract: DESKTOP_CONTRACT,
     ok: blocked.length === 0,
     state: blocked.length ? 'blocked' : (rows.every((r) => r.kind === 'same') ? 'already_aggregated' : 'ready'),
-    mode: classifyConfigState({ configPath: paths.configPath, baseUrl: gatewayBaseUrl }).mode,
+    mode: previewFromMode,
+    fromMode: previewFromMode,
+    toMode: previewToMode,
+    modeTarget: modeParams.target,
     configPath: paths.configPath,
     before: { exists: before.exists, size: before.size, sha256: before.sha256, mtimeMs: before.mtimeMs },
     expectedSha,
@@ -1211,7 +1387,8 @@ export function preview (opts = {}) {
     warnings,
     preserved,
     consentRequired,
-    consentToken: blocked.length ? null : agentConsentToken(paths.configPath, expectedSha, afterSha, childPlan),
+    consentToken: blocked.length ? null : agentConsentToken(paths.configPath, expectedSha, afterSha, childPlan,
+      consentBindingFromOpts(opts, classifyConfigState({ configPath: paths.configPath, baseUrl: gatewayBaseUrl }).mode)),
     firstRun: !before.exists,
     alreadyAggregated: rows.every((r) => r.kind === 'same'),
     agentChild: {
@@ -1267,7 +1444,7 @@ async function verifyAll (opts, paths, desired, expectedAfterSha) {
   verification.config = { ok: true, sha256: snap.sha256, size: snap.size, owned: Object.keys(desired.topLevel || {}) }
 
   // 2) 目录校验：存在、可解析、包含目标模型、未超上限。
-  const catalog = catalogSummary(opts.catalogPath, opts.model, opts)
+  const catalog = catalogSummary(opts.catalogPath, opts.effectiveModel || opts.model, opts)
   if (!catalog.ok) {
     verification.catalog = catalog
     const code = catalog.state === 'overflow' ? 'catalog_overflow' : 'catalog_verify_failed'
@@ -1302,6 +1479,9 @@ export async function activate (opts = {}) {
     const guard = managedProviderGuard(opts)
     if (guard) throw new DesktopError(guard.code, guard.message, guard.evidence, 422)
     const recovery = recoverInterruptedApply({ configPath: paths.configPath })
+    // 模式目标解析：preview 与 activate 共用同一解析，保证"看到什么就写什么"。
+    const { toMode, model: effectiveModel, childModel: effectiveChild, provider: effectiveProvider } = resolveModeParams(opts)
+    const fromMode = classifyConfigState({ configPath: paths.configPath, baseUrl: gatewayBaseUrl }).mode
     const before = snapshotConfigFile(paths.configPath)
     const beforeText = before.exists ? readFileSync(paths.configPath, 'utf8') : ''
     if (opts.expectedSha !== undefined && opts.expectedSha !== null && String(opts.expectedSha) !== String(before.exists ? before.sha256 : '')) {
@@ -1311,10 +1491,10 @@ export async function activate (opts = {}) {
     }
     let desired
     try {
-      desired = buildDesired({ baseUrl: gatewayBaseUrl, model: opts.model, catalogPath: opts.catalogPath, features: opts.features, managedProvider: opts.managedProvider, managedAgent: opts.managedAgent, agentReasoningEffort: opts.agentReasoningEffort })
+      desired = buildDesired({ baseUrl: gatewayBaseUrl, model: effectiveModel, catalogPath: opts.catalogPath, features: opts.features, managedProvider: effectiveProvider, managedAgent: opts.managedAgent, agentModel: effectiveChild, agentReasoningEffort: opts.agentReasoningEffort })
     } catch (e) { throw asDesktopError(e, 'invalid_desired') }
     // MG-FIX-P1-05：用户自行改过 go-deepseek.toml 时在任何写入之前 409，绝不覆盖。
-    const childPlan = planManagedAgentChild(paths, opts, desired, (loadState(paths) || {}).agentChild || null)
+    const childPlan = planManagedAgentChild(paths, Object.assign({}, opts, { model: effectiveChild }), desired, (loadState(paths) || {}).agentChild || null)
     if (childPlan.conflict) {
       const conflict = childPlan.conflict
       throw new DesktopError(conflict.reason,
@@ -1323,8 +1503,12 @@ export async function activate (opts = {}) {
     }
     let merged
     try {
-      merged = mergeOwnedFields(beforeText, desired)
-    } catch (e) { throw asDesktopError(e, 'config_unsupported') }
+      merged = computeModeMerge(paths, beforeText, desired, toMode)
+    } catch (e) {
+      if (e instanceof DesktopError) throw e
+      throw asDesktopError(e, 'config_unsupported')
+    }
+    const transitionState = merged.transitionState
     const preserved = summarizePreserved(beforeText)
     if (preserved.reservedOverrides.length) {
       throw new DesktopError('reserved_provider_override',
@@ -1336,7 +1520,8 @@ export async function activate (opts = {}) {
     const noChange = merged.changed.length === 0 && before.exists
     const childNeedsWrite = childPlan.action !== 'same' && childPlan.action !== 'none'
     if (!noChange || childNeedsWrite) {
-      const wantToken = agentConsentToken(paths.configPath, before.exists ? before.sha256 : '', afterSha, childPlan)
+      const wantToken = agentConsentToken(paths.configPath, before.exists ? before.sha256 : '', afterSha, childPlan,
+        consentBindingFromOpts(opts, classifyConfigState({ configPath: paths.configPath, baseUrl: gatewayBaseUrl }).mode))
       if (!opts.consentToken || String(opts.consentToken) !== wantToken) {
         throw new DesktopError('consent_required', '写入前必须显式确认：请先调用预览并把 consentToken 与 expectedSha 一起回传。', {
           expectedSha: before.exists ? before.sha256 : '', afterSha, consentTokenHint: wantToken,
@@ -1351,11 +1536,15 @@ export async function activate (opts = {}) {
     }
     // 回滚基线不可重置（2026-11-16 审计 P1-4）：再次激活（换模型/用户改过 owned 键）时，
     // before/backup 必须继承首次接入前的原始基线，否则退出会"恢复"出仍聚合的配置。
-    const previousState = loadState(paths)
-    const keepBaseline = !!(previousState && previousState.mode === 'aggregated' && previousState.before)
+    const previousState = transitionState
+    const keepBaseline = !!(previousState && (previousState.mode === 'aggregated' || previousState.mode === 'route') && previousState.before)
     const baselineBefore = keepBaseline ? previousState.before : stateBefore
     const baselineBeforeSha = keepBaseline ? previousState.beforeSha : stateBefore.sha256
     let baselineBackupPath = keepBaseline ? previousState.backupPath || null : null
+    // previous 记录紧邻的上一次模式，支撑回滚到 previous；不清空原始 before/backupPath。
+    const previousRecord = previousState
+      ? { mode: previousState.mode || fromMode, sha: previousState.appliedSha || stateBefore.sha256, desired: previousState.desired || null, backupPath: previousState.backupPath || null }
+      : { mode: fromMode, sha: stateBefore.sha256, desired: null, backupPath: null }
     if (keepBaseline && baselineBackupPath && baselineBeforeSha) {
       // 稳定化原始备份：commit 会把 .bak 轮换成 .bak.prev（两代后丢失）。在写入前把与基线
       // sha 一致的原始字节复制到 .bak.baseline，回滚锚点永不随轮转漂移。
@@ -1371,10 +1560,10 @@ export async function activate (opts = {}) {
       } catch { /* 原始备份不可读时保持原记录，回滚仍可按 before 记录诊断 */ }
     }
     if (noChange) {
-      const verification = await verifyAll(Object.assign({}, opts, { baseUrl: gatewayBaseUrl }), paths, desired, afterSha)
+      const verification = await verifyAll(Object.assign({}, opts, { baseUrl: gatewayBaseUrl, effectiveModel }), paths, desired, afterSha)
       // 幂等：保留第一次接入时记录的 before/backup，绝不用"聚合后的文件"覆盖回滚基线。
       const previous = loadState(paths)
-      const keepBaseline = previous && previous.mode === 'aggregated' && previous.before
+      const keepBaseline = previous && (previous.mode === 'aggregated' || previous.mode === 'route') && previous.before
       const appliedAt = keepBaseline && previous.appliedAt ? Number(previous.appliedAt) : Date.now()
       // 幂等激活也要补齐托管子代理文件（如被删），但不得覆盖既有基线记录。
       let childRecord = previous && previous.agentChild ? previous.agentChild : null
@@ -1385,7 +1574,7 @@ export async function activate (opts = {}) {
         childRecord = agentChildRecord(childPlan, null, true)
       }
       saveState(paths, {
-        mode: 'aggregated',
+        mode: toMode,
         before: keepBaseline ? previous.before : stateBefore,
         applied: { sha256: afterSha, size: Buffer.byteLength(afterText, 'utf8') },
         appliedSha: afterSha,
@@ -1393,12 +1582,17 @@ export async function activate (opts = {}) {
         backupPath: keepBaseline ? previous.backupPath || null : null,
         desired,
         agentChild: childRecord,
+        previous: previousRecord,
+        fromMode,
+        toMode,
+        parentModel: opts.parentModel || effectiveModel,
+        childModel: effectiveChild,
         appliedAt,
         lastApply: { ok: true, idempotent: true, at: Date.now(), verification: summarizeVerification(verification), agentChild: childRecord ? { action: childPlan.action } : null },
       })
       const desktop = resolveDesktopForProbe(opts)
       const clientRuntime = resolveClientRuntime(opts, { found: desktop.found, path: desktop.path })
-      const restart = computeRestartState({ mode: 'aggregated', appliedAt, client: clientRuntime })
+      const restart = computeRestartState({ mode: toMode, appliedAt, client: clientRuntime })
       return {
         ok: true,
         changed: false,
@@ -1407,13 +1601,15 @@ export async function activate (opts = {}) {
         backupPath: keepBaseline ? previous.backupPath || null : null,
         verification,
         recovery,
-        mode: 'aggregated',
+        mode: toMode,
         agentChild: childRecord ? { action: childPlan.action, path: childPlan.path, managed: true } : null,
         clientRuntime,
         restart,
         needsRestart: restart.needed,
       }
     }
+    const fromState = { mode: fromMode, sha: stateBefore.sha256, desired: previousState ? previousState.desired || null : null, backupPath: previousState ? previousState.backupPath || null : null }
+    const toState = { mode: toMode, sha: afterSha, model: effectiveModel, childModel: effectiveChild }
     const journalBase = {
       schema: JOURNAL_SCHEMA,
       phase: 'applying',
@@ -1423,6 +1619,11 @@ export async function activate (opts = {}) {
       applied: { sha256: afterSha, size: Buffer.byteLength(afterText, 'utf8') },
       backupPath: null,
       desired,
+      fromMode,
+      toMode,
+      fromState,
+      toState,
+      previous: previousRecord,
     }
     writeAtomicJson(paths.journalPath, journalBase, 0o600)
     let committed
@@ -1449,19 +1650,22 @@ export async function activate (opts = {}) {
     if (typeof opts.hooks?.afterWrite === 'function') await opts.hooks.afterWrite({ configPath: paths.configPath, afterSha })
     let verification
     try {
-      verification = await verifyAll(Object.assign({}, opts, { baseUrl: gatewayBaseUrl }), paths, desired, afterSha)
+      verification = await verifyAll(Object.assign({}, opts, { baseUrl: gatewayBaseUrl, effectiveModel }), paths, desired, afterSha)
     } catch (error) {
       const failure = asDesktopError(error, 'verification_failed')
       const restored = restoreIfOurs(paths, journalBase)
       try { unlinkSync(paths.journalPath) } catch {}
       saveState(paths, {
-        mode: restored.ok ? 'official' : 'unknown',
+        mode: restored.ok ? fromMode : 'unknown',
         before: stateBefore,
         applied: null,
         appliedSha: null,
         beforeSha: stateBefore.sha256,
         backupPath: journalBase.backupPath,
         desired: null,
+        previous: previousRecord,
+        fromMode,
+        toMode,
         appliedAt: null,
         lastApply: { ok: false, code: failure.code, at: Date.now(), restored: restored.ok, restoredSha: restored.sha || null },
       })
@@ -1486,7 +1690,7 @@ export async function activate (opts = {}) {
         try { unlinkSync(paths.journalPath) } catch {}
         const ce = childError instanceof DesktopError ? childError : null
         saveState(paths, {
-          mode: restored.ok ? 'official' : 'unknown',
+          mode: restored.ok ? fromMode : 'unknown',
           before: stateBefore,
           applied: null,
           appliedSha: null,
@@ -1494,6 +1698,9 @@ export async function activate (opts = {}) {
           backupPath: journalBase.backupPath,
           desired: null,
           agentChild: null,
+          previous: previousRecord,
+          fromMode,
+          toMode,
           appliedAt: null,
           lastApply: { ok: false, code: ce ? ce.code : 'agent_child_write_failed', at: Date.now(), restored: restored.ok },
         })
@@ -1509,7 +1716,7 @@ export async function activate (opts = {}) {
     writeAtomicJson(paths.journalPath, journalBase, 0o600)
     const appliedAt = Date.now()
     saveState(paths, {
-      mode: 'aggregated',
+      mode: toMode,
       before: baselineBefore,
       applied: { sha256: afterSha, size: Buffer.byteLength(afterText, 'utf8') },
       appliedSha: afterSha,
@@ -1517,13 +1724,18 @@ export async function activate (opts = {}) {
       backupPath: baselineBackupPath || journalBase.backupPath,
       desired,
       agentChild: childRecord,
+      previous: previousRecord,
+      fromMode,
+      toMode,
+      parentModel: opts.parentModel || effectiveModel,
+      childModel: effectiveChild,
       appliedAt,
       lastApply: { ok: true, at: appliedAt, verification: summarizeVerification(verification), agentChild: childRecord ? { action: childPlan.action } : null },
     })
     try { unlinkSync(paths.journalPath) } catch {}
     const desktop = resolveDesktopForProbe(opts)
     const clientRuntime = resolveClientRuntime(opts, { found: desktop.found, path: desktop.path })
-    const restart = computeRestartState({ mode: 'aggregated', appliedAt, client: clientRuntime })
+    const restart = computeRestartState({ mode: toMode, appliedAt, client: clientRuntime })
     return {
       ok: true,
       changed: true,
@@ -1532,7 +1744,7 @@ export async function activate (opts = {}) {
       backupPath: baselineBackupPath || journalBase.backupPath,
       verification,
       recovery,
-      mode: 'aggregated',
+      mode: toMode,
       agentChild: childRecord ? { action: childPlan.action, path: childPlan.path, managed: true } : null,
       clientRuntime,
       restart,
@@ -1748,8 +1960,8 @@ export async function deactivate (opts = {}) {
   try {
     const recovery = recoverInterruptedApply({ configPath: paths.configPath })
     const state = loadState(paths)
-    if (!state || state.mode !== 'aggregated' || !state.before) {
-      throw new DesktopError('not_aggregated', '当前不是由 ModelGate 管理的聚合配置，没有可回滚的备份。', { mode: state ? state.mode : null }, 409)
+    if (!state || (state.mode !== 'aggregated' && state.mode !== 'route') || !state.before) {
+      throw new DesktopError('not_aggregated', '当前不是由 ModelGate 管理的路由/聚合配置，没有可回滚的备份。', { mode: state ? state.mode : null }, 409)
     }
     if (!state.desired || (typeof state.desired !== 'object')) {
       throw new DesktopError('state_incomplete', '接入状态缺少 ModelGate 写入的字段记录，无法只撤销自有键；未做任何写入。', { mode: state.mode }, 409)
@@ -1757,7 +1969,13 @@ export async function deactivate (opts = {}) {
     const current = snapshotConfigFile(paths.configPath)
     const currentSha = current.exists ? current.sha256 : ''
     const currentText = current.exists ? readFileSync(paths.configPath, 'utf8') : ''
-    const baseText = state.before.exists ? readBackupText(state, paths) : ''
+    // 备份损坏且已对账时不再 409：退化为"只撤销自有键"，基线视为空（用户其它行仍逐字节保留）。
+    let baseText = ''
+    if (state.before.exists) {
+      try { baseText = readBackupText(state, paths) } catch (e) {
+        if (!(state.reconciled && state.reconciled.reason === 'backup_sha_mismatch')) throw e
+      }
+    }
     let oursText = baseText
     try { oursText = mergeOwnedFields(baseText, state.desired).text } catch { oursText = null }
     const conflictDetail = (extra) => {
@@ -1774,7 +1992,8 @@ export async function deactivate (opts = {}) {
     //     用户后来新增/修改的其它配置逐字节保留，不再因为无关编辑而永久卡在 409。
     //  3) 用户改过/删除自有键 → 409 + 三方差异，绝不覆盖。
     const stateApplied = String(state.appliedSha || '')
-    const fullRestore = current.exists && currentSha === stateApplied
+    const restoreViaOwnedOnly = !!(state.reconciled && state.reconciled.reason === 'backup_sha_mismatch')
+    const fullRestore = current.exists && currentSha === stateApplied && !restoreViaOwnedOnly
     // MG-FIX-P1-05：子代理文件的冲突/备份问题必须在任何 config.toml 写入之前判定，
     // 保证"用户改过 go-deepseek.toml → 409 且零写入"。
     const childRestore = planManagedAgentChildRestore(paths, state)
@@ -1818,6 +2037,10 @@ export async function deactivate (opts = {}) {
         backupPath: state.backupPath || null,
         desired: null,
         agentChild: null,
+        previous: { mode: state.mode, sha: state.appliedSha || currentSha, desired: state.desired, backupPath: state.backupPath || null },
+        fromMode: state.mode,
+        toMode: 'official',
+        exitedAt: Date.now(),
         appliedAt: null,
         lastApply: { ok: true, action: 'deactivate', scope: 'byte-exact', at: Date.now(), restoredSha: result.sha, agentChild: childApplied.handled ? { action: childRestore.action } : null },
       })
@@ -1853,6 +2076,10 @@ export async function deactivate (opts = {}) {
         backupPath: state.backupPath || null,
         desired: null,
         agentChild: null,
+        previous: { mode: state.mode, sha: state.appliedSha || currentSha, desired: state.desired, backupPath: state.backupPath || null },
+        fromMode: state.mode,
+        toMode: 'official',
+        exitedAt: Date.now(),
         appliedAt: null,
         lastApply: { ok: true, action: 'deactivate', scope: 'already-restored', at: Date.now(), preservedUserEdits: true, agentChild: childApplied.handled ? { action: childRestore.action } : null },
       })
@@ -1869,6 +2096,10 @@ export async function deactivate (opts = {}) {
       backupPath: state.backupPath || null,
       desired: null,
       agentChild: null,
+      previous: { mode: state.mode, sha: state.appliedSha || currentSha, desired: state.desired, backupPath: state.backupPath || null },
+      fromMode: state.mode,
+      toMode: 'official',
+      exitedAt: Date.now(),
       appliedAt: null,
       lastApply: {
         ok: true,
@@ -1915,6 +2146,81 @@ function readBackupText (state, paths) {
   }
 }
 
+// —— 本机漂移对账：只写 state，不写 config.toml ——
+// 场景：state.appliedSha 与当前文件不符、或 .bak 与 beforeSha 不符。
+// 对账后 appliedSha 指向当前字节（备份可用时走字节级回滚；备份损坏时标记 reconciled，
+// deactivate 退化为"只撤销自有键"，不再因无关的备份漂移永久 409）。
+export function previewReconcile (opts = {}) {
+  const paths = resolveDesktopPaths(opts)
+  const state = loadState(paths)
+  let current = null
+  try { current = snapshotConfigFile(paths.configPath) } catch { current = null }
+  const classification = classifyConfigState({ configPath: paths.configPath, baseUrl: opts.baseUrl || DEFAULT_GATEWAY_BASE_URL })
+  const currentSha = current && current.exists ? current.sha256 : ''
+  let backupSha = null
+  let backupReadable = false
+  if (state && state.backupPath) {
+    try {
+      backupSha = sha256Hex(readFileSync(state.backupPath))
+      backupReadable = true
+    } catch { backupReadable = false }
+  }
+  const appliedMismatch = !!(state && state.appliedSha && current.exists && current.sha256 !== state.appliedSha)
+  const backupMismatch = !!(state && state.beforeSha && backupReadable && backupSha !== state.beforeSha) ||
+    !!(state && state.before && state.before.exists && state.backupPath && !backupReadable)
+  const reasons = []
+  if (appliedMismatch) reasons.push('applied_sha_mismatch')
+  if (backupMismatch) reasons.push('backup_sha_mismatch')
+  return {
+    contract: DESKTOP_CONTRACT,
+    ok: true,
+    needsReconcile: appliedMismatch || backupMismatch,
+    mode: classification.mode,
+    drifted: classification.drifted === true,
+    currentSha,
+    appliedSha: state ? state.appliedSha || null : null,
+    beforeSha: state ? state.beforeSha || null : null,
+    backupPath: state ? state.backupPath || null : null,
+    backupSha,
+    reasons,
+    plan: {
+      mode: classification.mode,
+      appliedSha: current.exists ? currentSha : null,
+      applied: current.exists ? { sha256: currentSha, size: current.size } : null,
+      beforeSha: backupMismatch ? null : (state ? state.beforeSha || null : null),
+      backupPath: backupMismatch ? null : (state ? state.backupPath || null : null),
+      reconciled: backupMismatch ? { reason: 'backup_sha_mismatch', at: Date.now() } : null,
+    },
+  }
+}
+
+export function reconcileState (opts = {}) {
+  const paths = resolveDesktopPaths(opts)
+  const preview = previewReconcile(opts)
+  const state = loadState(paths)
+  if (!preview.needsReconcile || !state) {
+    return { ok: true, changed: false, preview, stateBackupPath: null }
+  }
+  // 写前备份 state 文件：失败也不修改原 state。
+  const stateBackupPath = paths.statePath + '.bak'
+  try { writeAtomicJson(stateBackupPath, state, 0o600) } catch (e) {
+    throw new DesktopError('state_backup_failed', '对账前 state 备份失败，未做任何写入：' + (e && e.message ? e.message : '未知错误'), null, 500)
+  }
+  const next = Object.assign({}, state, {
+    appliedSha: preview.plan.appliedSha,
+    applied: preview.plan.applied,
+    beforeSha: preview.plan.beforeSha,
+    backupPath: preview.plan.backupPath,
+    reconciled: preview.plan.reconciled,
+    reconciledAt: Date.now(),
+  })
+  if (preview.plan.reconciled) {
+    next.lastApply = Object.assign({}, state.lastApply || {}, { reconciled: true })
+  }
+  saveState(paths, next)
+  return { ok: true, changed: true, preview, stateBackupPath, state: next }
+}
+
 // —— 状态 ——
 export function status (opts = {}) {
   const paths = resolveDesktopPaths(opts)
@@ -1932,14 +2238,21 @@ export function status (opts = {}) {
   const fresh = loadState(paths)
   const desktop = resolveDesktopForProbe(opts)
   const clientRuntime = resolveClientRuntime(opts, { found: desktop.found, path: desktop.path })
-  const appliedAt = fresh && fresh.mode === 'aggregated' && Number(fresh.appliedAt) > 0 ? Number(fresh.appliedAt) : null
-  const restart = computeRestartState({ mode: classification.mode, appliedAt, client: clientRuntime })
+  const appliedAt = fresh && (fresh.mode === 'aggregated' || fresh.mode === 'route') && Number(fresh.appliedAt) > 0 ? Number(fresh.appliedAt) : null
+  const restart = computeRestartState({
+    mode: classification.mode,
+    appliedAt,
+    client: clientRuntime,
+    exitedAt: fresh ? fresh.exitedAt || null : null,
+    lastAction: fresh && fresh.lastApply ? fresh.lastApply.action || null : null,
+  })
   const nativeCompaction = nativeCompactionSummary(opts, classification)
   return {
     contract: DESKTOP_CONTRACT,
     ok: true,
     mode: classification.mode,
     reason: classification.reason,
+    drifted: classification.drifted === true,
     configPath: paths.configPath,
     config: { exists: current.exists, sha256: current.exists ? current.sha256 : '', size: current.size, mtimeMs: current.mtimeMs },
     backup: backupSummary(paths, fresh, current),

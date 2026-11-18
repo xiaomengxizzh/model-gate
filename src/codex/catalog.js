@@ -60,7 +60,10 @@ export const KNOWN_MODEL_FIELDS = Object.freeze([
   'auto_compact_token_limit',
 ])
 
-export const OFFICIAL_PROVIDER_IDS = Object.freeze(['openai', 'chatgpt', 'codex', 'openai-official', 'openai-codex'])
+// chatgptplan 是官方 ChatGPT 套餐身份（gpt-* 官方模型），必须走 passthrough，
+// 否则这些官方 slug 会被当成第三方模型并以 official_slug_reuse 落入隔离目录。
+// 仅影响目录归属判定；不改 provider 的 baseUrl / 鉴权。
+export const OFFICIAL_PROVIDER_IDS = Object.freeze(['openai', 'chatgpt', 'codex', 'openai-official', 'openai-codex', 'chatgptplan'])
 
 export const CODEX_OVERRIDE_FIELDS = Object.freeze([
   'displayName', 'description', 'contextWindow', 'maxContextWindow', 'modalities',
@@ -988,27 +991,49 @@ export function buildCatalog({ base, config = null, options = {} }) {
   const { selected, skipped, providerNames } = selectThirdPartyModels(config, options)
   const baseModels = officialCatalog.models
   const seenSlugs = new Map()
+  // 目录隔离（opt-in）：单个第三方模型校验失败时，默认仍整体 fail-closed；
+  // 显式 skipInvalidModels=true 时记录到 invalidModels 并跳过该模型，其余模型照常构建。
+  const invalidModels = []
+  const skipInvalid = options.skipInvalidModels === true
+  const onInvalidModel = typeof options.onInvalidModel === 'function' ? options.onInvalidModel : null
   for (const item of selected) {
-    if (officialSlugs.has(item.name)) {
-      throw new CatalogError('official_slug_reuse',
-        'models.' + item.name + ' 与官方模型同名；聚合模型不得复用/遮蔽官方模型 ID（D1/D2 稳定身份约束）')
+    const warnMark = warnings.length
+    try {
+      if (officialSlugs.has(item.name)) {
+        throw new CatalogError('official_slug_reuse',
+          'models.' + item.name + ' 与官方模型同名；聚合模型不得复用/遮蔽官方模型 ID（D1/D2 稳定身份约束）')
+      }
+      const built = buildThirdPartyEntry(item.name, item.entry, template, {
+        ...options,
+        baseModels,
+        providerNames,
+        nextPriority,
+      }, warnings)
+      if (officialSlugs.has(built.model.slug)) {
+        throw new CatalogError('official_slug_reuse', '生成的聚合 ID ' + built.model.slug + ' 与官方 slug 冲突')
+      }
+      if (seenSlugs.has(built.model.slug)) {
+        throw new CatalogError('slug_collision',
+          '聚合 ID 冲突：models.' + seenSlugs.get(built.model.slug) + ' 与 models.' + item.name + ' 映射到同一 ID ' + built.model.slug,
+          { slug: built.model.slug })
+      }
+      seenSlugs.set(built.model.slug, item.name)
+      thirdParty.push(built)
+    } catch (error) {
+      // 失败模型的中间 warnings 也要回滚，避免把被隔离模型的状态泄漏进目录元数据。
+      warnings.length = warnMark
+      if (!skipInvalid || !(error instanceof CatalogError)) throw error
+      const record = {
+        model: item.name,
+        provider: (item.entry && item.entry.provider) || (error.details && error.details.provider) || null,
+        code: error.code,
+        message: error.message,
+      }
+      invalidModels.push(record)
+      if (onInvalidModel) {
+        try { onInvalidModel(record) } catch { /* 回调不得破坏目录构建 */ }
+      }
     }
-    const built = buildThirdPartyEntry(item.name, item.entry, template, {
-      ...options,
-      baseModels,
-      providerNames,
-      nextPriority,
-    }, warnings)
-    if (officialSlugs.has(built.model.slug)) {
-      throw new CatalogError('official_slug_reuse', '生成的聚合 ID ' + built.model.slug + ' 与官方 slug 冲突')
-    }
-    if (seenSlugs.has(built.model.slug)) {
-      throw new CatalogError('slug_collision',
-        '聚合 ID 冲突：models.' + seenSlugs.get(built.model.slug) + ' 与 models.' + item.name + ' 映射到同一 ID ' + built.model.slug,
-        { slug: built.model.slug })
-    }
-    seenSlugs.set(built.model.slug, item.name)
-    thirdParty.push(built)
   }
 
   const catalog = { models: [...officialCatalog.models, ...thirdParty.map(t => t.model)] }
@@ -1064,7 +1089,7 @@ export function buildCatalog({ base, config = null, options = {} }) {
     bindings,
     warnings,
   }
-  return { catalog, meta }
+  return { catalog, meta, invalidModels }
 }
 
 // ---------------------------------------------------------------------------

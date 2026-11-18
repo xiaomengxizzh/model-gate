@@ -114,7 +114,7 @@ test('重启提示：客户端未运行时要求重开；探测失败时标未�
   assert.equal(unverified.clientRuntime.source, 'probe_failed')
 })
 
-test('重启提示：退出聚合后不再要求重启', async (t) => {
+test('重启提示：退出到 official 后仍需重启以加载原始配置', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
   const p = preview(f.opts)
@@ -126,6 +126,6 @@ test('重启提示：退出聚合后不再要求重启', async (t) => {
   await deactivate({ configPath: f.configPath, expectedSha: activated.sha })
   const s = status({ configPath: f.configPath, clientProbe: () => ({ running: true, startedAt: Date.now(), source: 'injected' }) })
   assert.equal(s.mode, 'official')
-  assert.equal(s.needsRestart, false)
-  assert.equal(s.restart.reason, 'not_aggregated')
+  assert.equal(s.needsRestart, true)
+  assert.equal(s.restart.reason, 'exited_to_official')
 })

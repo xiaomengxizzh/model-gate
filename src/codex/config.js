@@ -29,7 +29,7 @@ export const MANAGED_PROVIDER_ID = 'modelgate'
 // 不是猜测；requires_openai_auth 同样由该版本配置解析器接受。
 export const REMOTE_COMPACTION_LITERALS = Object.freeze(['unsupported', 'v2'])
 export const MANAGED_PROVIDER_SECTIONS = Object.freeze({
-  'model_providers.modelgate': Object.freeze(['name', 'base_url', 'wire_api', 'requires_openai_auth']),
+  'model_providers.modelgate': Object.freeze(['name', 'base_url', 'wire_api', 'requires_openai_auth', 'supports_websockets']),
   'model_providers.modelgate.capabilities': Object.freeze(['remote_compaction']),
 })
 // MG-FIX-P1-05：Codex 原生命名子代理（GPT 父 → Go DeepSeek 子）由 ModelGate 托管。
@@ -1174,13 +1174,19 @@ export function normalizeGatewayBaseUrl (raw) {
   return u.origin + path
 }
 
-// Managed Provider 模式（默认关闭）：
+// Managed Provider 段（路由模式/聚合模式共用；回环信任、无客户端 Key）：
 //   model_provider = "modelgate"
-//   [model_providers.modelgate] name/base_url/wire_api/requires_openai_auth
-//   [model_providers.modelgate.capabilities] remote_compaction = "unsupported"
-// 目的：让 Codex 对 Go DeepSeek 走它自己的本地自动压缩，不把 GPT 侧 opaque compaction item 发出去。
-// 该模式会切换 provider 身份；ChatGPT 登录复用（requires_openai_auth）尚未经原版 Desktop 真机验收，
-// 因此只能由调用方显式请求，默认仍使用内置 openai 身份（内置身份无法声明 provider capability）。
+//   [model_providers.modelgate]
+//     name = "ModelGate"
+//     base_url = "http://127.0.0.1:<port>/v1"
+//     wire_api = "responses"
+//     requires_openai_auth = false
+//     supports_websockets = false
+//   [model_providers.modelgate.capabilities]
+//     remote_compaction = "unsupported"
+// 安全约束：绝不写 env_key / experimental_bearer_token / 任何字面量 token；
+// 认证由本机回环信任承担（网关只监听 127.0.0.1，且由本机进程访问）。
+// 该模式会切换 provider 身份，只能由调用方显式请求（mode=route/aggregated 或显式 managedProvider）。
 export function buildManagedProviderSection (opts = {}) {
   const origin = normalizeGatewayBaseUrl(opts.openaiBaseUrl || opts.gatewayBaseUrl)
   const rawId = String(opts.providerId || MANAGED_PROVIDER_ID).trim()
@@ -1202,15 +1208,17 @@ export function buildManagedProviderSection (opts = {}) {
       'remote_compaction 只接受 ' + REMOTE_COMPACTION_LITERALS.join(' | ') + '（RemoteCompactionSupport 枚举）：' + remote)
   }
   const name = String(opts.name || 'ModelGate').trim() || 'ModelGate'
+  const baseUrl = origin.replace(/\/+$/, '') + '/v1'
   return {
     providerId: rawId,
     remoteCompaction: remote,
     sections: {
       ['model_providers.' + rawId]: {
         name,
-        base_url: origin,
+        base_url: baseUrl,
         wire_api: 'responses',
-        requires_openai_auth: true,
+        requires_openai_auth: false,
+        supports_websockets: false,
       },
       ['model_providers.' + rawId + '.capabilities']: {
         remote_compaction: remote,
@@ -1294,10 +1302,13 @@ export function buildManagedAgentConfig (opts = {}) {
 
 // 把托管子代理片段合并进一个 desired（只补，不覆盖调用方显式传入的 features 键）。
 // 显式 opts.managedAgent === false 可关闭；否则默认开启（普通用户路径零手工 TOML）。
+// 父/子解耦：顶层 model 由 desired.topLevel.model 决定（父），子代理 ([agents.go_deepseek] +
+// go-deepseek.toml) 用 opts.agentModel；未显式给出时回落到 opts.model，保持旧调用方语义不变。
 export function withManagedAgentDesired (desired, opts = {}) {
   if (opts.managedAgent === false) return desired
-  if (!opts.model) return desired
-  const managed = buildManagedAgentConfig({ model: opts.model, reasoningEffort: opts.agentReasoningEffort })
+  const childModel = String(opts.agentModel || opts.model || '').trim()
+  if (!childModel) return desired
+  const managed = buildManagedAgentConfig({ model: childModel, reasoningEffort: opts.agentReasoningEffort })
   const out = {
     topLevel: Object.assign({}, desired && desired.topLevel),
     sections: Object.assign({}, desired && desired.sections),

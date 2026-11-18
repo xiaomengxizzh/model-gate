@@ -81,6 +81,7 @@ export const SUITES = [
   'scripts/test/offline/codex-catalog-coherence.test.mjs',
   'scripts/test/offline/codex-catalog.test.mjs',
   'scripts/test/offline/codex-config.test.mjs',
+  'scripts/test/offline/three-mode-access.test.mjs',
   'scripts/test/offline/codex-control-items.test.mjs',
   'scripts/test/offline/codex-fallback-forward.test.mjs',
   'scripts/test/offline/codex-fallback.test.mjs',

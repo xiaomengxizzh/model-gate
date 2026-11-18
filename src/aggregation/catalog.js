@@ -196,6 +196,7 @@ function buildLayeredCatalog({ base, layers, options }) {
   let aliases = {}
   const warnings = []
   const skipped = []
+  const invalidModels = []
   let templateModel = null
   for (const layer of layers) {
     const config = { providers: { [layer.providerSegment]: { name: layer.name } }, models: layer.models }
@@ -206,6 +207,8 @@ function buildLayeredCatalog({ base, layers, options }) {
     templateModel = built.meta.templateModel
     for (const w of built.meta.warnings) warnings.push(Object.assign({ layer: layer.providerSegment }, w))
     for (const s of built.meta.skipped || []) skipped.push(Object.assign({ layer: layer.providerSegment }, s))
+    // 目录隔离：被跳过的坏模型进入发布诊断，不阻断其余模型发布。
+    for (const inv of built.invalidModels || []) invalidModels.push(Object.assign({ layer: layer.providerSegment }, inv))
   }
   const official = base.models.length
   const total = current.models.length
@@ -217,6 +220,7 @@ function buildLayeredCatalog({ base, layers, options }) {
       officialSlugs: base.models.map((m) => m && m.slug).filter(Boolean).sort(),
       counts: { official, thirdParty: total - official, total },
       skipped,
+      invalidModels,
       models: [],
       bindings,
       warnings,
@@ -422,7 +426,9 @@ export function createAggregatedCatalog(options = {}) {
     // 不可靠），因此投影所有带 multi_agent_version 的官方模型；第三方 mg-* 条目跳过，
     // 不改其 plaintextTools 原生工具声明。projectNativeDelegationBase 不改入参。
     base = projectNativeDelegationBase(base, null)
-    const layered = buildLayeredCatalog({ base, layers: collected.layers, options: opts.buildOptions || {} })
+    // 目录隔离在发布路径同样开启：单个坏模型只进 invalidModels 诊断，不再让整个发布 fail-closed。
+    const buildOptions = Object.assign({ skipInvalidModels: true }, opts.buildOptions || {})
+    const layered = buildLayeredCatalog({ base, layers: collected.layers, options: buildOptions })
     // 显式再过一次零碰撞/目录校验（buildCatalog 内部已做；这里保证聚合层的身份名也参与）。
     const identityConfig = { models: {} }
     for (const layer of collected.layers) {
@@ -493,6 +499,14 @@ export function createAggregatedCatalog(options = {}) {
       },
       ...collected.diagnostics,
     ]
+    if (layered.meta.invalidModels && layered.meta.invalidModels.length) {
+      diagnostics.push({
+        code: 'catalog_invalid_models_isolated',
+        severity: 'warning',
+        message: '部分模型校验失败已隔离，未纳入本次发布（目录仍可用）',
+        invalidModels: layered.meta.invalidModels,
+      })
+    }
     if (layered.meta.warnings.length) {
       const codes = {}
       for (const w of layered.meta.warnings) codes[w.code] = (codes[w.code] || 0) + 1

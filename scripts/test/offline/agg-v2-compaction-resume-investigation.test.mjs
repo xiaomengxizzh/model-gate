@@ -58,7 +58,10 @@ test('managed provider 默认声明 remote_compaction=unsupported 并写到正�
   assert.equal(sec.remoteCompaction, 'unsupported')
   assert.equal(sec.sections['model_providers.modelgate.capabilities'].remote_compaction, 'unsupported')
   assert.equal(sec.sections['model_providers.modelgate'].wire_api, 'responses')
-  assert.equal(sec.sections['model_providers.modelgate'].requires_openai_auth, true)
+  assert.equal(sec.sections['model_providers.modelgate'].base_url, 'http://127.0.0.1:8787/v1')
+  assert.equal(sec.sections['model_providers.modelgate'].requires_openai_auth, false)
+  assert.equal(sec.sections['model_providers.modelgate'].supports_websockets, false)
+  assert.equal('env_key' in sec.sections['model_providers.modelgate'], false)
 })
 
 test('managed provider 拒绝未授权的 remote_compaction 字面量', () => {

@@ -109,7 +109,7 @@ test('契约与所有权声明：只含 D1-A 可写字段，明确拒绝内置 p
   assert.deepEqual(Object.keys(OWNED_SECTIONS), ['features', 'agents.go_deepseek', 'model_providers.modelgate', 'model_providers.modelgate.capabilities'])
   assert.deepEqual([...OWNED_SECTIONS.features].sort(), ['multi_agent', 'multi_agent_v2'])
   assert.deepEqual([...OWNED_SECTIONS['agents.go_deepseek']].sort(), ['config_file', 'description'])
-  assert.deepEqual([...OWNED_SECTIONS['model_providers.modelgate']].sort(), ['base_url', 'name', 'requires_openai_auth', 'wire_api'])
+  assert.deepEqual([...OWNED_SECTIONS['model_providers.modelgate']].sort(), ['base_url', 'name', 'requires_openai_auth', 'supports_websockets', 'wire_api'])
   assert.deepEqual([...OWNED_SECTIONS['model_providers.modelgate.capabilities']], ['remote_compaction'])
   // V2-01：provider 级原生压缩能力只能落在自有 provider 段；内置 openai 的覆盖（含子表）仍被拒绝。
   assert.deepEqual([...RESERVED_OVERRIDE_SECTIONS], ['model_providers.openai', 'model_providers.openai.capabilities'])

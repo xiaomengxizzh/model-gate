@@ -352,9 +352,17 @@ function activationOptions (cfg, body, deps) {
   return opts
 }
 
-async function handleHealth (cfg, deps) {
+async function handleHealth (cfg, deps, ctx) {
   const st = desktopStatus(desktopOpts(cfg))
   const det = desktopDetect(desktopOpts(cfg))
+  // 目录运行时健康：只读本地目录，不触发网络；由入口注入 codexCatalogHealth，缺省时降级为 null。
+  let catalogRuntime = null
+  try {
+    if (ctx && typeof ctx.catalogRuntime === 'function') catalogRuntime = ctx.catalogRuntime()
+    else if (ctx && ctx.catalogRuntime) catalogRuntime = ctx.catalogRuntime
+    else if (deps && typeof deps.catalogRuntime === 'function') catalogRuntime = deps.catalogRuntime()
+    else if (deps && deps.catalogRuntime) catalogRuntime = deps.catalogRuntime
+  } catch { catalogRuntime = { ok: false, error: 'catalog_runtime_unavailable' } }
   return {
     status: 200,
     body: {
@@ -369,6 +377,7 @@ async function handleHealth (cfg, deps) {
         lastApply: st.lastApply || null,
         needsRestart: st.needsRestart === true,
       },
+      catalogRuntime,
     },
   }
 }
@@ -443,7 +452,7 @@ export async function handleAggregationApi (ctx = {}) {
   }
 
   try {
-    if (rest === '/health' && method === 'GET') return await handleHealth(ctx.cfg, deps)
+    if (rest === '/health' && method === 'GET') return await handleHealth(ctx.cfg, deps, ctx)
 
     if (rest === '/providers' && method === 'GET') {
       return { status: 200, body: { providers: providerViews(deps) } }
