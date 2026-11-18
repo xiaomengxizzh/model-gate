@@ -2,9 +2,11 @@
 //
 // 钉死：
 //   ① 默认（无 MG_PARENT_MODEL）：字节兼容 gpt-6-luna；
-//   ② MG_PARENT_MODEL=mg-opencodego-deepseek-v4-1-flash：显式设为 deepseek slug，
-//      用于后续 deepseek→deepseek 真机验证；writes config.toml model = 该 slug；
-//   ③ 子代理配置逻辑不变（managed agent child 仍指向 Go 别名，effort=high）。
+//   ② MG_PARENT_MODEL=deepseek-parent（官方缓存里的另一个 slug）：父仍是官方模型，
+//      写 config.toml model = 该 slug（第三方聚合别名作父见 g2-parent-thirdparty.test.mjs）；
+//   ③ 子代理配置逻辑不变（managed agent child 仍指向 Go 别名，effort=high）；
+//   ④ 身份守卫未削弱：聚合别名出现在官方基线目录里仍被 official_slug_reuse 拒绝
+//      （第三方别名作父的路线 A 在 g2-parent-thirdparty.test.mjs 单独覆盖）。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
@@ -14,6 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
+import { buildCatalog, asNativeDelegationParent } from '../../../src/codex/catalog.js'
 
 const execFileAsync = promisify(execFile)
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url))
@@ -127,27 +130,23 @@ test('③ 子代理配置逻辑不变：managed agent child 仍指向 Go 别名�
   assert.equal(childToml.includes('model = ' + JSON.stringify(printed.alias)), true, '子代理目标仍是 Go 别名')
 })
 
-test('④ 已知边界：把子代理生成的聚合别名 slug 直接当父会因 official_slug_reuse 被拒（非本改动引入）', { timeout: 30000 }, async (t) => {
-  // 约束事实（如实记录）：models.deepseek-v4.1-flash + provider opencodego 会由 buildCatalog 生成
-  // 聚合 ID mg-opencodego-deepseek-v4-1-flash；若把同一字符串设为官方父 slug，catalog 身份零碰撞
-  // 守卫（catalog.js:1002-1004）在写配置前 fail-closed。这是目录身份不变量，不是父模型可配置改动
-  // 的回归；deepseek→deepseek 真机验证应选用不同的父 slug（如 ② 的 deepseek-parent）。
-  const aliasAsParent = MODEL_CACHE.models.map((m) => Object.assign({}, m, {
-    slug: m.slug === 'deepseek-parent' ? 'mg-opencodego-deepseek-v4-1-flash' : m.slug,
+test('④ 身份守卫未削弱：把聚合别名写进官方基线目录仍被 official_slug_reuse 拒绝', { timeout: 30000 }, async () => {
+  // 路线 A（g2-parent-thirdparty.test.mjs）改的是"configure 不再把第三方父别名当官方模型"，
+  // **不是**放宽守卫：只要 mg-* 别名还出现在 official-models.json（官方基线）里，
+  // catalog.js:1002-1004 的身份零碰撞守卫就必须继续 fail-closed。
+  const officialLuna = asNativeDelegationParent(MODEL_CACHE.models[0])
+  const aliasAsOfficial = asNativeDelegationParent(Object.assign({}, MODEL_CACHE.models[0], {
+    slug: 'mg-opencodego-deepseek-v4-1-flash',
+    display_name: 'Alias smuggled into official catalog',
   }))
-  const root = await mkdtemp(join(tmpdir(), 'mg-g2-parent-collision-'))
-  const modelsPath = join(root, 'models_cache.json')
-  await writeFile(modelsPath, JSON.stringify({ models: aliasAsParent }), 'utf8')
-  t.after(async () => { await rm(root, { recursive: true, force: true }) })
-  const env = {
-    ...process.env,
-    HOME: root, CODEX_HOME: join(root, '.codex'),
-    MG_DESKTOP_STATE: join(root, 'state'), MG_DESKTOP_MODELS: modelsPath,
-    MG_DESKTOP_SUBSCRIPTION_MODE: 'app', MG_PARENT_MODEL: 'mg-opencodego-deepseek-v4-1-flash',
+  const config = {
+    defaults: { codexOfficialProvider: 'chatgpt-plan' },
+    providers: { opencodego: {} },
+    models: { 'deepseek-v4.1-flash': { provider: 'opencodego', api: 'responses', maxContext: 128000, reasoning: 'low', effortOptions: ['low', 'high'] } },
   }
-  await assert.rejects(
-    execFileAsync(process.execPath, [join(ROOT, 'bin/mg-desktop.mjs'), 'configure'], { env, timeout: 30000 }),
-    (err) => /official_slug_reuse|与官方 slug 冲突/.test(String(err.stderr || err.message || '')),
-    '父 slug 与聚合子别名冲突时 fail-closed，不写配置'
+  assert.throws(
+    () => buildCatalog({ base: { models: [officialLuna, aliasAsOfficial] }, config }),
+    (err) => err.code === 'official_slug_reuse',
+    '官方目录与聚合 ID 同名必须 fail-closed（守卫未因路线 A 放宽）'
   )
 })

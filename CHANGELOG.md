@@ -2,6 +2,14 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-18 第三方聚合别名可作父模型（路线 A：身份分流，不含真机验收）
+
+### Changed
+
+- **`MG_PARENT_MODEL` 可设为第三方聚合别名（如 `mg-opencodego-deepseek-v4-1-flash`）**：`bin/mg-desktop.mjs configure` 现在区分「官方 slug（默认 `gpt-6-luna`，仍走官方 provider）」与「第三方聚合别名」。别名作父时不再被当成官方缓存模型：`official-models.json` 只保留官方基线（luna 投影），别名仅由网关目录绑定解析到 `provider=opencodego`（`domain=thirdParty`），从而不再触发 `official_slug_reuse`，也不会被路由到 `codexOfficialProvider`。`codexOfficialProvider`、官方父路径、`official_slug_reuse` 守卫与 router 官方分支均未改动；未设 `MG_PARENT_MODEL` 或设为官方 slug 时，configure 产出的全部文件与改动前字节一致。
+- 客户端默认模型仍由 `codex/config.toml` 的 `model = "<别名>"` 承担；网关配置**不写** `defaults.model`——该字段语义是"虚拟共用模型名"（`src/router.js:357`、`505-507`），写入聚合别名会让目录零碰撞守卫 `slug_collision` fail-closed 并把解析短路成虚拟模型。
+- 回归：新增 `scripts/test/offline/g2-parent-thirdparty.test.mjs`（6 用例：默认/官方 slug 兼容、别名不入官方目录、缓存污染、解析层 provider/domain、子代理别名与 effort）；`g2-parent-model.test.mjs` ④ 改为在目录层断言 `official_slug_reuse` 守卫未被放宽。
+
 ## [Unreleased] —— 2026-11-16 续轮韧性：状态缺失优雅降级 + 全链路诊断
 
 ### Changed

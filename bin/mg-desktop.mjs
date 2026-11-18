@@ -6,7 +6,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
-import { buildCatalog, asNativeDelegationParent } from '../src/codex/catalog.js'
+import { buildCatalog, asNativeDelegationParent, stableModelId } from '../src/codex/catalog.js'
 // MG-FIX-P1-05：启动器与控制台的原生子代理配置共用同一 canonical 字节，
 // 避免"启动器写 low、控制台写 medium"导致 409 三方差异（两者都是 Codex 原生配置）。
 import { MANAGED_AGENT_DESCRIPTION, buildManagedAgentConfig } from '../src/codex/config.js'
@@ -20,10 +20,16 @@ const codexHome = join(appState, 'codex')
 const guiHome = join(appState, 'desktop')
 const gatewayHome = join(appState, 'gateway')
 const port = Number(process.env.MG_DESKTOP_PORT || 18787)
-// 父模型可配置：默认仍为 luna（字节兼容既有行为），MG_PARENT_MODEL 可显式设为第三方 slug
-// （如 mg-opencodego-deepseek-v4-1-flash），用于 deepseek→deepseek 父子验证。
-const parentModel = process.env.MG_PARENT_MODEL || 'gpt-6-luna'
+// 父模型可配置：默认仍为 luna（字节兼容既有行为）。MG_PARENT_MODEL 也可是**第三方聚合别名**
+// （如 mg-opencodego-deepseek-v4-1-flash，由 buildCatalog 从 childModel 生成）：
+// 该别名是第三方目录身份，绝不能被当成官方目录模型写进 official-models.json
+// （否则 catalog.js 的 official_slug_reuse 身份守卫会 fail-closed）。
+const DEFAULT_OFFICIAL_PARENT = 'gpt-6-luna'
+const parentModel = process.env.MG_PARENT_MODEL || DEFAULT_OFFICIAL_PARENT
 const childModel = 'deepseek-v4.1-flash'
+const childProvider = 'opencodego'
+// 聚合别名只来自 stableModelId（单一真源），用于判定 MG_PARENT_MODEL 是否就是这个别名。
+const childAlias = stableModelId(childProvider, childModel)
 const parentProvider = 'chatgpt-plan'
 
 // 订阅模式（所有者策略 A）：auto（默认，按本机 Codex 登录自动选择 local/app）/local/app/off。
@@ -59,13 +65,24 @@ async function configure() {
   const parentProviderConfig = buildSubscriptionProviderConfig(subscription.mode).provider
   const cachedPath = process.env.MG_DESKTOP_MODELS || join(homedir(), '.codex/models_cache.json')
   const models = JSON.parse(await readFile(cachedPath, 'utf8')).models
-  const original = models.find((item) => item.slug === parentModel)
-  if (!original) throw new Error('The Codex model catalog does not contain ' + parentModel)
+  // 父模型分两种身份，绝不混用：
+  //   · 官方 slug（默认 luna）—— 必须是官方缓存里的条目，按官方 provider 走；未知 slug 仍按旧行为 fail-closed。
+  //   · 第三方聚合别名 childAlias —— 不在官方缓存里（它是网关生成的），官方基线退回默认 luna，
+  //     该别名只由网关目录绑定解析到 opencodego，不进 official-models.json。
+  const configuredParent = models.find((item) => item.slug === parentModel)
+  const parentIsThirdParty = parentModel === childAlias
+  if (!configuredParent && !parentIsThirdParty) throw new Error('The Codex model catalog does not contain ' + parentModel)
   // MG-NATIVE-DELEGATION：与聚合目录发布共用同一“原生派单父模型”投影，避免两处漂移。
-  const parent = asNativeDelegationParent(original)
-  for (const dir of [appState, codexHome, guiHome, gatewayHome]) await mkdir(dir, { recursive: true, mode: 0o700 })
+  // 第三方父时投影的仍是官方基线 luna（官方父路径不变），绝不让第三方条目进官方目录。
+  const parentSource = parentIsThirdParty
+    ? models.find((item) => item.slug === DEFAULT_OFFICIAL_PARENT)
+    : configuredParent
+  if (!parentSource) {
+    throw new Error('The Codex model catalog does not contain ' + DEFAULT_OFFICIAL_PARENT +
+      ' (required as the official baseline when MG_PARENT_MODEL is a third-party aggregate alias)')
+  }
+  const parent = asNativeDelegationParent(parentSource)
   const basePath = join(gatewayHome, 'official-models.json')
-  await writeFile(basePath, JSON.stringify({ models: [parent] }), { mode: 0o600 })
 
   const config = {
     server: { host: '127.0.0.1', port, logFile: join(gatewayHome, 'gateway.log') },
@@ -81,11 +98,11 @@ async function configure() {
       //  app   —— 应用自有 OAuth（grant.json，`mg-desktop sign-in`）+ api.openai.com plan token。
       //  off   —— 不写订阅字段：官方请求回到「需网关自有 key」，由网关返回 typed 403，绝不换路径。
       [parentProvider]: parentProviderConfig,
-      opencodego: { baseUrl: 'https://opencode.ai/inference/go', pathPrefix: '/openai', api: 'openai', apiKeyEnv: 'OPENCODE_API_KEY' },
+      [childProvider]: { baseUrl: 'https://opencode.ai/inference/go', pathPrefix: '/openai', api: 'openai', apiKeyEnv: 'OPENCODE_API_KEY' },
     },
     models: {
       [childModel]: {
-        provider: 'opencodego', api: 'responses', maxContext: 128000,
+        provider: childProvider, api: 'responses', maxContext: 128000,
         reasoning: 'low', effortOptions: ['low', 'high'],
         codex: {
           plaintextTools: true, history: { agentMessage: 'project' },
@@ -101,6 +118,13 @@ async function configure() {
   const { catalog, meta } = buildCatalog({ base: { models: [parent] }, config })
   const alias = Object.keys(meta.bindings)[0]
   if (!alias) throw new Error('The Go alias could not be generated')
+  // 第三方父的别名必须与生成规则一致（目录身份单一真源）；不一致说明 alias 生成逻辑漂移，宁可不写配置。
+  if (parentIsThirdParty && alias !== parentModel) {
+    throw new Error('MG_PARENT_MODEL ' + parentModel + ' is not the generated third-party alias (' + alias + ')')
+  }
+  for (const dir of [appState, codexHome, guiHome, gatewayHome]) await mkdir(dir, { recursive: true, mode: 0o700 })
+  // official-models.json 只含官方基线模型：第三方父别名绝不登记为官方 slug。
+  await writeFile(basePath, JSON.stringify({ models: [parent] }), { mode: 0o600 })
   const catalogPath = join(codexHome, 'models.json')
   await writeFile(catalogPath, JSON.stringify(catalog), { mode: 0o600 })
   const configPath = join(gatewayHome, 'gateway.json')
