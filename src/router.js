@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { isAggregateModelId, aggregatePrefixes } from './codex/identity.js'
+import { OFFICIAL_PROVIDER_IDS } from './codex/catalog.js'
 
 export function configPaths() {
   // MG_CONFIG_DIR：可选。多实例隔离时为实例指定独立配置目录（keys/stats 随之独立）；未设置=cwd/config（单实例零配置）
@@ -117,10 +118,29 @@ export function codexOfficialSlugSet(cfg) {
 export function isCodexOfficialSlug(cfg, model) {
   return typeof model === 'string' && !!model && codexOfficialSlugSet(cfg).has(model)
 }
-// 官方 slug 的上游 provider：只认 defaults.codexOfficialProvider（不猜、不按名字推断）。
-export function codexOfficialProvider(cfg) {
+// 官方 slug 的上游 provider：显式 defaults.codexOfficialProvider 优先；缺省时按该 official slug
+// 在 config.models 的同名声明回退（仅当 provider 属 OFFICIAL_PROVIDER_IDS），避免 official_provider_missing。
+// 不按 provider 名字猜测身份——白名单来自 catalog.js 的单一真源。
+export function codexOfficialProvider(cfg, model) {
   const v = cfg && cfg.defaults && cfg.defaults.codexOfficialProvider
-  return typeof v === 'string' ? v.trim() : ''
+  if (typeof v === 'string' && v.trim()) return v.trim()
+  const models = (cfg && cfg.models) || {}
+  if (!model || !Object.prototype.hasOwnProperty.call(models, model)) return ''
+  const entry = models[model]
+  const provider = entry && entry.provider
+  if (typeof provider === 'string' && provider.trim() && OFFICIAL_PROVIDER_IDS.includes(provider.trim())) return provider.trim()
+  return ''
+}
+
+// 目录 official slug 与 config.models 同名时的「同源 passthrough」判定：镜像 catalog.js 的
+// OFFICIAL_PROVIDER_IDS 例外。只有同名条目的 provider 属于官方白名单，才算同一官方身份；
+// 非官方 provider 的同名声明仍是「同名不同源」冲突，必须 fail-closed。
+function isOfficialPassthroughDeclaration(cfg, model) {
+  const models = (cfg && cfg.models) || {}
+  if (!model || !Object.prototype.hasOwnProperty.call(models, model)) return false
+  const entry = models[model]
+  const provider = entry && entry.provider
+  return typeof provider === 'string' && OFFICIAL_PROVIDER_IDS.includes(provider.trim())
 }
 
 // 模型解析单一入口（MG-008 余项）：探测/预热/failback/转发必须得到同一组
@@ -448,12 +468,18 @@ export function createRouter(cfg) {
     const hasBinding = !!(rawBinding && typeof rawBinding === 'object')
     if (!isOfficial && !hasBinding) return null
     // 1) 目录 slug 与 config.models/别名同名 → 身份不确定（同名不同源），fail-closed，绝不让任何一侧静默胜出。
+    //    例外（方案 B）：official slug 被 config.models 同名声明且该条目 provider 属 OFFICIAL_PROVIDER_IDS
+    //    时，两侧是同一官方身份（catalog 也把这类条目当 passthrough 排除碰撞），改按官方条目解析。
+    //    非官方 provider 的同名冲突仍 404，绝不放行。
     const clash = alias.get(model)
-    if (clash) throw catalogError(model, 'catalog_slug_conflicts_with_models', '目录 slug ' + model + ' 同时被 config/models（' + clash.name + '）声明，身份冲突已拒绝路由')
-    // 2) 官方 slug：只走 defaults.codexOfficialProvider 指向的官方上游，api=responses（原生透传）。
+    if (clash && !(isOfficial && isOfficialPassthroughDeclaration(cfg, model))) {
+      throw catalogError(model, 'catalog_slug_conflicts_with_models', '目录 slug ' + model + ' 同时被 config/models（' + clash.name + '）声明，身份冲突已拒绝路由')
+    }
+    // 2) 官方 slug：走官方上游（显式 codexOfficialProvider 优先，缺省回退同名 config.models 的官方 provider），
+    //    api=responses（原生透传），不落 Chat 桥。
     if (isOfficial) {
-      const pid = codexOfficialProvider(cfg)
-      if (!pid) throw catalogError(model, 'official_provider_missing', '官方目录模型 ' + model + ' 需要 defaults.codexOfficialProvider 指定官方上游')
+      const pid = codexOfficialProvider(cfg, model)
+      if (!pid) throw catalogError(model, 'official_provider_missing', '官方目录模型 ' + model + ' 需要 defaults.codexOfficialProvider 或 config.models.' + model + '.provider（官方 provider）指定官方上游')
       if (!cfg.providers || !cfg.providers[pid]) throw catalogError(model, 'official_provider_missing', '官方目录模型 ' + model + ' 指向的上游 ' + pid + ' 未配置')
       return { canonicalName: model, known: true, catalogGeneration: genOf(cat), def: { provider: pid, api: 'responses', codexOfficial: true } }
     }

@@ -99,6 +99,7 @@ export const SUITES = [
   'scripts/test/offline/codex-v2-lifecycle.test.mjs',
   'scripts/test/offline/codex-v2-stream.test.mjs',
   'scripts/test/offline/codex-routing-catalog.test.mjs',
+  'scripts/test/offline/official-slug-runtime-identity.test.mjs',
   'scripts/test/offline/codex-target-authz.test.mjs',
   'scripts/test/offline/config-projection.test.mjs',
   'scripts/test/offline/config-schema.test.mjs',

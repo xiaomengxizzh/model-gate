@@ -23,7 +23,7 @@ import { supportsMedia, parseMultipartField, replaceMultipartField, isMultipart,
 import { defaultVideoPaths, newVideoTask, upstreamTaskId, applyUpstreamStatus, clientTask, loadVideoTasks, saveVideoTasks, gcVideoTasks, findSubjectTask, videoInputHash, recoverInterruptedVideoTasks, validateVideoCreate, VIDEO_POLL_MIN_MS } from './videos.js'
 import { todayKey } from './shared.js'
 import { readNativeUsage, nativeUsageConfig } from './native-usage.js'
-import { classifyTarget, isLoopbackHost } from './codex/identity.js'
+import { classifyTarget, isLoopbackHost, isOfficialTarget } from './codex/identity.js'
 import { restoreResponseJson, detectOpaqueV2Task, detectEncryptedToolSchema } from './codex/interop.js'
 import { readSubscriptionCredential, isGatewaySubscriptionTarget, probeLocalCodexAuth, SubscriptionCredentialError } from './codex/local-subscription.js'
 import { isTargetAuthzError, resolveUpstream, assertResolvedUpstream, assertNoSubscriptionCredentialToThirdParty, authFailureReceipt, authFailureResponse } from './codex/target-authz.js'
@@ -691,17 +691,16 @@ export function patchSubscriptionRequestBody(body) {
 // 第三方 Responses 上游直接 400：
 //   reasoning.context（如 "all_turns"）、text.verbosity、include 里的 reasoning.encrypted_content。
 // 只对**非官方** Responses 目标按能力剔除，并把剔除项写进诊断（不是静默改写，也不碰官方目标）。
-function isOfficialResponsesProvider(prov) {
-  const base = String((prov && (prov.baseUrl || (prov._def && prov._def.baseUrl))) || '')
-  try {
-    const host = new URL(base).hostname
-    return host === 'api.openai.com' || host === 'chatgpt.com' || host.endsWith('.chatgpt.com')
-  } catch { return false }
+// 官方 Responses 目标判定复用 identity.js 单一真源（classifyTarget/isOfficialTarget），
+// 不再在本文件复制 host 白名单，消除与 identity.js:DEFAULT_OFFICIAL_HOSTS 的漂移。
+// cfg 可选：传入时尊重 defaults.codexOfficialHosts 覆盖；不传时用默认官方 host 清单。
+function isOfficialResponsesProvider(prov, cfg) {
+  return isOfficialTarget(prov, cfg)
 }
 
-export function projectThirdPartyResponsesParams(body, prov) {
+export function projectThirdPartyResponsesParams(body, prov, cfg) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { body, dropped: [] }
-  if (isOfficialResponsesProvider(prov)) return { body, dropped: [] }
+  if (isOfficialResponsesProvider(prov, cfg)) return { body, dropped: [] }
   const out = Object.assign({}, body)
   const dropped = []
   if (out.reasoning && typeof out.reasoning === 'object' && Object.prototype.hasOwnProperty.call(out.reasoning, 'context')) {
@@ -2537,20 +2536,20 @@ async function proxyNativeResponses(state, budget, log, opts) {
     if (!healthy(ensureHst(state, pid), Date.now())) { lastErr = new Error('provider ' + pid + ' 熔断中'); continue }
     if (prov._def.apiKeyEnv && !prov.keyOk) { lastErr = new Error('provider ' + pid + ' 未配置 Key'); continue }
     const target = modelTarget(state.cfg, modelName, pid)
-    const projected = projectThirdPartyResponsesParams(body, prov)
+    const projected = projectThirdPartyResponsesParams(body, prov, state.cfg)
     if (projected.dropped.length) log && log.info('Codex 参数按目标能力剔除', pid, projected.dropped.join(','))
     // 工具项 call_id 为空 → 上游必然 400（且只给索引，不可操作）。
     // 第三方目标先做**无损配对补齐**（只补 id，不改内容/不丢历史），保持与官方后端一致的"按位置配对"语义；
     // 仍然无法配对的孤儿 output 才拦截并解释。官方目标完全不动。
     let thirdPartyBody = projected.body
-    if (!isOfficialResponsesProvider(prov)) {
+    if (!isOfficialResponsesProvider(prov, state.cfg)) {
       const fixed = repairThirdPartyToolCallIds(projected.body)
       if (fixed.repaired.length) {
         thirdPartyBody = fixed.body
         log && log.info('Codex 工具项 call_id 已按位置补齐', pid, fixed.repaired.map((r) => r.index + ':' + r.action).join(','))
       }
     }
-    const badCallId = isOfficialResponsesProvider(prov) ? null : firstEmptyToolCallId(thirdPartyBody)
+    const badCallId = isOfficialResponsesProvider(prov, state.cfg) ? null : firstEmptyToolCallId(thirdPartyBody)
     if (badCallId) {
       // MG-FIX-P0-01：补最小“仅结构信息”脱敏 trace（序号/type/role/name/id/call_id 是否存在 +
       // thread/correlation/route），只写入诊断日志用于定位历史形状；绝不记录正文/凭据。
