@@ -2,7 +2,7 @@
 //
 // 契约：docs/contracts/ui-v3-product-status.md §4。
 //   * ROUTES 是唯一路由表（id / group / navLabel / title / icon / order）。
-//   * primary  = 普通用户默认可见的 3 项（首页 / 模型与账号 / 设置）。
+//   * primary  = 普通用户默认可见的 3 项（用量 / 连接 / 设置）。
 //   * advanced = 开发者入口，index.html 用 <details> 默认收起、可键盘展开。
 //   * 旧 7 个 id 全部保留，新增 connections；#/connections?step=key 的查询串不参与匹配。
 //   * 未知 hash 一律回落 overview；不把服务根路由重定向到 /ui-next。
@@ -11,18 +11,18 @@ const ROUTE_LIST = [
   {
     id: 'overview',
     group: 'primary',
-    navLabel: '首页',
-    label: '首页',
-    title: '首页',
+    navLabel: '用量',
+    label: '用量',
+    title: '用量',
     icon: 'M3 3h6v6H3zM11 3h6v4h-6zM11 9h6v8h-6zM3 11h6v6H3z',
     order: 1,
   },
   {
     id: 'connections',
     group: 'primary',
-    navLabel: '模型与账号',
-    label: '模型与账号',
-    title: '模型与账号',
+    navLabel: '连接',
+    label: '连接',
+    title: '连接',
     icon: 'M12 8a3 3 0 10-2.6 3L4 16v2h3l1-1v-2h2v-2h2l.6-.6',
     order: 2,
   },

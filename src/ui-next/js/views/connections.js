@@ -49,6 +49,9 @@ const GO_TARGET_UPSTREAM = productStatus.GO_TARGET_MODEL || 'deepseek-v4.1-flash
 export const GO_TARGET_LABEL = 'DeepSeek V4.1 Flash'
 export const PROVIDER_PRESET_ID = 'opencode-go'
 
+// 默认落地步骤：三模式连接中枢（不是 key 向导第 1 步）。
+export const LANDING_STEP = 'connect'
+
 // 线性向导步骤；conflict/codex 是状态机分支，不在线性序列里。
 export const CONNECT_STEPS = Object.freeze([
   { id: 'key', label: '连接 OpenCode Go', hint: '只需要一个 API Key' },
@@ -58,13 +61,53 @@ export const CONNECT_STEPS = Object.freeze([
   { id: 'use', label: '在 Codex 中使用', hint: '在模型选择器里选择' },
   { id: 'revert', label: '退出并恢复', hint: '撤销 ModelGate 改过的字节' },
 ])
-export const SPECIAL_CONNECT_STEPS = Object.freeze(['conflict', 'codex'])
+export const SPECIAL_CONNECT_STEPS = Object.freeze(['conflict', 'codex', LANDING_STEP])
 export const CONNECT_ACTION_ORDER = Object.freeze(['provider', 'key', 'sync'])
 const CONNECT_ACTION_LABELS = Object.freeze({
   provider: '注册 OpenCode Go 供应商',
   key: '保存 OpenCode Go API Key',
   sync: '同步 DeepSeek 模型目录',
 })
+
+// —— 三模式落地页（参考图）——
+// segmented 切换条文案：唯一来源，测试与 UI 共用。
+export const SEGMENT_SPECS = Object.freeze([
+  Object.freeze({ mode: 'official', label: '⚡ 直连' }),
+  Object.freeze({ mode: 'route', label: '⇄ 路由' }),
+  Object.freeze({ mode: 'aggregated', label: '▤ 聚合' }),
+])
+// 三张并排卡片的文案：与参考图逐项对应，避免散落在 DOM 构造里。
+export const MODE_CARD_SPECS = Object.freeze([
+  Object.freeze({
+    mode: 'official', tone: 'direct', icon: '⚡', title: '直连模式',
+    subtitle: 'Codex 直接连接官方服务', provider: 'ChatGPT 官方', model: 'GPT-6 Luna',
+    status: '官方登录正常', cta: '使用直连', footnote: '不经过 ModelGate 转发',
+  }),
+  Object.freeze({
+    mode: 'route', tone: 'route', icon: '🌱', title: '路由模式',
+    subtitle: '经由 ModelGate 转发请求', provider: 'OpenCode Go', model: 'deepseek-v4.1-flash',
+    status: '网关运行中', cta: '启用路由', footnote: '需要网关持续运行',
+  }),
+  Object.freeze({
+    mode: 'aggregated', tone: 'aggregate', icon: '▤', title: '聚合模式',
+    subtitle: '在原版 Codex 中使用多个模型', cta: '启用聚合', footnote: '原版 Codex Harness · 原生压缩',
+    rows: ['ChatGPT 官方', 'OpenCode Go / deepseek-v4.1-flash'],
+    tagline: '父代理: 官方 GPT | 子代理: DeepSeek',
+  }),
+])
+
+// 官方侧父模型下拉的友好名：只有 luna 是已签收/PASS_REAL，其余一律 UNVERIFIED。
+export function friendlyParentLabel (id) {
+  return id === DEFAULT_PARENT_MODEL
+    ? 'GPT-6 Luna（已签收/PASS_REAL）'
+    : String(id) + '（未验证 UNVERIFIED）'
+}
+
+// 卡片主按钮的切换请求体（预览阶段：无 token、无 expectedSha 写入）。
+// 复用 aggregation.js 的冻结构造函数，保证与详情页/后端契约同源。
+export function buildCardSwitchBody (mode, parentModel) {
+  return buildSwitchRequest(null, false, mode, parentModel || null)
+}
 
 // —— 纯函数：步骤与路由 ——
 export function normalizeStep (value, fallback = 'key') {
@@ -1101,6 +1144,195 @@ async function runModeChange (ctx, kind, selection, host, live) {
   }
 }
 
+// —— 落地页：直连 / 路由 / 聚合三模式连接中枢（参考图）——
+// 纯 DOM 构造，不触碰凭据：Provider/Model 下拉只有展示名与父模型 id，不含任何 Key 输入框。
+function landingPanel (ctx, product) {
+  const snapshot = aggregationOf(ctx)
+  const health = snapshot && snapshot.health ? snapshot.health : null
+  const rawMode = health && health.mode ? String(health.mode) : 'unknown'
+  const currentMode = THREE_MODES.some((m) => m.id === rawMode) ? rawMode : 'official'
+  const drifted = !!(health && health.drifted === true) || !!(snapshot && snapshot.drifted === true)
+  const parents = selectableParentModels(snapshot && snapshot.modes)
+  const live = h('p', { class: 'mode-live hint', role: 'status', 'aria-live': 'polite' })
+  const cards = {}
+  const segEls = {}
+  const wrap = h('div', { class: 'mode-landing' })
+
+  // 顶部 segmented：点某段高亮对应卡片（不触发写入，写入只由卡片主按钮完成）。
+  const bar = h('div', { class: 'mode-segmented', role: 'tablist', 'aria-label': '连接模式' })
+  for (const seg of SEGMENT_SPECS) {
+    const base = 'mode-seg mode-seg-' + seg.mode
+    const btn = h('button', {
+      class: base, type: 'button', role: 'tab', 'aria-selected': 'false',
+      'data-mode': seg.mode, text: seg.label,
+    })
+    segEls[seg.mode] = btn
+    bar.append(btn, h('span', { class: 'mode-seg-divider', 'aria-hidden': 'true' }))
+  }
+  // 去掉最后一条分隔线（三选二）。
+  const dividers = Array.from(bar.children).filter((c) => c && c.className === 'mode-seg-divider')
+  if (dividers.length) dividers[dividers.length - 1].remove()
+  wrap.append(bar)
+
+  // 漂移：端点全部 200，单独提示"需要重新对齐"，不显示"读取失败"。
+  if (drifted) {
+    wrap.append(callout('warn',
+      h('strong', { text: '配置需要重新对齐：' }),
+      ' 聚合状态已正常读取，当前 config.toml 与对齐基线不一致。请点「重新对齐配置」只更新 state，不改配置内容；对齐后卡片按钮自动恢复可用。',
+      h('div', { class: 'toolbar', style: { marginTop: '8px' } },
+        h('button', {
+          class: 'btn btn-primary', type: 'button', text: '重新对齐配置',
+          onclick: () => beginReconcile(ctx),
+        }))))
+  }
+
+  const grid = h('div', { class: 'mode-cards' })
+
+  const cardFrame = (spec) => {
+    const head = h('div', { class: 'mode-card-head' },
+      h('span', { class: 'mode-icon mode-icon-' + spec.tone, text: spec.icon, 'aria-hidden': 'true' }),
+      h('div', { class: 'mode-card-heading' },
+        h('h3', { class: 'mode-card-title', text: spec.title }),
+        h('p', { class: 'mode-card-sub', text: spec.subtitle })))
+    const body = h('div', { class: 'mode-card-body' })
+    const foot = h('div', { class: 'mode-card-foot' })
+    const host = h('div', { class: 'mode-card-result' })
+    const card = h('article', {
+      class: 'mode-card mode-card-' + spec.tone, 'data-mode': spec.mode,
+    }, head, body, foot, host)
+    cards[spec.mode] = card
+    return { card, head, body, foot, host }
+  }
+  const ctaButton = (spec, host, selection) => {
+    const btn = h('button', {
+      class: 'btn mode-cta mode-cta-' + spec.tone, type: 'button', text: spec.cta,
+      disabled: drifted,
+    })
+    if (drifted) btn.title = '请先重新对齐配置后再切换接入方式'
+    btn.addEventListener('click', () => runModeChange(ctx, 'switch', selection, host, live))
+    return btn
+  }
+
+  // 1) 直连：Provider ChatGPT 官方 / Model GPT-6 Luna；状态来自 official 只读探测。
+  const direct = cardFrame(MODE_CARD_SPECS[0])
+  const officialState = product && product.official ? String(product.official.state || '') : ''
+  const officialLabel = officialState === 'detected' ? '官方登录正常'
+    : officialState === 'missing' ? '待登录'
+      : officialState === 'blocked' ? '登录状态待确认'
+        : '官方登录状态未知'
+  const providerSelect = h('select', { 'aria-label': 'Provider' },
+    h('option', { value: 'chatgpt-official', text: 'ChatGPT 官方', selected: true }))
+  const parentSelect = h('select', { 'aria-label': 'Model' },
+    ...parents.map((p) => h('option', {
+      value: p.id, text: friendlyParentLabel(p.id), selected: p.id === DEFAULT_PARENT_MODEL,
+    })))
+  direct.body.append(
+    field('Provider', providerSelect),
+    field('Model', parentSelect),
+    h('div', { class: 'mode-status' },
+      h('span', { class: 'mode-status-dot' + (officialState === 'detected' ? ' is-good' : ''), text: '● ' }),
+      h('span', { class: 'mode-status-text', text: officialLabel })))
+  direct.foot.append(ctaButton(MODE_CARD_SPECS[0], direct.host, { mode: 'official', parentModel: null }),
+    h('p', { class: 'mode-footnote', text: MODE_CARD_SPECS[0].footnote }))
+  grid.append(direct.card)
+
+  // 2) 路由：固定 OpenCode Go / deepseek-v4.1-flash；测试连接走网关 /healthz（纯只读）。
+  const route = cardFrame(MODE_CARD_SPECS[1])
+  const routeProvider = h('select', { 'aria-label': 'Provider' },
+    h('option', { value: 'opencode-go', text: 'OpenCode Go', selected: true }))
+  const routeModel = h('select', { 'aria-label': 'Model' },
+    h('option', { value: 'deepseek-v4.1-flash', text: 'deepseek-v4.1-flash', selected: true }))
+  const statusDot = h('span', { class: 'mode-status-dot' + (health ? ' is-good' : ''), text: '● ' })
+  const statusText = h('span', { class: 'mode-status-text', text: health ? '网关运行中' : '网关状态未知' })
+  const testBtn = h('button', {
+    class: 'btn btn-sm mode-test', type: 'button', text: '测试连接',
+    onclick: async () => {
+      testBtn.disabled = true
+      testBtn.textContent = '测试中…'
+      try {
+        await request('/healthz', { timeoutMs: 5000 })
+        statusDot.className = 'mode-status-dot is-good'
+        statusText.textContent = '网关运行中'
+        try { toast('网关运行中：/healthz 返回正常', 'success') } catch { /* 无 toast 环境 */ }
+      } catch (e) {
+        statusDot.className = 'mode-status-dot is-bad'
+        statusText.textContent = '网关不可用'
+        try { toast('网关不可用：' + (e && e.message ? e.message : '未知错误'), 'error') } catch { /* 无 toast 环境 */ }
+      } finally {
+        testBtn.disabled = false
+        testBtn.textContent = '测试连接'
+      }
+    },
+  })
+  route.body.append(
+    field('Provider', routeProvider),
+    field('Model', routeModel),
+    h('div', { class: 'mode-status' }, statusDot, statusText, testBtn))
+  route.foot.append(
+    ctaButton(MODE_CARD_SPECS[1], route.host, { mode: 'route', parentModel: null }),
+    h('a', { class: 'mode-link', href: '#/aggregation', text: '高级路由设置 ›' }),
+    h('p', { class: 'mode-footnote', text: MODE_CARD_SPECS[1].footnote }))
+  grid.append(route.card)
+
+  // 3) 聚合：ChatGPT 官方（已保留）+ OpenCode Go 子代理；父模型可改但标 UNVERIFIED。
+  const aggregate = cardFrame(MODE_CARD_SPECS[2])
+  const aggState = h('span', { class: 'mode-agg-state', text: '● 待启用' })
+  if (drifted) aggState.textContent = '● 需要重新对齐'
+  else if (currentMode === 'aggregated') aggState.textContent = '● 已启用'
+  else if (!snapshot) aggState.textContent = '● 状态未知'
+  aggregate.head.append(h('div', { class: 'mode-card-actions' }, aggState))
+  const aggregateSelection = { mode: 'aggregated', parentModel: DEFAULT_PARENT_MODEL }
+  const aggParent = h('select', { 'aria-label': 'GPT 父模型' },
+    ...parents.map((p) => h('option', {
+      value: p.id, text: friendlyParentLabel(p.id), selected: p.id === DEFAULT_PARENT_MODEL,
+    })))
+  // 对象引用在点击时读取，保证"改父模型后启用"提交的是当前选项。
+  aggParent.addEventListener('change', () => { aggregateSelection.parentModel = aggParent.value })
+  aggregate.body.append(
+    h('div', { class: 'mode-kv' },
+      h('span', { text: MODE_CARD_SPECS[2].rows[0] }),
+      h('span', { class: 'mode-badge', text: '已保留' })),
+    h('div', { class: 'mode-kv' }, h('span', { text: MODE_CARD_SPECS[2].rows[1] })),
+    field('GPT 父模型', aggParent, {
+      help: '只有 gpt-6-luna 已签收/PASS_REAL；其它订阅内 GPT 父模型为未验证（UNVERIFIED）。',
+    }),
+    h('span', { class: 'mode-tagline', text: MODE_CARD_SPECS[2].tagline }))
+  aggregate.foot.append(
+    ctaButton(MODE_CARD_SPECS[2], aggregate.host, aggregateSelection),
+    h('p', { class: 'mode-footnote', text: MODE_CARD_SPECS[2].footnote }))
+  grid.append(aggregate.card)
+  wrap.append(grid)
+
+  // segment → 卡片高亮/滚动（不写入）；聚合卡片的主按钮在点击时才读取当前父模型。
+  const activate = (target) => {
+    for (const seg of SEGMENT_SPECS) {
+      const btn = segEls[seg.mode]
+      const on = seg.mode === target
+      btn.className = 'mode-seg mode-seg-' + seg.mode + (on ? ' is-active' : '')
+      btn.setAttribute('aria-selected', on ? 'true' : 'false')
+    }
+    for (const spec of MODE_CARD_SPECS) {
+      const card = cards[spec.mode]
+      card.className = 'mode-card mode-card-' + spec.tone + (spec.mode === target ? ' is-selected' : '')
+    }
+    const card = cards[target]
+    if (card && typeof card.scrollIntoView === 'function') {
+      try { card.scrollIntoView({ block: 'nearest', behavior: 'smooth' }) } catch { /* 非浏览器 */ }
+    }
+  }
+  for (const seg of SEGMENT_SPECS) segEls[seg.mode].addEventListener('click', () => activate(seg.mode))
+  activate(currentMode)
+
+  wrap.append(live,
+    h('div', { class: 'mode-landing-foot' },
+      h('span', { class: 'hint', text: '切换后请完全退出并重新打开 Codex 才生效。' }),
+      h('button', {
+        class: 'btn btn-sm', type: 'button', text: '需要填 Key？进入接入向导 ›',
+        onclick: () => goToStep('key'),
+      })))
+  return { node: wrap, select: activate, cards }
+}
+
 function enablePanel (ctx) {
   const snapshot = aggregationOf(ctx)
   const health = snapshot && snapshot.health ? snapshot.health : null
@@ -1365,29 +1597,39 @@ function advancedDetails (ctx, product) {
 // —— 渲染入口 ——
 export function render (root, ctx = {}) {
   const product = productOf(ctx)
-  const step = normalizeStep(ctx.step || (typeof location !== 'undefined' && location.hash ? stepFromHash(location.hash) : 'key'))
-  root.append(pageHead('模型与账号', '连接 OpenCode Go、启用聚合、必要时重新打开 Codex；日常只需要填一个 Key。', {
+  // 默认落地页是三模式连接中枢；只有显式 ?step=xxx 才进入原接入向导。
+  const hash = typeof location !== 'undefined' && location.hash ? String(location.hash) : ''
+  const explicit = ctx.step != null && String(ctx.step).trim() ? String(ctx.step).trim() : ''
+  const rawStep = explicit || (/[?&]step=/.test(hash) ? stepFromHash(hash) : LANDING_STEP)
+  const step = normalizeStep(rawStep, LANDING_STEP)
+  const isLanding = step === LANDING_STEP
+  root.append(pageHead('连接', isLanding
+    ? 'AI 模型网关 · 连接 / 路由 / 聚合。选择直连、路由或聚合，切换后完全退出并重新打开 Codex 才生效。'
+    : '连接 OpenCode Go、启用聚合、必要时重新打开 Codex；日常只需要填一个 Key。', {
     eyebrow: 'CONNECTIONS',
     actions: [
       h('button', { class: 'btn', type: 'button', text: '查看高级诊断', onclick: () => { try { location.hash = '#/aggregation' } catch {} } }),
     ],
   }))
-  root.append(overallCard(product))
-  root.append(stepNav(step, ctx))
-
-  const panel = h('div')
-  switch (step) {
-    case 'model': panel.append(modelPanel(ctx)); break
-    case 'enable': panel.append(enablePanel(ctx)); break
-    case 'restart': panel.append(restartPanel(ctx)); break
-    case 'use': panel.append(usePanel(ctx, product)); break
-    case 'revert': panel.append(revertPanel(ctx)); break
-    case 'conflict': panel.append(conflictPanel(ctx)); break
-    case 'codex': panel.append(codexGuidePanel(product)); break
-    case 'key':
-    default: panel.append(keyPanel(ctx, product)); break
+  if (isLanding) {
+    root.append(landingPanel(ctx, product).node)
+  } else {
+    root.append(overallCard(product))
+    root.append(stepNav(step, ctx))
+    const panel = h('div')
+    switch (step) {
+      case 'model': panel.append(modelPanel(ctx)); break
+      case 'enable': panel.append(enablePanel(ctx)); break
+      case 'restart': panel.append(restartPanel(ctx)); break
+      case 'use': panel.append(usePanel(ctx, product)); break
+      case 'revert': panel.append(revertPanel(ctx)); break
+      case 'conflict': panel.append(conflictPanel(ctx)); break
+      case 'codex': panel.append(codexGuidePanel(product)); break
+      case 'key':
+      default: panel.append(keyPanel(ctx, product)); break
+    }
+    root.append(panel)
   }
-  root.append(panel)
   root.append(advancedDetails(ctx, product))
   root.append(h('p', { class: 'page-note', text: '本页只使用真实状态快照与同源管理 API；428/409/422 一律如实展示，不伪造成功。契约 ' + CONNECTIONS_VIEW_CONTRACT + '。' }))
 }

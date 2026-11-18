@@ -45,6 +45,9 @@ export const HOME_STATES = Object.freeze([
   // 聚合管理接口要求显式管理员令牌（403 explicit_admin_required）：这不是"读取失败"，
   // 也不是版本不支持，而是需要先设置令牌才能管理聚合。
   'needs_admin_token',
+  // 配置漂移：所有聚合端点都读取成功（200），只是 state 基线落后于 config.toml。
+  // 这是"需要重新对齐"，不是"读取失败"，必须与 recoverable_error 分开。
+  'needs_realign',
 ])
 
 const AGGREGATION_PATHS = Object.freeze(['providers', 'models', 'health', 'diagnostics'])
@@ -407,8 +410,8 @@ export function deriveAggregation (aggregation) {
     backupAvailable: backup.available === true,
     needsRestart: health.needsRestart === true || activation.needsRestart === true,
     nativeCompaction: compactionBlocked ? { blocked: true, detail: str(nativeCompaction.detail) || null } : null,
-    label: drifted && modeKnown ? modeText + ' · 配置漂移（需重新检测）' : modeText,
-    detail: modeDetail + (drifted && modeKnown ? ' 检测到配置漂移，请重新检测；不显示成直连。' : ''),
+    label: drifted && modeKnown ? modeText + ' · 配置漂移（需要重新对齐）' : modeText,
+    detail: modeDetail + (drifted && modeKnown ? ' 检测到配置漂移，请重新对齐配置；不显示成直连，也不是一次读取错误。' : ''),
   })
 }
 
@@ -460,6 +463,11 @@ export function nextPrimaryAction (ps) {
       return { id: 'wait-write', label: '正在写入配置…', kind: 'wait', route: null, detail: '不要关闭页面；失败会回滚。' }
     case 'ready':
       return { id: 'use-codex', label: '在 Codex 中使用', kind: 'route', route: '#/connections?step=use', detail: '打开原版 Codex Desktop 的模型选择器。' }
+    // 漂移是"读取成功但需要重新对齐"：主操作是走 reconcile（428 预览 → 确认 → 200，只写 state），
+    // 不能显示成"重试连接"（那会冒充成一次读取失败）。
+    case 'needs_realign':
+      return { id: 'realign', label: '重新对齐配置', kind: 'route', route: '#/connections',
+        detail: '聚合端点读取正常；当前配置与对齐基线不一致，请到连接页点「重新对齐配置」只更新 state。' }
     case 'recoverable_error': {
       const err = obj(p.error)
       const throttled = !!(err && err.kind === 'throttled')
@@ -504,8 +512,10 @@ export function homeStateOf (ps) {
   if (!p.go.credentialPresent) return 'needs_go_key'
   if (!p.go.targetModelConfigured) return 'ready_to_enable'
   // 聚合模式未知时不得提示"启用聚合"：那可能在不确定的情况下二次写入。
-  // unknown / 配置漂移都不当成直连。
-  if (p.aggregation.modeKnown === false || p.aggregation.mode === 'unknown' || p.aggregation.drifted === true) return 'recoverable_error'
+  // unknown 不当成直连，仍是可恢复错误；但 drifted 是端点全部读取成功后的"基线落后"，
+  // 必须单独成态，不能投影成 recoverable_error（那会被 overallOf 渲染成"读取失败"误报）。
+  if (p.aggregation.modeKnown === false || p.aggregation.mode === 'unknown') return 'recoverable_error'
+  if (p.aggregation.drifted === true) return 'needs_realign'
   // 只有官方直连还需要"启用"；路由/聚合都已完成接入，直接进入重启判定。
   if (p.aggregation.mode === 'official') return 'ready_to_enable'
   if (p.codex.restartNeeded === true) return 'needs_codex_restart'
@@ -537,6 +547,9 @@ export function overallOf (ps) {
       return { level: 'unknown', label: '状态未知（实例版本不支持）', detail: '当前实例没有聚合管理接口。' }
     case 'needs_admin_token':
       return { level: 'action', label: '只读：聚合管理未解锁', detail: '聚合接口返回 403（要求显式管理员身份，当前实例没有全局管理令牌）。状态为只读，Codex 侧已生效的配置不受影响；点击“解锁聚合管理”可在本机开启临时管理会话，或在设置里写入 MG_ADMIN_TOKEN。解锁前不会发起任何写入。' }
+    // 漂移：聚合端点全部 200，状态已取到；只是对齐基线落后，不是"读取失败"。
+    case 'needs_realign':
+      return { level: 'action', label: '配置需要重新对齐', detail: '聚合状态已正常读取；config.toml 与对齐基线不一致，重新对齐只更新 state、不改配置内容。' }
     case 'recoverable_error':
       return { level: 'error', label: '出现问题：读取失败', detail: '控制台没有取得真实状态，可安全重试。' }
     case 'locked':

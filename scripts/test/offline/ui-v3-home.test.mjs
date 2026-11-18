@@ -423,7 +423,7 @@ test('router：旧 7 个 id 全部保留，connections 为新增 primary，查�
   }
   assert.ok(routeMeta('connections'), '必须新增 connections 路由')
   assert.equal(routeMeta('connections').group, 'primary')
-  assert.equal(routeMeta('connections').navLabel, '模型与账号')
+  assert.equal(routeMeta('connections').navLabel, '连接')
   assert.equal(ROUTES.length, 8)
 
   locationState.hash = '#/connections?step=key'
@@ -455,7 +455,7 @@ test('router：routesByGroup 按 order 排序，主分区 3 项 + 高级 5 项',
   assert.deepEqual(orders, [...orders].sort((a, b) => a - b), '分组结果必须按 order 排序')
   // 返回副本：改调用方结果不得污染唯一路由表
   groups.primary[0].navLabel = 'MUTATED'
-  assert.equal(routeMeta('overview').navLabel, '首页')
+  assert.equal(routeMeta('overview').navLabel, '用量')
 })
 
 test('router：深链进入高级路由时展开高级分组，首页不自动展开', () => {

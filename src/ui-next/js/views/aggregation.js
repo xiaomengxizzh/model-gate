@@ -96,7 +96,7 @@ export function modeLabel (mode, drifted) {
       base = { mode: 'unknown', label: '状态未知', kind: 'warn' }
   }
   if (drift && base.mode !== 'unknown') {
-    return Object.assign({}, base, { label: base.label + ' · 配置漂移（需重新检测）', kind: 'warn', drifted: true })
+    return Object.assign({}, base, { label: base.label + ' · 配置漂移（需要重新对齐）', kind: 'warn', drifted: true })
   }
   return Object.assign({}, base, { drifted: false })
 }
@@ -487,7 +487,7 @@ function overviewCard (ctx) {
       : callout('good', h('strong', { text: rn.label + '：' }), ' ' + rn.detail),
     callout('warn', h('strong', { text: '切换后请完全退出并重新打开 Codex 才能使用新模式。' }), ' 运行中的 Codex 仍读取旧配置；本页不会声称"立即生效"。'),
     h('div', { class: 'toolbar', style: { marginTop: '10px' } },
-      h('button', { class: 'btn', type: 'button', text: '模型与账号', onclick: () => { location.hash = '#/connections' } }),
+      h('button', { class: 'btn', type: 'button', text: '连接', onclick: () => { location.hash = '#/connections' } }),
       h('button', { class: 'btn btn-sm', type: 'button', text: '重新检测', onclick: () => { AGG.fetched = false; loadAggregation(ctx) } })))
 
   return card('接入方式', '选择官方直连 / 路由 / 聚合；切换时只回滚 ModelGate 改过的字节。',
@@ -550,7 +550,7 @@ function providersCard (ctx) {
       ], rows),
       h('div', { class: 'toolbar', style: { marginTop: '10px' } }, add))
     : h('div', null,
-      empty('还没有注册聚合供应商', '在「模型与账号」只填一个 OpenCode Go API Key 即可自动注册并同步目标模型 ' + GO_TARGET_LABEL + '；这里是高级手工入口。',
+      empty('还没有注册聚合供应商', '在「连接」只填一个 OpenCode Go API Key 即可自动注册并同步目标模型 ' + GO_TARGET_LABEL + '；这里是高级手工入口。',
         h('button', { class: 'btn btn-primary', type: 'button', text: '去连接 OpenCode Go', onclick: () => { location.hash = '#/connections' } }),
         h('button', { class: 'btn', type: 'button', text: '手工注册供应商（高级）', onclick: () => openProviderDialog(ctx) })))
   return card('聚合供应商', '每个供应商独立授权域；同步只读取目录，不发起推理。目标模型固定为 ' + GO_TARGET_LABEL + '。',
@@ -626,7 +626,7 @@ function diagnosticsCard () {
 }
 
 // —— 交互 ——
-// 高级手工入口：默认 Go preset（普通用户请走「模型与账号」的单 Key 向导）。
+// 高级手工入口：默认 Go preset（普通用户请走「连接」的单 Key 向导）。
 function openProviderDialog (ctx) {
   const kindSelect = h('select', null,
     h('option', { value: 'opencode-go', text: 'OpenCode Go（默认，' + GO_TARGET_LABEL + '）' }),
@@ -647,7 +647,7 @@ function openProviderDialog (ctx) {
   kindSelect.addEventListener('change', syncFields)
   syncFields()
   const content = h('div', null,
-    callout('info', h('strong', { text: '这是高级手工入口：' }), ' 普通接入请到「模型与账号」只填一个 OpenCode Go API Key。这里只登记供应商与凭据变量名，不会代你登录，也不会回显 Key。'),
+    callout('info', h('strong', { text: '这是高级手工入口：' }), ' 普通接入请到「连接」只填一个 OpenCode Go API Key。这里只登记供应商与凭据变量名，不会代你登录，也不会回显 Key。'),
     callout('warn', h('strong', { text: '默认 Go 位形：' }), ' 选择 OpenCode Go 时使用已登记 preset（端点 / 名称 / 单模型作用域由服务端补全），不需要手填 URL。目标模型固定为 ' + GO_TARGET_LABEL + '。'),
     field('类型', kindSelect, { help: 'Go 与 Console 使用不同的授权域，不能互相替代。' }),
     idField,
@@ -1056,11 +1056,11 @@ function advancedSection (ctx) {
 export function render (root, ctx = {}) {
   if (!AGG.fetched && !AGG.loading) loadAggregation(ctx)
   const loading = !AGG.fetched && AGG.loading
-  root.append(pageHead('聚合详情', '高级诊断与一键启停。日常接入请到「模型与账号」只填一个 OpenCode Go API Key；本页保留完整技术证据与无损退出。', {
+  root.append(pageHead('聚合详情', '高级诊断与一键启停。日常接入请到「连接」只填一个 OpenCode Go API Key；本页保留完整技术证据与无损退出。', {
     eyebrow: 'AGGREGATION / ADVANCED',
     actions: [
       h('button', { class: 'btn', type: 'button', text: '重新检测', onclick: () => { AGG.fetched = false; loadAggregation(ctx) } }),
-      h('button', { class: 'btn btn-primary', type: 'button', text: '模型与账号', onclick: () => { location.hash = '#/connections' } }),
+      h('button', { class: 'btn btn-primary', type: 'button', text: '连接', onclick: () => { location.hash = '#/connections' } }),
     ],
   }))
   if (loading) {
