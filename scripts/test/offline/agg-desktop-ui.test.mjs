@@ -130,6 +130,9 @@ test('F6 回归：404 提示不得再声称后端未接线/需要主代理打补
   // 404 仍然需要解释，但解释必须指向真实原因（版本/实例未加载模块）。
   assert.match(src, /404/, '仍须说明 404 的含义')
   assert.match(src, /版本较旧|升级到提供/, '必须给出可执行的版本/实例原因')
-  // 渲染条件不变：只有 routeMissing 时才显示该提示。
-  assert.match(src, /if \(AGG\.routeMissing\) root\.append\(routeNotice\(ctx\)\)/)
+  // 渲染条件：核心只读接口缺失（routeMissing）或仅三模式端点缺失（modesUnavailable）时显示提示，
+  // 但两者分开记账，单个 modes 404 不再把整个聚合接口标成"全挂"。
+  assert.match(src, /if \(AGG\.routeMissing \|\| AGG\.modesUnavailable\) root\.append\(routeNotice\(ctx\)\)/)
+  assert.match(src, /modesUnavailable/, 'modes 缺失必须单独标识，不能放大成聚合接口全挂')
+  assert.doesNotMatch(src, /四个只读接口都返回了 404/, '不得再声称四个接口都 404')
 })

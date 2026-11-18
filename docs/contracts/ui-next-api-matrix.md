@@ -42,15 +42,15 @@ V3 把首页改为**状态驱动**：技术指标全部移到「监控与诊断�
 
 状态：离线/契约层 `PASS(mock)`；真实浏览器 `PASS(browser, mocked gateway)`（见 `docs/evidence/2026-11-15-ux-v3-a5-acceptance.md`）；真实 Go/GPT 推理与真实 Desktop 交互仍 `BLOCKED`（未授权付费调用）。
 
-### 2.2 三模式接入（switch / rollback / modes，P1 实现中）
+### 2.2 三模式接入（switch / rollback / modes，已接线；真机验收 NOT_TESTED）
 
-投影字段：历史 `profile` 已更名为 **`mode`**；新增 `previousMode`、`drifted`（见 [ui-v3-product-status §2.2](ui-v3-product-status.md)）。下表登记接口口径，**尚未真机验收，不得记为 PASS(real)**。
+投影字段：历史 `profile` 已更名为 **`mode`**；新增 `previousMode`、`drifted`（见 [ui-v3-product-status §2.2](ui-v3-product-status.md)）。下表登记接口口径：服务端已接线并通过离线/HTTP 夹具验证；**真机 GUI 切换仍 `NOT_TESTED`，不得记为 PASS(real)**。
 
 | UI 操作 | API | 关键字段 / 请求 | 边界 / 状态 |
 | --- | --- | --- | --- |
-| 列出接入方式 | `GET /api/codex/modes` | `available[]`、`mode`、`previousMode`、`drifted` | 只读；`unknown` 不写成 `official`；实现中 |
-| 切换（预览→确认→回执） | `POST /api/codex/switch` | `{mode: 'official'\|'route'\|'aggregated'}` → 预览 → 确认 → 回执 `needsRestart` | 切后**必须完全退出并重开 Codex GUI**；非法 mode 拒绝；实现中 |
-| 回滚到上一模式 | `POST /api/codex/rollback` | `{previousMode}` + `appliedSha`/备份校验 | `drifted=true` 拒绝；失败走 `state.previous`/备份；实现中 |
+| 列出接入方式 | `GET /api/aggregation/modes` | `available[]`、`current`、`previousMode`、`drifted` | 只读；`unknown` 不写成 `official`；已接线，真机 `NOT_TESTED` |
+| 切换（预览→确认→回执） | `POST /api/aggregation/switch` | `{mode: 'official'\|'route'\|'aggregated', parentModel?}` → 428 `preview` → 带 `consentToken`/`expectedSha` 确认 → 200 回执 `reload/restart` | 切后**必须完全退出并重开 Codex GUI**；非法 mode→422；`drifted`→409；已接线，真机 `NOT_TESTED` |
+| 回滚到上一模式 | `POST /api/aggregation/rollback` | 428 `preview` → 带 `consentToken`/`expectedSha` 确认 → 200；目标取 `state.previous` | `drifted=true` / 无 previous →409；失败走 `state.previous`/备份；已接线，真机 `NOT_TESTED` |
 | 路由零 GPT 验收 | 切换 `mode=route` 后核对网关日志 | `chatgpt-plan` 出站 = 0；DeepSeek 别名有 token | 验收硬指标，真机 `NOT_TESTED` |
 
 完整 config 形态与契约映射见[三模式接入方式映射](../product/2026-11-18-three-mode-access-mapping.md)。

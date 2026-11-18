@@ -29,9 +29,13 @@ import {
   activate as desktopActivate,
   deactivate as desktopDeactivate,
   detect as desktopDetect,
+  modeSnapshot,
   preview as desktopPreview,
+  previewRollback as desktopPreviewRollback,
+  rollback as desktopRollback,
   status as desktopStatus,
 } from '../codex/desktop-integration.js'
+import { AGGREGATION_MODES, listModeMetadata, listSelectableParents } from '../codex/profiles.js'
 
 export const AGGREGATION_API_CONTRACT = 'mg-aggregation-api/1'
 const BASE = '/api/aggregation'
@@ -352,9 +356,26 @@ function activationOptions (cfg, body, deps) {
   return opts
 }
 
+// 三模式切换选项：在普通接入选项上补 mode/parentModel。route 固定父模型；
+// aggregated 显式 parentModel 时让 model 与父保持一致，避免预览与实际写入不一致。
+function switchOptions (cfg, body, deps) {
+  const opts = activationOptions(cfg, body, deps)
+  const mode = String((body && body.mode) || '').trim()
+  if (AGGREGATION_MODES.includes(mode)) {
+    opts.mode = mode
+    const parent = body && body.parentModel != null ? String(body.parentModel).trim() : ''
+    if (parent) {
+      opts.parentModel = parent
+      if (mode !== 'route') opts.model = parent
+    }
+  }
+  return opts
+}
+
 async function handleHealth (cfg, deps, ctx) {
   const st = desktopStatus(desktopOpts(cfg))
   const det = desktopDetect(desktopOpts(cfg))
+  const snap = modeSnapshot(Object.assign(desktopOpts(cfg), { cfg }))
   // 目录运行时健康：只读本地目录，不触发网络；由入口注入 codexCatalogHealth，缺省时降级为 null。
   let catalogRuntime = null
   try {
@@ -369,6 +390,9 @@ async function handleHealth (cfg, deps, ctx) {
       ok: true,
       mode: st.mode,
       reason: st.reason || null,
+      // previousMode 复用 state.previous.mode 的投影：前端「回到上一模式」按钮读这个字段。
+      previousMode: snap.previousMode,
+      drifted: snap.drifted === true,
       needsRestart: st.needsRestart === true,
       detect: det,
       backup: det.backup || st.backup || { available: false },
@@ -560,6 +584,117 @@ export async function handleAggregationApi (ctx = {}) {
         expectedSha: body && body.expectedSha !== undefined ? String(body.expectedSha) : undefined,
       }))
       return { status: 200, body: Object.assign({ ok: true }, out, { reload: runtimeReload(ctx) }) }
+    }
+
+    // —— 三模式（official / route / aggregated）契约面 ——
+    // GET /modes：只读投影，复用 classifyConfigState（经 modeSnapshot）与目录候选父模型。
+    if (rest === '/modes' && method === 'GET') {
+      const snap = modeSnapshot(Object.assign(desktopOpts(ctx.cfg), { cfg: ctx.cfg }))
+      let parents = []
+      try {
+        const current = deps.catalog.readCurrent(SCOPE)
+        parents = listSelectableParents(current.catalog).map((p) => ({
+          id: p.slug, label: p.displayName, realTest: p.realTest,
+        }))
+      } catch { /* 目录不可读时返回空候选，前端会给出默认已签收父模型，不伪造目录 */ }
+      const available = listModeMetadata().map((m) => Object.assign({}, m, {
+        selectableParents: m.id === 'aggregated' ? parents : [],
+      }))
+      return {
+        status: 200,
+        body: {
+          current: { mode: snap.mode, parentModel: snap.parentModel, childModel: snap.childModel },
+          available,
+          // 兼容前端 selectableParentModels() 的两种读取形状（modes[] / selectableParents）。
+          modes: available,
+          selectableParents: parents,
+          previousMode: snap.previousMode,
+          drifted: snap.drifted,
+          appliedSha: snap.appliedSha,
+        },
+      }
+    }
+
+    // POST /switch：无 token → 428 + preview（删除行 / before·after sha / token）；带 token → 写入。
+    if (rest === '/switch' && method === 'POST') {
+      const mode = String((body && body.mode) || '').trim()
+      if (!AGGREGATION_MODES.includes(mode)) {
+        return fail(422, 'invalid_mode', '未知接入方式：只接受 official / route / aggregated', {
+          allowed: AGGREGATION_MODES.slice(),
+        })
+      }
+      if (modeSnapshot(Object.assign(desktopOpts(ctx.cfg), { cfg: ctx.cfg })).drifted) {
+        return fail(409, 'config_drifted', '配置已被修改（sha 漂移），拒绝切换；请重新检测后再操作')
+      }
+      const opts = switchOptions(ctx.cfg, body, deps)
+      const token = body && body.consentToken ? String(body.consentToken) : ''
+      if (!token) {
+        const p = desktopPreview(opts)
+        if (!p.ok) {
+          return fail(422, (p.blocked && p.blocked[0] && p.blocked[0].code) || 'activation_blocked', '切换被前置条件阻止，未做任何写入', {
+            blocked: p.blocked || [], preview: p,
+          })
+        }
+        return {
+          status: 428,
+          body: {
+            ok: false,
+            code: 'consent_required',
+            preview: Object.assign({}, p, {
+              beforeSha: p.before && p.before.sha256 ? p.before.sha256 : p.expectedSha,
+              afterSha: p.after && p.after.sha256 ? p.after.sha256 : null,
+              restartPreview: { needed: true, reason: 'mode_change_requires_restart' },
+            }),
+          },
+        }
+      }
+      const applied = await desktopActivate(Object.assign({}, opts, {
+        consentToken: token,
+        expectedSha: body && body.expectedSha !== undefined ? String(body.expectedSha) : undefined,
+      }))
+      const restart = applied && applied.restart ? applied.restart : { needed: true, reason: 'mode_change_requires_restart' }
+      return {
+        status: 200,
+        body: Object.assign({ ok: true }, applied, {
+          mode: applied && applied.mode ? applied.mode : mode,
+          restart: { needed: restart.needed === true, reason: restart.reason || null },
+          reload: runtimeReload(ctx),
+        }),
+      }
+    }
+
+    // POST /rollback：无 token → 428 + preview；带 token → 回到 state.previous.mode。
+    // 无 previous / 漂移 / 备份缺失由 previewRollback 抛 typed 409，mapFailure 原样映射。
+    if (rest === '/rollback' && method === 'POST') {
+      const opts = activationOptions(ctx.cfg, body, deps)
+      const token = body && body.consentToken ? String(body.consentToken) : ''
+      if (!token) {
+        const p = desktopPreviewRollback(opts)
+        return {
+          status: 428,
+          body: {
+            ok: false,
+            code: 'consent_required',
+            preview: Object.assign({}, p, {
+              beforeSha: p.before && p.before.sha256 ? p.before.sha256 : p.expectedSha,
+              afterSha: p.afterSha || (p.after && p.after.sha256 ? p.after.sha256 : null),
+              restartPreview: { needed: true, reason: 'mode_change_requires_restart' },
+            }),
+          },
+        }
+      }
+      const out = await desktopRollback(Object.assign({}, opts, {
+        consentToken: token,
+        expectedSha: body && body.expectedSha !== undefined ? String(body.expectedSha) : undefined,
+      }))
+      const restart = out && out.restart ? out.restart : { needed: true, reason: 'mode_change_requires_restart' }
+      return {
+        status: 200,
+        body: Object.assign({ ok: true }, out, {
+          restart: { needed: restart.needed === true, reason: restart.reason || null },
+          reload: runtimeReload(ctx),
+        }),
+      }
     }
 
     if (rest === '' || rest === '/') return fail(404, 'aggregation_route_unknown', '未知聚合路由：' + method + ' ' + path)

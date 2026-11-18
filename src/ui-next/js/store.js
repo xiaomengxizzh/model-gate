@@ -284,24 +284,26 @@ function startProductRefresh(opts) {
 
   const promise = (async () => {
     try {
-      // 并行读 /api/status 与聚合四接口；单个失败不影响其它结果。
+      // 并行读 /api/status 与聚合五接口；单个失败不影响其它结果。
+      // modes 失败单独记账：它只影响三模式切换，不进入 error/unsupported（不放大成"聚合接口全挂"）。
       const results = await Promise.allSettled([
         statusPromise,
         api.aggregationHealth({ signal }),
+        api.aggregationModes({ signal }),
         api.aggregationProviders({ signal }),
         api.aggregationModels({ signal }),
         api.aggregationDiagnostics({ signal }),
       ])
       if (epoch !== productState.epoch) return state.product
-      const [statusResult, healthResult, providersResult, modelsResult, diagnosticsResult] = results
-      const aggregationResults = results.slice(1)
-      const failures = aggregationResults
-        .filter((r) => r.status === 'rejected')
-        .map((r) => r.reason)
-        .filter(Boolean)
+      const [statusResult, healthResult, modesResult, providersResult, modelsResult, diagnosticsResult] = results
+      const coreFailures = [healthResult, providersResult, modelsResult, diagnosticsResult]
+        .filter((r) => r.status === 'rejected').map((r) => r.reason).filter(Boolean)
+      const modesFailure = modesResult.status === 'rejected' ? modesResult.reason : null
+      const failures = coreFailures
       const statusFailure = statusResult.status === 'rejected' ? statusResult.reason : null
-      const sessionExpired = (statusFailure && statusFailure.status === 401) || failures.some((e) => e && e.status === 401)
-      const cancelled = failures.some((e) => e && e.aborted === true)
+      const sessionExpired = (statusFailure && statusFailure.status === 401) ||
+        failures.some((e) => e && e.status === 401) || (modesFailure && modesFailure.status === 401)
+      const cancelled = failures.some((e) => e && e.aborted === true) || !!(modesFailure && modesFailure.aborted === true)
       // 401 已触发 store.handleUnauthorized（快照被清空），旧请求不得写回任何数据。
       if (sessionExpired || cancelled) return state.product
 
@@ -327,6 +329,8 @@ function startProductRefresh(opts) {
       const unsupported = !!error && classifyAggregationError(error).kind === 'unsupported'
       state.aggregation = {
         health: fulfillment(healthResult),
+        modes: fulfillment(modesResult),
+        modesUnavailable: !!(modesFailure && classifyAggregationError(modesFailure).kind === 'unsupported'),
         providers: fulfillment(providersResult),
         models: fulfillment(modelsResult),
         diagnostics: fulfillment(diagnosticsResult),

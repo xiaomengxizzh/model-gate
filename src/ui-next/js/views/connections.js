@@ -1108,19 +1108,21 @@ function enablePanel (ctx) {
   const drifted = !!(health && health.drifted === true)
   const m = modeLabel(known ? mode : 'unknown', drifted)
   const parents = selectableParentModels(snapshot && snapshot.modes)
+  // 仅当 modes/switch 端点缺失时禁用三模式切换；其它只读接口失败不影响这里的可点性。
+  const modeSwitchUnavailable = !!(snapshot && snapshot.modesUnavailable === true)
   const host = h('div')
   const live = h('p', { class: 'hint', role: 'status', 'aria-live': 'polite' })
 
   const switchBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '切换接入方式' })
-  switchBtn.disabled = !snapshot
+  switchBtn.disabled = !snapshot || modeSwitchUnavailable
   const chooser = modeChooser({
     current: known ? mode : 'official', parents,
-    onChange: (sel) => { switchBtn.disabled = !snapshot || sel === mode },
+    onChange: (sel) => { switchBtn.disabled = !snapshot || modeSwitchUnavailable || sel === mode },
   })
-  switchBtn.disabled = !snapshot || chooser.getSelection().mode === mode
+  switchBtn.disabled = !snapshot || modeSwitchUnavailable || chooser.getSelection().mode === mode
   switchBtn.addEventListener('click', () => runModeChange(ctx, 'switch', chooser.getSelection(), host, live))
 
-  const canRollback = !!(snapshot && (mode === 'aggregated' || mode === 'route'))
+  const canRollback = !!(snapshot && !modeSwitchUnavailable && (mode === 'aggregated' || mode === 'route'))
   const rollbackBtn = h('button', { class: 'btn', type: 'button', text: '回到上一模式', disabled: !canRollback, onclick: () => runModeChange(ctx, 'rollback', null, host, live) })
 
   host.append(

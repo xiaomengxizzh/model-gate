@@ -92,15 +92,15 @@ deriveProductStatus({
 
 **Go Key 写入通道**沿用现有 API，不新建存储：`POST /api/aggregation/providers`（可用 `preset:'opencode-go'` 省略 ID/URL/env）→ `POST /api/keys {id:'opencodego', key}` → `POST /api/aggregation/providers/opencodego/sync` → `POST /api/aggregation/activate`（428 预览 → consentToken → 原子写 → 回执）。每一步独立可重试/可回滚（`DELETE /api/aggregation/providers/:id`）。
 
-### 3.1 三模式切换端点（switch / rollback / modes，P1 实现中）
+### 3.1 三模式切换端点（switch / rollback / modes，已接线；真机验收 NOT_TESTED）
 
 | 操作 | 端点 | 语义 | 写盘 / 重启 |
 | --- | --- | --- | --- |
-| 列出模式 | `GET /api/codex/modes` | 返回可用模式、当前 `mode`、`previousMode`、`drifted`，只读 | 否 / 否 |
-| 切换模式 | `POST /api/codex/switch` | 预览 → 确认 → 回执；目标 `mode` 必须合法（`official`/`route`/`aggregated`） | 是 / **必须完全退出并重开 Codex GUI** |
-| 回滚模式 | `POST /api/codex/rollback` | 回到 `previousMode`，按 `appliedSha`/备份校验；`drifted=true` 时拒绝 | 是 / 必须重开 Codex GUI |
+| 列出模式 | `GET /api/aggregation/modes` | 返回可用模式、当前 `mode`、`previousMode`、`drifted`，只读 | 否 / 否 |
+| 切换模式 | `POST /api/aggregation/switch` | 428 预览 → 确认 → 200 回执；目标 `mode` 必须合法（`official`/`route`/`aggregated`），非法→422 | 是 / **必须完全退出并重开 Codex GUI** |
+| 回滚模式 | `POST /api/aggregation/rollback` | 428 预览 → 确认 → 回到 `previousMode`，按 `appliedSha`/备份校验；`drifted=true` 或无 previous→409 | 是 / 必须重开 Codex GUI |
 
-- 端点路径以 P1 实现为准；本节登记的是接口契约口径，尚未真机验收。
+- 端点路径与代码一致，统一走 `/api/aggregation/*`（`isAggregationApiPath` 已支持）；服务端已接线并通过离线 + HTTP 夹具验证，**真机 GUI 仍 `NOT_TESTED`**。
 - 切换/回滚一律要求显式管理员令牌、回环来源（或显式 `allowRemote`），不接受浏览器提供的路径或原始 TOML。
 - 非法 `mode` / `previousMode` / `drifted=true`：返回明确错误，配置与状态零改动，不静默降级。
 - 与既有受控配置写入 `/api/codex/config/plan|apply|rollback` 的关系：后者是字段级事务，前者是模式级编排；两者共用同一份 `mode` 状态与备份口径。

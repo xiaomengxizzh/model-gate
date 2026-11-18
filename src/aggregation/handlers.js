@@ -9,6 +9,9 @@
 //   GET      /api/aggregation/diagnostics
 //   POST     /api/aggregation/activate
 //   POST     /api/aggregation/deactivate
+//   GET      /api/aggregation/modes
+//   POST     /api/aggregation/switch
+//   POST     /api/aggregation/rollback
 //
 // 全部要求**显式管理员**（不因回环放行），并遵守 loopback peer / Host / Origin 与 `configVersion`
 // 乐观锁。处理器返回 `{ status, body }`，由主代理用既有 sendJson 输出；本模块不写 res、不写日志。
@@ -34,6 +37,9 @@ export const AGGREGATION_ROUTES = Object.freeze([
   'GET /api/aggregation/diagnostics',
   'POST /api/aggregation/activate',
   'POST /api/aggregation/deactivate',
+  'GET /api/aggregation/modes',
+  'POST /api/aggregation/switch',
+  'POST /api/aggregation/rollback',
 ])
 
 const bareHost = (h) => String(h || '').trim().toLowerCase().replace(/^\[|\]$/g, '')
@@ -405,6 +411,22 @@ export function createAggregationHandlers(deps = {}) {
     try { return { status: 200, body: await activation.deactivate(body || {}, ctx) } } catch (error) { return mapError(error) }
   }
 
+  // 三模式：仅转交注入的 activation 适配器；未注入时 501，绝不假装已实现。
+  // 实际接线在 src/aggregation/api.js（直接调用 desktop-integration），这里保持路由面一致。
+  function activationAction (name, missingMessage) {
+    return async (req, body, ctx = {}) => {
+      const g = guardAggregation(req, Object.assign({ cfg: ctxCfg(ctx) }, ctx))
+      if (g) return g
+      if (!activation || typeof activation[name] !== 'function') return denied(501, 'aggregation_activation_not_configured', missingMessage)
+      const v = versionConflict({ configVersion: currentVersion(ctx) }, body)
+      if (v) return v
+      try { return { status: 200, body: await activation[name](body || {}, ctx) } } catch (error) { return mapError(error) }
+    }
+  }
+  const modes = activationAction('modes', '三模式列表由 A3 提供；本处理器只转交，不假装已实现')
+  const switchMode = activationAction('switchMode', '模式切换由 A3 提供；本处理器只转交，不假装已实现')
+  const rollback = activationAction('rollback', '模式回滚由 A3 提供；本处理器只转交，不假装已实现')
+
   return Object.freeze({
     listProviders,
     addProvider,
@@ -415,6 +437,9 @@ export function createAggregationHandlers(deps = {}) {
     diagnostics,
     activate,
     deactivate,
+    modes,
+    switchMode,
+    rollback,
   })
 }
 
@@ -440,5 +465,8 @@ export function dispatchAggregationRoute(req, body, ctx = {}) {
   if (rest === '/diagnostics' && method === 'GET') return handlers.diagnostics(req, body, ctx)
   if (rest === '/activate' && method === 'POST') return handlers.activate(req, body, ctx)
   if (rest === '/deactivate' && method === 'POST') return handlers.deactivate(req, body, ctx)
+  if (rest === '/modes' && method === 'GET') return handlers.modes(req, body, ctx)
+  if (rest === '/switch' && method === 'POST') return handlers.switchMode(req, body, ctx)
+  if (rest === '/rollback' && method === 'POST') return handlers.rollback(req, body, ctx)
   return denied(404, 'aggregation_route_unknown', '未知聚合路由：' + method + ' ' + path)
 }

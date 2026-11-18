@@ -101,6 +101,7 @@ export const api = {
 
   // —— 聚合管理只读快照（首页/连接页/聚合页共用，见契约 §5）——
   aggregationHealth: (opts = {}) => request('/api/aggregation/health', opts),
+  aggregationModes: (opts = {}) => request('/api/aggregation/modes', opts),
   aggregationProviders: (opts = {}) => request('/api/aggregation/providers', opts),
   aggregationModels: (opts = {}) => request('/api/aggregation/models', opts),
   aggregationDiagnostics: (opts = {}) => request('/api/aggregation/diagnostics', opts),

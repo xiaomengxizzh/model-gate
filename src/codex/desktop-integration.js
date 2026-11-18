@@ -2280,6 +2280,148 @@ export function status (opts = {}) {
   }
 }
 
+// —— 三模式状态投影 / 回滚（供 HTTP 适配层复用；只读状态 + 受控写）——
+// previousMode 不是新字段：复用 activate/deactivate 已经维护的 state.previous.mode，
+// 避免另建第二份状态（两份状态一旦不同步，回滚就会写错模式）。
+export function modeSnapshot (opts = {}) {
+  const paths = resolveDesktopPaths(opts)
+  const classification = classifyConfigState({
+    configPath: paths.configPath,
+    baseUrl: String(opts.baseUrl || DEFAULT_GATEWAY_BASE_URL),
+  })
+  const state = loadState(paths)
+  const mode = classification.mode
+  const target = resolveModeTarget({ mode: AGGREGATION_MODES.includes(mode) ? mode : 'official', cfg: opts.cfg })
+  const cfgDefault = opts.cfg && opts.cfg.defaults && opts.cfg.defaults.model
+  const parentModel = (state && state.parentModel) ||
+    (mode === 'route' ? target.parentModel : (String(cfgDefault || '').trim() || target.parentModel))
+  const childModel = state && state.childModel ? state.childModel : target.childModel
+  const previousMode = state && state.previous && AGGREGATION_MODES.includes(String(state.previous.mode))
+    ? String(state.previous.mode)
+    : null
+  return {
+    mode,
+    parentModel,
+    childModel,
+    previousMode,
+    drifted: classification.drifted === true,
+    appliedSha: classification.sha256 || null,
+  }
+}
+
+// 回滚预览：回到 state.previous.mode。official 走逐字节恢复（备份），route/aggregated
+// 复用模式切换预览（planModeTransition 保证"看到什么就写什么"）。无 previous / 漂移 / 备份
+// 不可用一律 typed 409 + 零写入；consentToken 绑定 before/after sha，任一变化即失配。
+export function previewRollback (opts = {}) {
+  const paths = resolveDesktopPaths(opts)
+  const state = loadState(paths)
+  if (!state || !state.previous || !AGGREGATION_MODES.includes(String(state.previous.mode))) {
+    throw new DesktopError('no_previous_mode', '没有可回滚的上一模式：当前配置不是由 ModelGate 从上一种模式切换而来。', {
+      mode: state ? state.mode : null,
+    }, 409)
+  }
+  const previousMode = String(state.previous.mode)
+  const gatewayBaseUrl = String(opts.baseUrl || DEFAULT_GATEWAY_BASE_URL).replace(/\/+$/, '')
+  const classification = classifyConfigState({ configPath: paths.configPath, baseUrl: gatewayBaseUrl })
+  if (classification.drifted) {
+    throw new DesktopError('config_drifted', '配置已被修改（sha 漂移），不能回滚；请重新检测后再操作。', {
+      mode: classification.mode, appliedSha: state.appliedSha || null, currentSha: classification.sha256 || null,
+    }, 409)
+  }
+  if (previousMode === 'official') {
+    const backupPath = state.previous.backupPath || state.backupPath || null
+    if (!backupPath || !state.before || !state.before.exists) {
+      throw new DesktopError('previous_backup_missing', '上一模式（官方直连）的接入前备份不可用，无法回滚。', { previousMode }, 409)
+    }
+    let backupText
+    try { backupText = readFileSync(backupPath, 'utf8') } catch {
+      throw new DesktopError('previous_backup_missing', '上一模式（官方直连）的接入前备份不可读，无法回滚。', { previousMode }, 409)
+    }
+    const current = snapshotConfigFile(paths.configPath)
+    const currentText = current.exists ? readFileSync(paths.configPath, 'utf8') : ''
+    const existing = readOwnedFields(currentText)
+    const baseOwned = readOwnedFields(backupText)
+    // 期望形态 = 接入前备份里的自有字段；ownedRows 会标出要删除的 openai_base_url / 目录段等 remove 行。
+    const desired = { topLevel: {}, sections: {} }
+    for (const [key, entry] of Object.entries(baseOwned.topLevel || {})) {
+      if (!entry || !entry.present) continue
+      const value = normalizeOwnedValue(entry)
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') desired.topLevel[key] = value
+    }
+    for (const [name, section] of Object.entries(baseOwned.sections || {})) {
+      for (const [key, entry] of Object.entries((section && section.keys) || {})) {
+        if (!entry || !entry.present) continue
+        const value = normalizeOwnedValue(entry)
+        if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') continue
+        if (!desired.sections[name]) desired.sections[name] = {}
+        desired.sections[name][key] = value
+      }
+    }
+    const rows = ownedRows(existing, desired, { includeRemovals: true })
+    const expectedSha = current.exists ? current.sha256 : ''
+    const afterSha = sha256Hex(Buffer.from(backupText, 'utf8'))
+    const binding = { fromMode: classification.mode, toMode: 'official', providerMode: 'builtin-openai' }
+    return {
+      contract: DESKTOP_CONTRACT,
+      ok: true,
+      state: 'ready',
+      mode: classification.mode,
+      fromMode: classification.mode,
+      toMode: 'official',
+      previousMode: 'official',
+      before: { exists: current.exists, size: current.size, sha256: expectedSha },
+      after: { exists: true, size: Buffer.byteLength(backupText, 'utf8'), sha256: afterSha },
+      expectedSha,
+      afterSha,
+      rows,
+      changed: rows.filter((r) => r.kind !== 'same'),
+      conflicts: [],
+      blocked: [],
+      warnings: [],
+      preserved: summarizePreserved(currentText),
+      consentRequired: true,
+      consentToken: consentTokenFor(paths.configPath, expectedSha, afterSha, binding),
+      firstRun: false,
+      catalog: null,
+      agentChild: null,
+    }
+  }
+  const p = preview(Object.assign({}, opts, { mode: previousMode }))
+  return Object.assign({}, p, { previousMode })
+}
+
+// 回滚写：previewRollback 的确认阶段。token 失配 → 428；expectedSha 不符 → 409；
+// previousMode=official 走逐字节恢复，route/aggregated 走模式切换写入。
+export async function rollback (opts = {}) {
+  const p = previewRollback(opts)
+  if (!p.ok) {
+    throw new DesktopError('rollback_blocked', '回滚被前置条件阻止，未做任何写入。', {
+      blocked: p.blocked || [], preview: p,
+    }, 422)
+  }
+  if (!opts.consentToken || String(opts.consentToken) !== p.consentToken) {
+    throw new DesktopError('consent_required', '回滚前必须显式确认：请先调用预览并把 consentToken 与 expectedSha 一起回传。', {
+      expectedSha: p.expectedSha, afterSha: p.afterSha, consentTokenHint: p.consentToken,
+    }, 428)
+  }
+  if (opts.expectedSha !== undefined && opts.expectedSha !== null && String(opts.expectedSha) !== String(p.expectedSha)) {
+    throw new DesktopError('concurrent_modification', '预览后配置已被修改，已中止且未做任何写入。', {
+      expected: String(p.expectedSha), actual: String(opts.expectedSha),
+    }, 409)
+  }
+  const previousMode = p.previousMode
+  if (previousMode === 'official') {
+    const out = await deactivate(Object.assign({}, opts, { expectedSha: p.expectedSha }))
+    return Object.assign({}, out, { mode: 'official', previousMode })
+  }
+  const out = await activate(Object.assign({}, opts, {
+    mode: previousMode,
+    consentToken: p.consentToken,
+    expectedSha: p.expectedSha,
+  }))
+  return Object.assign({}, out, { previousMode })
+}
+
 // 供 HTTP 适配层一次性构造：五个导出之外的内部契约（不改变冻结签名）。
 export const DESKTOP_POLICY = Object.freeze({
   contract: DESKTOP_CONTRACT,

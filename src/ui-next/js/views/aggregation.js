@@ -54,7 +54,10 @@ export const PASS_REAL_PARENT_MODEL = 'gpt-6-luna'
 const AGG = {
   fetched: false,
   loading: false,
-  routeMissing: false,
+  // 逐端点记录缺失，不再把一个接口的 404 放大成"聚合接口全挂"。
+  routeMissing: false,      // 四个只读接口（health/providers/models/diagnostics）任一缺失
+  modesUnavailable: false,  // 仅 modes 缺失：只禁用三模式切换，不影响其它接口
+  missingRoutes: [],        // 实际 404 的端点路径，供 routeNotice 如实列出
   health: null,
   modes: null,
   selectedMode: null,
@@ -332,7 +335,15 @@ async function loadAggregation (ctx = {}) {
     request(AGGREGATION_ENDPOINTS.diagnostics),
   ])
   const results = { health, modes, providers, models, diagnostics }
-  AGG.routeMissing = Object.values(results).some((r) => r.status === 'rejected' && looksMissingRoute(r.reason))
+  const core = ['health', 'providers', 'models', 'diagnostics']
+  const missing = []
+  for (const key of Object.keys(results)) {
+    const r = results[key]
+    if (r.status === 'rejected' && looksMissingRoute(r.reason)) missing.push(AGGREGATION_ENDPOINTS[key])
+  }
+  AGG.missingRoutes = missing
+  AGG.routeMissing = core.some((key) => missing.includes(AGGREGATION_ENDPOINTS[key]))
+  AGG.modesUnavailable = missing.includes(AGGREGATION_ENDPOINTS.modes)
   AGG.health = health.status === 'fulfilled' ? health.value : null
   AGG.modes = modes.status === 'fulfilled' ? modes.value : null
   AGG.providers = providers.status === 'fulfilled' ? providers.value : null
@@ -356,9 +367,15 @@ function reload (ctx) {
 
 // —— 卡片 ——
 function routeNotice (ctx) {
+  const missing = Array.isArray(AGG.missingRoutes) ? AGG.missingRoutes.slice() : []
+  const list = missing.length ? missing.join('、') : '（具体端点见下方错误）'
+  const onlyModes = missing.length > 0 && missing.every((p) => p === AGGREGATION_ENDPOINTS.modes)
   return callout('warn',
-    h('strong', { text: '当前网关没有响应聚合接口（404）。' }),
-    ' 本视图的四个只读接口都返回了 404：通常是所连实例版本较旧，或聚合模块尚未随该实例启动。请确认 ModelGate 已升级到提供 /api/aggregation/* 的版本后重新探测；本视图不会伪造数据。',
+    h('strong', { text: onlyModes ? '三模式切换接口不可用（404）。' : '部分聚合接口返回 404。' }),
+    ' 实际失败的端点：' + list + '。' +
+    (onlyModes
+      ? ' 其它只读接口正常，本页继续展示真实状态；仅「切换接入方式 / 回到上一模式」按钮被禁用，升级到提供 /api/aggregation/modes|switch|rollback 的版本后重新探测即可。'
+      : ' 只禁用受影响的展示，不伪造数据；请确认 ModelGate 已升级到提供 /api/aggregation/* 的版本后重新探测。'),
     h('div', { class: 'toolbar', style: { marginTop: '8px' } },
       h('button', { class: 'btn btn-sm', type: 'button', text: '重新探测', onclick: () => reload(ctx) })))
 }
@@ -422,7 +439,8 @@ function overviewCard (ctx) {
   const restart = health.restart || activation.restart || null
   const rn = restartNotice(restart, mode)
   const backup = health.backup || activation.backup || { available: false }
-  const canToggle = !AGG.routeMissing
+  // 只有三模式端点（modes/switch/rollback）缺失时才禁用切换；其它只读接口正常时不误伤。
+  const canToggle = !AGG.modesUnavailable
   const parents = selectableParentModels(AGG.modes)
   const switchBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '切换接入方式' })
   switchBtn.disabled = !canToggle
@@ -828,7 +846,7 @@ async function beginActivate (ctx) {
       return
     }
     if (e && e.status === 409) { toast('另一个操作正在进行或配置已被修改，请稍后重试', 'error'); await loadAggregation(ctx); return }
-    if (e && e.status === 404) { AGG.routeMissing = true; ctx.rerender && ctx.rerender(); return }
+    if (e && e.status === 404) { AGG.routeMissing = true; AGG.missingRoutes = [AGGREGATION_ENDPOINTS.activate]; ctx.rerender && ctx.rerender(); return }
     toast('无法开始接入：' + (e && e.message ? e.message : '未知错误'), 'error')
   }
 }
@@ -849,7 +867,7 @@ async function beginSwitch (ctx, mode, parentModel) {
     }
     if (e && e.status === 409) { toast('配置已被修改或另一操作在进行，未写入；请重新检测', 'error'); await loadAggregation(ctx); return }
     if (e && e.status === 422) { toast('切换被前置条件阻止（422），未写入', 'error'); await loadAggregation(ctx); return }
-    if (e && e.status === 404) { AGG.routeMissing = true; ctx.rerender && ctx.rerender(); return }
+    if (e && e.status === 404) { AGG.modesUnavailable = true; AGG.missingRoutes = [AGGREGATION_ENDPOINTS.switch]; ctx.rerender && ctx.rerender(); return }
     toast('无法切换：' + (e && e.message ? e.message : '未知错误'), 'error')
   }
 }
@@ -869,7 +887,7 @@ async function beginRollback (ctx) {
     }
     if (e && e.status === 409) { toast('配置已被修改，未回滚；请重新检测', 'error'); await loadAggregation(ctx); return }
     if (e && e.status === 422) { toast('回滚被前置条件阻止（422），未写入', 'error'); await loadAggregation(ctx); return }
-    if (e && e.status === 404) { AGG.routeMissing = true; ctx.rerender && ctx.rerender(); return }
+    if (e && e.status === 404) { AGG.modesUnavailable = true; AGG.missingRoutes = [AGGREGATION_ENDPOINTS.rollback]; ctx.rerender && ctx.rerender(); return }
     toast('无法回滚：' + (e && e.message ? e.message : '未知错误'), 'error')
   }
 }
@@ -944,7 +962,7 @@ export function render (root, ctx = {}) {
     root.append(callout('info', h('strong', { text: '正在读取聚合状态与 Desktop 探测结果…' }), ' 在响应返回前不显示 0、不显示“已连接”。'))
     return
   }
-  if (AGG.routeMissing) root.append(routeNotice(ctx))
+  if (AGG.routeMissing || AGG.modesUnavailable) root.append(routeNotice(ctx))
   if (AGG.healthError && !AGG.routeMissing) {
     root.append(callout('danger', h('strong', { text: '聚合健康接口读取失败：' }), AGG.healthError.message || '未知错误',
       h('div', { class: 'toolbar', style: { marginTop: '8px' } }, h('button', { class: 'btn btn-sm', type: 'button', text: '重试', onclick: () => { AGG.fetched = false; loadAggregation(ctx) } }))))

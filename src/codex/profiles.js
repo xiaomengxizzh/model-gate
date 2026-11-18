@@ -11,6 +11,19 @@ export const DEFAULT_PARENT_MODEL = 'gpt-6-luna'
 export const ROUTE_MODEL = 'mg-opencodego-deepseek-v4-1-flash'
 export const DEEPSEEK_CHILD_MODEL = 'deepseek-v4.1-flash'
 
+// 三模式的展示元数据（HTTP /modes 的 available[] 投影，与 UI 的「接入方式」措辞一致）。
+// 纯数据、不含任何路径/凭据；只有 id 是契约字段，label/description 可随产品措辞调整。
+export const MODE_META = Object.freeze({
+  official: Object.freeze({ id: 'official', label: '官方直连', description: '不经 ModelGate，使用 Codex 官方默认配置。' }),
+  route: Object.freeze({ id: 'route', label: '路由', description: '纯 DeepSeek（父=子=mg-opencodego-deepseek-v4-1-flash），零 GPT 调用。' }),
+  aggregated: Object.freeze({ id: 'aggregated', label: '聚合', description: 'GPT 父（默认 gpt-6-luna）+ DeepSeek 子。' }),
+})
+
+// 按稳定顺序返回三模式元数据；selectableParents 由调用方（目录）补齐，这里保持纯函数。
+export function listModeMetadata () {
+  return AGGREGATION_MODES.map((id) => Object.assign({}, MODE_META[id], { selectableParents: [] }))
+}
+
 /**
  * 把一次模式选择解析成确定的接入目标。
  * @param {object}  input
