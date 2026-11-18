@@ -3,6 +3,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,15 +13,29 @@ import { handleCodexApi, planIdFor, CODEX_API_VERSION } from '../../../src/codex
 const CLI = join(root, 'bin', 'mg.mjs')
 
 function cli(args, env = {}) {
-  const res = spawnSync(process.execPath, [CLI, ...args], {
-    cwd: root,
-    encoding: 'utf8',
-    timeout: 40000,
-    env: Object.assign({}, process.env, {
-      MG_CONFIG: '', MG_CONFIG_DIR: '', MG_ADMIN_TOKEN: '', MG_CLI_ALLOW_REMOTE: '',
-      ...env,
-    }),
-  })
+  // 隔离：显式 --config/--config-dir 命令会经 loadConfig()（src/router.js）把
+  // <MG_CONFIG_DIR>/gateway.local.json 合并进主配置。若 MG_CONFIG_DIR 置空，
+  // configPaths() 会回退到 <cwd>/config，读到生产 gitignored 的 gateway.local.json /
+  // keys.local.json，污染只读/export 用例的显式配置。故这类命令把 MG_CONFIG_DIR 指向
+  // 本用例专属的空临时目录（无 local/keys 文件），用后即清理。
+  // 其余命令（--version / doctor / 管理面）依赖"无配置来源"语义：尤其 doctor 期望
+  // config=unknown、nextAction=pass-explicit-config，必须保持 MG_CONFIG_DIR 为空。
+  const usesExplicitConfig = args.includes('--config') || args.includes('--config-dir')
+  const isolatedDir = usesExplicitConfig ? mkdtempSync(join(tmpdir(), 'mg-n03-cli-')) : null
+  let res
+  try {
+    res = spawnSync(process.execPath, [CLI, ...args], {
+      cwd: root,
+      encoding: 'utf8',
+      timeout: 40000,
+      env: Object.assign({}, process.env, {
+        MG_CONFIG: '', MG_CONFIG_DIR: isolatedDir || '', MG_ADMIN_TOKEN: '', MG_CLI_ALLOW_REMOTE: '',
+        ...env,
+      }),
+    })
+  } finally {
+    if (isolatedDir) rmSync(isolatedDir, { recursive: true, force: true })
+  }
   let json = null
   try { json = JSON.parse(res.stdout) } catch { json = null }
   return { status: res.status, stdout: res.stdout, stderr: res.stderr, json }
