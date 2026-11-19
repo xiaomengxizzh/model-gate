@@ -94,6 +94,49 @@ test('codexOfficialProvider 缺省回退同名官方条目；显式值优先；�
   assert.equal(codexOfficialProvider(nonOfficial, LUNA), '', '非官方 provider 不参与回退')
 })
 
+test('官方目录新 slug（未在 config.models 声明）→ 复用共享官方 provider，不 404、不落 Chat 桥', () => {
+  const NEW = 'gpt-6.2-sol'
+  // 基线新模型不在 config.models；config.models 里只有 luna 一条官方声明（chatgptplan），
+  // 复现真机报错：之前 codexOfficialProvider(NEW) 返回空 → 404 official_provider_missing。
+  const cfg = cfgWith({
+    models: { [LUNA]: { provider: 'chatgptplan', api: 'responses' } },
+    catalog: catalogView({ officialSlugs: [LUNA, NEW] }),
+  })
+  assert.equal(codexOfficialProvider(cfg, NEW), 'chatgptplan', '新官方 slug 复用共享官方 provider')
+  assert.equal(codexOfficialProvider(cfg), '', '未给模型名仍不得猜测')
+  const hit = createRouter(cfg).resolve(NEW)
+  assert.equal(hit.known, true)
+  assert.equal(hit.canonicalName, NEW)
+  assert.deepEqual(hit.def, { provider: 'chatgptplan', api: 'responses', codexOfficial: true })
+  const prov = { id: 'chatgptplan', baseUrl: cfg.providers.chatgptplan.baseUrl, _def: cfg.providers.chatgptplan }
+  assert.equal(classifyTarget(prov, cfg).kind, 'official')
+  assert.equal(isOfficialTarget(prov, cfg), true)
+  const nProto = resolveUpstreamProtocol({
+    publicId: NEW,
+    upstreamId: modelTarget(cfg, NEW, 'chatgptplan').servingName,
+    protocol: hit.def.api,
+  })
+  assert.equal(nProto.ok, true)
+  assert.equal(nProto.protocol, 'responses', '新官方 slug 走原生 responses，不落 Chat 桥')
+  assert.equal(modelTarget(cfg, NEW, 'chatgptplan').servingName, NEW, '官方上游模型名就是 slug，不改写')
+})
+
+test('多官方 provider 并存且不一致 → 不猜测，official_provider_missing fail-closed', () => {
+  const NEW = 'gpt-6.2-sol'
+  const cfg = cfgWith({
+    models: {
+      [LUNA]: { provider: 'chatgptplan', api: 'responses' },
+      otheroff: { provider: 'openai', api: 'responses' },
+    },
+    catalog: catalogView({ officialSlugs: [LUNA, NEW] }),
+  })
+  assert.equal(codexOfficialProvider(cfg, NEW), '', '官方 provider 有分歧时不得猜测身份')
+  const e = reasonOf(() => createRouter(cfg).resolve(NEW))
+  assert.equal(e && e.code, 'unknown_model')
+  assert.equal(e.reason, 'official_provider_missing')
+  assert.equal(e.status, 404)
+})
+
 test('不回归：OpenCode Go 聚合 slug 仍解析到 opencodego / thirdParty', () => {
   const cfg = cfgWith({ models: { [LUNA]: { provider: 'chatgptplan', api: 'responses' } } })
   const hit = createRouter(cfg).resolve(GO)

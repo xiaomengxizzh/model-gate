@@ -118,18 +118,33 @@ export function codexOfficialSlugSet(cfg) {
 export function isCodexOfficialSlug(cfg, model) {
   return typeof model === 'string' && !!model && codexOfficialSlugSet(cfg).has(model)
 }
-// 官方 slug 的上游 provider：显式 defaults.codexOfficialProvider 优先；缺省时按该 official slug
-// 在 config.models 的同名声明回退（仅当 provider 属 OFFICIAL_PROVIDER_IDS），避免 official_provider_missing。
-// 不按 provider 名字猜测身份——白名单来自 catalog.js 的单一真源。
+// 官方 slug 的上游 provider，三级判定（不按 provider 名字猜测身份——白名单来自 catalog.js 单一真源）：
+//   1) 显式 defaults.codexOfficialProvider 优先；
+//   2) 该 official slug 在 config.models 的同名声明（仅当 provider 属 OFFICIAL_PROVIDER_IDS）；
+//   3) 共享官方 provider 兜底：官方目录会随客户端升级动态扩张（如 gpt-6.2-sol/astra），新 slug
+//      往往还没在 config.models 里声明同名条目。所有官方目录模型属同一 ChatGPT 官方订阅、走同一
+//      官方上游，因此当 config.models 中「所有」官方 provider 声明指向同一个 id 时复用它作为默认；
+//      若并存多个不同官方 provider（身份有分歧）则不猜测，返回 '' 由调用方 fail-closed。
+//      传 model 名才启用兜底（未给模型名时不得猜测身份）。
 export function codexOfficialProvider(cfg, model) {
   const v = cfg && cfg.defaults && cfg.defaults.codexOfficialProvider
   if (typeof v === 'string' && v.trim()) return v.trim()
   const models = (cfg && cfg.models) || {}
-  if (!model || !Object.prototype.hasOwnProperty.call(models, model)) return ''
-  const entry = models[model]
-  const provider = entry && entry.provider
-  if (typeof provider === 'string' && provider.trim() && OFFICIAL_PROVIDER_IDS.includes(provider.trim())) return provider.trim()
-  return ''
+  if (!model) return ''
+  if (Object.prototype.hasOwnProperty.call(models, model)) {
+    const entry = models[model]
+    const provider = entry && entry.provider
+    if (typeof provider === 'string' && provider.trim() && OFFICIAL_PROVIDER_IDS.includes(provider.trim())) return provider.trim()
+  }
+  const shared = new Set()
+  for (const name of Object.keys(models)) {
+    const entry = models[name]
+    const provider = entry && entry.provider
+    if (typeof provider === 'string' && provider.trim() && OFFICIAL_PROVIDER_IDS.includes(provider.trim())) {
+      shared.add(provider.trim())
+    }
+  }
+  return shared.size === 1 ? [...shared][0] : ''
 }
 
 // 目录 official slug 与 config.models 同名时的「同源 passthrough」判定：镜像 catalog.js 的
