@@ -3468,16 +3468,30 @@ function makeHandler(state) {
           res.writeHead(nout.status, { 'content-type': nout.contentType }); res.end(nout.buf); return
         }
         // 方案 B：聚合 Go 绑定（opencodego）的 thirdParty chat-completions 子代理续轮兼容。
-        // 这类子代理（deepseek）的续轮帧由 Codex 连接续轮自行填入 previous_response_id，其 input
-        // 已含完整历史（全量重发）；而 Chat 桥契约（responses.js:317）会据此 400「不维护续轮」，
-        // 子代理无法派单。Chat 桥本就不做 server-side 续轮，删除该字段等价于「无状态重发」，与
-        // RESPONSES 分支（:3437-3440）及续轮重建后（:3392）的删除语义一致：不静默丢历史、不伪造
-        // function_call、不删用户 input、不放宽 MG-R008 配对闸门。
+        // 这类子代理（deepseek）的续轮帧由 Codex 连接续轮自行填入 previous_response_id；Chat 桥契约
+        // （responses.js:317）会据此 400「不维护续轮」，故须删除该字段。但 Codex 0.169/0.170 的续轮帧
+        // 是**增量**的：input 只带 function_call_output，配对的 function_call 在上一轮响应里（靠
+        // previous_response_id 关联）。若只裸删 prev_id 而不补回历史，桥配对闸门（MG-R008）会判
+        // tool_output_without_call → 400（2026-11-19 真机回归）。
+        // 修复：删 prev_id 前先按 prev_id 从 continuation store 重建完整历史（复用 native 路径
+        // :3350 的已验证机制），命中则用重建后的 input（含上一轮 function_call）→ 桥配对自然通过；
+        // 未命中（状态缺失/过期）退回原有「无状态重发」行为，不回归 3c74cc3 的既有语义。
+        // 不静默丢历史、不伪造 function_call、不删用户 input、不放宽 MG-R008 配对闸门。
         // 仅对 Go 绑定子代理开此口子：通用 thirdParty chat 目标（responses-endpoint 拒绝矩阵）仍
         // 保持 400 fail-closed 契约；官方/原生路径在上方已 return，不受影响。
         if (nProto && nProto.protocol === CHAT_COMPLETIONS && nDef && nDef.provider &&
             state.cfg.providers[nDef.provider] && isGoBinding(buildProvider(state.cfg, nDef.provider)) &&
             body && Object.prototype.hasOwnProperty.call(body, 'previous_response_id')) {
+          const prevId = body.previous_response_id
+          if (typeof prevId === 'string' && prevId) {
+            const rec = reconstructContinuation(prevId, body.input)
+            if (rec.ok) {
+              body = Object.assign({}, body, { input: rec.input })
+              log && log.info('responses chat-bridge continuation reconstructed', 'restored=' + rec.restoredItems, 'delta=' + rec.deltaItems)
+            } else {
+              log && log.warn('responses chat-bridge continuation degraded', 'reason=' + rec.reason, 'store=' + continuationStoreSize().count)
+            }
+          }
           body = Object.assign({}, body)
           delete body.previous_response_id
         }
