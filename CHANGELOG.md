@@ -2,6 +2,35 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-22 简约演示前端（cel-dusk，独立预览）
+
+### Added
+
+- **只读演示前端 `src/ui-demo/`**：单页、零依赖、零表单；消费 `/api/status`、`/api/model-stats`、`/api/aggregation/health`、`/api/logs`。视觉基线为 style-atlas 的 `cel-dusk`（亮/暗两档，2px 描边 + 位移实色影 + steps(2)）。
+- **独立预览服务器 `scripts/ui-demo-preview.mjs`**：静态资源 + `/api/*` 只读反向代理；默认 127.0.0.1:8791 → 8787，支持 `--fixture` 离线验收。不启停、不改写运行中的网关与 `/ui-next`。
+- **契约 `docs/contracts/ui-demo-v1.md`** 与 **使用说明 `docs/how-to/ui-demo-preview.md`**：字段口径、降级规则、信息架构与验收边界。
+
+### 诚实边界（未验证）
+
+- 演示不是生产控制台：`/` 仍 302 → `/ui-next/`，未新增服务端路由，未重启 8787。
+- 预览默认代理运行中的旧进程（无 `requests` 桶字段）时，页面按契约显式降级；新字段只在重启后的新进程出现。
+- 真机浏览器只覆盖本机 Chrome 无头渲染与截图，不含读屏/键盘全流程人工验收；演示不发起推理请求。
+
+## [Unreleased] —— 2026-11-22 用量记账修复：请求数与 prompt 缓存 token 解耦
+
+### Fixed
+
+- **`/api/model-stats` 每个时间桶有真实 `requests`**：日/小时桶此前只有 `tokens/hit/miss/inTokens/outTokens`，旧前端把 `hit+miss`（prompt 缓存 token）当请求数，出现 4.45 亿「请求」的数量级错报。新增统一记账入口 `noteRequestAccepted()`（`src/index.js`，经 `FWD_DEPS` 注入 `src/forward.js`）：成功路径同时维护 `counters.requests`、`byProvider.requests`、`byModel.requests` 与日/小时桶 `requests`；`tallyDaily()` 建桶补 `requests: 0` 默认值，桶形状一致。6 处成功块（媒体 / 视频创建 / 官方 Responses / 原生 Responses / embeddings / rerank）改为调用该入口，流式 Responses 仍把返回的模型桶传给 `streamCodexResponse`；错误计数、重试与 provider 记账语义未改。
+- **`/api/model-stats` 新增 `cacheHitTokens`/`cacheMissTokens`**：与兼容别名 `hit`/`miss` 同值，明确二者是 **prompt 缓存 token** 而非请求数；`requests` 为请求数。
+- **`/api/status.models[]` 新增 `todayRequests`**：与 `today`（今日 token）取同一日桶；`providers`/`dialogues` 形状未改。`src/forward.js` 的 Chat 数据面改用同一记账入口，避免日/小时桶只有 token 没有请求数。
+- **升级前的历史桶不伪造 0**：没有 `requests` 字段的旧 `stats.json` 桶投影为 `null`（未知），新写入的空桶为数字 `0`；前端据此显示 `—` 而不是 0。回归补了「昨天历史桶 → null」断言。
+- **回归**：新增 `scripts/test/offline/usage-accounting.test.mjs`（隔离 `MG_CONFIG_DIR` + 随机回环端口 + 本地 mock 上游，零真实上游、零付费），断言 3 次成功 `/v1/chat/completions` → 模型小时桶 `requests` 合计 3、`hit/miss` 为缓存 token（且不等于请求数）、`cacheHitTokens/cacheMissTokens` 同值、`counters.requests`=3、`models[].requests/todayRequests`=3；已在 `scripts/test/run.mjs` 的 SUITES 登记。
+
+### 诚实边界（未验证）
+
+- 未重启 8787、未访问真实上游：本轮只做离线 mock 验证；新字段/新口径只在新进程生效，运行中的旧进程需所有者重启后验证。
+- Chat 数据面沿用的仍是既有「逐上游尝试」请求记账（重试会多次 +1），本轮只把日/小时桶并入同一入口，未改变该历史语义。
+
 ## [Unreleased] —— 2026-11-19 官方模型目录根治：基线跟上 0.170（含 gpt-6.2）+ 一键刷新机制
 
 ### Added

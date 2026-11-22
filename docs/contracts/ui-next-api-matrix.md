@@ -138,3 +138,11 @@ V3 把首页改为**状态驱动**：技术指标全部移到「监控与诊断�
 - Web 端备份/恢复：无管理 API；不提供无效按钮。
 - 客户端 config/auth 文件探测：安全边界内不做；验证等级无法自动判定。
 - 真实上游 429/5xx 故障注入与真实客户端回归：需要单独授权与预算，本轮按 `BLOCKED` 记录（见验收报告）。
+## 10. 已知缺陷（2026-11-22 记录；本轮不修改运行中前端）
+
+运行在 8787 的 `/ui-next` 仍有两处与后端投影不一致的展示缺陷。所有者要求本轮不替换、不重启该前端；修复基线在新演示 `src/ui-demo` 与后端字段：
+
+1. **用量页把 `hit+miss` 当请求数**：`src/ui-next/js/views/dashboard.js` 的 `usageBuckets()` 用 `row.requests = row.hit + row.miss`，而 `hit/miss` 是 prompt 缓存 token；本机因此出现 4.45 亿「请求」。后端已在 `/api/model-stats` 提供真实 `requests` 与显式 `cacheHitTokens/cacheMissTokens`；运行中的 `/ui-next` 未改。
+2. **最近请求的「模型」列显示对话 ID**：`usageRecentCard()` 用 `d.named || d.id` 填模型列，而 `/api/status.dialogues[]` 不含模型名，故显示 `conv-...`。新演示改用 `lastServing`；后端未新增 dialogues 模型字段。
+
+新演示对缺失字段显示 `—` 或明确提示，不把缓存 token 当请求数。

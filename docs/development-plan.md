@@ -6,6 +6,26 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
+## 2026-11-22 简约演示前端（cel-dusk）与用量记账理顺
+
+所有者指令：当前前端与后端不匹配；重新理顺后端，在一条分支上按 style-atlas 的 cel-dusk 基线做一个简约、少手填的演示，且不影响运行中的前端。
+
+- 分支 `feat/ui-demo-cel-dusk`，独立 worktree `.worktrees/ui-demo`（基线 `6f8803d`）；主工作树仍停在 `deploy/modelgate-ux-v3`，未改 `src/ui-next/**`，未重启 8787。
+- 后端：统一成功请求记账 `noteRequestAccepted()`；`/api/model-stats` 每桶新增 `requests` 与显式 `cacheHitTokens/cacheMissTokens`；`/api/status.models[]` 新增 `todayRequests`；旧 `stats.json` 历史桶的 `requests` 投影为 `null`（未知），空桶为数字 0。改动 `src/index.js`、`src/forward.js`，回归 `scripts/test/offline/usage-accounting.test.mjs`。
+- 前端：`src/ui-demo/{index.html,styles.css,app.js}` 单页只读演示（无 Provider/Key/模型/配置表单）；`scripts/ui-demo-preview.mjs` 独立静态 + `/api` 代理（默认 8791 → 8787，支持 `--fixture`）；契约 `docs/contracts/ui-demo-v1.md`、说明 `docs/how-to/ui-demo-preview.md`；预览服务器回归 `scripts/test/offline/ui-demo-preview.test.mjs`。
+- 已知缺陷登记：运行中 `/ui-next` 用量页仍把 `hit+miss` 当请求数、最近请求把对话 ID 当模型名；本轮按所有者要求不修改运行中前端，记入 [ui-next API 矩阵 §10](contracts/ui-next-api-matrix.md)。
+
+| 命令 / 检查 | 结果 |
+| --- | --- |
+| `npm test` | PASS：149 suites、1,396 passed、3 skipped、0 failed（137.2s）|
+| `node scripts/check-ui.mjs` | PASS：21/21 syntax OK（含 `src/ui-demo` 与预览服务器）|
+| `npm run docs:check` | PASS（138 files、697 links）|
+| `git diff --check` | PASS |
+| Chrome 无头渲染 | 1440×2100 / 900×1800 / 390×1800，亮/暗两档；无横向溢出、无控制台错误 |
+| 对比度（cel-dusk 令牌） | 正文/次级/徽章/代码 ≥ 4.5:1；修复 dark 下 `accent-text/accent-soft` 4.49 → 改用 `accent-text-on-soft` 7.55 |
+
+未验证：未重启 8787，运行中旧进程没有 `requests` 桶字段（演示按契约显示 `—` 与提示）；未做真实上游推理、真实 Desktop 交互、读屏人工全流程。新后端端到端只在离线 mock（3 模型 × 2 请求）下验证。
+
 ## 2026-11-16 Codex 实际使用严格审计修复（已合并 main 并部署）
 
 所有者指令：审计→修复→合并所有支线→push。审计发现与修复清单见[审计修复证据](evidence/2026-11-16-codex-audit-remediation.md)，部署与生产冒烟见[部署记录](evidence/2026-11-16-audit-fix-deployment.md)。

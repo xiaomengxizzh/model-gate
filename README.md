@@ -37,6 +37,7 @@ npm test
 - [审计与验证记录](docs/audit-20261108.md)：发现、修复、局限。
 - [整合候选验收与合并建议](docs/roadmap/2026-11-09-integration-candidate-report.md)：分支取舍、测试证据、未验证项与回滚。
 - [新控制台 ↔ API 适配矩阵](docs/contracts/ui-next-api-matrix.md)：六个功能区的实际接口与状态。
+- [简约演示前端（cel-dusk）](docs/how-to/ui-demo-preview.md)：独立只读预览，不是 `/ui-next` 的替代入口，也不在网关注册路由。
 - [后续开发计划](docs/development-plan.md)：优先级、依赖和逐项验收。
 - [变更记录](CHANGELOG.md)：历史行为变更。
 

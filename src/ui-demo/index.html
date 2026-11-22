@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN" data-style="cel-dusk" data-mode="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="ModelGate 简约演示：只读网关总览，cel-dusk 基线，无表单写入。">
+  <title>ModelGate · 简约演示</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到主内容</a>
+
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="ModelGate 简约演示首页">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <span class="brand-copy">
+        <strong>ModelGate</strong>
+        <small>简约演示 · CEL-DUSK</small>
+      </span>
+    </a>
+    <div class="topbar-actions">
+      <p class="chip" id="live-chip" data-state="loading" aria-live="polite">
+        <span class="dot" aria-hidden="true"></span><span id="live-text">连接中</span>
+      </p>
+      <p class="mode-chip" id="mode-chip" hidden></p>
+      <button class="btn" type="button" id="refresh">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.6-3.7M13 2v4H9"/></svg>
+        刷新
+      </button>
+      <button class="btn btn-icon" type="button" id="theme" aria-label="切换明暗主题" title="切换明暗主题">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 1 0 6.5 6.5A5.3 5.3 0 0 1 8 1.5z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow">只读快照 / READ ONLY</p>
+        <h1 id="hero-title">网关总览</h1>
+        <p class="lede">数字直接来自本地网关的真实接口。演示没有 Provider、Key、模型或配置表单，也不提供任何写入入口。</p>
+      </div>
+      <div class="hero-meta" id="hero-meta">
+        <p><span>配置版本</span><b id="meta-version">—</b></p>
+        <p><span>运行时长</span><b id="meta-uptime">—</b></p>
+        <p><span>最近更新</span><b id="meta-updated">—</b></p>
+      </div>
+    </section>
+
+    <section class="stats" id="stats" aria-label="核心指标" aria-busy="true">
+      <article class="stat" data-k="started">
+        <p class="stat-label">启动以来请求</p>
+        <p class="stat-value" data-v="started">—</p>
+        <p class="stat-sub" data-s="started">读取中</p>
+      </article>
+      <article class="stat" data-k="persisted">
+        <p class="stat-label">持久化请求</p>
+        <p class="stat-value" data-v="persisted">—</p>
+        <p class="stat-sub" data-s="persisted">读取中</p>
+      </article>
+      <article class="stat" data-k="today">
+        <p class="stat-label">今日 Token</p>
+        <p class="stat-value" data-v="today">—</p>
+        <p class="stat-sub" data-s="today">读取中</p>
+      </article>
+      <article class="stat" data-k="hitrate">
+        <p class="stat-label">缓存命中率</p>
+        <p class="stat-value" data-v="hitrate">—</p>
+        <p class="stat-sub" data-s="hitrate">读取中</p>
+      </article>
+      <article class="stat" data-k="p95">
+        <p class="stat-label">P95 延迟</p>
+        <p class="stat-value" data-v="p95">—</p>
+        <p class="stat-sub" data-s="p95">读取中</p>
+      </article>
+      <article class="stat" data-k="errors">
+        <p class="stat-label">错误</p>
+        <p class="stat-value" data-v="errors">—</p>
+        <p class="stat-sub" data-s="errors">读取中</p>
+      </article>
+    </section>
+
+    <section class="panel" id="usage-panel" aria-labelledby="usage-title" aria-busy="true">
+      <div class="panel-head">
+        <div>
+          <h2 id="usage-title">用量</h2>
+          <p class="panel-sub">来源 /api/model-stats；柱子是该时间桶的真实 Token。请求按网关记账口径，Chat 重试尝试会重复计数。</p>
+        </div>
+        <div class="segmented" role="group" aria-label="时间范围">
+          <button class="seg" type="button" data-days="1" aria-pressed="true">24 小时</button>
+          <button class="seg" type="button" data-days="7" aria-pressed="false">7 天</button>
+          <button class="seg" type="button" data-days="30" aria-pressed="false">30 天</button>
+        </div>
+      </div>
+      <div class="usage-body">
+        <div class="chart-wrap" id="chart-wrap"></div>
+        <aside class="usage-side">
+          <p class="side-label">本窗口合计</p>
+          <dl class="kv">
+            <div><dt>Token</dt><dd id="usage-tokens">—</dd></div>
+            <div><dt>记账请求</dt><dd id="usage-requests">—</dd></div>
+            <div><dt>缓存命中</dt><dd id="usage-hitrate">—</dd></div>
+            <div><dt>输出 Token</dt><dd id="usage-out">—</dd></div>
+          </dl>
+          <p class="note" id="usage-note" hidden></p>
+        </aside>
+      </div>
+      <details class="data-table">
+        <summary>查看本窗口数据表</summary>
+        <div class="table-scroll"><table id="bucket-table"><caption class="sr-only">按时间桶的用量</caption><thead></thead><tbody></tbody></table></div>
+      </details>
+    </section>
+
+    <div class="columns">
+      <section class="panel" id="providers-panel" aria-labelledby="providers-title" aria-busy="true">
+        <div class="panel-head">
+          <div>
+            <h2 id="providers-title">上游</h2>
+            <p class="panel-sub">/api/status · providers[].st</p>
+          </div>
+        </div>
+        <div class="table-scroll"><table id="providers-table"><thead></thead><tbody></tbody></table></div>
+      </section>
+
+      <section class="panel" id="models-panel" aria-labelledby="models-title" aria-busy="true">
+        <div class="panel-head">
+          <div>
+            <h2 id="models-title">模型</h2>
+            <p class="panel-sub">按本窗口 Token 排序，最多 8 行</p>
+          </div>
+        </div>
+        <div class="table-scroll"><table id="models-table"><thead></thead><tbody></tbody></table></div>
+      </section>
+    </div>
+
+    <section class="panel" id="recent-panel" aria-labelledby="recent-title" aria-busy="true">
+      <div class="panel-head">
+        <div>
+          <h2 id="recent-title">最近</h2>
+          <p class="panel-sub">lastServing 与 /api/logs 尾部；日志只读、不落正文。</p>
+        </div>
+      </div>
+      <div class="recent-grid">
+        <div class="last-serving">
+          <p class="side-label">最近一次上游服务</p>
+          <p class="last-model" id="last-model">—</p>
+          <p class="last-meta" id="last-meta">读取中</p>
+        </div>
+        <pre class="log" id="log-tail" aria-label="最近日志" tabindex="0">读取中…</pre>
+      </div>
+    </section>
+
+    <p class="error-banner" id="error-banner" role="alert" hidden></p>
+  </main>
+
+  <footer class="foot">
+    <span>只读演示 · 数据来自本机 ModelGate 管理 API</span>
+    <span>cel-dusk 基线 · 无第三方依赖</span>
+  </footer>
+
+  <noscript>
+    <div class="noscript">这份演示需要 JavaScript 才能读取本地网关；未启用时不会显示任何指标。</div>
+  </noscript>
+</body>
+</html>

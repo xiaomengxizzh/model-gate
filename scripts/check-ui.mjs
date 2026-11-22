@@ -5,8 +5,8 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
-const dir = join(root, 'src/ui-next')
-const files = []
+const dirs = [join(root, 'src/ui-next'), join(root, 'src/ui-demo')]
+const files = [join(root, 'scripts/ui-demo-preview.mjs')]
 function walk (d) {
   for (const name of readdirSync(d)) {
     const p = join(d, name)
@@ -14,7 +14,7 @@ function walk (d) {
     else if (name.endsWith('.js')) files.push(p)
   }
 }
-walk(dir)
+for (const dir of dirs) walk(dir)
 files.sort()
 let failed = 0
 for (const f of files) {

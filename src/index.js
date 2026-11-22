@@ -423,7 +423,25 @@ function pruneStatsHistory(state) {
     }
   }
 }
-function tallyDaily(state, modelName, tokens, hit, miss, inTokens, outTokens) { if (!modelName) return; const now = new Date(); const k = todayKey(now); const m = state.stats.daily[modelName] || (state.stats.daily[modelName] = {}); const c = m[k] || (m[k] = { tokens: 0, hit: 0, miss: 0, inTokens: 0, outTokens: 0 }); c.tokens += tokens || 0; c.hit += hit || 0; c.miss += miss || 0; c.inTokens += inTokens || 0; c.outTokens += outTokens || 0; const hk = k + ':' + String(now.getHours()).padStart(2, '0'); const hm = state.stats.hourly[modelName] || (state.stats.hourly[modelName] = {}); const h = hm[hk] || (hm[hk] = { tokens: 0, hit: 0, miss: 0, inTokens: 0, outTokens: 0 }); h.tokens += tokens || 0; h.hit += hit || 0; h.miss += miss || 0; h.inTokens += inTokens || 0; h.outTokens += outTokens || 0 }
+function tallyDaily(state, modelName, tokens, hit, miss, inTokens, outTokens) { if (!modelName) return; const now = new Date(); const k = todayKey(now); const m = state.stats.daily[modelName] || (state.stats.daily[modelName] = {}); const c = m[k] || (m[k] = { requests: 0, tokens: 0, hit: 0, miss: 0, inTokens: 0, outTokens: 0 }); c.tokens += tokens || 0; c.hit += hit || 0; c.miss += miss || 0; c.inTokens += inTokens || 0; c.outTokens += outTokens || 0; const hk = k + ':' + String(now.getHours()).padStart(2, '0'); const hm = state.stats.hourly[modelName] || (state.stats.hourly[modelName] = {}); const h = hm[hk] || (hm[hk] = { requests: 0, tokens: 0, hit: 0, miss: 0, inTokens: 0, outTokens: 0 }); h.tokens += tokens || 0; h.hit += hit || 0; h.miss += miss || 0; h.inTokens += inTokens || 0; h.outTokens += outTokens || 0 }
+// 请求记账统一入口：进程计数 + 上游计数 + 模型累计 + 日/小时桶 requests 同时 +1。
+// 口径：Chat 数据面按上游尝试 +1（既有语义），其余成功路径按成功响应 +1；
+// requests 与 hit/miss（prompt 缓存 token 的命中/未命中）不同量纲，旧前端把 hit+miss 当请求数导致数量级错报。
+function noteRequestAccepted(state, modelName, pid) {
+  state.st.counters.requests += 1
+  agg(state, pid, 'requests', 1)
+  if (!modelName) return null
+  const sg = state.stats.byModel[modelName] || (state.stats.byModel[modelName] = { requests: 0, errors: 0 })
+  sg.requests = (sg.requests || 0) + 1
+  const now = new Date(); const k = todayKey(now); const hk = k + ':' + String(now.getHours()).padStart(2, '0')
+  const m = state.stats.daily[modelName] || (state.stats.daily[modelName] = {})
+  const c = m[k] || (m[k] = { requests: 0, tokens: 0, hit: 0, miss: 0, inTokens: 0, outTokens: 0 })
+  c.requests = (c.requests || 0) + 1
+  const hm = state.stats.hourly[modelName] || (state.stats.hourly[modelName] = {})
+  const h = hm[hk] || (hm[hk] = { requests: 0, tokens: 0, hit: 0, miss: 0, inTokens: 0, outTokens: 0 })
+  h.requests = (h.requests || 0) + 1
+  return sg
+}
 // 虚拟模型入口账本：serving 与入口名不同且入口是虚拟模型时，同步计入虚拟名（供其自身 quota/dailyQuota 检查）
 function tallyVirtual(state, modelName, serving, tokens, inTokens, outTokens) {
   if (!modelName || !serving || modelName === serving) return
@@ -477,9 +495,10 @@ function buildStatus(state) {
     const m = (s.byModel && s.byModel[name]) || { requests: 0, errors: 0 }
     const _provApi = ((state.cfg.providers || {})[d.provider] || {}).api || 'openai'
     const _effectiveApi = d.api || _provApi
-    const dk = (s.daily && s.daily[name] && s.daily[name][todayKey()]) || { tokens: 0, hit: 0, miss: 0 }
+    const dkRaw = (s.daily && s.daily[name] && s.daily[name][todayKey()]) || null
+    const dk = dkRaw || { tokens: 0, hit: 0, miss: 0 }
     const hitRate = (dk.hit + dk.miss) > 0 ? Math.round((dk.hit / (dk.hit + dk.miss)) * 1000) / 10 : null
-    return { name, provider: d.provider, alias: d.alias || [], fallbacks: d.fallbacks || [], capability: d.capability || 'chat', maxConcurrent: d.maxConcurrent || 0, qps: d.qps || 0, reasoning: d.reasoning || '', effortOptions: d.effortOptions || [], effortFormat: d.effortFormat || '', dailyQuota: d.dailyQuota || 0, quota: d.quota || 0, maxContext: d.maxContext || 0, maxTokensMax: d.maxTokensMax || 0, api: d.api || '', effectiveApi: _effectiveApi, hostedTools: _effectiveApi === 'responses' ? 'native' : 'chat-bridge-lossy', providerModels: d.providerModels || {}, forceNoStream: !!d.forceNoStream, probe: m.probe || null, requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, hitRate, affinity: state.affinity[name] || null, avgMs: m.latencyCount ? Math.round(m.latencySum / m.latencyCount) : null }
+    return { name, provider: d.provider, alias: d.alias || [], fallbacks: d.fallbacks || [], capability: d.capability || 'chat', maxConcurrent: d.maxConcurrent || 0, qps: d.qps || 0, reasoning: d.reasoning || '', effortOptions: d.effortOptions || [], effortFormat: d.effortFormat || '', dailyQuota: d.dailyQuota || 0, quota: d.quota || 0, maxContext: d.maxContext || 0, maxTokensMax: d.maxTokensMax || 0, api: d.api || '', effectiveApi: _effectiveApi, hostedTools: _effectiveApi === 'responses' ? 'native' : 'chat-bridge-lossy', providerModels: d.providerModels || {}, forceNoStream: !!d.forceNoStream, probe: m.probe || null, requests: m.requests, errors: m.errors, tokens: m.tokens || 0, today: dk.tokens || 0, todayRequests: dkRaw ? (typeof dkRaw.requests === 'number' ? dkRaw.requests : null) : 0, hitRate, affinity: state.affinity[name] || null, avgMs: m.latencyCount ? Math.round(m.latencySum / m.latencyCount) : null }
   })
   const defaults = state.cfg.defaults || {}
   const todayTotal = models.reduce((a, m) => a + (m.today || 0), 0)
@@ -1825,10 +1844,7 @@ async function handleMediaProxy(state, budget, log, opts) {
           throw e
         }
         const ct = (up.headers && up.headers['content-type']) || (binary ? 'application/octet-stream' : 'application/json; charset=utf-8')
-        state.st.counters.requests += 1
-        agg(state, pid, 'requests', 1)
-        const sg = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
-        sg.requests = (sg.requests || 0) + 1
+        const sg = noteRequestAccepted(state, modelName, pid)
         if (!binary) {
           const j = tryParse(buf)
           const usage = (j && j.usage) || {}
@@ -1951,10 +1967,7 @@ async function createVideoTask(state, budget, log, opts) {
         applyUpstreamStatus(task, j)
         if (!task.upstreamId && task.status === 'queued') task.error = 'upstream 未返回任务 id，无法轮询'
         state.videos[task.id] = task
-        state.st.counters.requests += 1
-        agg(state, pid, 'requests', 1)
-        const sg = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
-        sg.requests = (sg.requests || 0) + 1
+        const sg = noteRequestAccepted(state, modelName, pid)
         markOk(state, pid); noteAffinity(state, modelName, pid)
         saveVideos(state, log)
         return { ok: true, task }
@@ -2407,10 +2420,7 @@ async function proxyOfficialResponses(state, budget, log, opts) {
         return jsonError(502, 'upstream_redirect_rejected', '官方上游返回重定向（' + up.status + '），网关拒绝跟随', 'upstream_error')
       }
       if (up.ok) {
-        state.st.counters.requests += 1
-        agg(state, pid, 'requests', 1)
-        const sg = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
-        sg.requests = (sg.requests || 0) + 1
+        const sg = noteRequestAccepted(state, modelName, pid)
         markOk(state, pid); noteAffinity(state, modelName, pid)
         const ctRaw = (up.headers && up.headers['content-type']) || ''
         const ctDeclaredSse = /text\/event-stream/i.test(ctRaw)
@@ -2612,10 +2622,7 @@ async function proxyNativeResponses(state, budget, log, opts) {
         return { status: 502, contentType: 'application/json; charset=utf-8', buf: Buffer.from(JSON.stringify({ error: { message: '上游返回重定向（' + up.status + '），网关拒绝跟随', code: 'upstream_redirect_rejected', type: 'upstream_error' } })) }
       }
       if (up.ok) {
-        state.st.counters.requests += 1
-        agg(state, pid, 'requests', 1)
-        const sg = state.stats.byModel[modelName] = state.stats.byModel[modelName] || { requests: 0, errors: 0 }
-        sg.requests = (sg.requests || 0) + 1
+        const sg = noteRequestAccepted(state, modelName, pid)
         markOk(state, pid); noteAffinity(state, modelName, pid)
         const ct = (up.headers && up.headers['content-type']) || 'application/json; charset=utf-8'
         if (/text\/event-stream/i.test(ct)) {
@@ -2736,7 +2743,7 @@ function streamRawResponses(res, upstreamStream, budget, continuation, log, off)
   })
 }
 
-const FWD_DEPS = { ensureHst, markFail, markOk, healthy, effState: (h, now) => (h.state === 'open' && h.openUntil <= now) ? 'half' : h.state, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tallyDialogueRequest, tryParse, collectBody }
+const FWD_DEPS = { ensureHst, markFail, markOk, healthy, effState: (h, now) => (h.state === 'open' && h.openUntil <= now) ? 'half' : h.state, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, noteRequestAccepted, tallyVirtual, tallyDialogue, tallyDialogueRequest, tryParse, collectBody }
 function makeHandler(state) {
   const log = state.log
   const logFile = () => state.cfg.server && state.cfg.server.logFile
@@ -2851,7 +2858,7 @@ function makeHandler(state) {
         sendJson(res, 200, await readNativeUsage(state.cfg, days))
         return
       }
-      if (path === '/api/model-stats' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const days = Math.min(90, Math.max(1, parseInt(new URL(url, 'http://x').searchParams.get('days') || '7', 10) || 7)); const out = {}; const now = new Date(); const modelNames = Object.keys(state.cfg.models || {}); const pt = (c) => ({ tokens: c ? c.tokens : 0, inTokens: c ? (c.inTokens || 0) : 0, outTokens: c ? (c.outTokens || 0) : 0, hit: c ? (c.hit || 0) : 0, miss: c ? (c.miss || 0) : 0, hitRate: (c && (c.hit + c.miss) > 0) ? Math.round((c.hit / (c.hit + c.miss)) * 1000) / 10 : null }); if (days === 1) { for (const name of modelNames) { const mh = state.stats.hourly[name] || {}; const arr = []; for (let i2 = 23; i2 >= 0; i2--) { const hd = new Date(now.getTime() - i2 * 3600 * 1000); const hk = todayKey(hd) + ':' + String(hd.getHours()).padStart(2, '0'); arr.push(Object.assign({ date: String(hd.getHours()).padStart(2, '0') + ':00' }, pt(mh[hk]))) } out[name] = arr } } else { for (const name of modelNames) { const md = state.stats.daily[name] || {}; const arr = []; for (let i2 = days - 1; i2 >= 0; i2--) { const d = new Date(now); d.setDate(d.getDate() - i2); const k = todayKey(d); arr.push(Object.assign({ date: k }, pt(md[k]))) } out[name] = arr } } sendJson(res, 200, { days, mode: days === 1 ? 'hourly' : 'daily', models: out }); return }
+      if (path === '/api/model-stats' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const days = Math.min(90, Math.max(1, parseInt(new URL(url, 'http://x').searchParams.get('days') || '7', 10) || 7)); const out = {}; const now = new Date(); const modelNames = Object.keys(state.cfg.models || {}); const pt = (c) => { const hit = c ? (c.hit || 0) : 0; const miss = c ? (c.miss || 0) : 0; return { tokens: c ? c.tokens : 0, inTokens: c ? (c.inTokens || 0) : 0, outTokens: c ? (c.outTokens || 0) : 0, requests: !c ? 0 : (typeof c.requests === 'number' ? c.requests : null), hit, miss, cacheHitTokens: hit, cacheMissTokens: miss, hitRate: (hit + miss) > 0 ? Math.round((hit / (hit + miss)) * 1000) / 10 : null } }; if (days === 1) { for (const name of modelNames) { const mh = state.stats.hourly[name] || {}; const arr = []; for (let i2 = 23; i2 >= 0; i2--) { const hd = new Date(now.getTime() - i2 * 3600 * 1000); const hk = todayKey(hd) + ':' + String(hd.getHours()).padStart(2, '0'); arr.push(Object.assign({ date: String(hd.getHours()).padStart(2, '0') + ':00' }, pt(mh[hk]))) } out[name] = arr } } else { for (const name of modelNames) { const md = state.stats.daily[name] || {}; const arr = []; for (let i2 = days - 1; i2 >= 0; i2--) { const d = new Date(now); d.setDate(d.getDate() - i2); const k = todayKey(d); arr.push(Object.assign({ date: k }, pt(md[k]))) } out[name] = arr } } sendJson(res, 200, { days, mode: days === 1 ? 'hourly' : 'daily', models: out }); return }
       if (path === '/api/route-preview' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
         const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)) || {}
@@ -3034,10 +3041,7 @@ function makeHandler(state) {
               const norm = normalizeEmbeddingResponse(target.api, j, hit.canonicalName)
               const usage = (j && j.usage) || (norm && norm.usage) || {}
               const tokens = Number(usage.total_tokens) > 0 ? Number(usage.total_tokens) : (Number(usage.prompt_tokens) > 0 ? Number(usage.prompt_tokens) : 0)
-              state.st.counters.requests += 1
-              agg(state, pid, 'requests', 1)   // agg 同时累加 global 与 provider，避免重复计数
-              const sg = state.stats.byModel[hit.canonicalName] = state.stats.byModel[hit.canonicalName] || { requests: 0, errors: 0 }
-              sg.requests = (sg.requests || 0) + 1
+              const sg = noteRequestAccepted(state, hit.canonicalName, pid)
               if (tokens > 0) { sg.tokens = (sg.tokens || 0) + tokens; agg(state, pid, 'tokens', tokens); tallyDaily(state, hit.canonicalName, tokens, 0, 0, tokens, 0) }
               markOk(state, pid); noteAffinity(state, hit.canonicalName, pid)
               res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(norm)); return
@@ -3108,10 +3112,7 @@ function makeHandler(state) {
               const norm = normalizeRerankResponse(target.api, j, rhit.canonicalName, { topN: rbody.top_n })
               const usage = (j && j.usage) || {}
               const tokens = Number(usage.total_tokens) > 0 ? Number(usage.total_tokens) : (Number(usage.prompt_tokens) > 0 ? Number(usage.prompt_tokens) : 0)
-              state.st.counters.requests += 1
-              agg(state, pid, 'requests', 1)
-              const sg = state.stats.byModel[rhit.canonicalName] = state.stats.byModel[rhit.canonicalName] || { requests: 0, errors: 0 }
-              sg.requests = (sg.requests || 0) + 1
+              const sg = noteRequestAccepted(state, rhit.canonicalName, pid)
               if (tokens > 0) { sg.tokens = (sg.tokens || 0) + tokens; agg(state, pid, 'tokens', tokens); tallyDaily(state, rhit.canonicalName, tokens, 0, 0, tokens, 0) }
               markOk(state, pid); noteAffinity(state, rhit.canonicalName, pid)
               res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(norm)); return

@@ -998,7 +998,7 @@ async function authorizedSendOnce(input) {
 }
 
 export async function forwardChain(deps, state, req, url, path, method, bodyBuf, body, log, streamRelay, budget, opts = {}) {
-  const { ensureHst, markFail, markOk, healthy, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tallyDialogueRequest, tryParse, collectBody } = deps
+  const { ensureHst, markFail, markOk, healthy, agg, ensureSt, noteAffinity, noteCacheStat, tallyDaily, tallyVirtual, tallyDialogue, tallyDialogueRequest, noteRequestAccepted, tryParse, collectBody } = deps
   const cfg = state.cfg
   const budgetSignal = (budget && budget.signal) || null
   // M1-3a：账本启用/费用上限 fail-closed。没有账本却配置了费用上限 ⇒ 零发送（审计：上限不能对着 spent=0 判）。
@@ -1356,7 +1356,9 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       if (Number.isFinite(_estUsd)) codex.spentUsd += _estUsd
     }
     if (chainModels[chainModels.length - 1] !== serving) chainModels.push(serving)
-    agg(state, pid, 'requests', 1); state.st.counters.requests += 1; bm.requests += 1
+    // 请求记账单一入口（与 index.js 成功块同源）：counters/byProvider/byModel + 日/小时桶 requests 一起 +1。
+    // Chat 路径沿用既有「逐上游尝试」语义；bm 与 noteRequestAccepted 返回的 byModel 条目是同一对象，后续 bm.errors 记账不变。
+    noteRequestAccepted(state, modelName, pid)
     // 跨模型兜底：把发给上游的 model 名改写为该兜底模型名。
     // 改革（protocol-per-model）：同一上游的不同模型可以各走不同协议（如 OpenCode Zen 的 union-alpha
     // 只接受 Anthropic /v1/messages，同上游其它模型走 OpenAI /v1/chat/completions），因此协议的落点从

@@ -88,7 +88,15 @@
 请求 `{id?: string}`。带 `id`：未知模型 `400 {error}`；已知 → `200 {ok:true,result,status}`，`result` 为 `{id,ok,code,ms,err}`。缺 `id` → `200 {ok:true,results,status}` 遍历全部真实模型。发最小推理请求。
 
 ### `GET /api/model-stats?days=7`
-`days` 夹取到 1–90（`0`/`abc` → 7）。`days=1` → `mode:'hourly'`，每模型 24 个小时桶（`date:'HH:00'`）；其余 `mode:'daily'`，每模型 `days` 个日期桶（`date:'YYYY-MM-DD'`）。桶字段 `{tokens,inTokens,outTokens,hit,miss,hitRate}`，`hitRate` 无样本时为 `null`。只覆盖真实模型，不含虚拟模型。
+`days` 夹取到 1–90（`0`/`abc` → 7）。`days=1` → `mode:'hourly'`，每模型 24 个小时桶（`date:'HH:00'`）；其余 `mode:'daily'`，每模型 `days` 个日期桶（`date:'YYYY-MM-DD'`）。桶字段 `{requests,tokens,inTokens,outTokens,hit,miss,cacheHitTokens,cacheMissTokens,hitRate}`：
+
+- `requests`：**请求数**，与 `GET /api/status` 的 `counters.requests`、`models[].requests` 同源，由统一入口 `noteRequestAccepted()`（`src/index.js`）记账。Responses / 媒体 / 视频 / embeddings / rerank 在成功响应后 +1；Chat 数据面沿用既有的逐上游尝试记账（重试会多次 +1，本轮未改该语义）。`requests` **不是** `hit+miss`。
+- `hit` / `miss`：**prompt 缓存 token** 的命中 / 未命中量（兼容别名，旧字段名保留）。命中 + 未命中 = 本次输入 token，量级与请求数无关；旧前端把两者相加当请求数，会出现数量级错报。
+- `cacheHitTokens` / `cacheMissTokens`：与 `hit` / `miss` 逐桶同值，口径显式化。
+- `tokens` / `inTokens` / `outTokens`：总 token 与输入/输出 token。
+- `hitRate`：`round(hit/(hit+miss)*1000)/10`（百分比），无样本时为 `null`。
+
+新写入的桶 `requests` 为数字；升级前的历史桶没有该字段，投影为 `null`（未知，不是 0），前端不得把 `null` 显示成 0。只覆盖真实模型，不含虚拟模型。回归：`scripts/test/offline/usage-accounting.test.mjs`。
 
 ### `GET /api/native-usage?days=7`
 只读采集 Codex 本地会话日志（默认关闭）。配置来源：`MG_NATIVE_USAGE_DIR` 环境变量优先，其次 `defaults.nativeUsageDir`；空串或 `off` 关闭。`days` 夹取 1–90。响应 `{enabled, source:'codex-sessions', days, dirLabel, generatedAt, scanned:{files,sessions,bytes,parseErrors}, totals:{inputTokens,cachedInputTokens,cacheWriteTokens,outputTokens,reasoningOutputTokens,totalTokens,turns}, byDay:[...], byModel:[...], note}`；关闭时 `{enabled:false, reason/note}`，目录不存在时 `{enabled:true, error:'目录不存在或不可读'}`。只解析 `session_meta`/`turn_context`/`token_count`，**不读取消息正文**；不代表经过网关的代理流量。回归见 `scripts/test/offline/native-usage.test.mjs`。
@@ -109,7 +117,7 @@
 | `cache` | object | `{trend:[{t,v}], alert}` |
 | `dialogues` | array | 最近 30 个有请求的对话（`id,named,requests,tokens,hit,miss,hitRate,startAt,lastAt`） |
 | `providers` | array | 每项 `{id,baseUrl,hasKey,keySource,apiKeyEnv,pathPrefix,api,extraHeaders,proxy,circuit,st}`；**不含 apiKey** |
-| `models` | array | 每项含 `name,provider,alias,fallbacks,maxConcurrent,qps,reasoning,effortOptions,effortFormat,dailyQuota,quota,maxContext,maxTokensMax,api,providerModels,forceNoStream,requests,errors,tokens,today,hitRate,affinity,avgMs,probe` |
+| `models` | array | 每项含 `name,provider,alias,fallbacks,maxConcurrent,qps,reasoning,effortOptions,effortFormat,dailyQuota,quota,maxContext,maxTokensMax,api,providerModels,forceNoStream,requests,errors,tokens,today,todayRequests,hitRate,affinity,avgMs,probe`；`requests` 为模型累计请求记账（与 `counters.requests` 同源），`today` 为今日 token，`todayRequests` 为同一日桶的今日请求数，`hitRate` 仍是 prompt 缓存 token 命中率 |
 | `virtualModels` | array | `{name,directory,quota,dailyQuota,maxContext,maxConcurrent,qps,keySet,expiresAt,expiresAtState,expiresAtMs,note,requests,errors,tokens,today,hitRate}`（无效过期值另带 `expiresAtDiagnostic`）；`expiresAtState` ∈ `none/valid/expired/invalid`；**不含 Key** |
 | `defaults` | object | 配置默认值原样回显，`clientKey` 有值时固定为 `********` |
 | `server` | object | `{maxBodyBytes,keyEncrypted,host,port}` |
