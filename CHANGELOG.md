@@ -2,6 +2,25 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— 2026-11-24 交互演示前端（模式 / 图表 / 设置）
+
+### Added
+
+- **`src/ui-demo/` 从只读演示升级为三 tab 交互演示**：模式页提供当前接入方式快照、三模式单选、聚合父模型选择与「预览切换 / 回滚 / 采纳基线」；图表页提供 24h/7d/30d、Token/记账请求/缓存命中率、柱状/折线、Provider/模型筛选、选中桶详情与明细表；设置页提供外观/图表默认值/显示偏好/交互安全/JSON 导入导出/网关只读信息/日志尾部。
+- **两阶段写入**：预览先 POST 空 `consentToken` 取 428 preview（逐行 diff、前后 SHA、备份、冲突），勾选知情项后才携带 `consentToken` + `expectedSha` 确认写入；consent 令牌只在内存，不进 localStorage/URL/日志/DOM。409/422/404 显示真实错误，不自动覆盖，不声称已生效。
+- **模块化**：`src/ui-demo/js/` 拆出 `api/dom/data/format/mode/mode-view/chart/charts-view/settings/settings-view`；`scripts/test/offline/ui-demo-contract.test.mjs` 覆盖纯函数契约（10 用例），已登记到 `scripts/test/run.mjs`；`check-ui` 覆盖全部 31 个 UI 模块语法。
+- **独立预览服务器 `scripts/ui-demo-preview.mjs` 支持 POST 同源改写**：转发浏览器请求到 8787 做模式预览/确认，自身不发起写入、不启停网关、不改 `/ui-next`。
+
+### Changed
+
+- 契约 `docs/contracts/ui-demo-v1.md` 升 v1.1：从「只读零表单」改为「三 tab 交互 + 两阶段 consent 写入」，补写入安全硬约束；`docs/how-to/ui-demo-preview.md` 同步写入安全与验收边界。
+- `src/ui-demo/index.html` 以 data URI 提供 favicon，消除浏览器自动请求导致的 404 控制台错误。
+
+### 诚实边界（未验证）
+
+- 演示不是生产控制台：`src/ui-next/**` 与根路由未改，8787 未启停；真实切换生效需完全退出并重开 Codex 后按三模式验收口径实测。
+- 确认写入的真实链路未在真机执行（本轮只做到 428 预览 + 知情勾选启用确认，不真正 POST 确认）；预览代理已具备转发能力，但写入后果由所有者按正式流程验证。
+
 ## [Unreleased] —— 2026-11-22 简约演示前端（cel-dusk，独立预览）
 
 ### Added
