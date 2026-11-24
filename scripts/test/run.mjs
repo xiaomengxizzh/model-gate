@@ -152,6 +152,7 @@ export const SUITES = [
   'scripts/test/offline/siwc-preview.test.mjs',
   'scripts/test/offline/sse-chunking.test.mjs',
   'scripts/test/offline/ui-contract.test.mjs',
+  'scripts/test/offline/ui-demo-contract.test.mjs',
   'scripts/test/offline/ui-demo-preview.test.mjs',
   'scripts/test/offline/usage-accounting.test.mjs',
   'scripts/test/offline/ui-next.test.mjs',

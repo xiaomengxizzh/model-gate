@@ -63,13 +63,18 @@ function staticPath (pathname) {
 }
 
 function proxy (req, res) {
+  // 浏览器在 POST 时会带 Origin: http://127.0.0.1:8791；网关按自己的 Host/Origin 规则校验，
+  // 代理必须把它改写为目标同源，否则只读 GET 正常、模式预览/确认会被 403 拒绝。
+  const headers = Object.assign({}, req.headers, { host: target.host })
+  if (headers.origin) headers.origin = target.origin
+  if (headers.referer) headers.referer = target.origin + '/'
   const options = {
     protocol: target.protocol,
     hostname: target.hostname,
     port: target.port,
     method: req.method,
     path: req.url,
-    headers: Object.assign({}, req.headers, { host: target.host }),
+    headers,
   }
   const up = http.request(options, (upRes) => {
     res.writeHead(upRes.statusCode || 502, upRes.headers)

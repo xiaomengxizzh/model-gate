@@ -68,7 +68,9 @@ test('ui-demo preview: static whitelist + fixture + traversal guard', { timeout:
 
   const page = await raw(port, '/')
   assert.equal(page.status, 200)
-  assert.match(page.body, /网关总览/)
+  assert.match(page.body, /交互演示/, '交互演示标题')
+  for (const tab of ['模式', '图表', '设置']) assert.ok(page.body.includes('>' + tab + '<'), '三 tab 均存在：' + tab)
+  assert.match(page.body, /rel="icon" href="data:,"/, 'favicon 用 data URI，不产生 404')
   assert.match(String(page.headers['content-security-policy']), /default-src 'none'/)
   assert.equal(page.headers['x-content-type-options'], 'nosniff')
 
