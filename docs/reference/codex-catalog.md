@@ -68,6 +68,23 @@ Codex 0.167 的 `model_catalog_json` 是**整体替换**语义：文件里的 `m
 
 两条路径使用同一个 `ModelsResponse { models: ModelInfo[] }` 结构，因此 CLI 的 `--format=catalog-json|codex-models` 输出**同一份字节**：单一真源，避免两路径漂移。`--format` 只影响元数据记录与默认文件名，便于将来区分发布渠道。请求体编码（含官方路径可能使用 zstd 的 `content-encoding`）与目录无关。
 
+### 2.5 CLI 使用 OpenCode Go DeepSeek 简写
+
+ModelGate 接受 `deepseekv4.1flash` 并解析到 OpenCode Go 的 `deepseek-v4.1-flash`。Codex 模型列表在该绑定可用时返回同一套元数据，简写在模型选择器中隐藏。Codex CLI 0.170.0 的自定义 provider 需要通过 `model_catalog_json` 加载这份元数据。可从运行中的 ModelGate 导出，或使用 `mg-desktop.mjs configure` 生成的目录。
+
+已有 `opencodego` 配置使用受支持的 Go 入口时，`deepseek-v4.1-flash` 可在缺少 Codex 能力声明的情况下复用该模型的工具能力证据。目录默认提供 `unified_exec`，显式模型配置优先。其他模型仍按各自声明执行。遇到 `MG_FB_NO_CANDIDATE` 时，在网关的 `codex fallback decision` 日志中查看 `excludedReasons`。
+
+```bash
+catalog=$(mktemp)
+curl -fsS 'http://127.0.0.1:8787/v1/models?client_version=0.170.0' -o "$catalog" &&
+  codex exec -c "model_catalog_json=\"$catalog\"" -m deepseekv4.1flash '只回复 6 × 7 的结果。'
+rm -f "$catalog"
+```
+
+CLI 使用现有的 ModelGate provider 配置。启用了数据面鉴权的网关需要在导出时使用已有授权方式。网关未配置对应 Go 目标时，简写返回 `404 unknown_model`。
+
+CLI 自建 Go provider 时，在该 provider 的 `.capabilities` 段声明 `remote_compaction = "unsupported"`，让 Codex 本地生成压缩请求。使用 ModelGate 生成的 `go_deepseek` 子代理配置时已有此声明。
+
 ## 3. 输入
 
 ### 3.1 官方基线

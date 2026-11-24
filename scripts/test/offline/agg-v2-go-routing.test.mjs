@@ -142,6 +142,61 @@ test('Responses 路由：公开 ID → Go /responses 入口，带派发会话头
   assert.equal(hits[0].headers['thread-id'], undefined)
 })
 
+test('Codex Go Chat 接受旧配置的工具声明和增量工具结果', { timeout: 30000 }, async (t) => {
+  const hits = []
+  const up = await startScriptedUpstream(jsonHandler(hits, (_req, res) => {
+    if (hits.length > 1) return chatOk(res)
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({
+      choices: [{
+        message: { role: 'assistant', tool_calls: [{
+          id: 'call_arithmetic', type: 'function',
+          function: { name: 'calculate', arguments: '{}' },
+        }] },
+        finish_reason: 'tool_calls',
+      }],
+    }))
+  }))
+  const config = gatewayConfig(up.base)
+  config.models[V2_TARGET_UPSTREAM_MODEL] = { provider: 'opencodego', maxContext: 1000000 }
+  config.models['other-go-model'] = { provider: 'opencodego', maxContext: 1000000 }
+  const gw = await startGateway({ config, env: { [SYNTH_ENV]: SYNTH_KEY } })
+  t.after(async () => { await gw.stop(); await up.stop() })
+
+  const tools = [{ type: 'function', name: 'calculate', parameters: { type: 'object', properties: {} } }]
+  const first = await gw.post('/v1/responses', { model: V2_TARGET_PUBLIC_ID, input: '17 * 19', tools })
+  const result = await first.json()
+  assert.equal(first.status, 200, JSON.stringify(result))
+  assert.match(result.id, /^resp_mgchat_/)
+  const second = await gw.post('/v1/responses', {
+    model: V2_TARGET_PUBLIC_ID, previous_response_id: result.id, tools,
+    input: [{ type: 'function_call_output', call_id: 'call_arithmetic', output: '323' }],
+  })
+  assert.equal(second.status, 200, await second.text())
+  assert.equal(hits.length, 2)
+  const body = JSON.parse(hits[1].body)
+  assert.equal(body.model, V2_TARGET_UPSTREAM_MODEL)
+  assert.equal(body.messages.find((message) => message.role === 'assistant').tool_calls[0].id, 'call_arithmetic')
+  assert.deepEqual(body.messages.find((message) => message.role === 'tool'),
+    { role: 'tool', tool_call_id: 'call_arithmetic', content: '323' })
+
+  const catalog = await (await gw.get('/v1/models?client_version=0.170.0')).json()
+  for (const slug of [V2_TARGET_PUBLIC_ID, 'deepseekv4.1flash']) {
+    assert.equal(catalog.models.find((model) => model.slug === slug)?.shell_type, 'unified_exec')
+  }
+  const remote = await gw.post('/v1/responses', {
+    model: 'deepseekv4.1flash', previous_response_id: result.id,
+    input: [{ type: 'compaction_trigger' }],
+  })
+  assert.equal(remote.status, 400)
+  assert.equal((await remote.json()).error.code, 'native_compaction_route_not_ready')
+  assert.equal(hits.length, 2, '远程压缩标记不能进入 Go Chat 上游')
+  const other = await gw.post('/v1/responses', { model: 'mg-opencodego-other-go-model', input: '17 * 19', tools })
+  assert.equal(other.status, 502)
+  assert.equal((await other.json()).error.code, 'MG_FB_NO_CANDIDATE')
+  assert.equal(hits.length, 2, '未声明能力的其他模型不能继承目标模型的工具能力')
+})
+
 test('上游 4xx：不换供应商/不换模型，fallback 上游零命中', { timeout: 30000 }, async (t) => {
   const goHits = []
   const otherHits = []
@@ -276,4 +331,51 @@ test('身份一致性：出站 model 恒为真实模型，公共 ID 不一致直
   const other = identityOf({ upstreamId: 'gpt-6-luna' })
   assert.equal(other.ok, false)
   assert.equal(other.code, GO_READY_CODES.MODEL_OUT_OF_SCOPE)
+})
+
+test('Go CLI alias without the Go target returns unknown_model before the bridge or default routing', async (t) => {
+  const hits = []
+  const up = await startScriptedUpstream(jsonHandler(hits, (req, res) => chatOk(res)))
+  t.after(() => up.stop())
+  const gw = await startGateway({ config: {
+    defaults: { provider: 'generic' },
+    providers: { generic: { baseUrl: up.base, api: 'openai' } },
+  } })
+  t.after(() => gw.stop())
+  const res = await gw.post('/v1/responses', {
+    model: 'deepseekv4.1flash', input: 'calculate', previous_response_id: 'resp_old',
+  })
+  assert.equal(res.status, 404)
+  assert.equal((await res.json()).error.code, 'unknown_model')
+  assert.equal(hits.length, 0)
+})
+
+test('CLI alias receives exact model metadata and continues through the Go Chat route', async (t) => {
+  const alias = 'deepseekv4.1flash'
+  const hits = []
+  const up = await startScriptedUpstream(jsonHandler(hits, (req, res) => {
+    if (hits.length !== 1) return chatOk(res)
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ choices: [{ message: { tool_calls: [{ id: 'call_calc', type: 'function', function: { name: 'calculate', arguments: '{"expression":"6*7"}' } }] }, finish_reason: 'tool_calls' }] }))
+  }))
+  const cfg = gatewayConfig(up.base)
+  cfg.models[V2_TARGET_UPSTREAM_MODEL].alias = []
+  cfg.models[V2_TARGET_UPSTREAM_MODEL].maxContext = 128000
+  const gw = await startGateway({ config: cfg, env: { [SYNTH_ENV]: SYNTH_KEY } })
+  t.after(async () => { await gw.stop(); await up.stop() })
+  const models = (await (await gw.get('/v1/models?client_version=0.170.0')).json()).models
+  const canonical = models.find((m) => m.slug === V2_TARGET_PUBLIC_ID)
+  assert.ok(canonical)
+  const first = await gw.post('/v1/responses', { model: alias, input: 'calculate', stream: false, previous_response_id: 'resp_mgws_legacy' })
+  assert.equal(first.status, 200, await first.clone().text())
+  const response = await first.json()
+  assert.equal(response.model, alias)
+  const result = await gw.post('/v1/responses', {
+    model: alias, previous_response_id: response.id, stream: false,
+    input: [{ type: 'function_call_output', call_id: 'call_calc', output: '42' }],
+  })
+  assert.equal(result.status, 200, await result.clone().text())
+  assert.deepEqual(hits.map((hit) => JSON.parse(hit.body).model), [V2_TARGET_UPSTREAM_MODEL, V2_TARGET_UPSTREAM_MODEL])
+  assert.equal(JSON.parse(hits[1].body).messages.at(-1).content, '42')
+  assert.deepEqual(models.find((m) => m.slug === alias), { ...canonical, slug: alias, visibility: 'hide' })
 })

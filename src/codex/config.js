@@ -15,6 +15,7 @@
 import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { GO_CLI_ALIAS, V2_TARGET_PUBLIC_ID, V2_TARGET_UPSTREAM_MODEL } from '../providers/opencode-go.js'
 
 export const CONFIG_CONTRACT = 'mg-codex-config/1'
 export const OWNED_TOP_LEVEL = Object.freeze(['model_provider', 'openai_base_url', 'model', 'model_catalog_json'])
@@ -1286,6 +1287,22 @@ export function buildManagedAgentConfig (opts = {}) {
   const effort = String(opts.reasoningEffort || MANAGED_AGENT_CHILD_EFFORT).trim() || MANAGED_AGENT_CHILD_EFFORT
   const description = String(opts.description || MANAGED_AGENT_DESCRIPTION).trim() || MANAGED_AGENT_DESCRIPTION
   const configFile = MANAGED_AGENT_FILE
+  let text = 'model = ' + JSON.stringify(model) + '\n' + 'model_reasoning_effort = ' + JSON.stringify(effort) + '\n'
+  if (opts.gatewayBaseUrl && [V2_TARGET_PUBLIC_ID, GO_CLI_ALIAS, V2_TARGET_UPSTREAM_MODEL].includes(model)) {
+    const baseUrl = normalizeGatewayBaseUrl(opts.gatewayBaseUrl) + '/v1'
+    // A child inheriting the built-in OpenAI provider may send compaction_trigger.
+    // Give the Go child its own provider so this setting cannot affect the parent.
+    text += 'model_provider = "modelgate-go-child"\n\n' +
+      '[model_providers.modelgate-go-child]\n' +
+      'name = "ModelGate Go child"\n' +
+      'base_url = ' + JSON.stringify(baseUrl) + '\n' +
+      'wire_api = "responses"\n' +
+      'requires_openai_auth = false\n' +
+      'supports_websockets = false\n' +
+      (opts.envKey ? 'env_key = ' + JSON.stringify(opts.envKey) + '\n' : '') +
+      '\n[model_providers.modelgate-go-child.capabilities]\n' +
+      'remote_compaction = "unsupported"\n'
+  }
   return {
     sections: {
       features: { multi_agent: true },
@@ -1293,7 +1310,7 @@ export function buildManagedAgentConfig (opts = {}) {
     },
     child: {
       fileName: configFile,
-      text: 'model = ' + JSON.stringify(model) + '\n' + 'model_reasoning_effort = ' + JSON.stringify(effort) + '\n',
+      text,
       model,
       reasoningEffort: effort,
     },

@@ -54,6 +54,16 @@ test('缓存缺失 fail-closed：未知 id / 空 id 都拒绝，绝不返回半�
   assert.equal(reconstructContinuation(null, []).ok, false)
 })
 
+test('已绑定身份的续轮历史只对同一鉴权身份可见', () => {
+  resetContinuationStore()
+  const input = [msg('m1', 'user', 'prior history')]
+  recordContinuation({ responseId: 'resp_scoped', input, output: [], owner: 'client-a' })
+  assert.deepEqual(reconstructContinuation('resp_scoped', [], 'client-a').input, input)
+  const missing = { ok: false, reason: 'continuation_state_missing' }
+  assert.deepEqual(reconstructContinuation('resp_scoped', [], 'client-b'), missing)
+  assert.deepEqual(reconstructContinuation('resp_scoped', []), missing)
+})
+
 test('TTL 过期与 LRU 淘汰后 fail-closed', async () => {
   resetContinuationStore()
   configureContinuationLimits({ ttlMs: 5, maxEntries: 2, maxEntryBytes: 16 * 1024 * 1024, maxTotalBytes: 128 * 1024 * 1024 })

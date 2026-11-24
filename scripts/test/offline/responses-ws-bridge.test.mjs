@@ -506,3 +506,98 @@ test('非法 WS 帧 JSON 返回 error 帧而不是崩溃', { timeout: 30000 }, a
   const err = await ws.until('error')
   assert.match(err.error.message, /invalid WebSocket frame JSON/)
 })
+
+for (const mode of ['SSE', 'JSON']) {
+  test(`Go Chat ${mode} registers each client-visible response for delta-only WS continuation`, { timeout: 15000 }, async (t) => {
+    const calls = ['call_a', 'call_b', 'call_c'].map((id, index) => ({
+      index, id, type: 'function', function: { name: 'echo', arguments: JSON.stringify({ index }) },
+    }))
+    const bodies = []
+    const up = await startScriptedUpstream(async (req, res) => {
+      const chunks = []
+      for await (const c of req) chunks.push(c)
+      bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+      const message = bodies.length === 1 ? { tool_calls: calls } : { content: `reply ${bodies.length}` }
+      const finish_reason = bodies.length === 1 ? 'tool_calls' : 'stop'
+      if (mode === 'SSE' && bodies.at(-1).stream) {
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        res.end(sse([{ choices: [{ delta: message }] }, { choices: [{ delta: {}, finish_reason }] }]) + 'data: [DONE]\n\n')
+      } else {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ choices: [{ message, finish_reason }] }))
+      }
+    })
+    t.after(() => up.stop())
+    const gw = await startGateway({ config: responsesConfig(up.base, {
+      providers: { opencodego: { baseUrl: up.base + '/v1', api: 'openai' } },
+      models: { 'ws-model': { provider: 'opencodego', api: 'openai', forceNoStream: mode === 'JSON' } },
+    }) })
+    const ws = await wsConnect(gw.port, { headers: { 'thread-id': 'go-continuation' } })
+    t.after(async () => { ws.close(); await gw.stop() })
+    async function nextTurn(over) {
+      ws.send(createFrame('first question', over))
+      while (true) {
+        const event = JSON.parse(await ws.nextFrame())
+        assert.notEqual(event.type, 'error', event.error?.message)
+        assert.notEqual(event.type, 'response.failed', JSON.stringify(event.error))
+        if (event.type === 'response.completed') return event.response
+      }
+    }
+    const first = await nextTurn({ tools: [{ type: 'function', name: 'echo', parameters: { type: 'object' } }] })
+    assert.deepEqual(first.output.map((it) => it.call_id), calls.map((call) => call.id))
+    const second = await nextTurn({
+      previous_response_id: first.id,
+      input: calls.map(({ id }) => ({ type: 'function_call_output', call_id: id, output: `result for ${id}` })),
+    })
+    await nextTurn({ previous_response_id: second.id, input: 'third question' })
+    assert.deepEqual(bodies[1].messages.map((m) => m.role), ['user', 'assistant', 'tool', 'tool', 'tool'])
+    assert.deepEqual(bodies[1].messages[1].tool_calls.map((c) => c.id), calls.map((c) => c.id))
+    assert.deepEqual(bodies[1].messages.slice(2).map((m) => [m.tool_call_id, m.content]), calls.map(({ id }) => [id, `result for ${id}`]))
+    assert.deepEqual(bodies[2].messages, [...bodies[1].messages, { role: 'assistant', content: 'reply 2' }, { role: 'user', content: 'third question' }])
+    const httpTurn = await gw.post('/v1/responses', {
+      model: 'ws-model', previous_response_id: second.id, input: 'http follow-up', stream: false,
+    })
+    assert.equal(httpTurn.status, 200)
+    const httpResponse = await httpTurn.json()
+    assert.match(httpResponse.id, /^resp_mgchat_/)
+    await nextTurn({ previous_response_id: httpResponse.id, input: 'back on WS' })
+    assert.deepEqual(bodies[4].messages.slice(-3).map((m) => m.content), ['http follow-up', 'reply 4', 'back on WS'])
+
+    const missing = await gw.post('/v1/responses', {
+      model: 'ws-model', previous_response_id: 'resp_mgchat_evicted', input: 'only a delta',
+    })
+    assert.equal(missing.status, 400)
+    assert.equal((await missing.json()).error.code, 'previous_response_not_found')
+    assert.equal(bodies.length, 5, 'expired history must never reach the upstream')
+
+    const orphan = await gw.post('/v1/responses', {
+      model: 'ws-model', input: [{ type: 'function_call_output', call_id: 'call_unknown', output: 'orphan' }],
+    })
+    assert.equal(orphan.status, 400)
+    assert.equal((await orphan.json()).error.type, 'tool_pairing_invalid')
+    assert.equal(bodies.length, 5, 'unpaired tool results must never reach the upstream')
+  })
+}
+
+test('WS warmup preserves its input when the first real turn sends only a delta', { timeout: 15000 }, async (t) => {
+  const bodies = []
+  const up = await startScriptedUpstream(async (req, res) => {
+    const chunks = []
+    for await (const c of req) chunks.push(c)
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.end(sse([created('resp_warmup_delta'), completed('resp_warmup_delta', 'ok')]))
+  })
+  t.after(() => up.stop())
+  const gw = await startGateway({ config: responsesConfig(up.base) })
+  const ws = await wsConnect(gw.port)
+  t.after(async () => { ws.close(); await gw.stop() })
+  const original = createFrame('history supplied in warmup', { generate: false })
+  ws.send(original)
+  const warm = await ws.until('response.completed')
+  assert.equal(bodies.length, 0)
+  ws.send(createFrame('', { previous_response_id: warm.response.id, input: 'new question' }))
+  await ws.until('response.completed')
+  assert.equal(bodies.length, 1)
+  assert.deepEqual(bodies[0].input.map((m) => m.content[0].text), ['history supplied in warmup', 'new question'])
+})

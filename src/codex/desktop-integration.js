@@ -242,7 +242,7 @@ function planManagedAgentChild (paths, opts, desired, prevRecord) {
       text: '', model: null, reasoningEffort: null,
       before: { exists: false, sha256: '', size: 0 }, after: { exists: false, sha256: '', size: 0 } }
   }
-  const built = buildManagedAgentConfig({ model: opts.model, reasoningEffort: opts.agentReasoningEffort })
+  const built = buildManagedAgentConfig({ model: opts.model, reasoningEffort: opts.agentReasoningEffort, gatewayBaseUrl: opts.gatewayBaseUrl })
   const childText = built.child.text
   const afterSha = sha256Hex(Buffer.from(childText, 'utf8'))
   const before = snapshotManagedAgentChild(childPath)
@@ -276,7 +276,7 @@ function planManagedAgentChild (paths, opts, desired, prevRecord) {
     return plan
   }
   const theirsText = readFileSync(childPath, 'utf8')
-  if (isCanonicalManagedChildText(theirsText, opts.model)) {
+  if (isCanonicalManagedChildText(theirsText, opts.model, opts.gatewayBaseUrl)) {
     // 状态漂移（记录丢失/早期版本写入）但文件恰为 ModelGate 规范形状：按可升级的托管文件对待。
     plan.action = 'upgrade'
     return plan
@@ -291,18 +291,18 @@ function planManagedAgentChild (paths, opts, desired, prevRecord) {
   return plan
 }
 
-// 字节级规范形状识别：仅 model + model_reasoning_effort 两键、与 buildManagedAgentConfig
-// 对同一 (model, effort) 的输出逐字一致，且 model 属于 ModelGate 托管别名（本次目标模型或
+// 字节级规范形状识别：只认旧版两键模板或同一网关的新模板，且 model 属于托管目标（本次目标模型或
 // mg-opencodego- 命名空间）。用户自有模型（如 "user-own"）即使形状相同也判非托管（保守）。
-function isCanonicalManagedChildText (text, expectedModel) {
+function isCanonicalManagedChildText (text, expectedModel, gatewayBaseUrl) {
   const modelMatch = /^model = "([^"]+)"$/m.exec(String(text))
   const effortMatch = /^model_reasoning_effort = "([^"]+)"$/m.exec(String(text))
   if (!modelMatch || !effortMatch) return false
   const model = modelMatch[1]
   if (model !== String(expectedModel || '') && !model.startsWith('mg-opencodego-')) return false
   try {
-    const built = buildManagedAgentConfig({ model, reasoningEffort: effortMatch[1] })
-    return built.child.text === text
+    const opts = { model, reasoningEffort: effortMatch[1] }
+    return buildManagedAgentConfig(opts).child.text === text ||
+      buildManagedAgentConfig({ ...opts, gatewayBaseUrl }).child.text === text
   } catch { return false }
 }
 
@@ -1294,7 +1294,7 @@ export function preview (opts = {}) {
     }
   }
   const desired = buildDesired({ baseUrl: gatewayBaseUrl, model: modeParams.model, catalogPath: opts.catalogPath, features: opts.features, managedProvider: modeParams.provider, managedAgent: opts.managedAgent, agentModel: modeParams.childModel, agentReasoningEffort: opts.agentReasoningEffort })
-  const childPlan = planManagedAgentChild(paths, Object.assign({}, opts, { model: modeParams.childModel }), desired, (loadState(paths) || {}).agentChild || null)
+  const childPlan = planManagedAgentChild(paths, Object.assign({}, opts, { model: modeParams.childModel, gatewayBaseUrl }), desired, (loadState(paths) || {}).agentChild || null)
   let before
   let beforeText = ''
   let existing
@@ -1366,7 +1366,7 @@ export function preview (opts = {}) {
     conflicts.push({ path: MANAGED_AGENT_FILE, reason: childPlan.conflict.reason, message })
     warnings.push(message)
   }
-  const consentRequired = blocked.length === 0 && (firstRun || conflicts.length > 0 || childPlan.action === 'create')
+  const consentRequired = blocked.length === 0 && (firstRun || conflicts.length > 0 || ['create', 'upgrade'].includes(childPlan.action))
   return {
     contract: DESKTOP_CONTRACT,
     ok: blocked.length === 0,
@@ -1494,7 +1494,7 @@ export async function activate (opts = {}) {
       desired = buildDesired({ baseUrl: gatewayBaseUrl, model: effectiveModel, catalogPath: opts.catalogPath, features: opts.features, managedProvider: effectiveProvider, managedAgent: opts.managedAgent, agentModel: effectiveChild, agentReasoningEffort: opts.agentReasoningEffort })
     } catch (e) { throw asDesktopError(e, 'invalid_desired') }
     // MG-FIX-P1-05：用户自行改过 go-deepseek.toml 时在任何写入之前 409，绝不覆盖。
-    const childPlan = planManagedAgentChild(paths, Object.assign({}, opts, { model: effectiveChild }), desired, (loadState(paths) || {}).agentChild || null)
+    const childPlan = planManagedAgentChild(paths, Object.assign({}, opts, { model: effectiveChild, gatewayBaseUrl }), desired, (loadState(paths) || {}).agentChild || null)
     if (childPlan.conflict) {
       const conflict = childPlan.conflict
       throw new DesktopError(conflict.reason,

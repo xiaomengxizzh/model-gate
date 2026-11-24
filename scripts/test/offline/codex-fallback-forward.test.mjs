@@ -176,6 +176,102 @@ test('内容已交付后断流 → stop_with_error，不换上游（p2 命中 0�
 })
 
 // ============================================================================
+// 5b. unsent 断流（写后无任何响应头/内容/工具）→ 对账闸门放行由开关控制
+//   defaults.codexStreamInterruptResume=false（默认）→ 仍 STOP，不换上游；
+//   =true 且可证明未交付 → 决策转 FAILOVER/RETRY_SAME，备份命中、最终 200。
+//   复现 2026-11-23 deepseek 子代理断连签名：phase=unsent error=stream_interrupted。
+// ============================================================================
+function preHeaderDropUpstream() {
+  // 读完请求体后直接销毁 socket：body 已写出（wroteBody=true possiblyCommitted=true），
+  // 但一个响应头/事件都没回 → execOutcome=SENT_UNKNOWN、codex.phase=UNSENT、toolCallSeen=false。
+  return startScriptedUpstream(async (req, res) => {
+    for await (const _ of req) { /* drain body */ }
+    res.destroy()
+  })
+}
+
+test('unsent 断流 + 开关关闭（默认）→ MG_FB_STOP_RECONCILE，不换上游（p2 命中 0）', { timeout: 30000 }, async (t) => {
+  const primary = await preHeaderDropUpstream()
+  const backup = await startScriptedUpstream(async (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(CHAT_OK('backup')) })
+  t.after(async () => { await primary.stop(); await backup.stop() })
+  const gw = await startGw(t, 'mg-fb-unsent-off', {
+    defaults: baseDefaults(),
+    providers: { p1: { baseUrl: primary.base }, p2: { baseUrl: backup.base } },
+    models: { 'mg-fb-unsent-off': { provider: 'p1', fallbacks: ['p2'] } },
+  })
+  const res = await postChat(gw, chatBody('mg-fb-unsent-off'))
+  const text = await res.text()
+  assert.equal(res.status, 502, '未开启开关：默认安全语义，仍停在对账：' + text.slice(0, 300))
+  assert.equal(backup.hits.length, 0, '开关关闭时不得换上游（实际 ' + backup.hits.length + '）')
+  const log = await gwLog(gw)
+  assert.match(log, /MG_FB_STOP_RECONCILE/, '日志应含对账停机证据')
+})
+
+test('unsent 断流 + 开关开启 → 换上游重试成功（p2 命中 ≥1），且日志有可信续传证据', { timeout: 30000 }, async (t) => {
+  const primary = await preHeaderDropUpstream()
+  const backup = await startScriptedUpstream(async (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(CHAT_OK('backup')) })
+  t.after(async () => { await primary.stop(); await backup.stop() })
+  const gw = await startGw(t, 'mg-fb-unsent-on', {
+    defaults: baseDefaults({ codexStreamInterruptResume: true }),
+    providers: { p1: { baseUrl: primary.base }, p2: { baseUrl: backup.base } },
+    models: { 'mg-fb-unsent-on': { provider: 'p1', fallbacks: ['p2'] } },
+  })
+  const res = await postChat(gw, chatBody('mg-fb-unsent-on'))
+  const text = await res.text()
+  assert.equal(res.status, 200, '开关开启且无副作用交付：应换上游成功：' + text.slice(0, 300))
+  assert.ok(backup.hits.length >= 1, '应换到备用上游（实际 ' + backup.hits.length + '）')
+  const log = await gwLog(gw)
+  assert.match(log, /unsent_stream_interrupt|可信续传/, '日志应含可信续传放行证据')
+})
+
+test('unsent 断流 + 开关开启但流中出现工具调用 → 仍 STOP，不重复执行工具（p2 命中 0）', { timeout: 30000 }, async (t) => {
+  const primary = await startScriptedUpstream(async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+    res.write(toolCallDelta())
+    await wait(20)
+    res.destroy()
+  })
+  const backup = await startScriptedUpstream(async (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(CHAT_OK('backup')) })
+  t.after(async () => { await primary.stop(); await backup.stop() })
+  const gw = await startGw(t, 'mg-fb-unsent-tool', {
+    defaults: baseDefaults({ codexStreamInterruptResume: true }),
+    providers: { p1: { baseUrl: primary.base }, p2: { baseUrl: backup.base } },
+    models: { 'mg-fb-tool2': { provider: 'p1', fallbacks: ['p2'], codex: { capabilities: { shellType: 'disabled' } } } },
+  })
+  const res = await postChat(gw, chatBody('mg-fb-tool2', { stream: true, tools: [{ type: 'function', function: { name: 'shell' } }] }))
+  const text = await res.text()
+  assert.match(text, /stream_interrupted/, '工具副作用优先：仍流内错误收尾：' + text.slice(0, 300))
+  assert.equal(backup.hits.length, 0, '工具调用已出现时即便开关开也不得换上游（实际 ' + backup.hits.length + '）')
+})
+
+// ============================================================================
+// 5c. 回归：可信续传重试不得触发熔断（2026-11-23 生产根因）
+//   单一上游连续 6 次 unsent 断流（> FAIL_OPEN_THRESHOLD=5）后第 7 次成功：
+//   markFail 被跳过 ⇒ 不熔断 ⇒ 不出现 MG_FB_NO_CANDIDATE/unhealthy ⇒ 最终 200。
+//   旧行为：第 5 次就熔断，之后 skip provider(熔断中) + NO_CANDIDATE，对话作废。
+// ============================================================================
+test('unsent 断流连续 6 次后恢复 → 不熔断、重试到第 7 次成功', { timeout: 30000 }, async (t) => {
+  const primary = await startScriptedUpstream(async (req, res, rec) => {
+    for await (const _ of req) { /* drain body */ }
+    if (rec.index < 6) { res.destroy(); return }  // 前 6 次写后无头断流
+    res.writeHead(200, { 'content-type': 'application/json' }); res.end(CHAT_OK('recovered'))
+  })
+  t.after(async () => { await primary.stop() })
+  const gw = await startGw(t, 'mg-fb-unsent-circuit', {
+    defaults: baseDefaults({ codexStreamInterruptResume: true, codexFallbackLimits: { maxSameProviderAttempts: 20, maxFailovers: 0, maxTotalAttempts: 25, maxWaitMs: 30000 } }),
+    providers: { p1: { baseUrl: primary.base } },
+    models: { 'mg-fb-unsent-circuit': { provider: 'p1' } },
+  })
+  const res = await postChat(gw, chatBody('mg-fb-unsent-circuit'))
+  const text = await res.text()
+  assert.equal(res.status, 200, '同一上游第 7 次应成功：' + text.slice(0, 300))
+  assert.ok(primary.hits.length >= 7, '应重试到 ≥7 次（实际 ' + primary.hits.length + '）')
+  const log = await gwLog(gw)
+  assert.ok(!/skip provider \(熔断中\)/.test(log), '可信续传重试不得把上游熔断')
+  assert.ok(!/MG_FB_NO_CANDIDATE/.test(log), '不应出现候选全不可用')
+})
+
+// ============================================================================
 // 6. 官方 402 未确认应急 → stop；确认后 → failover
 // ============================================================================
 test('官方 402 未确认应急 → stop；确认 codexEmergency 后才 failover 到第三方（config-declared official）', { timeout: 30000 }, async (t) => {

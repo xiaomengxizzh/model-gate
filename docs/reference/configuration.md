@@ -28,6 +28,7 @@
     "aggregatePrefixes": ["mg-", "mg/"],    // Codex 聚合保留 ID 前缀：命中但未配置 → 404 unknown_model，不回落默认上游
     "codexFallback": false,                 // Codex 智能 Fallback 总开关（聚合 slug 自动启用；true 时非聚合模型也受决策器约束）
     "codexFallbackLimits": { "maxSameProviderAttempts": 1, "maxFailovers": 2, "maxTotalAttempts": 3, "maxWaitMs": 30000 },
+    "streamReconnectMax": 2,                // SSE 断流续传次数上限（缺省 2）；当前 reconnect 回调为空实现，调大只减日志噪声、不重放请求
     "codexBudget": { "requestUsd": 0, "taskUsd": 0, "dailyUsd": 0, "enforceUnknownCost": false },
     "codexEmergency": false,                // D7 手动应急：true 或 {"acknowledged":true} 才允许官方额度耗尽后切第三方
     "failbackProbe": { "enabled": true, "everyMs": 30000, "successStreak": 2, "system": "ping" }  // 主上游回切探活
@@ -240,6 +241,8 @@ Codex 0.167 在自定义 provider 与内置 openai 两条路径上都会带一�
 | `defaults.codexFallbackLimits.maxFailovers` | `2` | 最多换候选次数。 |
 | `defaults.codexFallbackLimits.maxTotalAttempts` | `3` | 单请求总上游尝试上限。 |
 | `defaults.codexFallbackLimits.maxWaitMs` | `30000` | Retry-After / 退避的单次等待上限。 |
+| `defaults.streamReconnectMax` | `2` | SSE 断流续传次数上限。当前 `reconnect` 回调为空实现（`async () => null`，不重放请求），调大只减少「续传用尽」日志噪声，对断流恢复无实质作用；不设则沿用 2。 |
+| `defaults.codexStreamInterruptResume` | `false` | **写后无头断流的可信续传开关（默认关，行为不变）**。仅当上游写后无任何响应头/内容/工具事件到达客户端（`phase=unsent` 且无工具调用，`error=stream_interrupted`）时，显式设为 `true` 才让对账闸门放行、按决策器 `retry_same`/`failover` 重试/换上游（日志含 `unsent_stream_interrupt`）。这些可信续传重试**不累计 `markFail`**（否则第 5 次即熔断、候选全变 unhealthy → `MG_FB_NO_CANDIDATE`，重试预算再大也无效）；工具已交付或已出现工具调用时始终 STOP，绝不重放。仍受 `codexFallbackLimits` / `loopMs` 有界约束。回滚：设为 `false` 或删除该键。注意该开关须放在 `defaults` 下（`gateway.local.json` 只合并 `defaults`，不会合并 `server`）。 |
 | `defaults.codexBudget.requestUsd` | `0` | 单请求费用上限（USD；0=不限）。按 `models.<名>.costEstimateUsd` / `providers.<名>.costEstimateUsd` 的单次估算累计。 |
 | `defaults.codexBudget.taskUsd` / `dailyUsd` | `0` | 单任务 / 日累计上限。**当前未接费用账本，spent 恒 0（NOT_RUN）**；字段保留给后续接入。 |
 | `defaults.codexBudget.enforceUnknownCost` | `false` | `true` 时付费候选若没有费用估算则 fail-closed（宁可停机也不假设免费）。 |

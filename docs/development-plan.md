@@ -6,6 +6,29 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
+## 2026-11-21 Go 子代理压缩路径
+
+- 托管 Go 子代理独立声明 `remote_compaction = "unsupported"`，由 Codex 选择现有本地压缩流程。Chat 桥拒绝远程触发标记时返回 `native_compaction_route_not_ready`。现有托管子配置已升级，父配置的 SHA-256 未变。
+- Codex CLI 0.170.0 在隔离目录连接回环 mock，降低测试压缩阈值后，同一会话先发送 Codex 压缩提示，再用摘要继续下一轮。离线套件及旧配置升级和回滚回归通过。8787 服务于 12:26:21 CST 重启，新进程 PID `449618`。两个 Go 模型名的远程压缩探针均返回 `400 native_compaction_route_not_ready`。真实原生子代理压缩仍待复测。
+
+## 2026-11-20 Codex CLI DeepSeek 简写与工具结果回传
+
+- 隔离网关复现 `deepseekv4.1flash` 落入通用 Chat 桥并返回 `previous_response_id 不支持`。将简写接到已配置的 Go 目标，Codex 模型列表与启动器生成的目录同时提供精确简写元数据。配置缺失时先返回 `unknown_model`。
+- 真实 Codex CLI 0.170.0 连接隔离网关和回环 mock。显式加载目录后，工具调用、`call_id` 结果回传和最后的 `42` 均通过，CLI 退出码 0。自定义 provider 缺少本地目录时仍会显示默认元数据告警。真实 Go 上游及原生子代理待复验。
+- `npm test` 通过 147 个套件，1,400 个用例通过、3 个跳过。CLI 启动方式见[目录参考](reference/codex-catalog.md)。
+
+## 2026-11-20 Codex CLI 员工选路 502 修复
+
+- 报告对应的旧 Go 配置缺少 Codex 工具能力声明。回归先复现 `MG_FB_NO_CANDIDATE`，再用已有工具能力证据修复目标模型的选路与目录。其他 Go 模型继续使用各自的能力声明。日志新增排除原因码。
+- Codex CLI 0.170.0 连接隔离网关和回环 mock，使用相同会话 ID 验证执行工具、回传同一 `call_id` 和 `exec resume`，两次均退出 0。全量离线测试 147 套件通过，1,401 个用例通过、3 个跳过。语法、文档和元数据检查通过。
+- 经用户授权，本机 8787 服务于 23:43:27 CST 重启，PID `2825636`。两个模型名均发布 `unified_exec`。Codex CLI 0.170.0 经真实 Go 上游执行工具并回传 `323 / EMPLOYEE-XMXZ-719`，再用简写续接同一会话得到 `324 / EMPLOYEE-XMXZ-719`，两次均退出 0。会话 `01a1f9a2-e0cf-78c1-b2f7-8debdca132bc`。原生第二跳和负责人接收员工实时进度待验证。
+
+## 2026-11-19 Go Chat 子代理增量续轮修复
+
+- 在隔离网关经真实 WebSocket 协议发送三条增量 `function_call_output`，SSE 和上游 JSON 两种路径均复现三次 `tool_output_without_call`。现有重建路径只能读取缓存，Chat 桥终态没有写入对应的响应 ID 和工具调用。
+- SSE、JSON 转 SSE 和非流式 JSON 在交付前共用同一续轮登记逻辑。回归覆盖三条并行调用、链式增量、HTTP 与 WS 交替、缺失状态和孤儿结果拒绝。附带修复同连接预热历史在首个增量轮次中丢失的问题。
+- Node v24.22.2：`npm run check`、`npm test`（147 套件，1,398 用例通过、3 跳过）、`npm run docs:check`、`node scripts/check-metadata.mjs` 均通过。本机 8787 有现存 Codex 连接，运行中的旧进程未重启。真实 Codex Desktop 子代理、真实上游以及原生压缩复验待执行。
+
 ## 2026-11-16 Codex 实际使用严格审计修复（已合并 main 并部署）
 
 所有者指令：审计→修复→合并所有支线→push。审计发现与修复清单见[审计修复证据](evidence/2026-11-16-codex-audit-remediation.md)，部署与生产冒烟见[部署记录](evidence/2026-11-16-audit-fix-deployment.md)。

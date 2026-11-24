@@ -128,6 +128,8 @@ test('③ 子代理配置逻辑不变：managed agent child 仍指向 Go 别名�
   const childToml = await readFile(join(codex, childFile), 'utf8')
   assert.equal(childToml.includes('model_reasoning_effort = "high"'), true, '子代理 effort=high 未被父模型切换影响')
   assert.equal(childToml.includes('model = ' + JSON.stringify(printed.alias)), true, '子代理目标仍是 Go 别名')
+  assert.match(childToml, /^model_provider = "modelgate-go-child"$/m)
+  assert.match(childToml, /^\[model_providers\.modelgate-go-child\.capabilities\]\nremote_compaction = "unsupported"$/m)
 })
 
 test('④ 身份守卫未削弱：把聚合别名写进官方基线目录仍被 official_slug_reuse 拒绝', { timeout: 30000 }, async () => {

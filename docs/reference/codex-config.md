@@ -44,6 +44,8 @@
 - `wire_api = "responses"`、`requires_openai_auth = false` —— 该 provider 不依赖官方 ChatGPT Bearer；**不写任何内嵌 Key 字段、不写 bearer token / 客户端密钥**，仅信任本机回环。
 - `supports_websockets = false` —— 关闭 WebSocket 升级，统一走 HTTP `POST /v1/responses`。
 - `[model_providers.modelgate.capabilities] remote_compaction = "unsupported"` —— 关闭远程压缩，由 Codex 侧本地压缩。
+
+托管 `go_deepseek` 的角色文件单独声明 `[model_providers.modelgate-go-child.capabilities] remote_compaction = "unsupported"`。重新应用 ModelGate 接入配置可升级旧版托管角色文件。升级后需重新创建子代理以读取该配置。仍收到 `native_compaction_route_not_ready` 时，核对实际子代理使用的 provider 和能力声明。
 - 禁止触碰 `[model_providers.openai]`（reserved built-in provider ID，发现既有段只告警、不删改）。
 
 **只读保留（模块不修改、不改写顺序）**：`[mcp_servers.*]`、`[projects.*]`、`approval_policy` / `sandbox_mode` 等权限与信任段、所有未知字段与注释。写前写后各算一次 `unmanagedFingerprint`，指纹不一致即拒绝写入（fail closed）。

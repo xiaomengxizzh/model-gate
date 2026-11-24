@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import http from 'node:http'
 import { pipeline, Transform } from 'node:stream'
 import { readFileSync, chmodSync, existsSync, copyFileSync, statSync } from 'node:fs'
@@ -27,11 +28,11 @@ import { classifyTarget, isLoopbackHost, isOfficialTarget } from './codex/identi
 import { restoreResponseJson, detectOpaqueV2Task, detectEncryptedToolSchema } from './codex/interop.js'
 import { readSubscriptionCredential, isGatewaySubscriptionTarget, probeLocalCodexAuth, SubscriptionCredentialError } from './codex/local-subscription.js'
 import { isTargetAuthzError, resolveUpstream, assertResolvedUpstream, assertNoSubscriptionCredentialToThirdParty, authFailureReceipt, authFailureResponse } from './codex/target-authz.js'
-import { reconstructContinuation, recordContinuation, createCaptureSink, continuationStoreSize, configureContinuationRootFix, configureContinuationIdAlias } from './responses-continuation.js'
-import { v2ScopeOf, V2_TARGET_UPSTREAM_MODEL, GO_NATIVE_CODEX_DEFAULTS, isGoBinding } from './providers/opencode-go.js'
+import { reconstructContinuation, normalizeContinuationInput, recordContinuation, createCaptureSink, continuationStoreSize, configureContinuationRootFix, configureContinuationIdAlias } from './responses-continuation.js'
+import { v2ScopeOf, GO_CLI_ALIAS, V2_TARGET_PUBLIC_ID, V2_TARGET_UPSTREAM_MODEL, GO_NATIVE_CODEX_DEFAULTS, isGoBinding } from './providers/opencode-go.js'
 import { createCapabilityRegistry, PROVEN_OPTIONAL_CAPABILITIES } from './optional/policy.js'
 import { createObservability, hashId } from './observability/events.js'
-import { buildCatalog } from './codex/catalog.js'
+import { buildCatalog, withGoCliModelMetadata } from './codex/catalog.js'
 import { generationRecordFromBuilt, toCatalogView } from './codex/catalog-generation.js'
 import { microFromUsd } from './routing/facts.js'
 import { planTargetHeaders, targetDeny, legacyPassthroughRequested } from './codex/auth.js'
@@ -43,6 +44,7 @@ import { attachResponsesWebSocket, looksLikeSse } from './responses-ws.js'
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
 const RESPONSES_PATHS = new Set(['/v1/responses', '/responses'])
+const GO_CHAT_RESPONSE_PREFIX = 'resp_mgchat_'
 // 官方 Responses 后端（内置 openai provider + openai_base_url 指回网关，由 classifyTarget=official 判定）
 // 原生支持 store / previous_response_id / background / truncation。Codex 的 WS 持久连接靠
 // previous_response_id 在同一连接内串联多轮，属官方 API 原生能力，按"实际目标能力"如实声明。
@@ -269,7 +271,16 @@ function injectedNow() {
 
 function codexModelsPayload(state) {
   const view = codexCatalogView(state.cfg)
-  return view ? view.models : null
+  if (!view) return null
+  try {
+    const hit = state.router.resolve(GO_CLI_ALIAS)
+    if (hit.canonicalName === V2_TARGET_PUBLIC_ID || hit.canonicalName === V2_TARGET_UPSTREAM_MODEL) {
+      return withGoCliModelMetadata({ models: view.models }).models
+    }
+  } catch (error) {
+    if (error.code !== 'unknown_model') throw error
+  }
+  return view.models
 }
 function isCodexModelListRequest(req, url) {
   if (/[?&]client_version=/.test(url || '')) return true
@@ -2966,6 +2977,7 @@ function makeHandler(state) {
       // grants its named entry, including when no global credential is configured.
       const clientKey = currentClientKey(state)
       const globalAuthorized = clientKey && clientAuthOk(req, clientKey)
+      let continuationKey = globalAuthorized ? clientKey : null
       if (!globalAuthorized) {
         let vm = null
         const vms = state.cfg.virtualModels || []
@@ -2986,6 +2998,7 @@ function makeHandler(state) {
           sendJson(res, 401, { error: { message: '无效的客户端接入 Key（状态 401）', type: 'unauthorized' } })
           return
         }
+        if (vmKey) continuationKey = vmKey
       }
 
       if (req.method === 'GET' && (path === '/v1/models' || path === '/models')) {
@@ -3282,7 +3295,12 @@ function makeHandler(state) {
         // 原生 Responses 透传（MG-015）：模型显式 api:"responses" 时不做 Chat 桥转换
         // resolve 在缺 model 且无 defaults.provider 时会抛错：此处静默回落到 Chat 桥，由 forwardChain 给出统一错误
         let nHit = null
-        try { nHit = state.router.resolve(body.model) } catch { nHit = null }
+        try { nHit = state.router.resolve(body.model) } catch (error) {
+          if (error.code === 'unknown_model') {
+            sendJson(res, 404, { error: { message: error.message, code: 'unknown_model', type: 'unknown_model', model: body.model, available: error.available || [] } })
+            return
+          }
+        }
         const nDef = nHit && nHit.def
         // MG-R008：按模型协议显式分派，禁止「猜协议」或静默回落。
         //   responses            → 原生透传（不做 Chat 翻译）
@@ -3316,9 +3334,9 @@ function makeHandler(state) {
         // 历史项）。订阅后端与第三方便携上游都不接受该字段；只剔除不重建会永久丢失被省略的
         // 消息/推理项。这里按 response.id 取回上一轮真实 input+output，重建完整历史后再剔除；
         // 每一轮（含首轮）都登记续轮状态，供下一轮重建。缓存缺失（重启/淘汰/超容量）→
-        // fail-closed 400，绝不静默丢上下文。仅 native Responses / 官方路由参与；
-        // Chat 桥（虚拟池/chat 协议模型）的 previous_response_id 仍由桥契约显式拒绝。
+        // 由各路由处理缺失状态。此处处理 native Responses / 官方路由，Go Chat 桥在下方处理。
         let continuation = null
+        const continuationOwner = continuationKey ? sha256Hex(continuationKey) : null
         if (body && nDef && !nDef.isVirtualModel && !nDef.virtual && nDef.provider && state.cfg.providers[nDef.provider]) {
           const contProv = buildProvider(state.cfg, nDef.provider)
           const contKind = classifyTarget(contProv, state.cfg).kind
@@ -3347,7 +3365,7 @@ function makeHandler(state) {
                   recPrevId = aliased
                 }
               }
-              const rec = reconstructContinuation(recPrevId, body.input)
+              const rec = reconstructContinuation(recPrevId, body.input, continuationOwner)
               if (rec.ok) {
                 body = Object.assign({}, body, { input: rec.input })
                 log && log.info('responses continuation reconstructed', 'prev=' + prevIdRaw, 'restored=' + rec.restoredItems, 'delta=' + rec.deltaItems)
@@ -3391,17 +3409,12 @@ function makeHandler(state) {
               }
               delete body.previous_response_id
             }
-            const canonicalInput = Array.isArray(body.input)
-              ? body.input
-              : (typeof body.input === 'string' && body.input !== ''
-                ? [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: body.input }] }]
-                : [])
             continuation = {
               prevId: degraded ? null : prevIdRaw,
               // 补丁⑨：实验态登记回退键 + 配置快照；仅 causal 逻辑读取，基线路径不使用。
               rawPrevId: prevIdRaw,
               causal: causalHere,
-              canonicalInput,
+              canonicalInput: normalizeContinuationInput(body.input),
               model: body.model,
               thread: String((req.headers && (req.headers['thread-id'] || req.headers['session-id'])) || ''),
             }
@@ -3467,39 +3480,35 @@ function makeHandler(state) {
           if (nout && nout.streamed) return
           res.writeHead(nout.status, { 'content-type': nout.contentType }); res.end(nout.buf); return
         }
-        // 方案 B：聚合 Go 绑定（opencodego）的 thirdParty chat-completions 子代理续轮兼容。
-        // 这类子代理（deepseek）的续轮帧由 Codex 连接续轮自行填入 previous_response_id；Chat 桥契约
-        // （responses.js:317）会据此 400「不维护续轮」，故须删除该字段。但 Codex 0.169/0.170 的续轮帧
-        // 是**增量**的：input 只带 function_call_output，配对的 function_call 在上一轮响应里（靠
-        // previous_response_id 关联）。若只裸删 prev_id 而不补回历史，桥配对闸门（MG-R008）会判
-        // tool_output_without_call → 400（2026-11-19 真机回归）。
-        // 修复：删 prev_id 前先按 prev_id 从 continuation store 重建完整历史（复用 native 路径
-        // :3350 的已验证机制），命中则用重建后的 input（含上一轮 function_call）→ 桥配对自然通过；
-        // 未命中（状态缺失/过期）退回原有「无状态重发」行为，不回归 3c74cc3 的既有语义。
-        // 不静默丢历史、不伪造 function_call、不删用户 input、不放宽 MG-R008 配对闸门。
-        // 仅对 Go 绑定子代理开此口子：通用 thirdParty chat 目标（responses-endpoint 拒绝矩阵）仍
-        // 保持 400 fail-closed 契约；官方/原生路径在上方已 return，不受影响。
-        if (nProto && nProto.protocol === CHAT_COMPLETIONS && nDef && nDef.provider &&
-            state.cfg.providers[nDef.provider] && isGoBinding(buildProvider(state.cfg, nDef.provider)) &&
-            body && Object.prototype.hasOwnProperty.call(body, 'previous_response_id')) {
+        // Go Chat routes use the Responses IDs emitted by this gateway for continuation.
+        // Other Chat routes still reject previous_response_id in the bridge.
+        const goChat = nProto?.protocol === CHAT_COMPLETIONS && nDef?.provider &&
+          state.cfg.providers[nDef.provider] && isGoBinding(buildProvider(state.cfg, nDef.provider))
+        if (goChat && Object.prototype.hasOwnProperty.call(body, 'previous_response_id')) {
           const prevId = body.previous_response_id
-          if (typeof prevId === 'string' && prevId) {
-            const rec = reconstructContinuation(prevId, body.input)
-            if (rec.ok) {
-              body = Object.assign({}, body, { input: rec.input })
-              log && log.info('responses chat-bridge continuation reconstructed', 'restored=' + rec.restoredItems, 'delta=' + rec.deltaItems)
-            } else {
-              log && log.warn('responses chat-bridge continuation degraded', 'reason=' + rec.reason, 'store=' + continuationStoreSize().count)
+          const rec = reconstructContinuation(prevId, body.input, continuationOwner)
+          if (rec.ok) {
+            body = { ...body, input: rec.input }
+            log && log.info('responses chat-bridge continuation reconstructed', 'restored=' + rec.restoredItems, 'delta=' + rec.deltaItems)
+          } else {
+            log && log.warn('responses chat-bridge continuation degraded', 'reason=' + rec.reason, 'store=' + continuationStoreSize().count)
+            if (typeof prevId === 'string' && prevId.startsWith(GO_CHAT_RESPONSE_PREFIX)) {
+              sendJson(res, 400, { error: {
+                code: 'previous_response_not_found', type: 'invalid_request_error', param: 'previous_response_id',
+                message: 'Go Chat 续轮状态已失效，请移除 previous_response_id 并重发完整历史。',
+              } })
+              return
             }
           }
-          body = Object.assign({}, body)
+          body = { ...body }
           delete body.previous_response_id
         }
+        const canonicalInput = goChat ? normalizeContinuationInput(body.input) : null
         // M1-3b：把隐式默认改为显式选择——这是为旧客户端/Codex CLI 保留的已知有损兼容模式；
         // 严格默认入口是 bridge()，未来可切换。
         const conv = responsesToChat(body, LEGACY_BRIDGE_COMPAT)
         if (conv.rejected) {
-          sendJson(res, 400, { error: { message: conv.rejected.message, type: conv.rejected.code || 'unsupported_parameter' } })
+          sendJson(res, 400, { error: { message: conv.rejected.message, type: conv.rejected.code || 'unsupported_parameter', code: conv.rejected.code } })
           return
         }
         responsesMode = true
@@ -3508,6 +3517,18 @@ function makeHandler(state) {
           stream: !!body.stream,
           customToolNames: (Array.isArray(body.tools) ? body.tools : []).filter((t) => t && t.type === 'custom' && typeof t.name === 'string').map((t) => t.name),
           lossy: conv.lossy || [],
+          id: goChat ? GO_CHAT_RESPONSE_PREFIX + randomBytes(16).toString('hex') : undefined,
+          onComplete: goChat ? (response) => {
+            const result = recordContinuation({
+              responseId: response.id,
+              owner: continuationOwner,
+              input: canonicalInput,
+              output: response.output,
+              model: response.model,
+              status: response.status,
+            })
+            if (!result.recorded) log && log.warn('responses chat-bridge continuation not recorded', 'reason=' + result.reason)
+          } : undefined,
         }
         if (responsesMeta.lossy.length) log && log.info('responses 有损转换', responsesMeta.lossy.slice(0, 20).join(','))
         // 关键：既换内存 body，也换 bodyBuf —— forwardChain 对 OpenAI 上游默认透传原始 bodyBuf
@@ -3518,9 +3539,15 @@ function makeHandler(state) {
       const fPath = ((isChat || isResponses) && path !== '/v1/chat/completions') ? '/v1/chat/completions' : path
       const fUrl = (fPath === path) ? url : (fPath + url.slice(path.length))
       // 中继参数（Chat 与 Responses 共用）：token/缓存记账按 meta 里的实际上游/模型归属
+      // SSE 续传次数可配置（defaults.streamReconnectMax，缺省 2）。注：当前 reconnect 回调为空实现
+      // （async () => null，见 forward.js），调大仅减少「续传用尽」日志噪声，不重放请求、无副作用。
+      const streamReconnectMax = (() => {
+        const v = state.cfg.defaults && state.cfg.defaults.streamReconnectMax
+        return Number.isFinite(Number(v)) && Number(v) > 0 ? Math.trunc(Number(v)) : 2
+      })()
       const relayOptsFor = (m, reconnect) => ({
         idleMs: (state.cfg.defaults && state.cfg.defaults.timeout && state.cfg.defaults.timeout.idleMs) || 0,
-        maxReconnects: 2, log, reconnect, signal: budget.signal, budget,
+        maxReconnects: streamReconnectMax, log, reconnect, signal: budget.signal, budget,
         protocol: m.api || 'openai', extract: (m.api && m.api !== 'openai') ? adapterFor(m.api).extractStreamContent : undefined, extractFinish: (m.api && m.api !== 'openai') ? adapterFor(m.api).extractStreamFinish : undefined,
         rewriteModel: m.rewriteModel || null, // 「名字没对上」：响应 model 回写为客户端请求名
         onTokens: (n, usage) => {
@@ -3535,7 +3562,7 @@ function makeHandler(state) {
       const streamRelay = async (result, meta) => {
         const m = meta || {}
         if (responsesMode) {
-          if (!responsesSession) responsesSession = createResponsesStream(res, { model: responsesMeta.model })
+          if (!responsesSession) responsesSession = createResponsesStream(res, responsesMeta)
           const opts = relayOptsFor(m, m.reconnect)
           opts.rewriteModel = null // Responses 的 model 由 writer/响应对象回写
           return responsesSession.relay(result.stream, opts)
@@ -3576,7 +3603,7 @@ function makeHandler(state) {
         }
         if (out.kind === 'stream') {
           // 兼容路径（未注入 streamRelay 的异常分支）：直接桥接上游流
-          if (!responsesSession) responsesSession = createResponsesStream(res, { model: responsesMeta.model })
+          if (!responsesSession) responsesSession = createResponsesStream(res, responsesMeta)
           await responsesSession.relay(out.res.stream, Object.assign(relayOptsFor(out, out.reconnect), { rewriteModel: null }))
           return
         }
@@ -3585,11 +3612,12 @@ function makeHandler(state) {
           if (out.status >= 200 && out.status < 300) {
             if (responsesMeta.stream) {
               // 客户端要流式但上游给的是 JSON（forceNoStream/降级）：以单帧事件交付
-              if (!responsesSession) responsesSession = createResponsesStream(res, { model: responsesMeta.model })
+              if (!responsesSession) responsesSession = createResponsesStream(res, responsesMeta)
               responsesSession.oneShot(chat, { customToolNames: responsesMeta.customToolNames })
               return
             }
-            const resp = chatToResponse(chat, { model: responsesMeta.model, customToolNames: responsesMeta.customToolNames })
+            const resp = chatToResponse(chat, responsesMeta)
+            responsesMeta.onComplete?.(resp)
             res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(resp)); return
           }
           res.writeHead(out.status || 502, Object.assign({ 'content-type': out.contentType || 'application/json; charset=utf-8' }, sanitizeDownstreamHeaders(out.headers))); res.end(out.body); return
@@ -3601,7 +3629,7 @@ function makeHandler(state) {
         writeUpstreamHeaders(res, out.res)
         await relayStream(res, out.res.stream, {
           idleMs: (state.cfg.defaults && state.cfg.defaults.timeout && state.cfg.defaults.timeout.idleMs) || 0,
-          maxReconnects: 2, log, reconnect: out.reconnect, signal: budget.signal, budget,
+          maxReconnects: streamReconnectMax, log, reconnect: out.reconnect, signal: budget.signal, budget,
           protocol: out.api || 'openai', extract: (out.api && out.api !== 'openai') ? adapterFor(out.api).extractStreamContent : undefined, extractFinish: (out.api && out.api !== 'openai') ? adapterFor(out.api).extractStreamFinish : undefined,
           rewriteModel: (body && body.model) || null, // 「名字没对上」：响应 model 回写为客户端请求名
           onTokens: (n, usage) => {

@@ -50,6 +50,7 @@ async function fixture (text = USER_CONFIG) {
   await writeFile(catalogPath, CATALOG)
   if (text !== undefined) await writeFile(configPath, text)
   const base = {
+    codexHome: dir,
     configPath,
     baseUrl: 'http://127.0.0.1:18787',
     model: MODEL,

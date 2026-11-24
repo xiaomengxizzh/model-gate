@@ -2,6 +2,37 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— deepseek 子代理 unsent 断连不再作废整轮
+
+### Added / Changed
+
+- **写后无头断流的可信续传开关 `defaults.codexStreamInterruptResume`（默认关，行为不变）**：Codex 聚合请求若在上游写后、响应头/内容/工具事件到达客户端之前断连（`phase=unsent`、`error=stream_interrupted`，即 2026-11-23 deepseek 子代理日志签名），显式开启该开关后，对账闸门按「可证明未交付」放行（日志 `unsent_stream_interrupt`），并补上 `retry_same`/`failover` 重试接线；有内容或工具已交付时仍 STOP，绝不重放（MG-R006/R008）。该开关置于 `defaults`（`gateway.local.json` 只合并 `defaults`，`server` 块会被丢弃）。
+- **`defaults.streamReconnectMax`（缺省 2）**：SSE 续传次数改为可配置；当前 `reconnect` 为空实现，调大只减日志噪声、不重放请求，无实质恢复作用。
+- 本地配置放大有界重试预算：`retry.maxAttempts=6`、`codexFallbackLimits=6/12/24`、`loopMs=1800000`（非真无限，遵守 MG-002）。
+
+### Fixed（第二轮：2026-11-23 生产实测，修复"重试 5 次即无法续传"）
+
+- 首轮修复虽放开了对账闸门，但 `forward.js` 的 `noReplay` 分支仍对每次可信续传重试调用 `markFail`，第 `FAIL_OPEN_THRESHOLD=5` 次即熔断唯一上游 → 候选全被标 unhealthy → `MG_FB_NO_CANDIDATE`，对话仍作废。**现对可证明未交付的断流跳过 `markFail`**（传输层断连不是上游不健康的证据；开关关闭时该分支恒 false，旧行为不变）。本地配置 `codexFallbackLimits` 提到 `60/12/100`，与 `loopMs=30min` 匹配。
+- 回归新增：单一上游连续 6 次 unsent 断流后第 7 次成功，断言不熔断、不出现 `MG_FB_NO_CANDIDATE`。
+
+### Tests
+
+- `codex-fallback-forward.test.mjs` 新增 4 例：开关关仍 STOP；开关开且 unsent 换上游成功；开关开但已出现工具调用仍 STOP（防重复执行工具）；连续 6 次断流不熔断并恢复。全套离线测试通过。
+
+### 回滚
+
+- `defaults.codexStreamInterruptResume=false` 或删该键 + `systemctl --user restart model-gateway.service`；代码改动用 git 精准 revert。
+
+## [Unreleased] —— Go Chat 子代理续轮
+
+### Fixed
+
+- Codex CLI 可使用 `deepseekv4.1flash` 调用已配置的 OpenCode Go 模型。Codex 模型列表和启动器目录为简写提供相同的模型元数据。
+- Codex 聚合选路与模型目录为旧配置中的 OpenCode Go `deepseek-v4.1-flash` 复用既有工具能力证据。选路日志记录候选被排除的原因码。
+- 托管 Go 子代理使用独立的 Codex provider，声明远程压缩不可用，由 Codex 本地压缩。Chat 桥对旧客户端发来的 `compaction_trigger` 返回 `native_compaction_route_not_ready`。
+- Go Chat 桥在返回 SSE、降级 SSE 或 JSON 终态前登记响应 ID 和实际工具调用。增量续轮可恢复原调用并按 `call_id` 配对。新格式响应 ID 失效时返回 `previous_response_not_found`，客户端可重发完整历史。
+- WS 预热的输入会保留到同一连接和模型的真实增量续轮，且仍经 HTTP 入口校验。
+
 ## [Unreleased] —— 2026-11-19 官方模型目录根治：基线跟上 0.170（含 gpt-6.2）+ 一键刷新机制
 
 ### Added

@@ -63,7 +63,7 @@ async function fixture (configText, childText) {
 }
 
 function canonicalChild () {
-  return buildManagedAgentConfig({ model: MODEL }).child.text
+  return buildManagedAgentConfig({ model: MODEL, gatewayBaseUrl: 'http://127.0.0.1:18787' }).child.text
 }
 
 async function activateFully (f, extra) {
@@ -106,6 +106,20 @@ test('既有配置用户：只改托管字段，用户行逐字节保留，子�
   assert.equal(unmanagedFingerprint(USER_CONFIG), unmanagedFingerprint(after), '非托管行必须逐字节保留')
   assert.match(after, /^\[agents\.go_deepseek\]$/m)
   assert.equal(await readFile(f.childPath, 'utf8'), canonicalChild())
+})
+
+test('旧版托管 Go 子配置可升级为本地压缩，并在退出时恢复', async (t) => {
+  const legacy = buildManagedAgentConfig({ model: MODEL }).child.text
+  const f = await fixture(USER_CONFIG, legacy)
+  t.after(f.cleanup)
+  const p = preview(f.opts)
+  assert.equal(p.agentChild.action, 'upgrade')
+  assert.equal(p.consentRequired, true)
+  const applied = await activateFully(f)
+  assert.match(await readFile(f.childPath, 'utf8'), /^remote_compaction = "unsupported"$/m)
+  assert.equal(preview(f.opts).agentChild.action, 'same')
+  await deactivate({ configPath: f.configPath, managedAgentPath: f.childPath, expectedSha: applied.sha })
+  assert.equal(await readFile(f.childPath, 'utf8'), legacy)
 })
 
 test('退出聚合：新建子文件被删除且配置逐字节恢复（空白与既有用户）', async (t) => {

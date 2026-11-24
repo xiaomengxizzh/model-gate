@@ -21,7 +21,7 @@ const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000
 const DEFAULT_MAX_ENTRY_BYTES = 16 * 1024 * 1024
 const DEFAULT_MAX_TOTAL_BYTES = 128 * 1024 * 1024
 
-const entries = new Map() // responseId -> { prevId, input, output, model, thread, status, bytes, touchedAt }
+const entries = new Map() // responseId -> { prevId, input, output, model, thread, status, owner, bytes, touchedAt }
 let totalBytes = 0
 let limits = {
   maxEntries: DEFAULT_MAX_ENTRIES,
@@ -144,7 +144,7 @@ function evictIfNeeded () {
 
 // 记录一轮真实发生的响应。responseId 缺失（上游失败/无 id）时不记录。
 // input：入口级完整历史（数组）；output：上游真实 output items。
-export function recordContinuation ({ responseId, prevId = null, input, output, model = '', thread = '', status = 'completed', aliases = null }) {
+export function recordContinuation ({ responseId, prevId = null, input, output, model = '', thread = '', status = 'completed', aliases = null, owner }) {
   if (typeof responseId !== 'string' || responseId === '') return { recorded: false, reason: 'no_response_id' }
   const inputItems = cloneItems(input)
   const outputItems = cloneItems(output)
@@ -166,6 +166,7 @@ export function recordContinuation ({ responseId, prevId = null, input, output, 
     model: String(model || ''),
     thread: String(thread || ''),
     status: String(status || ''),
+    owner,
     bytes,
     touchedAt: Date.now(),
   })
@@ -197,10 +198,22 @@ function dedupeAppend (history, items) {
   return out
 }
 
+export function normalizeContinuationInput (input) {
+  if (Array.isArray(input)) return input
+  if (typeof input === 'string' && input !== '') {
+    return [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: input }] }]
+  }
+  return []
+}
+
+export function mergeContinuationInput (history, delta) {
+  return dedupeAppend(history, normalizeContinuationInput(delta))
+}
+
 // 续轮重建：parent.input + parent.output + delta。缺失/过期 → fail-closed。
 // G2 第三层（方案 B）：先把客户端引用的 id 解析到登记键（消除 resp_mgws_ 合成 id 与
 // 真实 50hex/24hex 的冲突），解析只改查键；输入/输出/去重/fail-closed 语义完全不变。
-export function reconstructContinuation (prevId, deltaInput) {
+export function reconstructContinuation (prevId, deltaInput, owner = null) {
   if (typeof prevId !== 'string' || prevId === '') return { ok: false, reason: 'no_previous_response_id' }
   evictIfNeeded()
   // 直接命中优先：正常链式续轮（real→real）不受别名影响，避免别名链把 R2 误解析到 R1。
@@ -210,15 +223,14 @@ export function reconstructContinuation (prevId, deltaInput) {
     const resolved = resolveContinuationId(prevId)
     if (resolved !== prevId) parent = entries.get(resolved)
   }
-  if (!parent) return { ok: false, reason: 'continuation_state_missing' }
+  // New scoped entries use the authenticated identity. Older entries and empty warmup markers remain compatible.
+  if (!parent || (parent.owner !== undefined && parent.owner !== owner)) {
+    return { ok: false, reason: 'continuation_state_missing' }
+  }
   parent.touchedAt = Date.now()
-  const delta = Array.isArray(deltaInput)
-    ? cloneItems(deltaInput)
-    : (typeof deltaInput === 'string' && deltaInput !== ''
-      ? [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: deltaInput }] }]
-      : [])
+  const delta = normalizeContinuationInput(deltaInput)
   const base = parent.input.concat(parent.output)
-  const input = dedupeAppend(base, delta)
+  const input = mergeContinuationInput(base, cloneItems(delta))
   return { ok: true, input, restoredItems: base.length, deltaItems: delta.length }
 }
 

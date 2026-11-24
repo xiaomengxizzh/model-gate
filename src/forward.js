@@ -22,7 +22,7 @@ import {
   TARGET_DOMAINS, REDIRECT_POLICY,
 } from './codex/target-authz.js'
 import { generationAuthzBinding } from './codex/catalog-generation.js'
-import { newHeaders as opencodeGoHeaders, isGoBinding } from './providers/opencode-go.js'
+import { newHeaders as opencodeGoHeaders, isGoBinding, goCodexToolDefaults } from './providers/opencode-go.js'
 
 const HOP_BY_HOP = new Set(['host','connection','transfer-encoding','content-length','upgrade','keep-alive','te','trailer'])
 const STRIP_IN = new Set(['authorization','cookie','x-api-key','api-key','proxy-authorization','proxy-connection','x-mg-admin','x-goog-api-key','host'])
@@ -435,16 +435,16 @@ function codexRequestInfoOf(body) {
 
 // 候选能力只来自配置/目录声明，绝不复制请求 tools（审计 P1 / T-ROUTE-01）。
 // 未声明 capabilities ⇒ 工具能力为空（请求带工具时该候选不可入选），而不是"请求需要什么就支持什么"。
-function codexCapabilitiesOf(md) {
+function codexCapabilitiesOf(md, goDefaults) {
   const codex = md && md.codex && typeof md.codex === 'object' ? md.codex : {}
-  const declared = codex.capabilities && typeof codex.capabilities === 'object' ? codex.capabilities : null
+  const declared = codex.capabilities === undefined ? goDefaults?.capabilities : codex.capabilities
   const contextWindow = Number((md && md.maxContext) || codex.contextWindow || 0) || 0
   const modalities = Array.isArray(codex.modalities) ? codex.modalities.map(String) : []
   return {
     capability: (md && md.capability) || 'chat',
     contextWindow,
     modalities,
-    tools: { types: declared ? ['function', 'custom'] : [], hosted: [] },
+    tools: { types: declared && typeof declared === 'object' ? ['function', 'custom'] : [], hosted: [] },
     readability: { plaintext: true, v2Encrypted: false },
   }
 }
@@ -454,6 +454,9 @@ function codexCandidateFor(cfg, model, pid, now, primary) {
   const identity = classifyTarget(built, cfg)
   const official = identity.kind === 'official'
   const md = codexModelDefinition(cfg, model, pid)
+  const goDefaults = md?.provider === pid
+    ? goCodexToolDefaults(pid, built._def, modelTarget(cfg, model, pid).servingName)
+    : null
   const keyMissing = !!(built._def && built._def.apiKeyEnv && !built.keyOk)
   const bag = {
     authorization: facts.evidence(!official && !keyMissing, { source: facts.FACT_SOURCE.CONFIG, observedAt: now }),
@@ -462,8 +465,8 @@ function codexCandidateFor(cfg, model, pid, now, primary) {
       name: model || '',
       scope: primary ? 'primary' : 'fallback',
     }, { source: facts.FACT_SOURCE.CONFIG, observedAt: now }),
-    capabilities: facts.evidence(codexCapabilitiesOf(md), {
-      source: md && md.codex ? facts.FACT_SOURCE.CATALOG : facts.FACT_SOURCE.CONFIG,
+    capabilities: facts.evidence(codexCapabilitiesOf(md, goDefaults), {
+      source: md?.codex || goDefaults ? facts.FACT_SOURCE.CATALOG : facts.FACT_SOURCE.CONFIG,
       observedAt: now,
     }),
   }
@@ -1236,7 +1239,8 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
       },
     })
     // 审计日志：只记决策字段，不含令牌/正文
-    log && log.info('codex fallback decision', 'action=' + d.action, 'code=' + d.code, 'phase=' + d.audit.phase, 'error=' + d.audit.errorClass, 'model=' + ((o.current && o.current.model) || '-'), 'provider=' + ((o.current && o.current.provider) || '-'), 'target=' + ((d.target && (d.target.model + '/' + d.target.provider)) || '-'), 'budgetNextUsd=' + (d.budget.nextUsd == null ? '?' : d.budget.nextUsd))
+    const excludedReasons = [...new Set(d.excluded.flatMap((candidate) => candidate.reasons))].sort()
+    log && log.info('codex fallback decision', 'action=' + d.action, 'code=' + d.code, 'phase=' + d.audit.phase, 'error=' + d.audit.errorClass, 'model=' + ((o.current && o.current.model) || '-'), 'provider=' + ((o.current && o.current.provider) || '-'), 'target=' + ((d.target && (d.target.model + '/' + d.target.provider)) || '-'), 'budgetNextUsd=' + (d.budget.nextUsd == null ? '?' : d.budget.nextUsd), 'excludedReasons=' + (excludedReasons.join(',') || '-'))
     return d
   }
   const codexStopResult = (d, o = {}) => {
@@ -1749,7 +1753,17 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
         bm.latencySum = (bm.latencySum || 0) + latency; bm.latencyCount = (bm.latencyCount || 0) + 1
         agg(state, pid, 'errors', 1); state.st.counters.errors += 1; bm.errors += 1
         upstreamHits += 1
-        if (err.execOutcome !== 'TOOL_RISK') markFail(state, pid, prov && prov.circuit)
+        // 「可证明未交付」的写后断流（SENT_UNKNOWN + phase 仍 UNSENT + 无工具事件 + 开关开）必须在
+        // markFail 之前算出：这类中断只是传输层断连，不是上游不健康的证据。若照常 markFail，每次
+        // 可信续传重试都会累计失败，第 FAIL_OPEN_THRESHOLD(5) 次即熔断该上游 → 候选全被标 unhealthy
+        // → MG_FB_NO_CANDIDATE，重试预算再大也在第 5 次被掐断（2026-11-23 生产实测根因）。
+        // 默认开关关闭 ⇒ resumeSafeInterrupt 恒 false ⇒ markFail 与旧行为逐字节一致。
+        const resumeSafeInterrupt = !!(codex
+          && err.execOutcome === 'SENT_UNKNOWN'
+          && codex.phase === PHASE.UNSENT
+          && !codex.toolCallSeen
+          && cfg.defaults && cfg.defaults.codexStreamInterruptResume === true)
+        if (err.execOutcome !== 'TOOL_RISK' && !resumeSafeInterrupt) markFail(state, pid, prov && prov.circuit)
         lastErr = err
         last429 = null
         rejectedOnly = false
@@ -1757,11 +1771,29 @@ export async function forwardChain(deps, state, req, url, path, method, bodyBuf,
           const _d = codexDecide({
             error: { status: err.status || null, code: err.code, streamInterrupted: err.execOutcome === 'SENT_UNKNOWN' },
             current: codexCand,
-            lastAttempt: { possiblyCommitted: err.possiblyCommitted === true, trustedResume: null },
+            lastAttempt: {
+              possiblyCommitted: err.possiblyCommitted === true,
+              trustedResume: resumeSafeInterrupt ? { trusted: true, reason: 'unsent_stream_interrupt' } : null,
+            },
           })
           if (_d && _d.action === ACTION.STOP) {
             if (err.relay && err.relay.finish) err.relay.finish(_d.reason)
             return codexStopResult(_d, { pid, modelName, serving, streamStarted: !!err.relay })
+          }
+          // 决策已放行（非 STOP）时补上真正的重试接线：复刻下方通用 catch 已验证的
+          // FAILOVER/RETRY_SAME 模式（1829-1835），否则决策结果会被丢弃、仍落到底部收尾。
+          if (resumeSafeInterrupt && _d && (_d.action === ACTION.RETRY_SAME || _d.action === ACTION.FAILOVER)) {
+            log && log.warn('codex unsent 断流：按可信续传重试/换上游（开关已开，无副作用交付）',
+              'decision=' + _d.action, 'code=' + _d.code, 'model=' + (serving || '-'), 'provider=' + pid)
+            codexMarkTried(serving || route.model, pid)
+            if (_d.action === ACTION.FAILOVER) {
+              codex.attempts.failovers += 1
+              forcedTarget = _d.target ? { model: _d.target.model, provider: _d.target.provider } : null
+              continue
+            }
+            codex.attempts.sameProvider += 1
+            forcedTarget = { model: serving, provider: pid }
+            if (await codexWaitRetry(_d)) { pi -= 1; continue }
           }
         }
         if (streamStarted || err.relay) {

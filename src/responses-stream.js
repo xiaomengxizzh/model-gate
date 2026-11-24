@@ -67,7 +67,7 @@ function makeSink(res, writer, handlers) {
 }
 
 /**
- * createResponsesStream(res, { model, id, createdAt })
+ * createResponsesStream(res, { model, id, createdAt, onComplete })
  * 返回会话：relay(upstream, relayOpts) → relayStream 结果 + finish；fail(note)；oneShot(chatJson)。
  * 首个 relay/oneShot/fail 时才写响应头与 response.created。
  */
@@ -181,6 +181,12 @@ export function createResponsesStream(res, opts = {}) {
       model, output, output_text: text, usage: mapUsage(usage),
     }
   }
+  function completedFrames() {
+    const response = buildResponse('completed')
+    opts.onComplete?.(response)
+    return writer.completed(response)
+  }
+
   function finalizeCompleted() {
     if (finalized) return
     finalized = true
@@ -189,7 +195,7 @@ export function createResponsesStream(res, opts = {}) {
     let frames = ''
     frames += finishMessage()
     for (const st of toolCalls.values()) frames += finishTool(st)
-    frames += writer.completed(buildResponse('completed'))
+    frames += completedFrames()
     if (!res.destroyed && !res.writableEnded) { try { res.write(frames) } catch {} }
     // relayStream 会在 done 后调用 sink.end()，这里不主动 end，保持单一出口
   }
@@ -261,7 +267,7 @@ export function createResponsesStream(res, opts = {}) {
         frames += writer.endToolCall(args, { itemId, callId })
         st.ended = true
       }
-      frames += writer.completed(buildResponse('completed'))
+      frames += completedFrames()
       if (!res.destroyed && !res.writableEnded) { try { res.write(frames) } catch {} ; try { res.end() } catch {} }
       finalized = true
     },

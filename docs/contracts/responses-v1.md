@@ -28,7 +28,7 @@
    - `models.<名>.api = "responses"` 或 `providers.<id>.api = "responses"` → **原生转发**：路径 `/v1/responses`，鉴权头按上游协议注入，请求/响应尽量透传（只剥离管理凭据与逐跳头）。
    - 空/其它值 → **Chat 桥**：把 Responses 请求转换为 Chat Completions 请求发给上游，再把上游 JSON/SSE 重建为 Responses JSON/事件。
 3. 默认必须是 Chat 桥；不得因为上游"看起来支持"就自动切原生（避免半兼容上游静默丢工具/推理字段）。
-4. Chat 桥只支持文本与 function/custom tool；`background:true`、`previous_response_id` 续轮、`store:true`、`truncation` 在两条路径都必须**显式拒绝**（`400 unsupported_parameter`），不允许静默忽略。托管工具与命名空间分组见 4.2。
+4. Chat 桥只支持文本与 function/custom tool；`background:true`、`previous_response_id` 续轮、`store:true`、`truncation` 默认由桥接转换器**显式拒绝**（`400 unsupported_parameter`，Go Chat 续轮例外见 §3.7），不允许静默忽略。托管工具与命名空间分组见 4.2。
 4.1 `include` 例外：真实客户端（Codex CLI、DSH headless）固定发 `include:["reasoning.encrypted_content"]`。网关本就不产生加密推理，该项在语义上等于"没有可返回的东西"，整条拒绝会让 Responses 入口对真实客户端完全不可用（2026-11-09 实测 DSH 0.2.2-rc.1 因此 400）。因此**只接受丢弃后不影响正确性的项**（`reasoning.encrypted_content`、`output_text.logprobs`）并记 `lossy: include_dropped:<项>`；图片/托管产物/未知项仍旧显式拒绝，避免静默丢掉客户端要求的产物。
 4.2 托管工具与 `namespace` 分组：Chat 协议只能表达 function/custom tool。命名空间分组（Codex 的 `type:"namespace"`，如 `multi_agent_v1` / `collaboration`）在桥方向**展开为可逆 function 名**（`mg_ns__<namespace>__<tool>`），回程 JSON/SSE 再还原为 `{name, namespace}`；无法展开的形状记 `unsupported_tool`。托管工具（`web_search` / `file_search` / `code_interpreter` / `mcp` / `computer_*` / `image_generation` / `local_shell`）仍**丢弃并记 `tool_dropped:<type>`**，同时提供 `onUnsupportedTool:"reject"` 让调用方改为整条 400（零上游调用）；`v2` 的加密任务（`agent_message` 含 `encrypted_content`、`encrypted_task_id`、`encrypted_*` 参数/输出）一律 `400 code=v2_encrypted_task_unsupported`，不解析/不删除/不伪造/不降级 v1；原生 `api:"responses"` 透传路径（`mode:'native'`）原样交给上游。`tool_choice` 点名被丢弃的工具时降级为 `auto` 并记 `tool_choice_dropped:<name>`（否则上游会因"无名工具"400）。理由：Codex 0.167 已取消 `wire_api="chat"`（openai/codex discussions#7782 要求统一 `responses`），而它每轮固定发送 `namespace` 与 `web_search`；按 4. 整条拒绝等于"不支持 Codex"，与 MG-015 目标冲突。原生 `api:"responses"` 透传不经过桥映射，工具原样交给上游。
 
@@ -43,6 +43,12 @@ plan §3.2 的规则是「不能表达 ⇒ typedUnsupported，**除非调用方�
 ### 3.6 SSE 帧解码（M1-2）
 
 `src/sse.js` 用流式 `TextDecoder` 解码（UTF-8 多字节字符跨 chunk 不丢），帧边界按 SSE 规范识别 `\r\n`/`\n`/`\r` 及其混用，并对单帧（默认 1 MiB）与待解析缓冲（默认 2 MiB）设上限；超限抛 `SSE_FRAME_TOO_LARGE`，中继以一次中断终态收尾且**不续传**（重放整个请求可能重复副作用）。Chat SSE → Responses 事件桥的 item id 在 add/delta/done/completed 间保持稳定，工具增量按 call_id 隔离。
+
+### 3.7 OpenCode Go Chat 续轮
+
+Go Chat 桥在返回成功终态前，以 `resp_mgchat_*` 响应 ID 登记完整输入和实际输出项。WS 和 HTTP 可用同一 ID 提交增量项，入口先重建历史，再执行 `call_id` 配对检查和 Chat 转换。续轮状态受进程内缓存限额和有效期约束，并绑定已验证的客户端身份。引用失效的 `resp_mgchat_*` 时返回 `400 previous_response_not_found`，客户端可省略该 ID 并重发完整历史。旧格式续轮 ID 保留原有完整请求兼容路径。
+
+WS 本地预热的输入仅在同一连接、同一模型引用预热响应 ID 时用于重建，并经内部 HTTP POST 鉴权和请求校验。
 
 ## 4. 请求映射（Chat 桥）
 
@@ -61,7 +67,7 @@ plan §3.2 的规则是「不能表达 ⇒ typedUnsupported，**除非调用方�
 | `reasoning.effort` | `reasoning_effort` | 复用 `canonEffort` 与 per-route `effortFormat` 整形 |
 | `stream` | `stream` | 桥路径始终向上游请求流式（除非模型 `forceNoStream`），再按客户端 `stream` 决定是否聚合 |
 | `metadata`, `user` | 丢弃 | 有损；网关不向上游透传调用方任意元数据 |
-| `previous_response_id`, `store`, `background`, `truncation` | **拒绝** | 见 §3.4 |
+| `previous_response_id`, `store`, `background`, `truncation` | **拒绝** | 见 §3.4，Go Chat 入口续轮见 §3.7 |
 | `include`（仅 `reasoning.encrypted_content` / `output_text.logprobs`） | 接受并**记有损** | 见 §3.4 |
 | `include`（其它项） | **拒绝** | 见 §3.4 |
 | 托管工具 | 丢弃 + 记 `tool_dropped:<type>`（可 `onUnsupportedTool:"reject"` 改整条 400） | 见 §3.2 4.2 |

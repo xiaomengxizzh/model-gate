@@ -49,3 +49,6 @@ scripts/test/__mg-selftest-danger-*.mjs
 master.key
 *.pyc
 __pycache__/
+# 本地 UI 临时产物（含用量/对话ID/路径与截图，绝不入库）
+/.tmp-ui/status.json
+/.tmp-ui/current-ui.png

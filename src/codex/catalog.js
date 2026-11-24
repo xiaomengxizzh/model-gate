@@ -7,6 +7,7 @@
 // - 校验闸门 fail-closed：任何错误在落盘前抛出，不产出半成品。
 // - 聚合 ID 稳定且不可重绑定；历史版本与回滚指针由 state 记录。
 import { createHash } from 'node:crypto'
+import { GO_CLI_ALIAS, V2_TARGET_PUBLIC_ID, goCodexToolDefaults } from '../providers/opencode-go.js'
 import { CODEX_NATIVE_COMPACTION_CAPABILITIES } from './interop.js'
 
 export const CATALOG_SCHEMA = 'modelgate.codex-catalog/1'
@@ -686,7 +687,18 @@ function collectCapabilities(name, override, warnings = [], options = {}) {
 
 function buildThirdPartyEntry(name, entry, template, options, warnings) {
   validateOverrideShape(name, entry.codex)
-  const override = entry.codex || {}
+  const declared = entry.codex || {}
+  const providerId = entry.provider
+  const providerConfig = options.providerNames?.[providerId]
+  // Aggregate bindings send the source model name for their own provider.
+  const goDefaults = goCodexToolDefaults(providerId, providerConfig, name)
+  const override = goDefaults && declared.capabilities === undefined && declared.evidence === undefined
+    ? {
+      ...declared,
+      capabilities: { shellType: goDefaults.capabilities.shellType },
+      evidence: { shellType: goDefaults.evidence.shellType },
+    }
+    : declared
   let templateModel = template
   if (override.baseModel) {
     templateModel = options.baseModels.find(m => m.slug === override.baseModel)
@@ -1245,6 +1257,15 @@ export const OUTPUT_FORMATS = Object.freeze(['catalog-json', 'codex-models'])
 
 export function renderCodexModels(catalog) {
   return { models: (catalog && Array.isArray(catalog.models) ? catalog.models : []) }
+}
+
+// Codex matches metadata by exact slug. Keep the compatibility spelling hidden
+// so selectors still show one entry for the Go target.
+export function withGoCliModelMetadata(catalog) {
+  const { models } = renderCodexModels(catalog)
+  const primary = models.find((model) => model.slug === V2_TARGET_PUBLIC_ID)
+  if (!primary || models.some((model) => model.slug === GO_CLI_ALIAS)) return { models }
+  return { models: [...models, { ...primary, slug: GO_CLI_ALIAS, visibility: 'hide' }] }
 }
 
 // catalog-json（model_catalog_json 文件）与 codex-models（GET /v1/models 响应体）

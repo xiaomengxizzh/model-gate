@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process'
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { isAggregateModelId, aggregatePrefixes } from './codex/identity.js'
 import { OFFICIAL_PROVIDER_IDS } from './codex/catalog.js'
+import { GO_CLI_ALIAS, V2_TARGET_PUBLIC_ID, V2_TARGET_UPSTREAM_MODEL, isGoBinding } from './providers/opencode-go.js'
 
 export function configPaths() {
   // MG_CONFIG_DIR：可选。多实例隔离时为实例指定独立配置目录（keys/stats 随之独立）；未设置=cwd/config（单实例零配置）
@@ -550,6 +551,23 @@ export function createRouter(cfg) {
     // 目录 slug 必须先于 alias：否则「官方 slug 被 config.models 同名声明」会被静默解析成第三方模型。
     if (model) { const catHit = resolveCatalogSlug(model, snapshot); if (catHit) return catHit }
     if (model) { const hit = alias.get(model); if (hit) return { canonicalName: hit.name, known: true, def: hit.def } }
+    if (model === GO_CLI_ALIAS) {
+      const cat = catalog(snapshot)
+      const binding = cat.bindings[V2_TARGET_PUBLIC_ID]
+      if (binding && binding.model === V2_TARGET_UPSTREAM_MODEL && cfg.providers?.[binding.provider] &&
+          isGoBinding({ id: binding.provider, _def: cfg.providers[binding.provider] })) {
+        return resolveCatalogSlug(V2_TARGET_PUBLIC_ID, snapshot)
+      }
+      const direct = models[V2_TARGET_UPSTREAM_MODEL]
+      if (direct && direct.disabled !== true && (direct.capability || 'chat') === 'chat' &&
+          cfg.providers?.[direct.provider] && isGoBinding({ id: direct.provider, _def: cfg.providers[direct.provider] })) {
+        const target = modelTarget(cfg, V2_TARGET_UPSTREAM_MODEL, direct.provider)
+        if (target.servingName === V2_TARGET_UPSTREAM_MODEL) {
+          return { canonicalName: V2_TARGET_UPSTREAM_MODEL, known: true, def: direct }
+        }
+      }
+      throw catalogError(model, 'go_cli_alias_unavailable', '模型 ' + model + ' 需要已配置的 OpenCode Go 目标 ' + V2_TARGET_UPSTREAM_MODEL)
+    }
     // 聚合保留前缀（默认 mg-/mg/，可用 defaults.aggregatePrefixes 覆盖）：未命中即硬失败。
     // 已配置的聚合 ID 在上一步就已返回，因此这条只影响「下架/拼错/同名不同源」的 ID。
     if (isAggregateModelId(model, cfg)) throw unknownAggregate(model)

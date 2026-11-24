@@ -16,7 +16,7 @@
 import http from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
 import { isIP } from 'node:net'
-import { recordWarmupContinuation } from './responses-continuation.js'
+import { mergeContinuationInput, normalizeContinuationInput, recordWarmupContinuation } from './responses-continuation.js'
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 export const RESPONSES_WS_PATHS = Object.freeze(new Set(['/v1/responses', '/responses']))
@@ -324,6 +324,14 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
   const targetHost = (!bound || bound === '0.0.0.0') ? '127.0.0.1' : (bound === '::' ? '[::1]' : (isIP(bound) === 6 ? '[' + bound + ']' : bound))
   const targetPort = addr && typeof addr === 'object' ? addr.port : (state.cfg.server && state.cfg.server.port) || 8787
   const body = Object.assign({}, frame)
+  const warmupState = peer.warmup
+  if (warmupState && warmupState.id === body.previous_response_id && warmupState.model === body.model) {
+    if (warmupState.input.length && (body.input == null || typeof body.input === 'string' || Array.isArray(body.input))) {
+      body.input = mergeContinuationInput(warmupState.input, body.input)
+    }
+  } else {
+    peer.warmup = null
+  }
   // WS 帧控制字段不属于 Responses 请求体：type 是帧类型，generate 是预热开关。
   // 漏删会把它们透传给上游（审计 P1）；WS 轮次一律流式，强制 stream:true。
   delete body.type
@@ -385,6 +393,7 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
         if (type === 'response.output_item.done' && obj.item) peer.turnOutput.push(obj.item)
         if (TERMINAL_EVENTS.has(type) && obj.response && Array.isArray(obj.response.output)) peer.turnOutput = obj.response.output
       }
+      if (type === 'response.completed') peer.warmup = null
       if (TERMINAL_EVENTS.has(type)) finish()
       peer.sendText(text).catch(() => finish())
     }
@@ -428,6 +437,7 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
         }
         const id = response.id || ('resp_mgws_' + randomBytes(12).toString('hex'))
         const base = Object.assign({}, response, { id, status: response.status || 'completed' })
+        peer.warmup = null
         peer.sendJson({ type: 'response.created', response: base })
           .then(() => peer.sendJson({ type: 'response.completed', response: base }))
           .finally(finish)
@@ -451,7 +461,10 @@ function runTurn(peer, { server, state, log }, frame, upgradeReq) {
 
 function warmup(peer, frame) {
   const id = 'resp_mgws_' + randomBytes(12).toString('hex')
-  // 预热应答也登记续轮状态：Codex 若以该 id 续轮，重建结果就是 delta 本身（不丢历史）。
+  // Only this socket can reuse the unvalidated warmup input. The POST still
+  // authenticates and validates the combined request before it reaches an upstream.
+  peer.warmup = { id, model: frame.model, input: normalizeContinuationInput(frame.input) }
+  // Keep the empty marker so the POST can resolve the warmup response ID.
   recordWarmupContinuation({ responseId: id, model: frame.model || '' })
   peer.sendJson({ type: 'response.created', response: { id, status: 'in_progress', model: frame.model || '', output: [] } })
   peer.sendJson({
@@ -478,11 +491,11 @@ function onMessageFactory(ctx, upgradeReq) {
       case 'response.create':
         // Codex WS 预热帧的可靠信号是帧内 generate===false（header 的 request_kind=prewarm
         // 在真实轮次上也会出现，不能用于判断，否则真实推理被短路成空响应 → 0 tokens）。
-        if (frame.generate === false) { warmup(ctx.peer, frame); return }
         if (ctx.peer.turnActive) {
           await ctx.peer.sendJson({ type: 'error', error: { message: 'a turn is already in flight on this socket', type: 'busy' } })
           return
         }
+        if (frame.generate === false) { warmup(ctx.peer, frame); return }
         runTurn(ctx.peer, ctx, frame, upgradeReq)
         return
       case 'response.interrupt': {

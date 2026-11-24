@@ -60,6 +60,7 @@ export const GO_NATIVE_CODEX_DEFAULTS = Object.freeze({
     applyPatchToolType: Object.freeze({ source: 'ModelGate Codex catalog fixture', observedAt: '2026-11-14' }),
   }),
 })
+export const GO_CLI_ALIAS = 'deepseekv4.1flash'
 export const DEFAULT_ALIAS = 'mg-opencodego-deepseek-v4-1-flash'
 export const DEFAULT_VENDOR_MODEL = 'deepseek-v4.1-flash'
 export const SESSION_HEADER = 'x-opencode-session'
@@ -108,6 +109,14 @@ export function isGoBinding(provider) {
   if (p.id === PROVIDER_ID) return true
   const entry = entryOf(p._def || p)
   return entry.ok === true && entry.entry.legacy !== true
+}
+
+// Older Go registrations omit Codex metadata. Reuse the existing tool evidence
+// for the exact model on the registered Go entry.
+export function goCodexToolDefaults(providerId, provider, servingModel) {
+  if (providerId !== PROVIDER_ID || !provider || servingModel !== DEFAULT_VENDOR_MODEL) return null
+  const entry = entryOf(provider)
+  return entry.ok && !entry.entry.legacy ? GO_NATIVE_CODEX_DEFAULTS : null
 }
 
 // 版本/授权校验。opts: { cfg, grant, model, allowLegacy, allowLoopback, now }

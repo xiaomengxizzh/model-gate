@@ -74,6 +74,7 @@ export const UNSUPPORTED_ALLOWED_TOOLS = 'unsupported_allowed_tools'
 export const UNSUPPORTED_TOOL_CHOICE = 'unsupported_tool_choice'
 export const TOOL_PAIRING_INVALID = 'tool_pairing_invalid'
 export const OPAQUE_CONTINUATION_UNSUPPORTED = 'opaque_continuation_unsupported'
+export const REMOTE_COMPACTION_UNSUPPORTED = 'native_compaction_route_not_ready'
 // 原生路由：协作任务正文是密文（不可读）→ 不得当空任务转发给第三方上游。
 export const OPAQUE_COLLABORATION_TASK = 'opaque_collaboration_task'
 // Chat 桥：请求含 Code Mode 单元状态（cell_id）→ 桥无法保真，显式失败而不是静默降级。
@@ -310,6 +311,11 @@ export function bridge(input, opts = {}) {
     const gate = nativeGate(req, opts)
     if (gate) return { body: null, lossy, rejected: gate.rejected, unsupported: [], aliases: [], pairing: null, mode }
     return { body: null, lossy, rejected: null, unsupported: [], aliases: [], pairing: null, mode }
+  }
+
+  if (Array.isArray(req.input) && req.input.some((item) => item?.type === 'compaction_trigger')) {
+    return fail(REMOTE_COMPACTION_UNSUPPORTED,
+      'Chat 桥无法执行 Codex 远程压缩（compaction_trigger）。请使用声明 capabilities.remote_compaction = "unsupported" 的 ModelGate 子代理配置，再由 Codex 执行本地压缩。')
   }
 
   // —— Chat 桥契约 §3.4 / §4：必须显式拒绝的能力，不得静默忽略 ——
