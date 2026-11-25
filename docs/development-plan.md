@@ -6,6 +6,66 @@
 
 基线日期：2026-11-08。**新增大型安装/下载：无；历史提议仅供研究，不自动执行。** 资源执行遵守 [RESOURCE_APPROVAL.md](../RESOURCE_APPROVAL.md)。范围：在现有 Node 内置模块架构上提升 Chat 网关的安全性、资源边界、协议一致性和可维护性，再扩展其他模型能力。下表是后续任务状态唯一来源；历史 phase 计划仅作需求来源。计划不是未来所有需求的承诺，新增需求先补契约与验收。
 
+- 安全审计（2026-11-25）：修复租户嵌套 `apiKeyEnv` 宿主秘密外泄、连接/策略预览明文秘密、并发确认写 CAS 丢更新、租户日志无界、操作临时文件崩溃残留、native 预演目标错配；新增 4 套件，183 suites / 1624 passed / 3 skipped。
+
+## 2026-11-26 按 V13.1 样例逐页重构前端
+
+- 以所有者提供的 `modelgate-desktop-v13.1.html` 为视觉真源，逐页重构 `/ui-vnext` 的 shell、导航、面包屑、应用/服务卡片、池四 tab、用量趋势、稳定性策略、设置子导航、服务/连接详情、模型目录、只读路由预演、客户端与日志。
+- 保留真实 store/API、预览确认、稳定 ID、凭据隔离、取消迟到请求与零上游预演；未复制样例 demo state、模拟检测、假故障、假客户端 CRUD 或原生 confirm。
+- 新增独立 `#/mode` 二级路由；`#/pool-test` 真正进入模拟测试 tab；高级路由明确标规则 CRUD 未实现，只提供真实同核预演；模型发现改为选择具体服务/连接。
+- 修复快速路由切换时旧页面短暂保留的渲染竞态；重渲染排队执行最新路由。
+- `npm run check` PASS；`npm test` 183 suites / 1625 passed / 3 skipped；真实 Chrome 轻量冒烟 35/35，覆盖 18 路由、服务弹窗、route-preview、设置备份、360px 五页，0 JS/network error、0 上游推理。
+- 当前产品指纹 `a0df9a9f91fed8620963ce5689d39a5d74e846ecec42b4af6e3d294eaa343123`（176 文件）；证据 `docs/evidence/v13.1-r2/browser/sample-smoke/report.json`。生产与 V13.1 HTML 基线并排截图 `docs/evidence/v13.1-r2/browser/baseline-compare/compare-1440x900.png`；默认深色、应用接入双卡与搜索/筛选已按基线对齐。未重启生产、未 commit/push/merge/发布；静态前端由 8787 逐请求提供，人工视觉/IME/Orca 听音仍待所有者签收。
+
+## 2026-11-25 Codex 端点修复与本地生产切换
+
+- 根因：Codex `openai_base_url` 与 custom provider 均指向未监听的 `127.0.0.1:15721`，请求不达 8787；网关自身健康。已备份 `~/.codex/config.toml` 并改为 `http://127.0.0.1:8787/v1`，目标 `gpt-6.2-sol` 在 Codex 目录中存在。
+- 修复 `advancePhase()` 同阶段重复事件幂等，消除 `tool_side_effect->tool_side_effect` 日志洪水；非法回退与工具/流交付后的重放阻断不变。新增单元与真实流回归，修复前复现失败、修复后通过。
+- 根 `/` 302 到 `/ui-vnext/`，`/ui-next/` 保留回滚；capabilities、README、契约、ADR、托盘与三组根路由测试同步。新前端内部旧跳转已清除，Linux/Windows 托盘源码均显式打开 `/ui-vnext/`。
+- 验证：Node v24.22.2 / npm 11.19.1；`npm run check` PASS；定向 57 passed / 1 skipped；`npm test` 183 suites / 1625 passed / 3 skipped；docs 150 files / 743 links、metadata 39、contract 12/7/5、`git diff --check` 均 PASS；指纹 `f1358b3580a292681e605cb2053b22c15ca29c391590004764cf61d136d84cac`。
+- 生产：2026-11-25 23:18:10 CST 再次重启 8787 加载最终入口提示，MainPID `275796`，Node v24.22.2；`/healthz=ok`、`/admin` 410 指向 `/ui-vnext/`、`configVersion=396`。Linux 托盘已于所有者明确授权后重启，PID `290596`，加载 `/ui-vnext/` 面板地址。
+- 2026-11-26 定位到通用“服务面板”托盘第二入口 `~/.local/bin/service-panel.py` 仍映射 `/ui-next/`，已改为 `/ui-vnext/` 并备份；所有者授权重启后 PID `664439`。旧 ModelGate NEXT 标签页需关闭后再从托盘打开。
+- 边界：V07 原 35 条、xmxz OwnerConfig、真实付费/GUI/native compact 保持原阻断；未 push/merge/commit/对外发布。回滚包 `.agents/deploy-backup-20261125-225052-local-switch`，systemd 与 Codex 原配置均已备份。
+
+## 2026-11-25 U02 三模式草稿闭环
+
+- `drafts.js` 仅持久化接入方式、allowlist 模型/池与固定 Luna 父模型；Key/token/consent/配置正文拒绝入存储。三模式草稿相互隔离，可在六项一级窗口、历史前进/后退和刷新后恢复。
+- 配置代际变化默认隔离旧草稿，必须明确恢复或通过自定义弹窗放弃；localStorage 读写/删除失败可见，当前页内存编辑可用；恶意/未知字段草稿隔离删除且不回显。
+- `node scripts/e2e/ui-v13-u02-browser.mjs`：193/193 PASS，含 3 模式 × 6 窗口 × 2 尺寸 × 2 主题 = 72 状态；V04 72/72、质量 171/171、真实 Orca 39/39 同指纹通过。
+- `npm test`：179 suites / 1600 passed / 3 skipped；check/docs/metadata/product-contract/whitespace 均通过。0 上游推理、0 配置写请求、0 native dialog/JS error；未触生产或安装资源。
+
+- 视觉复核（2026-11-25）：`browser/visual-review-report.json` 以六张联络表检查 19 页面与 12 弹窗的 100 个当前样本，未发现阻断性重叠、裁切或层级错误；这是 AI 视觉检查，不冒充所有者人工签收。
+- 凭据回归（2026-11-25）：服务与连接凭据弹窗均改为 `/api/config/write:preview` →“确认安全保存”，修复旧接口直写导致的 428；Key 不进入 localStorage、预览计划或日志。
+
+## 2026-11-25 G15 持久结构化观测事件
+
+- 已完成：`createObservability({persistFile,maxBytes,maxRecords})` 接入 scope-owned `<paths.dir>/observability/events.jsonl`；0700/0600、单次追加 fsync、原子轮转、总记录/字节上限、启动加载与 seq 延续。损坏/截断/forbidden/明文引用行跳过计数，符号链接等文件级异常 fail-closed；写盘失败不阻断请求或实时 ring。
+- `/api/logs/structured` 合并文本日志、持久事件与未持久化实时事件，支持 level/q/traceId/limit/cursor；`/api/observability/events` 与 SSE 仍只使用实时 ring。契约、配置参考、CHANGELOG 与测试 manifest 已同步。
+- `npm test -- observability-store`：1 suite / 10 passed；现有 observability + MG-R009 兼容回归 8/8 passed；轮转边界额外以 4 组配置 × 250 事件核对磁盘/内存一致。
+- `npm test`：179 suites / 1600 passed / 3 skipped，0 failed；`npm run check`、`npm run docs:check`、metadata 39 checks、product contract check 与 `git diff --check` 均 PASS。
+- 边界：仅临时目录与回环 mock，0 次真实上游/付费调用；无依赖下载、无生产配置或 8787 重启、无 commit/push/merge。真实上游与生产部署仍须另行授权。
+
+## 2026-11-25 G11 同核路由预演
+
+- 新增 `src/resources/route-preview.js`，`src/index.js` 仅替换 `/api/route-preview` 处理块；纯 `{model}` 响应字段保持不变。
+- 扩展角色/能力/正常/故障转移/恢复/取消/额度场景与预算，复用真实 router、effectivePolicy、`routing/decision.js` 和内存 RequestLedger；输出候选顺序、阻断原因、有效上限/剩余量、重放安全、额度状态与估算费用。预演不发送上游、不写配置/用量/回执、不返回正文或凭据。
+- 新增 `scripts/test/offline/v13-route-preview-http.test.mjs` 并登记显式测试清单；隔离 HTTP 8/8 通过（含预演候选顺序与真实执行决策链一致性、route 禁 GPT、费用账本失败关闭）。完整验证：`npm test` 179 suites / 1600 passed / 3 skipped；真实账户/Codex Desktop/付费上游不属于本轮授权，未验证。
+
+## 2026-11-24 V13.1 前后端一体化重构（A0–A6）
+
+- A0：完整 R2 包 74/74 SHA256 校验通过；固定历史 `0ba7c1fe` 与当前 `48325bf` 已对照，`.tmp-ui/` 保留。R2 中 V13.1 字符数元数据偏差已取证，不影响文件哈希。
+- A1：完成 ModelGate 真实后端、本机 CC Switch 4.0.27 二进制、Sub2API/Portkey/LiteLLM/New API/Models.dev/各 Harness 官方源码与协议研究；交付差距矩阵、资源 API 契约与 ADR-0013。CC Switch 本地不是源码仓库，未伪称 commit/行号。
+- A2–A6 核心：稳定服务/连接/模型/池/应用引用、模板与目录发现、统一 RequestLedger、有效策略、Codex 角色池目标、用量/日志/备份、三 Harness 配置适配器均已接入真实 API/UI。`npm test` 183 suites / 1624 passed / 3 skipped；真实 Chrome V05/V06 171/171、V04 错误矩阵 72/72、U08 多连接压力 45/45、真实 Orca/AT-SPI 39/39 通过。
+- 生产边界：真实 DeepSeek/Luna/原版 Codex GUI/Harness/native compaction 用户暂不授权，全部保持 BLOCKED；8787 PID `38474` 未重启，根入口未切，未 push/merge/commit。
+- 尚未完成：V07 原 35 条权威断言、xmxz owner config 完整 schema/加载器与人工/真实场景签收；所有其他可执行非真实场景门禁已关闭。
+- 下一门禁：取得 V07 原 35 条权威清单后同树复跑；真实场景与生产切换须另行书面授权。
+- 执行证据与回滚：`docs/evidence/v13.1-r2/a0-baseline-report.md`、`a1-source-research.md`、`a3-a6-implementation-report.md`、`migration-rollback.md`；阶段/验收状态在 `input/04-执行清单/`。
+- V05/V06/V02（2026-11-25）：`PASS_FIXTURE`。`node scripts/e2e/ui-v13-quality.mjs` 171/171 通过；Chrome 153 在 266×720/1440×900、双主题验证 100 服务、31 池（每池 48 候选）、1,488 候选引用、1,000 模型、40 连接；68 组合无横向溢出，JS error 0，最终最大路由 1028.9ms、long task 790ms。80/100/125/150% 缩放、真实 CDP IME、减少动效与对比度通过。`node scripts/e2e/ui-v13-screen-reader.mjs` 使用真实 Orca 50.2/AT-SPI 2.60.4 完成 39/39，捕获 66 条实际语音输出；人工听音/视觉与 OS IME 候选窗仍未签收。证据 `browser/v05-v06-quality-report.json`、`browser/v06-screen-reader-report.json`。未调用真实上游、未安装资源、未触 8787。
+- V06 读屏（2026-11-25）：`PASS_REAL_ORCA_AT_SPI`。`node scripts/e2e/ui-v13-screen-reader.mjs` 39/39 通过；Orca 50.2 + AT-SPI 2.60.4（复用系统 GI，未安装 pyatspi）+ Chrome 153 + 私有 Xvfb/D-Bus，在六个主页面实测标题、六个主导航控件、主操作和具名表单；20 次真实 Tab 到达搜索框，服务弹窗 7 个控件具名；采集到 AT-SPI focus 事件与 66 条 Orca 实际语音输出。动态回环端口、临时 HOME/profile/config，未触 8787/真实上游；所有自有进程清理后均为 ESRCH。证据 `docs/evidence/v13.1-r2/browser/v06-screen-reader-report.json`。可听人工签核仍为 `NOT_RUN`，不以语音调试日志冒充人工试听。
+- V07（2026-11-25）：`BLOCKED_AUTHORITATIVE_35_NOT_FOUND`。R2 仅保留历史 Chromium 35/35 汇总，未提供 35 条名称、断言体、两组定义或原执行命令；检索仓库证据/文档/测试、git 历史、保留 R2 ZIP 与相关本地会话均未找到权威枚举。未创建 runner、未以 V13.1 26 项浏览器检查或 169 套离线测试替代，也未改应用源码或既有测试。当前树指纹 `417cbbb94a30cca25ba4bf0de782011a5c950d2cac81c9a2b4b81aef14c5008a`；阻断取证见 `docs/evidence/v13.1-r2/legacy-35-report.json`，解除需提供原 35 条权威清单及可复跑映射。
+- V04（2026-11-25）：`PASS_FIXTURE`。修复忙碌弹窗 Escape 非取消关闭、409 后焦点落到 BODY、慢路由预演无取消/AbortController、迟到预演重渲染服务页并抢焦点四项已验阻断；共享 Modal 增加忙碌 Escape 前置拦截、错误告警焦点与焦点圈定，页面重渲染保留焦点/选区，预演按路由代际丢弃迟到结果。`node scripts/e2e/ui-v13-error-matrix.mjs` 72/72；`node scripts/e2e/ui-v13-quality.mjs` 171/171；`npm run check` 通过；相关离线回归 21/21。真实 Chrome fixture 的 native dialog、JS error、推理、上游写入均为 0，未触 8787、未安装。证据 `browser/v04-error-matrix-report.json`、`browser/v05-v06-quality-report.json`；人工视觉/真实上游边界不变。
+- xmxz 契约复核（2026-11-25）：`BLOCKED_INCOMPLETE_CONFIG_CONTRACT`。本地官方仓 `../xmxz_harness@b05b6ce0e42e8bf0b891177ab86040c48eb45834` 已核验 `XDG_CONFIG_HOME/xmxz/v1/config.json`、`secrets.env` 与 `ProviderProfile`；但 owner config 仅有字段名清单，wire schema 无 OwnerConfig，源码/历史无加载器或生产 `xmxz serve`，不能安全推导 `providerProfiles/priceBooks` 容器形态及有效路由。未实现 adapter、未猜配置；能力与 UI 继续 unsupported，仅细化原因。证据 `docs/evidence/v13.1-r2/xmxz-contract-audit.json`。
+
 ## 2026-11-21 Go 子代理压缩路径
 
 - 托管 Go 子代理独立声明 `remote_compaction = "unsupported"`，由 Codex 选择现有本地压缩流程。Chat 桥拒绝远程触发标记时返回 `native_compaction_route_not_ready`。现有托管子配置已升级，父配置的 SHA-256 未变。

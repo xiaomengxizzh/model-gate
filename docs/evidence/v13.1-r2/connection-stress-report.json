@@ -1,0 +1,967 @@
+{
+  "schemaVersion": 1,
+  "suite": "U08 multi-connection stress",
+  "requirement": "并发与排队、限流、熔断半开、回切、连接异常；无惊群、无失控重试、恢复后安全回切；区分逻辑与尝试",
+  "status": "PASS",
+  "startedAt": "2026-11-25T16:53:48.835Z",
+  "finishedAt": "2026-11-25T16:53:52.755Z",
+  "durationMs": 3920,
+  "environment": {
+    "node": "v24.22.2",
+    "platform": "linux",
+    "arch": "x64",
+    "branch": "deploy/modelgate-ux-v3",
+    "commitSha": "48325bf0027e583108c66677c7dec15fd5007228",
+    "sourceSha256": {
+      "src/forward.js": "fa06de3a5f0a67801364659f8e1de93dfbebc458b20e89ebfe1e1b1057763a1b",
+      "src/resources/connections.js": "2a852d713a0d8a4ef74a95f95a91af7d081f4a9bfcb9f897c862b0795dcc6d23",
+      "src/resources/request-ledger.js": "6f8fedb33a65896601b28e60b96bdc20f39b88a434152a32c085d5e6cf53d443",
+      "scripts/test/offline/harness.mjs": "4395be454fac1cb3f1ff32f9e0a2a73c4a4540fbe190746c9488e74a696ffaef",
+      "scripts/test/offline/v13-connection-stress.test.mjs": "9c54c142c6b50d449e0da2a592eaa34683e2ca64a436db214a79bd96c419ba41",
+      "scripts/test/run.mjs": "e6bc07b55218e6330d597af1c4ebc5e2d2d7b5e3aa5aeb775e936c385ba362a5"
+    }
+  },
+  "command": "npm test -- v13-connection-stress",
+  "boundaries": {
+    "testType": "REAL_HTTP_MOCK",
+    "gateway": "isolated child process from existing harness",
+    "upstream": "scripted loopback HTTP mock",
+    "keys": "fictional per-connection environment keys",
+    "externalNetwork": false,
+    "downloads": 0,
+    "port8787Touched": false,
+    "appSourceEdits": false
+  },
+  "thresholds": {
+    "minimumConnections": 40,
+    "stressProviders": 8,
+    "stressConnectionsPerProvider": 5,
+    "stressConcurrentLogicalRequests": 40,
+    "independentSlotCapacities": [
+      1,
+      2,
+      3
+    ],
+    "independentSlotLogicalRequests": 12,
+    "cooldownRetryAfterMs": 1000,
+    "overBudgetRetryAfterMs": 5000,
+    "overBudgetOverallMs": 700,
+    "circuitCooldownMs": 300,
+    "halfOpenConcurrentLogicalRequests": 20,
+    "maximumHalfOpenUpstreamProbes": 1,
+    "cancelledQueuedUpstreamAttempts": 0
+  },
+  "scenarios": [
+    {
+      "id": "U08-01",
+      "name": "40-connection concurrent stress",
+      "status": "PASS",
+      "checks": [
+        {
+          "name": "api_exposes_40_connections",
+          "passed": true,
+          "expected": 40,
+          "actual": 40,
+          "threshold": "exactly 40 configured connections"
+        },
+        {
+          "name": "all_connection_credentials_configured",
+          "passed": true,
+          "expected": 40,
+          "actual": 40,
+          "threshold": "all 40 use isolated fictional keys"
+        },
+        {
+          "name": "connections_span_8_providers",
+          "passed": true,
+          "expected": 8,
+          "actual": 8,
+          "threshold": "8 providers"
+        },
+        {
+          "name": "all_40_connections_concurrently_in_flight",
+          "passed": true,
+          "expected": 40,
+          "actual": 40,
+          "threshold": "40 gated upstream attempts"
+        },
+        {
+          "name": "all_40_connection_ids_unique",
+          "passed": true,
+          "expected": 40,
+          "actual": 40,
+          "threshold": "no connection reuse while its single slot is occupied"
+        },
+        {
+          "name": "no_connection_exceeds_maxConcurrent_1",
+          "passed": true,
+          "expected": 1,
+          "actual": 1,
+          "threshold": "per-connection maxConcurrent=1"
+        },
+        {
+          "name": "each_provider_has_5_independent_slots",
+          "passed": true,
+          "expected": {
+            "stress-p0": 5,
+            "stress-p1": 5,
+            "stress-p2": 5,
+            "stress-p3": 5,
+            "stress-p4": 5,
+            "stress-p5": 5,
+            "stress-p6": 5,
+            "stress-p7": 5
+          },
+          "actual": {
+            "stress-p0": 5,
+            "stress-p1": 5,
+            "stress-p2": 5,
+            "stress-p3": 5,
+            "stress-p4": 5,
+            "stress-p5": 5,
+            "stress-p6": 5,
+            "stress-p7": 5
+          },
+          "threshold": "5 simultaneous slots per provider"
+        },
+        {
+          "name": "all_40_logical_requests_succeed",
+          "passed": true,
+          "expected": 40,
+          "actual": 40,
+          "threshold": "40 HTTP 200 responses"
+        },
+        {
+          "name": "logical_equals_upstream_40",
+          "passed": true,
+          "expected": {
+            "logicalRequests": 40,
+            "upstreamAttempts": 40,
+            "gatewayRequestCounter": 40,
+            "completedRequests": 40,
+            "errors": 0,
+            "retries": 0
+          },
+          "actual": {
+            "logicalRequests": 40,
+            "upstreamAttempts": 40,
+            "gatewayRequestCounter": 40,
+            "completedRequests": 40,
+            "errors": 0,
+            "retries": 0
+          },
+          "threshold": "exact logical/upstream/completed counts"
+        }
+      ],
+      "observations": {
+        "gatedInFlight": {
+          "upstreamAttempts": 40,
+          "uniqueConnections": 40,
+          "maxInFlightPerConnection": 1,
+          "connectionsPerProvider": {
+            "stress-p0": 5,
+            "stress-p1": 5,
+            "stress-p2": 5,
+            "stress-p3": 5,
+            "stress-p4": 5,
+            "stress-p5": 5,
+            "stress-p6": 5,
+            "stress-p7": 5
+          }
+        },
+        "accounting": {
+          "logicalRequests": 40,
+          "upstreamAttempts": 40,
+          "gatewayRequestCounter": 40,
+          "completedRequests": 40,
+          "errors": 0,
+          "retries": 0
+        }
+      },
+      "error": null
+    },
+    {
+      "id": "U08-02",
+      "name": "priority/round-robin eligibility",
+      "status": "PASS",
+      "checks": [
+        {
+          "name": "eight_requests_succeed",
+          "passed": true,
+          "expected": 8,
+          "actual": 8,
+          "threshold": "8 HTTP 200"
+        },
+        {
+          "name": "equal_priority_round_robin_exact",
+          "passed": true,
+          "expected": [
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa"
+          ],
+          "actual": [
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa"
+          ],
+          "threshold": "c0,c1 repeated; priority 1/disabled/model-ineligible excluded"
+        },
+        {
+          "name": "ineligible_connections_zero_attempts",
+          "passed": true,
+          "expected": {
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa": 4,
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa": 4
+          },
+          "actual": {
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa": 4,
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa": 4
+          },
+          "threshold": "only two priority-0 eligible connections"
+        },
+        {
+          "name": "eligibility_accounting_exact",
+          "passed": true,
+          "expected": {
+            "logicalRequests": 8,
+            "upstreamAttempts": 8,
+            "gatewayRequestCounter": 8,
+            "completedRequests": 8,
+            "errors": 0,
+            "retries": 0
+          },
+          "actual": {
+            "logicalRequests": 8,
+            "upstreamAttempts": 8,
+            "gatewayRequestCounter": 8,
+            "completedRequests": 8,
+            "errors": 0,
+            "retries": 0
+          },
+          "threshold": "8 logical = 8 upstream"
+        }
+      ],
+      "observations": {
+        "selection": {
+          "sequence": [
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa",
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa"
+          ],
+          "counts": {
+            "conn_u08_eligible-00_aaaaaaaaaaaaaaaa": 4,
+            "conn_u08_eligible-01_aaaaaaaaaaaaaaaa": 4
+          },
+          "statuses": [
+            200,
+            200,
+            200,
+            200,
+            200,
+            200,
+            200,
+            200
+          ]
+        },
+        "accounting": {
+          "logicalRequests": 8,
+          "upstreamAttempts": 8,
+          "gatewayRequestCounter": 8,
+          "completedRequests": 8,
+          "errors": 0,
+          "retries": 0
+        }
+      },
+      "error": null
+    },
+    {
+      "id": "U08-03",
+      "name": "independent maxConcurrent slots",
+      "status": "PASS",
+      "checks": [
+        {
+          "name": "only_sum_of_connection_caps_in_flight",
+          "passed": true,
+          "expected": 6,
+          "actual": 6,
+          "threshold": "1+2+3 independent slots"
+        },
+        {
+          "name": "each_connection_uses_own_cap",
+          "passed": true,
+          "expected": {
+            "conn_u08_slots-00_aaaaaaaaaaaaaaaa": 1,
+            "conn_u08_slots-01_aaaaaaaaaaaaaaaa": 2,
+            "conn_u08_slots-02_aaaaaaaaaaaaaaaa": 3
+          },
+          "actual": {
+            "conn_u08_slots-00_aaaaaaaaaaaaaaaa": 1,
+            "conn_u08_slots-01_aaaaaaaaaaaaaaaa": 2,
+            "conn_u08_slots-02_aaaaaaaaaaaaaaaa": 3
+          },
+          "threshold": "caps [1,2,3]"
+        },
+        {
+          "name": "no_connection_exceeds_its_cap",
+          "passed": true,
+          "expected": true,
+          "actual": {
+            "conn_u08_slots-00_aaaaaaaaaaaaaaaa": 1,
+            "conn_u08_slots-01_aaaaaaaaaaaaaaaa": 2,
+            "conn_u08_slots-02_aaaaaaaaaaaaaaaa": 3
+          },
+          "threshold": "observed max <= configured max for every connection"
+        },
+        {
+          "name": "all_queued_requests_complete",
+          "passed": true,
+          "expected": 12,
+          "actual": 12,
+          "threshold": "12 HTTP 200 after gate release"
+        },
+        {
+          "name": "slot_accounting_exact",
+          "passed": true,
+          "expected": {
+            "logicalRequests": 12,
+            "upstreamAttempts": 12,
+            "gatewayRequestCounter": 12,
+            "completedRequests": 12,
+            "errors": 0,
+            "retries": 0
+          },
+          "actual": {
+            "logicalRequests": 12,
+            "upstreamAttempts": 12,
+            "gatewayRequestCounter": 12,
+            "completedRequests": 12,
+            "errors": 0,
+            "retries": 0
+          },
+          "threshold": "queueing does not duplicate attempts"
+        }
+      ],
+      "observations": {
+        "gatedInFlight": {
+          "upstreamAttempts": 6,
+          "perConnection": {
+            "conn_u08_slots-00_aaaaaaaaaaaaaaaa": 1,
+            "conn_u08_slots-01_aaaaaaaaaaaaaaaa": 2,
+            "conn_u08_slots-02_aaaaaaaaaaaaaaaa": 3
+          },
+          "maxObserved": {
+            "conn_u08_slots-00_aaaaaaaaaaaaaaaa": 1,
+            "conn_u08_slots-01_aaaaaaaaaaaaaaaa": 2,
+            "conn_u08_slots-02_aaaaaaaaaaaaaaaa": 3
+          },
+          "queuedLogicalRequests": 6
+        },
+        "accounting": {
+          "logicalRequests": 12,
+          "upstreamAttempts": 12,
+          "gatewayRequestCounter": 12,
+          "completedRequests": 12,
+          "errors": 0,
+          "retries": 0
+        }
+      },
+      "error": null
+    },
+    {
+      "id": "U08-04",
+      "name": "429 cooldown / Retry-After safety",
+      "status": "PASS",
+      "checks": [
+        {
+          "name": "first_logical_request_fails_over_to_other_connection",
+          "passed": true,
+          "expected": {
+            "status": 200,
+            "attempts": 2,
+            "sequence": [
+              "conn_u08_limited-00_aaaaaaaaaaaaaaaa",
+              "conn_u08_limited-01_aaaaaaaaaaaaaaaa"
+            ]
+          },
+          "actual": {
+            "status": 200,
+            "attempts": 2,
+            "sequence": [
+              "conn_u08_limited-00_aaaaaaaaaaaaaaaa",
+              "conn_u08_limited-01_aaaaaaaaaaaaaaaa"
+            ]
+          },
+          "threshold": "A 429 then B success within one logical request"
+        },
+        {
+          "name": "cooling_connection_skipped_without_upstream_attempt",
+          "passed": true,
+          "expected": {
+            "status": 429,
+            "attempts": 2,
+            "aHits": 1
+          },
+          "actual": {
+            "status": 429,
+            "attempts": 2,
+            "aHits": 1
+          },
+          "threshold": "A receives no second hit during cooldown"
+        },
+        {
+          "name": "cooldown_response_preserves_retry_after",
+          "passed": true,
+          "expected": {
+            "header": "1",
+            "ms": 997,
+            "attempts": 0
+          },
+          "actual": {
+            "header": "1",
+            "ms": 997,
+            "attempts": 0
+          },
+          "threshold": "remaining cooldown is returned without shortening; zero upstream attempts for this logical request"
+        },
+        {
+          "name": "cooldown_retry_after_is_positive_and_bounded",
+          "passed": true,
+          "expected": true,
+          "actual": 997,
+          "threshold": "0 < remaining Retry-After <= 1000ms"
+        },
+        {
+          "name": "cooldown_skip_is_bounded",
+          "passed": true,
+          "expected": true,
+          "actual": 1,
+          "threshold": "no 1s wait inside 700ms request budget"
+        },
+        {
+          "name": "other_connection_serves_after_skip",
+          "passed": true,
+          "expected": {
+            "status": 200,
+            "attempts": 3,
+            "bHits": 2
+          },
+          "actual": {
+            "status": 200,
+            "attempts": 3,
+            "bHits": 2
+          },
+          "threshold": "B serves without another A attempt"
+        },
+        {
+          "name": "cooldown_expiry_restores_eligibility",
+          "passed": true,
+          "expected": {
+            "fourth": 200,
+            "fifth": 429,
+            "aFinal": 2,
+            "bFinal": 3
+          },
+          "actual": {
+            "fourth": 200,
+            "fifth": 429,
+            "aFinal": 2,
+            "bFinal": 3
+          },
+          "threshold": "after 1.1s A is selected again, then B completes the logical request"
+        },
+        {
+          "name": "over_budget_retry_after_not_shortened",
+          "passed": true,
+          "expected": {
+            "status": 429,
+            "header": "5",
+            "ms": 5000,
+            "hits": 1
+          },
+          "actual": {
+            "status": 429,
+            "header": "5",
+            "ms": 5000,
+            "hits": 1
+          },
+          "threshold": "5s Retry-After returned unchanged; exactly one upstream attempt"
+        },
+        {
+          "name": "over_budget_retry_after_returns_promptly",
+          "passed": true,
+          "expected": true,
+          "actual": 6,
+          "threshold": "no 5s sleep under 700ms overall budget"
+        },
+        {
+          "name": "cooldown_accounting_exact",
+          "passed": true,
+          "expected": {
+            "logicalRequests": 6,
+            "upstreamAttempts": 6,
+            "gatewayRequestCounter": 6,
+            "completedRequests": 3,
+            "errors": 3,
+            "retries": 0
+          },
+          "actual": {
+            "logicalRequests": 6,
+            "upstreamAttempts": 6,
+            "gatewayRequestCounter": 6,
+            "completedRequests": 3,
+            "errors": 3,
+            "retries": 0
+          },
+          "threshold": "6 logical requests; 6 actual upstream attempts; gateway counter must not count pre-send cooldown skips"
+        }
+      ],
+      "observations": {
+        "responses": {
+          "first": {
+            "status": 200,
+            "retryAfter": null,
+            "errorCode": null,
+            "errorType": null,
+            "attempts": null,
+            "retryAfterMs": null
+          },
+          "second": {
+            "status": 429,
+            "retryAfter": "1",
+            "errorCode": "MG_429_RATE_LIMIT",
+            "errorType": "rate_limited",
+            "attempts": 0,
+            "retryAfterMs": 997
+          },
+          "third": {
+            "status": 200,
+            "retryAfter": null,
+            "errorCode": null,
+            "errorType": null,
+            "attempts": null,
+            "retryAfterMs": null
+          },
+          "fourth": {
+            "status": 200,
+            "retryAfter": null,
+            "errorCode": null,
+            "errorType": null,
+            "attempts": null,
+            "retryAfterMs": null
+          },
+          "fifth": {
+            "status": 429,
+            "retryAfter": "1",
+            "errorCode": "MG_429_RATE_LIMIT",
+            "errorType": "rate_limited",
+            "attempts": 0,
+            "retryAfterMs": 993
+          },
+          "retry": {
+            "status": 429,
+            "retryAfter": "5",
+            "errorCode": "MG_429_RATE_LIMIT",
+            "errorType": "rate_limited",
+            "attempts": 1,
+            "retryAfterMs": 5000
+          }
+        },
+        "limitedAttempts": {
+          "afterFirst": 2,
+          "afterSecond": 2,
+          "afterThird": 3,
+          "final": 5
+        },
+        "limitedSequence": [
+          "conn_u08_limited-00_aaaaaaaaaaaaaaaa",
+          "conn_u08_limited-01_aaaaaaaaaaaaaaaa",
+          "conn_u08_limited-01_aaaaaaaaaaaaaaaa",
+          "conn_u08_limited-00_aaaaaaaaaaaaaaaa",
+          "conn_u08_limited-01_aaaaaaaaaaaaaaaa"
+        ],
+        "aHitsFinal": 2,
+        "bHitsFinal": 3,
+        "secondElapsedMs": 1,
+        "retryElapsedMs": 6,
+        "retryHits": 1,
+        "accounting": {
+          "logicalRequests": 6,
+          "upstreamAttempts": 6,
+          "gatewayRequestCounter": 6,
+          "completedRequests": 3,
+          "errors": 3,
+          "retries": 0
+        }
+      },
+      "error": null
+    },
+    {
+      "id": "U08-05",
+      "name": "shared quota-domain exhaustion",
+      "status": "PASS",
+      "checks": [
+        {
+          "name": "independent_domain_recovers_logical_request",
+          "passed": true,
+          "expected": 200,
+          "actual": 200,
+          "threshold": "one 402 must fail over only outside the exhausted shared domain"
+        },
+        {
+          "name": "shared_domain_siblings_zero_attempts",
+          "passed": true,
+          "expected": 0,
+          "actual": 0,
+          "threshold": "second connection in exhausted domain is not sent"
+        },
+        {
+          "name": "same_domain_other_provider_zero_attempts",
+          "passed": true,
+          "expected": 0,
+          "actual": 0,
+          "threshold": "all providers sharing account-family are skipped"
+        },
+        {
+          "name": "independent_provider_exactly_one_attempt",
+          "passed": true,
+          "expected": 1,
+          "actual": 1,
+          "threshold": "independent domain receives exactly one attempt"
+        },
+        {
+          "name": "quota_accounting_exact",
+          "passed": true,
+          "expected": {
+            "logicalRequests": 1,
+            "upstreamAttempts": 2,
+            "gatewayRequestCounter": 2,
+            "completedRequests": 1,
+            "errors": 1,
+            "retries": 0
+          },
+          "actual": {
+            "logicalRequests": 1,
+            "upstreamAttempts": 2,
+            "gatewayRequestCounter": 2,
+            "completedRequests": 1,
+            "errors": 1,
+            "retries": 0
+          },
+          "threshold": "1 logical request = 1 rejected shared-domain attempt + 1 independent success"
+        }
+      ],
+      "observations": {
+        "response": {
+          "status": 200,
+          "retryAfter": null,
+          "errorCode": null,
+          "errorType": null,
+          "attempts": null,
+          "retryAfterMs": null
+        },
+        "attempts": [
+          {
+            "providerId": "sharedA",
+            "connectionId": "conn_u08_sharedA-00_aaaaaaaaaaaaaaaa"
+          },
+          {
+            "providerId": "independent",
+            "connectionId": "conn_u08_independent-00_aaaaaaaaaaaaaaaa"
+          }
+        ],
+        "accounting": {
+          "logicalRequests": 1,
+          "upstreamAttempts": 2,
+          "gatewayRequestCounter": 2,
+          "completedRequests": 1,
+          "errors": 1,
+          "retries": 0
+        }
+      },
+      "error": null
+    },
+    {
+      "id": "U08-06",
+      "name": "circuit half-open / recovery / no herd",
+      "status": "PASS",
+      "checks": [
+        {
+          "name": "failure_opens_circuit",
+          "passed": true,
+          "expected": {
+            "status": 502,
+            "state": "open",
+            "open": true
+          },
+          "actual": {
+            "status": 502,
+            "state": "open",
+            "open": true
+          },
+          "threshold": "one 503 opens maxFailures=1 circuit"
+        },
+        {
+          "name": "open_window_zero_upstream_attempts",
+          "passed": true,
+          "expected": [
+            502,
+            502,
+            502,
+            502,
+            502
+          ],
+          "actual": [
+            502,
+            502,
+            502,
+            502,
+            502
+          ],
+          "threshold": "open circuit skips all five logical requests"
+        },
+        {
+          "name": "no_thundering_herd",
+          "passed": true,
+          "expected": 1,
+          "actual": 1,
+          "threshold": "exactly one upstream half-open probe while the probe gate is held"
+        },
+        {
+          "name": "recovery_releases_all_waiters",
+          "passed": true,
+          "expected": 20,
+          "actual": 20,
+          "threshold": "20 logical requests complete after one successful probe"
+        },
+        {
+          "name": "successful_probe_closes_circuit",
+          "passed": true,
+          "expected": {
+            "state": "ok",
+            "openUntilMs": 0
+          },
+          "actual": {
+            "state": "ok",
+            "openUntilMs": 0
+          },
+          "threshold": "health reset after recovery"
+        },
+        {
+          "name": "circuit_accounting_exact",
+          "passed": true,
+          "expected": {
+            "logicalRequests": 26,
+            "upstreamAttempts": 21,
+            "gatewayRequestCounter": 21,
+            "completedRequests": 20,
+            "errors": 1,
+            "retries": 0
+          },
+          "actual": {
+            "logicalRequests": 26,
+            "upstreamAttempts": 21,
+            "gatewayRequestCounter": 21,
+            "completedRequests": 20,
+            "errors": 1,
+            "retries": 0
+          },
+          "threshold": "26 logical = 1 failing + 5 skipped + 20 recovered; 21 upstream attempts"
+        }
+      ],
+      "observations": {
+        "failedResponse": {
+          "status": 502,
+          "retryAfter": null,
+          "errorCode": "MG_FB_UPSTREAM",
+          "errorType": "no_replay",
+          "attempts": null,
+          "retryAfterMs": null
+        },
+        "healthAtOpen": {
+          "requests": 1,
+          "errors": 1,
+          "retries": 0,
+          "tokens": 0,
+          "avgMs": 7,
+          "p50": 7,
+          "p95": 7,
+          "state": "open",
+          "openUntilMs": 299,
+          "probe": null
+        },
+        "openWindowResponses": [
+          502,
+          502,
+          502,
+          502,
+          502
+        ],
+        "openWindowAdditionalUpstreamAttempts": 0,
+        "probesWhileGateHeld": 1,
+        "recoveredResponses": [
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200,
+          200
+        ],
+        "finalHealth": {
+          "requests": 21,
+          "errors": 1,
+          "retries": 0,
+          "tokens": 40,
+          "avgMs": 22,
+          "p50": 16,
+          "p95": 19,
+          "state": "ok",
+          "openUntilMs": 0,
+          "probe": null
+        },
+        "accounting": {
+          "logicalRequests": 26,
+          "upstreamAttempts": 21,
+          "gatewayRequestCounter": 21,
+          "completedRequests": 20,
+          "errors": 1,
+          "retries": 0
+        }
+      },
+      "error": null
+    },
+    {
+      "id": "U08-07",
+      "name": "active/queued cancellation safety",
+      "status": "PASS",
+      "checks": [
+        {
+          "name": "queued_requests_not_sent_before_cancel",
+          "passed": true,
+          "expected": 2,
+          "actual": 2,
+          "threshold": "both maxConcurrent=1 slots occupied"
+        },
+        {
+          "name": "cancelled_queued_zero_upstream_attempts",
+          "passed": true,
+          "expected": 0,
+          "actual": 0,
+          "threshold": "cancellation removes waiter before send"
+        },
+        {
+          "name": "cancelled_active_socket_destroyed",
+          "passed": true,
+          "expected": true,
+          "actual": true,
+          "threshold": "gateway closes the active upstream response socket within 1s of client cancellation"
+        },
+        {
+          "name": "cancelled_requests_stop_without_replay",
+          "passed": true,
+          "expected": {
+            "activeAborted": 1,
+            "queuedAborted": true
+          },
+          "actual": {
+            "activeAborted": 1,
+            "queuedAborted": true
+          },
+          "threshold": "one active + one queued client cancellation"
+        },
+        {
+          "name": "survivor_acquires_released_slot",
+          "passed": true,
+          "expected": 200,
+          "actual": 200,
+          "threshold": "uncancelled queued request succeeds"
+        },
+        {
+          "name": "cancel_accounting_exact",
+          "passed": true,
+          "expected": {
+            "logicalRequests": 4,
+            "upstreamAttempts": 3,
+            "gatewayRequestCounter": 3,
+            "completedRequests": 2,
+            "errors": 0,
+            "retries": 0
+          },
+          "actual": {
+            "logicalRequests": 4,
+            "upstreamAttempts": 3,
+            "gatewayRequestCounter": 3,
+            "completedRequests": 2,
+            "errors": 0,
+            "retries": 0
+          },
+          "threshold": "4 logical requests; cancelled-queued has zero attempt; no retry/error inflation"
+        }
+      ],
+      "observations": {
+        "attemptsBeforeCancel": 2,
+        "upstreamMarkers": [
+          null,
+          null,
+          null
+        ],
+        "cancelledQueuedAttempts": 0,
+        "cancelledActiveSocketClosedBeforeGateRelease": true,
+        "cancelledActiveSocketClosed": true,
+        "cancelledActiveSocketAborted": false,
+        "activeAbortedResponses": 1,
+        "queuedAbortedResponse": true,
+        "survivorStatus": 200,
+        "accounting": {
+          "logicalRequests": 4,
+          "upstreamAttempts": 3,
+          "gatewayRequestCounter": 3,
+          "completedRequests": 2,
+          "errors": 0,
+          "retries": 0
+        }
+      },
+      "error": null
+    }
+  ],
+  "totals": {
+    "scenarios": 7,
+    "passedScenarios": 7,
+    "failedScenarios": 0,
+    "checks": 45,
+    "passedChecks": 45,
+    "failedChecks": 0,
+    "logicalRequests": 97,
+    "upstreamAttempts": 92
+  },
+  "failures": []
+}

@@ -235,7 +235,7 @@ test('网关：事务注入失败返回 500，不发布内存、不降低鉴权�
   assert.equal((await chat(gw, next)).status, 401)
   const before = await (await gw.get('/api/status')).json()
 
-  const failed = await gw.post('/api/config/save', { defaults: { clientKey: next } })
+  const failed = await gw.write('/api/config/save', { defaults: { clientKey: next } })
   assert.equal(failed.status, 500, '事务注入失败必须是 500（不能假装成功）')
   const body = await failed.json()
   assert.equal(body.code, 'injected_fault')
@@ -268,13 +268,13 @@ test('网关：rename 后真实进程退出，重启恢复旧代际且鉴权一�
 
   const gw1 = await startGateway({ name: 'txn-crash', dir, config })
   try {
-    assert.equal((await gw1.post('/api/config/save', { defaults: { clientKey: old } })).status, 200)
+    assert.equal((await gw1.write('/api/config/save', { defaults: { clientKey: old } })).status, 200)
     assert.equal((await chat(gw1, old)).status, 200)
   } finally { await gw1.stop() }
 
   const gw2 = await startGateway({ name: 'txn-crash', dir, config, env: { MG_TXN_FAULT: 'after_rename_keys:exit' } })
   try {
-    await assert.rejects(gw2.post('/api/config/save', { defaults: { clientKey: next } }), '进程应在提交中途退出')
+    await assert.rejects(gw2.write('/api/config/save', { defaults: { clientKey: next } }), '进程应在提交中途退出')
   } catch { /* 预期：连接被断开 */ }
   // 等子进程退出
   await new Promise((resolve) => setTimeout(resolve, 150))
@@ -320,20 +320,20 @@ test('网关：外部修改后保存 fail-closed，reload 后才继续', { timeo
   const gw = await startGateway({ name: 'txn-ext', dir, config })
   t.after(async () => { await gw.stop(); await upstream.stop(); rmSync(dir, { recursive: true, force: true }) })
 
-  assert.equal((await gw.post('/api/config/save', { defaults: { clientKey: old } })).status, 200)
+  assert.equal((await gw.write('/api/config/save', { defaults: { clientKey: old } })).status, 200)
   assert.equal(statSync(join(dir, TARGET_KEYS)).mode & 0o777, 0o600, 'keys 落盘权限必须 0600')
   const localPath = join(dir, TARGET_CONFIG)
   const edited = Object.assign(JSON.parse(readFileSync(localPath, 'utf8')), { externalMarker: 'hand-edit' })
   writeFileSync(localPath, JSON.stringify(edited, null, 2))
 
-  const refused = await gw.post('/api/config/save', { defaults: { clientKey: next } })
+  const refused = await gw.write('/api/config/save', { defaults: { clientKey: next } })
   assert.equal(refused.status, 409)
   assert.equal((await refused.json()).code, 'store_conflict')
   assert.equal(JSON.parse(readFileSync(localPath, 'utf8')).externalMarker, 'hand-edit', '不得覆盖外部文件')
   assert.equal((await chat(gw, old)).status, 200, '被拒绝的保存不得改变鉴权')
 
   assert.equal((await gw.post('/api/config/reload', {})).status, 200)
-  assert.equal((await gw.post('/api/config/save', { defaults: { clientKey: next } })).status, 200)
+  assert.equal((await gw.write('/api/config/save', { defaults: { clientKey: next } })).status, 200)
   assert.equal((await chat(gw, next)).status, 200)
   assert.equal((await chat(gw, old)).status, 401)
 })

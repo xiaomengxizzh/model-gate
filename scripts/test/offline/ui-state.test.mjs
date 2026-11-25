@@ -43,6 +43,7 @@ class El {
   getAttribute (k) { return this.attributes[k] == null ? null : this.attributes[k] }
   removeAttribute (k) { delete this.attributes[k] }
   addEventListener (type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn) }
+  click () { for (const fn of this.listeners.click || []) fn({ target: this }) }
   removeEventListener () {}
   focus () {}
   select () {}
@@ -196,11 +197,27 @@ test('409 冲突：保留用户草稿逐字段不变，不覆盖用户输入', a
   const snapshot = JSON.parse(JSON.stringify(draft.data))
   const originalSave = api.saveConfig
   api.saveConfig = async () => { throw new ApiError('conflict', 409, { currentVersion: 9 }) }
+  stubFetch((url) => {
+    assert.equal(url, '/api/config/write:preview')
+    return Promise.resolve(jsonRes(200, { expectedVersion: 3, requestId: 'ui-conflict', previewId: 'prv_ui', confirmToken: 'token_ui', summary: { fields: ['defaults', 'models'] } }))
+  })
   try {
-    await assert.rejects(draft.save(), (e) => e instanceof ConflictError && e.currentVersion === 9)
+    const saving = draft.save()
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    const buttons = []
+    const visit = (node) => {
+      if (!node) return
+      if (node.tagName === 'BUTTON') buttons.push(node)
+      for (const child of node.children || []) visit(child)
+    }
+    visit(document.getElementById('dialog-root'))
+    const confirm = buttons.find((button) => button.textContent === '确认应用')
+    assert.ok(confirm, '保存必须先展示真实确认对话框')
+    confirm.click()
+    await assert.rejects(saving, (e) => e instanceof ConflictError && e.currentVersion === 9)
     assert.deepEqual(draft.data, snapshot, '冲突后草稿必须逐字段保持用户输入')
     assert.equal(draft.baseVersion, 3, '冲突不得改变草稿基准版本')
-  } finally { api.saveConfig = originalSave }
+  } finally { api.saveConfig = originalSave; globalThis.fetch = realFetch }
 })
 
 test('空白掩码/未编辑字段：save payload 中完全不出现 clientKey', () => {

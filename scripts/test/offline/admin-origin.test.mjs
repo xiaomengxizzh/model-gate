@@ -6,6 +6,15 @@ import http from 'node:http'
 import { startGateway, startMockUpstream } from './harness.mjs'
 
 // 需要自定义 Host 头/源地址时只能走原生 http（fetch 禁止设置 Host，也不能指定 localAddress）
+async function rawConfirmedWrite(base, payload, options) {
+  const headers = { 'content-type': 'application/json' }
+  const current = JSON.parse((await raw(base + '/api/status', { ...options, headers })).body)
+  const requestId = 'remote-preview-' + Math.random().toString(36).slice(2)
+  const previewResponse = await raw(base + '/api/config/write:preview', { ...options, method: 'POST', headers, body: JSON.stringify({ ...payload, action: 'config.save', expectedVersion: current.configVersion, requestId }) })
+  const plan = JSON.parse(previewResponse.body)
+  if (previewResponse.status !== 200) return previewResponse
+  return raw(base + '/api/config/save', { ...options, method: 'POST', headers, body: JSON.stringify({ ...payload, expectedVersion: plan.expectedVersion, requestId, previewId: plan.previewId, confirmToken: plan.confirmToken }) })
+}
 function raw(url, { method = 'GET', headers = {}, body = '', localAddress } = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url)
@@ -27,11 +36,11 @@ test('MG-001 回环实例：同源放行、跨源与坏 Host 拒绝、CLI 无 Or
   const json = { 'content-type': 'application/json' }
 
   // 无 Origin 的 CLI 客户端：放行
-  assert.equal((await gw.post('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
+  assert.equal((await gw.write('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
   // 同源浏览器面板：放行
-  assert.equal((await gw.post('/api/config/save', {}, Object.assign({ origin }, json))).status, 200)
+  assert.equal((await gw.write('/api/config/save', {}, Object.assign({ origin }, json))).status, 200)
   // 跨源网页：拒绝（写与读都拦）
-  const cross = await gw.post('/api/config/save', {}, Object.assign({ origin: 'http://evil.example' }, json))
+  const cross = await gw.write('/api/config/save', {}, Object.assign({ origin: 'http://evil.example' }, json))
   assert.equal(cross.status, 403)
   assert.match((await cross.json()).error, /跨源/)
   assert.equal((await gw.get('/api/status', { origin: 'http://evil.example' })).status, 403)
@@ -53,7 +62,7 @@ test('MG-001 显式白名单：allowedHosts / allowedOrigins 是唯一放行入�
   t.after(() => gw.stop())
   const json = { 'content-type': 'application/json' }
   assert.equal((await raw(gw.base + '/api/status', { headers: { host: 'panel.lan' } })).status, 200)
-  assert.equal((await gw.post('/api/config/save', {}, Object.assign({ origin: 'http://panel.lan' }, json))).status, 200)
+  assert.equal((await gw.write('/api/config/save', {}, Object.assign({ origin: 'http://panel.lan' }, json))).status, 200)
   // 白名单之外依旧拒绝
   assert.equal((await raw(gw.base + '/api/status', { headers: { host: 'other.lan' } })).status, 403)
   assert.equal((await gw.get('/api/status', { origin: 'https://panel.lan' })).status, 403)
@@ -117,5 +126,5 @@ test('MG-001 远程对端：无令牌下远程管理一律 403；allowRemote 才
   })
   t.after(async () => { await allowed.stop() })
   assert.equal((await raw(allowed.base + '/api/status', { localAddress: REMOTE_SRC })).status, 200)
-  assert.equal((await raw(allowed.base + '/api/config/save', { localAddress: REMOTE_SRC, method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 200)
+  assert.equal((await rawConfirmedWrite(allowed.base, {}, { localAddress: REMOTE_SRC })).status, 200)
 })

@@ -1,0 +1,45 @@
+ID,原始要求,交付物,证据路径,状态,边界
+O01,读取README/R2计划/双HTML/provider JSON/视觉规范/审计/CSV/AGENTS/HANDOFF/产品合同,input完整包与manifest,input/manifest.json,PASS,74文件包已定位
+O02,验证SHA256SUMS,74项校验,a0-baseline-report.md,PASS,74/74通过
+O03,比较固定历史SHA与当前分支,基线差异报告,a0-baseline-report.md,PASS,0ba7c1fe对48325bf
+O04,保留未提交工作且不盲重置,工作区审计,.tmp-ui/保留与git status,PASS,未动既有未跟踪目录
+O05,执行A0–A7,阶段门禁与审计,input/04-执行清单/stage-gates.csv,PASS_FIXTURE,真实场景按授权BLOCKED
+O06,先做源码级A0/A1研究,内部与外部源码研究,a1-source-research.md,PASS,外部快照与本地源码分别标注
+O07,研究CC Switch/Sub2API/LiteLLM/New API/Portkey/Models.dev,复用机制与不可直用原因,a1-source-research.md,PASS,CC Switch仅本地二进制不伪称源码
+O08,研究Codex/Claude Code/OpenCode/DSH官方协议,协议与配置边界,a1-source-research.md,PASS_FIXTURE,xmxz另见契约审计
+O09,每个外部结论含版本/来源位置/复用机制/不可直用原因,来源证据表,a1-source-research.md,PASS,UNKNOWN项未猜测
+O10,保持Node>=24与零第三方运行时依赖,package与内置模块实现,package.json,PASS,无新增运行时依赖
+O11,复用现有事务/协议/虚拟模型/路由/Codex代码,资源层扩展ADR,../explanation/adr-0013-v13-integrated-rebuild.md,PASS,未建平行网关
+O12,真实服务/账户/模型生命周期,services/connections/models资源API,../contracts/v13.1/services-v1.md,PASS_FIXTURE,真实账户未验
+O13,模板与模型发现,63模板与连接目录发现,../contracts/v13.1/resource-api-v1.md,PASS_FIXTURE,非实时账户权限
+O14,多池与双向应用引用,poolId/slug/members/HarnessBinding,../contracts/v13.1/resource-api-v1.md,PASS_FIXTURE,真实Codex生效另验
+O15,统一重试/续传/回退预算,RequestLedger真实发送接线,src/resources/request-ledger.js,PASS_FIXTURE,U08压力45/45
+O16,独立Harness适配器,Claude Code/OpenCode/DSH序列化,src/resources/harness-adapters.js,PASS_FIXTURE,xmxz保持unsupported
+O17,真实用量/日志/备份/故障反馈,usage/diagnostics/backup/store,../contracts/v13.1/resource-api-v1.md,PASS_FIXTURE,费用未知值保留null
+O18,保留Codex官方直连与零GPT纯路由,official/route/aggregated目标与策略,src/resources/route-preview.js,PASS_FIXTURE,真实GUI未授权
+O19,官方父+第三方原生子池与Codex原生能力,aggregation/catalog/continuation接线,../explanation/adr-0014-resource-budget-harness.md,PASS_FIXTURE,不自建压缩
+O20,六项固定一级导航,应用接入/模型服务/模型池/用量分析/稳定性策略/设置,src/ui-vnext/index.html,PASS_FIXTURE,19页面矩阵
+O21,每个可见按钮有动作/API/反馈/异常/验收映射,窗口动作契约,window-action-contract.csv,PASS_FIXTURE,规划动作明确标注
+O22,19页面状态与12弹窗类型,真实Chrome矩阵,browser/a2-browser-report.json,PASS_FIXTURE,历史266页面+72弹窗;当前样例布局18路由冒烟35/35
+O23,持续更新CSV状态与证据路径,验收/阶段/MG-R矩阵,input/04-执行清单/acceptance-matrix.csv,PASS,当前SHA已对齐
+O24,交付源码/契约/ADR/测试回执/截图/风险/迁移回滚,完整交付树,docs/contracts/v13.1与migration-rollback.md,PASS_FIXTURE,真实场景回执保持BLOCKED
+O25,记录SHA/环境/命令/模型/结果/真实与fixture边界,最终审计与JSON回执,completion-audit.md,PASS,模型推理0次
+O26,不以smoke/static/mock冒充完整验收,证据等级与限制,completion-audit.md,PASS,PASS_FIXTURE不标PASS_REAL
+O27,不静默减需求/不用假生产数据,差距矩阵与阻断,gap-matrix.csv,PASS,权威缺失显式BLOCKED
+O28,生产切换/推送/合并/发布需所有者批准,生产保护记录,completion-audit.md,PASS,8787与旧UI未重启
+O29,MG-R009单实例多租户,scope/config/keys/catalog/stats/logs隔离,src/tenancy/http.js,PASS_FIXTURE,双身份HTTP fixture
+O30,持久Operation/Preview/取消,原子回执/commit marker/恢复,src/resources/operation-store.js,PASS_FIXTURE,22项store回归
+O31,DNS解析后私网/元数据复核,全答案校验与socket lookup固定,src/resources/network-policy.js,PASS_FIXTURE,注入transport残余TOCTOU已披露
+O32,U04在途删除保护,有界登记与预览/确认阻断,src/resources/in-flight.js,PASS_FIXTURE,固定配置代纪
+O33,U08多连接压力,40连接/8provider压力,connection-stress-report.json,PASS_FIXTURE,45/45
+O34,V02/V05/V06质量门禁,缩放/IME/压力/AX/真实Orca,browser/v05-v06-quality-report.json,PASS_FIXTURE,人工听音/OS候选窗未签收
+O35,V04/U16错误与异步矩阵,72项真实浏览器检查,browser/v04-error-matrix-report.json,PASS_FIXTURE,故障注入不冒充真实账户
+O36,U02三模式草稿,72窗口状态与存储故障场景,browser/u02-browser-report.json,PASS_FIXTURE,193/193
+O37,G11同核路由预演,role/capability/scenario/budget,src/resources/route-preview.js,PASS_FIXTURE,9项HTTP回归
+O38,G15持久结构化trace,scope-owned有界JSONL,src/observability/events.js,PASS_FIXTURE,10项store回归
+O39,最终安全审计,六项实证缺陷修复,completion-audit.md,PASS_FIXTURE,嵌套环境秘密/CAS/日志/临时文件/native目标
+O40,V07原35条旧业务断言,严格权威输入校验器与待填模板,legacy-35-authoritative-input.json,BLOCKED,空模板明确非证据且被拒绝;权威名称/断言体/两组定义/命令仍缺失
+O41,xmxz官方OwnerConfig契约,schema/loader/激活/写入语义,xmxz-contract-audit.json,PASS_AUDIT_UNSUPPORTED,契约不完整不猜测适配
+O42,人工视觉/OS IME/Orca听音签收,所有者人工签收,browser/visual-review-report.json,BLOCKED,自动检查不冒充人工
+O43,真实DeepSeek/Luna/GUI/Harness/native compact,真实付费与Desktop回执,a0-baseline-report.md,BLOCKED,用户未授权付费测试
+O44,生产重启/切根/push/merge/release,所有者批准与生产窗口,migration-rollback.md,LOCAL_SWITCH_DONE_RELEASE_BLOCKED,8787已切Node24+ui-vnext;前端/托盘源码已切;Codex端点已修;未push/merge/commit/发布

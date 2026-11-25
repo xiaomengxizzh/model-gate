@@ -1,0 +1,888 @@
+{
+  "kind": "modelgate-template-design-snapshot",
+  "asOf": "2026-11-24",
+  "warning": "Illustrative model IDs; verify actual account permissions and endpoints; no secrets; not a production configuration.",
+  "providers": [
+    {
+      "id": "chatgptplan",
+      "name": "ChatGPT 套餐",
+      "cat": "套餐与账号",
+      "status": "已有接入基础",
+      "api": "Responses",
+      "url": "",
+      "doc": "https://developers.openai.com/codex/",
+      "models": [
+        "gpt-6-luna",
+        "gpt-6.2-sol",
+        "gpt-6.2-astra"
+      ],
+      "auth": "原生 Codex 登录",
+      "note": "官方直连或聚合父模型；不加入第三方池。目录以本机官方模型列表为准。"
+    },
+    {
+      "id": "opencodego",
+      "name": "OpenCode Go",
+      "cat": "套餐与账号",
+      "status": "已有接入基础",
+      "api": "Chat",
+      "url": "https://opencode.ai/inference/go/openai/v1",
+      "doc": "https://opencode.ai/docs/console/go/",
+      "models": [
+        "deepseek-v4.1-flash",
+        "deepseek-v4-pro",
+        "kimi-k3",
+        "glm-5.3",
+        "qwen3.8-flash"
+      ],
+      "auth": "套餐 API Key",
+      "note": "当前仓库已有 DeepSeek 接入基础；新端点及其他模型待验收。额度共享，切换模型不等于增加套餐额度。"
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI API",
+      "cat": "官方 API",
+      "status": "已有接入基础",
+      "api": "Responses",
+      "url": "https://api.openai.com/v1",
+      "doc": "https://platform.openai.com/docs/models",
+      "models": [
+        "gpt-6-luna",
+        "gpt-5.6-luna",
+        "gpt-4o-mini"
+      ],
+      "auth": "API Key",
+      "note": "独立 API 计费，与 ChatGPT 套餐不同。模型 ID 须由账户目录确认。"
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic / Claude API",
+      "cat": "官方 API",
+      "status": "已有接入基础",
+      "api": "Messages",
+      "url": "https://api.anthropic.com",
+      "doc": "https://docs.anthropic.com/",
+      "models": [
+        "claude-haiku-5-5",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6"
+      ],
+      "auth": "API Key",
+      "note": "原生 Messages；不自动假定 Codex 兼容。"
+    },
+    {
+      "id": "gemini",
+      "name": "Google AI Studio / Gemini",
+      "cat": "官方 API",
+      "status": "已有接入基础",
+      "api": "Gemini",
+      "url": "https://generativelanguage.googleapis.com",
+      "doc": "https://ai.google.dev/gemini-api/docs",
+      "models": [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro"
+      ],
+      "auth": "API Key",
+      "note": "原生 Gemini；与 Vertex AI 凭据分开。"
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek 官方",
+      "cat": "国内模型",
+      "status": "已有接入基础",
+      "api": "Chat",
+      "url": "https://api.deepseek.com/v1",
+      "doc": "https://api-docs.deepseek.com/",
+      "models": [
+        "deepseek-chat",
+        "deepseek-reasoner"
+      ],
+      "auth": "API Key",
+      "note": "历史兼容 ID，实际可用以目录为准。"
+    },
+    {
+      "id": "qwen-cn",
+      "name": "阿里云百炼 / Qwen（中国）",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "doc": "https://help.aliyun.com/zh/model-studio/",
+      "models": [
+        "qwen-max",
+        "qwen-plus",
+        "qwen-turbo",
+        "qwen3.8-flash",
+        "qwen3.8-max"
+      ],
+      "auth": "API Key",
+      "note": "地域与 API Key 必须匹配。"
+    },
+    {
+      "id": "qwen-intl",
+      "name": "Alibaba Model Studio（国际）",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      "doc": "https://www.alibabacloud.com/help/en/model-studio/",
+      "models": [
+        "qwen-max",
+        "qwen-plus",
+        "qwen3.8-max",
+        "qwen3.8-flash"
+      ],
+      "auth": "API Key",
+      "note": "国际地域；其他地域按官方地址配置。"
+    },
+    {
+      "id": "moonshot-cn",
+      "name": "月之暗面 / Kimi（中国）",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.moonshot.cn/v1",
+      "doc": "https://platform.moonshot.cn/",
+      "models": [
+        "moonshot-v1-8k",
+        "moonshot-v1-32k",
+        "kimi-k2-0905-preview"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "moonshot-intl",
+      "name": "Moonshot / Kimi（国际）",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.moonshot.ai/v1",
+      "doc": "https://platform.moonshot.ai/",
+      "models": [
+        "moonshot-v1-8k",
+        "kimi-k2-0905-preview"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "zhipu",
+      "name": "智谱 GLM（中国）",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://open.bigmodel.cn/api/paas/v4",
+      "doc": "https://docs.bigmodel.cn/",
+      "models": [
+        "glm-4-flash",
+        "glm-4-plus",
+        "glm-4.7"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "zai",
+      "name": "Z.AI（国际）",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.z.ai/api/paas/v4",
+      "doc": "https://docs.z.ai/",
+      "models": [
+        "glm-4.7",
+        "glm-5"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "minimax-cn",
+      "name": "MiniMax（中国）",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.minimaxi.com/v1",
+      "doc": "https://platform.minimaxi.com/",
+      "models": [
+        "MiniMax-M2.5",
+        "MiniMax-M2.7"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "minimax-intl",
+      "name": "MiniMax（国际）",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.minimax.io/v1",
+      "doc": "https://platform.minimax.io/",
+      "models": [
+        "MiniMax-M2.5",
+        "MiniMax-M2.7"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "volcengine",
+      "name": "火山方舟 / 豆包",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://ark.cn-beijing.volces.com/api/v3",
+      "doc": "https://www.volcengine.com/docs/82379",
+      "models": [
+        "doubao-seed-1-6-250615",
+        "doubao-seed-1-6-flash-250715"
+      ],
+      "auth": "API Key",
+      "note": "部分账户需要实际推理接入点 ID。"
+    },
+    {
+      "id": "byteplus",
+      "name": "BytePlus ModelArk",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://ark.ap-southeast.bytepluses.com/api/v3",
+      "doc": "https://docs.byteplus.com/en/docs/ModelArk",
+      "models": [],
+      "auth": "API Key",
+      "note": "模型 ID 从实际地域目录读取。"
+    },
+    {
+      "id": "stepfun",
+      "name": "阶跃星辰 / StepFun",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.stepfun.com/v1",
+      "doc": "https://platform.stepfun.com/",
+      "models": [
+        "step-2-16k",
+        "step-1-flash"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "hunyuan",
+      "name": "腾讯混元",
+      "cat": "国内模型",
+      "status": "规划中",
+      "api": "Chat",
+      "url": "",
+      "doc": "https://cloud.tencent.com/document/product/1729",
+      "models": [
+        "hunyuan-turbo-latest",
+        "hunyuan-large"
+      ],
+      "auth": "腾讯云授权",
+      "note": "原生签名 / 兼容端点按账号类型确认。"
+    },
+    {
+      "id": "ernie",
+      "name": "百度千帆 / 文心",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://qianfan.baidubce.com/v2",
+      "doc": "https://cloud.baidu.com/doc/qianfan/",
+      "models": [
+        "ernie-4.5-8k",
+        "ernie-speed-128k"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "spark",
+      "name": "讯飞星火",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://spark-api-open.xf-yun.com/v1",
+      "doc": "https://www.xfyun.cn/doc/spark/HTTP调用文档.html",
+      "models": [
+        "lite",
+        "generalv3.5",
+        "4.0Ultra"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "baichuan",
+      "name": "百川智能",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.baichuan-ai.com/v1",
+      "doc": "https://platform.baichuan-ai.com/",
+      "models": [
+        "Baichuan4",
+        "Baichuan4-Turbo"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "yi",
+      "name": "零一万物 / Yi",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.lingyiwanwu.com/v1",
+      "doc": "https://platform.lingyiwanwu.com/",
+      "models": [
+        "yi-lightning",
+        "yi-large"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "mimo",
+      "name": "小米 MiMo",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.xiaomimimo.com/v1",
+      "doc": "https://platform.xiaomimimo.com/",
+      "models": [
+        "mimo-v2-flash"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "longcat",
+      "name": "美团 LongCat",
+      "cat": "国内模型",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.longcat.chat/openai/v1",
+      "doc": "https://longcat.chat/",
+      "models": [
+        "LongCat-Flash-Chat",
+        "LongCat-Flash-Thinking"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "xai",
+      "name": "xAI / Grok",
+      "cat": "官方 API",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.x.ai/v1",
+      "doc": "https://docs.x.ai/",
+      "models": [
+        "grok-4",
+        "grok-4-fast-reasoning"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "mistral",
+      "name": "Mistral AI",
+      "cat": "官方 API",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.mistral.ai/v1",
+      "doc": "https://docs.mistral.ai/",
+      "models": [
+        "mistral-large-latest",
+        "mistral-small-latest",
+        "codestral-latest"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "cohere",
+      "name": "Cohere",
+      "cat": "官方 API",
+      "status": "规划中",
+      "api": "Cohere",
+      "url": "https://api.cohere.com",
+      "doc": "https://docs.cohere.com/",
+      "models": [
+        "command-a-03-2025",
+        "command-r-plus"
+      ],
+      "auth": "API Key",
+      "note": "已有 rerank 基础不代表原生 Chat V2 已接通。"
+    },
+    {
+      "id": "perplexity",
+      "name": "Perplexity",
+      "cat": "官方 API",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.perplexity.ai",
+      "doc": "https://docs.perplexity.ai/",
+      "models": [
+        "sonar",
+        "sonar-pro",
+        "sonar-reasoning-pro"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://openrouter.ai/api/v1",
+      "doc": "https://openrouter.ai/docs/",
+      "models": [
+        "openai/gpt-6.2-astra-pro",
+        "deepseek/deepseek-chat",
+        "anthropic/claude-sonnet-4.6"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "siliconflow",
+      "name": "硅基流动 SiliconFlow（中国）",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.siliconflow.cn/v1",
+      "doc": "https://docs.siliconflow.cn/",
+      "models": [
+        "zai-org/GLM-4.6",
+        "deepseek-ai/DeepSeek-V3",
+        "Qwen/Qwen3-32B"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "siliconflow-intl",
+      "name": "SiliconFlow（国际）",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.siliconflow.com/v1",
+      "doc": "https://docs.siliconflow.com/",
+      "models": [
+        "deepseek-ai/DeepSeek-V3",
+        "Qwen/Qwen3-32B"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "modelscope",
+      "name": "魔搭 ModelScope",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api-inference.modelscope.cn/v1",
+      "doc": "https://modelscope.cn/docs/",
+      "models": [
+        "Qwen/Qwen3-32B",
+        "deepseek-ai/DeepSeek-V3"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "opencodezen",
+      "name": "OpenCode Console / Zen",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://opencode.ai/inference/openai/v1",
+      "doc": "https://opencode.ai/docs/console/harnesses",
+      "models": [
+        "kimi-k3"
+      ],
+      "auth": "API Key",
+      "note": "与 Go 套餐分开计费；端点、模型和权限按实际账户验证。"
+    },
+    {
+      "id": "groq",
+      "name": "Groq",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.groq.com/openai/v1",
+      "doc": "https://console.groq.com/docs",
+      "models": [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "together",
+      "name": "Together AI",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.together.xyz/v1",
+      "doc": "https://docs.together.ai/",
+      "models": [
+        "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "fireworks",
+      "name": "Fireworks AI",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.fireworks.ai/inference/v1",
+      "doc": "https://docs.fireworks.ai/",
+      "models": [
+        "accounts/fireworks/models/llama-v3p3-70b-instruct"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "deepinfra",
+      "name": "DeepInfra",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.deepinfra.com/v1/openai",
+      "doc": "https://deepinfra.com/docs",
+      "models": [
+        "meta-llama/Llama-3.3-70B-Instruct"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "cerebras",
+      "name": "Cerebras",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.cerebras.ai/v1",
+      "doc": "https://inference-docs.cerebras.ai/",
+      "models": [
+        "llama3.1-8b"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "nvidia",
+      "name": "NVIDIA NIM / API Catalog",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://integrate.api.nvidia.com/v1",
+      "doc": "https://build.nvidia.com/",
+      "models": [
+        "meta/llama-3.3-70b-instruct"
+      ],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "hf",
+      "name": "Hugging Face Inference Providers",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://router.huggingface.co/v1",
+      "doc": "https://huggingface.co/docs/inference-providers/",
+      "models": [],
+      "auth": "API Key",
+      "note": "根据推理提供商和账户实际目录发现。"
+    },
+    {
+      "id": "vercel",
+      "name": "Vercel AI Gateway",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://ai-gateway.vercel.sh/v1",
+      "doc": "https://vercel.com/docs/ai-gateway",
+      "models": [],
+      "auth": "API Key",
+      "note": "模型列表按账户发现。"
+    },
+    {
+      "id": "novita",
+      "name": "Novita AI",
+      "cat": "聚合与推理",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "https://api.novita.ai/openai/v1",
+      "doc": "https://novita.ai/docs/",
+      "models": [],
+      "auth": "API Key",
+      "note": ""
+    },
+    {
+      "id": "azure",
+      "name": "Azure OpenAI / Foundry",
+      "cat": "企业云",
+      "status": "规划中",
+      "api": "Responses",
+      "url": "",
+      "doc": "https://learn.microsoft.com/azure/ai-foundry/openai/",
+      "models": [],
+      "auth": "API Key / Entra ID",
+      "note": "需要资源地址、部署名称和认证方式；不能用全局固定模型 ID。"
+    },
+    {
+      "id": "bedrock",
+      "name": "AWS Bedrock",
+      "cat": "企业云",
+      "status": "规划中",
+      "api": "Bedrock",
+      "url": "",
+      "doc": "https://docs.aws.amazon.com/bedrock/",
+      "models": [],
+      "auth": "AWS 授权",
+      "note": "需要区域、账户授权和模型访问权限。"
+    },
+    {
+      "id": "vertex",
+      "name": "Google Vertex AI",
+      "cat": "企业云",
+      "status": "规划中",
+      "api": "Gemini",
+      "url": "",
+      "doc": "https://cloud.google.com/vertex-ai/generative-ai/docs",
+      "models": [],
+      "auth": "Google Cloud 授权",
+      "note": "项目、区域、服务账户 / ADC 等专用适配。"
+    },
+    {
+      "id": "cloudflare",
+      "name": "Cloudflare Workers AI",
+      "cat": "企业云",
+      "status": "规划中",
+      "api": "Chat",
+      "url": "",
+      "doc": "https://developers.cloudflare.com/workers-ai/",
+      "models": [],
+      "auth": "API Token",
+      "note": "需要 Account ID 与专用访问地址。"
+    },
+    {
+      "id": "claudeplan",
+      "name": "Claude 官方套餐",
+      "cat": "套餐与账号",
+      "status": "规划中",
+      "api": "Messages",
+      "url": "",
+      "doc": "https://claude.ai/",
+      "models": [],
+      "auth": "原生应用登录",
+      "note": "只规划官方支持的原生登录方式；不将订阅凭据当通用 API Key。"
+    },
+    {
+      "id": "copilot",
+      "name": "GitHub Copilot",
+      "cat": "套餐与账号",
+      "status": "规划中",
+      "api": "Chat",
+      "url": "",
+      "doc": "https://docs.github.com/copilot",
+      "models": [],
+      "auth": "官方授权",
+      "note": "仅规划获允许的接入方式。"
+    },
+    {
+      "id": "geminiplan",
+      "name": "Gemini / Google 官方套餐",
+      "cat": "套餐与账号",
+      "status": "规划中",
+      "api": "Gemini",
+      "url": "",
+      "doc": "https://gemini.google.com/",
+      "models": [],
+      "auth": "原生应用登录",
+      "note": "套餐不等于 Gemini API；仅规划合规原生接入。"
+    },
+    {
+      "id": "kimi-code",
+      "name": "Kimi Code",
+      "cat": "套餐与账号",
+      "status": "规划中",
+      "api": "待确认",
+      "url": "",
+      "doc": "https://www.kimi.com/",
+      "models": [],
+      "auth": "套餐专用授权",
+      "note": "独立于按量 API，专用端点、额度与协议需核对。"
+    },
+    {
+      "id": "glm-plan",
+      "name": "GLM Coding Plan",
+      "cat": "套餐与账号",
+      "status": "规划中",
+      "api": "待确认",
+      "url": "",
+      "doc": "https://docs.z.ai/",
+      "models": [],
+      "auth": "套餐专用授权",
+      "note": "独立于按量 API，专用端点、额度与协议需核对。"
+    },
+    {
+      "id": "minimax-plan",
+      "name": "MiniMax Coding Plan",
+      "cat": "套餐与账号",
+      "status": "规划中",
+      "api": "待确认",
+      "url": "",
+      "doc": "https://platform.minimax.io/",
+      "models": [],
+      "auth": "套餐专用授权",
+      "note": "独立于按量 API，专用端点、额度与协议需核对。"
+    },
+    {
+      "id": "qwen-plan",
+      "name": "Qwen Coding Plan / Token Plan",
+      "cat": "套餐与账号",
+      "status": "规划中",
+      "api": "待确认",
+      "url": "",
+      "doc": "https://help.aliyun.com/",
+      "models": [],
+      "auth": "套餐专用授权",
+      "note": "独立于按量 API，专用端点、额度与协议需核对。"
+    },
+    {
+      "id": "volc-plan",
+      "name": "火山 Coding Plan",
+      "cat": "套餐与账号",
+      "status": "规划中",
+      "api": "待确认",
+      "url": "",
+      "doc": "https://www.volcengine.com/",
+      "models": [],
+      "auth": "套餐专用授权",
+      "note": "独立于按量 API，专用端点、额度与协议需核对。"
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama",
+      "cat": "本地与自建",
+      "status": "已有接入基础",
+      "api": "Chat",
+      "url": "http://127.0.0.1:11434/v1",
+      "doc": "https://docs.ollama.com/",
+      "models": [],
+      "auth": "本地服务",
+      "note": "只发现已有模型，不下载权重或启动服务。"
+    },
+    {
+      "id": "lmstudio",
+      "name": "LM Studio",
+      "cat": "本地与自建",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "http://127.0.0.1:1234/v1",
+      "doc": "https://lmstudio.ai/docs",
+      "models": [],
+      "auth": "本地服务",
+      "note": "读取已经启动的本地模型服务。"
+    },
+    {
+      "id": "vllm",
+      "name": "vLLM",
+      "cat": "本地与自建",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "http://127.0.0.1:8000/v1",
+      "doc": "https://docs.vllm.ai/",
+      "models": [],
+      "auth": "本地服务 / API Key",
+      "note": ""
+    },
+    {
+      "id": "llamacpp",
+      "name": "llama.cpp Server",
+      "cat": "本地与自建",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "http://127.0.0.1:8080/v1",
+      "doc": "https://github.com/ggml-org/llama.cpp",
+      "models": [],
+      "auth": "本地服务 / API Key",
+      "note": ""
+    },
+    {
+      "id": "sglang",
+      "name": "SGLang",
+      "cat": "本地与自建",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "http://127.0.0.1:30000/v1",
+      "doc": "https://docs.sglang.ai/",
+      "models": [],
+      "auth": "本地服务 / API Key",
+      "note": ""
+    },
+    {
+      "id": "litellm",
+      "name": "LiteLLM Proxy",
+      "cat": "本地与自建",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "http://127.0.0.1:4000/v1",
+      "doc": "https://docs.litellm.ai/",
+      "models": [],
+      "auth": "网关密钥",
+      "note": "地址可改；从已配置的实例发现模型。"
+    },
+    {
+      "id": "newapi",
+      "name": "New API / One API",
+      "cat": "本地与自建",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "http://127.0.0.1:3000/v1",
+      "doc": "https://github.com/QuantumNous/new-api",
+      "models": [],
+      "auth": "网关密钥",
+      "note": "用户已有的自建实例；可修改地址。"
+    },
+    {
+      "id": "sub2api",
+      "name": "Sub2API",
+      "cat": "本地与自建",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "",
+      "doc": "https://github.com/Wei-Shaw/sub2api",
+      "models": [],
+      "auth": "网关密钥",
+      "note": "输入本人管理或获授权的实例地址；不转用其他账户凭据。"
+    },
+    {
+      "id": "compatible",
+      "name": "其他 OpenAI 兼容 API",
+      "cat": "本地与自建",
+      "status": "兼容待验收",
+      "api": "Chat",
+      "url": "",
+      "doc": "https://platform.openai.com/docs/api-reference",
+      "models": [],
+      "auth": "API Key",
+      "note": "仅当目录没有对应供应商时使用。"
+    }
+  ]
+}

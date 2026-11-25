@@ -259,8 +259,10 @@ CLI 约定：
 - JSON 输出稳定且不含凭据/正文；不写全局文件、不读 `~/.codex`、不碰 auth.json。
 
 
-### 可观测性端点（N06，2026-11-12）
+### 可观测性端点（N06 / G15）
 
-- `GET /api/observability/events?cursor=&limit=` 返回 `{contract: mg-observability-v1, version: 1, items, nextCursor, hasMore, retained: {count, capacity, dropped}, stats}`；非法 cursor 返回 400 稳定 code。
-- `GET /api/observability/stream`：短期 SSE，重放不超过 100 条的有界快照 + 增量 + 15s keepalive，断开即退订。
-- 事件中的 id 只能由 hashId() 派生；正文、凭据、密文与原始 parent id 在 emit 阶段显式拒绝（全链路 canary 断言）。
+- `GET /api/observability/events?cursor=&limit=` 返回**实时 ring** 的 `{contract: mg-observability-v1, version: 1, items, nextCursor, hasMore, retained: {count, capacity, dropped}, stats}`；非法 cursor 返回 400 稳定 code。重启后 ring 为空，不伪造历史。
+- `GET /api/observability/stream`：短期 SSE，只重放实时 ring 不超过 100 条的快照 + 增量 + 15s keepalive，断开即退订；不重放持久事件。
+- `GET /api/logs/structured?level=&q=&traceId=&limit=&cursor=` 返回 `mg-logs/1`，合并尾部文本日志与持久事件投影。`traceId` 是 `q` 的别名；`limit` 最大 500，缺省 100；`cursor` 为不透明 base64url offset。事件 id 为 `observability:<seq>`，只投影哈希 `traceId`、kind、level、message、terminal/status/model/provider/phase；`retained.sourceEvents/eventRetained/durable` 披露匹配量、保留量和损坏/轮转计数，不暴露文件路径。
+- 持久事件存放在 scope-owned `<paths.dir>/observability/events.jsonl`，当前文件 + `.1` 合计受 `defaults.observability.maxBytes/maxRecords` 限制；目录 0700、文件 0600。单次追加 fsync，轮转/压缩原子 rename。启动加载有效保留事件并延续 seq；损坏、截断、forbidden 字段或明文引用行跳过且计入 `corrupt`，文件级异常 fail-closed。持久化禁用时结构化日志兼容实时 ring。
+- 事件中的 request/parent/attempt/trace 引用只能由 hashId() 派生；正文、凭据、密文、原始线程/会话 ID 及嵌套 forbidden 字段在 emit 阶段显式拒绝（全链路 canary 断言）。观测写盘失败不改变请求结果。

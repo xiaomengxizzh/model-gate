@@ -1,0 +1,32 @@
+﻿ID,类型,窗口,最低动作集合,已有接口基础（/api 前缀省略）,缺口,阶段,视觉证据,执行状态
+harness,page,应用接入,检测/快捷切换/通用接入,"status, aggregation/health,modes",多 Harness 适配器、实际生效,A5/A6,02-视觉设计/modelgate-v13.1-dark-harness.png,PASS_FIXTURE
+mode,page,Codex 配置,三模式、模型/池、预览/应用/回滚/解除,"aggregation/switch,rollback,reconcile",角色池目标、目录发布、重启验证,A5,02-视觉设计/modelgate-v13.1-dark-mode.png,PASS_FIXTURE
+providers,page,我的服务,添加/编辑/启停/删除/搜索/排序,"config/status,config/save,keys",实例与关联事务,A3,02-视觉设计/modelgate-v13.1-dark-providers.png,PASS_FIXTURE
+directory,page,服务目录,搜索筛选、查看/添加模板,"aggregation/registry, discovery",版本化通用模板 API,A3,02-视觉设计/modelgate-v13.1-dark-directory.png,PASS_FIXTURE
+serviceDetail,page,服务详情,连接 CRUD、探活、关联池,"config/save,keys,probe",多账户、权限、真实状态,A3,02-视觉设计/modelgate-v13.1-dark-serviceDetail.png,PASS_FIXTURE
+accountDetail,page,连接详情,编辑/暂停/删除/授权/额度,"keys, status",独立连接身份、额度/冷却、授权,A3/A4,02-视觉设计/modelgate-v13.1-dark-accountDetail.png,PASS_FIXTURE
+serviceModels,page,服务模型,同步/手动添加/编辑/删除/入池,"config/save, aggregation/providers/:id/sync",通用发现、账户权限、稳定 ID,A3/A4,02-视觉设计/modelgate-v13.1-dark-serviceModels.png,PASS_FIXTURE
+pools,page,模型池候选,创建/复制/删除/排序/权重/启停,"virtualModels,directory,route-preview",独立池资源与引用保护,A4,02-视觉设计/modelgate-v13.1-dark-pools.png,PASS_FIXTURE
+poolStrategy,page,池策略,选择/回退/循环/保存,"defaults.directory,retry, codexFallbackLimits",独立策略与统一预算,A4,02-视觉设计/modelgate-v13.1-dark-poolStrategy.png,PASS_FIXTURE
+poolApps,page,池应用引用,反向绑定/解除/跳转,aggregation/switch,角色引用统一写入,A4/A5,02-视觉设计/modelgate-v13.1-dark-poolApps.png,PASS_FIXTURE
+poolTest,page,池预演,选择故障/预算、运行预演,route-preview,同决策器无副作用预演,A4,02-视觉设计/modelgate-v13.1-dark-poolTest.png,PASS_FIXTURE
+usage,page,用量分析,筛选/趋势/明细/CSV,"model-stats,native-usage,status",逻辑请求/尝试、池与应用维度,A6,02-视觉设计/modelgate-v13.1-dark-usage.png,PASS_FIXTURE
+reliability,page,稳定性默认,选择预设/范围、保存/恢复,config/save defaults,生效策略、继承和状态,A4,02-视觉设计/modelgate-v13.1-dark-reliability.png,PASS_FIXTURE
+reliabilityDetail,page,稳定性详细,重试/限流/熔断/超时/续传,defaults.retry/timeout/codexFallbackLimits,各层统一预算、能力约束,A4/A5,02-视觉设计/modelgate-v13.1-dark-reliabilityDetail.png,PASS_FIXTURE
+settings,page,设置,主题/密度/高级/导入导出/恢复,"config/reload,config/save",通用备份恢复、操作通知,A2/A6,02-视觉设计/modelgate-v13.1-dark-settings.png,PASS_FIXTURE
+models,page,高级模型,全局目录、编辑/筛选,config/save models,与服务目录同源,A3/A6,02-视觉设计/modelgate-v13.1-dark-models.png,PASS_FIXTURE
+routing,page,高级路由,规则编辑/预演,"config/save directory,route-preview",与模型池同源/冲突检查,A4/A6,02-视觉设计/modelgate-v13.1-dark-routing.png,PASS_FIXTURE
+clients,page,客户端密钥,创建/编辑/删除/权限,"keys,virtualModels",客户端实体、授权边界,A6,02-视觉设计/modelgate-v13.1-dark-clients.png,PASS_FIXTURE
+logs,page,请求日志,筛选/详情/导出,"logs,status",结构化 trace、分页、脱敏,A6,02-视觉设计/modelgate-v13.1-dark-logs.png,PASS_FIXTURE
+service-catalog,dialog,选择服务预设,搜索/筛选/打开模板,provider templates,通用目录,A3,03-验收证据/modelgate-v13.1-visual-audit.json#service-catalog,PASS_FIXTURE
+service-template,dialog,接入模板,预填/选择模型/授权,"config/save,keys,sync",真实授权及发现,A3,02-视觉设计/modelgate-v13.1-dark-dialog-service-template.png,PASS_FIXTURE
+service-custom,dialog,自定义服务,地址协议校验/添加,"config/save,keys",实例及安全校验,A3,03-验收证据/modelgate-v13.1-visual-audit.json#service-custom,PASS_FIXTURE
+service-edit,dialog,编辑服务,变更/影响预览/保存,config/save,稳定 ID 与重验,A3,03-验收证据/modelgate-v13.1-visual-audit.json#service-edit,PASS_FIXTURE
+service-delete,dialog,删除服务,影响预览/确认/取消,config/save,原子引用与凭据处理,A3/A4,02-视觉设计/modelgate-v13.1-dark-dialog-service-delete.png,PASS_FIXTURE
+account-add,dialog,添加连接,认证/优先级/确认,keys,多连接,A3,03-验收证据/modelgate-v13.1-visual-audit.json#account-add,PASS_FIXTURE
+account-edit,dialog,编辑连接,更新/暂停/确认,keys,独立连接配置,A3,02-视觉设计/modelgate-v13.1-dark-dialog-account-edit.png,PASS_FIXTURE
+model-add,dialog,手动添加模型,ID/能力/重复校验,config/save models,稳定 ID 与能力证据,A3,03-验收证据/modelgate-v13.1-visual-audit.json#model-add,PASS_FIXTURE
+pool-create,dialog,创建模型池,名称/候选/回退/确认,virtualModels,池资源,A4,02-视觉设计/modelgate-v13.1-dark-dialog-pool-create.png,PASS_FIXTURE
+pool-candidates,dialog,添加候选,搜索/批选/确认,virtualModels,成员权限与去重,A4,03-验收证据/modelgate-v13.1-visual-audit.json#pool-candidates,PASS_FIXTURE
+pool-bind,dialog,应用绑定,选择模式角色/预览,aggregation/switch,统一角色池绑定,A5,03-验收证据/modelgate-v13.1-visual-audit.json#pool-bind,PASS_FIXTURE
+generic-access,dialog,通用 API 接入,选池/模型/复制配置,"virtualModels,keys",明确授权与可用标识,A6,03-验收证据/modelgate-v13.1-visual-audit.json#generic-access,PASS_FIXTURE

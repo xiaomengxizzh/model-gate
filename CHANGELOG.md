@@ -2,6 +2,80 @@
 
 本项目所有显著变更记录于此。格式参考 Keep a Changelog；版本号随发布推进（`package.json` 已随 0.2.3 同步）。
 
+## [Unreleased] —— V13.1 A3–A6 资源、预算与多 Harness 闭环
+
+### Added / Changed
+
+- Codex 阶段状态机将同一阶段的重复事件视为幂等 no-op；同一响应内多个工具调用不再产生 `codex phase rejected tool_side_effect->tool_side_effect` 日志洪水，重放阻断语义不变。
+- 所有者授权本地生产切换：根 `/` 改为 302 到 `/ui-vnext/`，`/ui-next/` 保留为回滚入口；托盘面板同步指向新入口。
+- 新前端内部旧 `/ui-next/` 跳转已清除：应用接入、API/密钥、设置页改用当前路由；Linux 与 Windows 托盘源码均显式打开 `/ui-vnext/`，退役提示同步更新。
+- 按所有者 V13.1 样例逐页重构 `/ui-vnext`：采用样例 shell、侧栏、顶栏、面包屑、应用/服务卡片、池四 tab、用量趋势、稳定性策略、设置子导航与详情布局；保留真实 API、预览确认、凭据隔离和零上游预演，不复制 demo 数据或假 CRUD。新增独立 `#/mode`，修复 `pool-test` 与快速路由渲染竞态。
+- 服务与连接凭据弹窗改为“预览凭据变更→确认安全保存”，修复 V13 页面直写旧 `/api/keys` 导致的 428；Key 只保留在内存与 apply 请求。
+- 当前指纹重跑完整浏览器旅程、266 页面与 72 弹窗矩阵；AI 视觉联络表检查 100 个样本，未发现阻断性重叠或裁切（不冒充所有者人工签收）。
+- G11 扩展 `POST /api/route-preview`：保留 `{model}` 旧响应字段，新增角色/能力/场景/预算预演；复用真实 router、effectivePolicy、routing decision 与 RequestLedger，返回候选顺序、阻断原因、额度/重放/剩余预算，零上游且不回显正文或凭据。
+- 服务/连接/模型/池删除预览与确认接入有界在途登记；在途资源 422，流结束/关闭/错误释放，已发送请求保持固定配置代际。
+- 服务/连接/模型/池/应用引用使用稳定 ID， preview→confirm→现有 config transaction；支持服务启停、多连接独立 Key/优先级/并发/额度域、目录发现、删除影响与最后连接保护。
+- 虚拟模型在加载、投影、保存三处保留扩展字段；命名池支持优先级/权重/轮询、稳定 slug、Codex 目录发布与双向 desired 应用引用。
+- RequestLedger 接入真实转发链，统一首次发送/重试/回退/恢复/等待预算；429 真等待、共享额度域耗尽阻断、工具与未知提交防重放。
+- Codex route 父子可共同选择 model/pool，aggregated 可保留官方父并选择第三方子池；consent/state 绑定目标，目录能力按候选交集保守声明。
+- 新增统一用量、结构化日志、脱敏备份/导入恢复；用量累计跨真实进程重启保留。
+- G15 观测事件新增 scope-owned 有界持久 JSONL：0600/0700、单次追加 fsync、原子轮转、启动加载与 seq 延续；损坏/截断/明文引用行跳过计数，写盘失败不影响请求。`/api/logs/structured` 合并持久历史并支持过滤分页，实时事件端点与 SSE 仍只使用内存 ring。
+- Claude Code、OpenCode、DSH 独立配置适配器，仅显式 `MG_HARNESS_ROOT` 可写；xmxz 已核验官方路径与 ProviderProfile，但 owner config 完整 schema/加载器尚未实现，保持 unsupported。
+- `/ui-vnext` 补齐 19 页面深链、六项一级导航与 12 类弹窗；真实浏览器 266 页面 + 72 弹窗矩阵通过。
+- 新增 `scripts/e2e/ui-v13-quality.mjs`，以隔离网关和真实 Chrome 验证 V05/V06 大规模压力与无障碍；修复窄屏导航可读名称、重复 h1、窄屏横向溢出和控件边界对比度。
+- 服务预览/确认写入与目录发现接入异步 DNS 网络策略：全部答案私网复核、显式授权持久化、写入前重解析；原生发现请求固定到已验证地址，注入 fetch 披露残余 TOCTOU。
+- 修复 V04 四项 UI 阻断：忙碌弹窗拦截浏览器 Escape 关闭请求并保持焦点圈定；异步错误后聚焦弹窗内告警；路由预演提供“取消预演”并通过 AbortController 中止；跨路由的迟到完成不再重渲染当前页，普通重渲染保留焦点与选区。
+- 关闭 U02 非真实交互缺口：Codex 三模式草稿按模式隔离，可在六项一级窗口、浏览器前进/后退及刷新后恢复；本地仅持久化接入方式、allowlist 模型/池与固定 Luna 父模型，Key/token/consent/配置正文均拒入。配置代际变化时旧草稿默认隔离，须明确恢复或通过自定义弹窗放弃；localStorage 读写/删除失败可见且保留当前页编辑。可点击面包屑保留详情查询上下文，父级导航正确选中，主滚动位置按完整路由恢复。
+
+### Tests / 边界
+
+- G11 新增隔离 HTTP 回归 8/8：旧字段逐字兼容、池/角色/官方目标、五种场景、预算/额度阻断、未知参数 fail-closed 与零上游；登记于 `scripts/test/run.mjs`。
+- 安全审计修复：递归拒绝租户嵌套环境凭据；连接/策略预览仅存秘密掩码并在提交时恢复（含连接级 Header/代理与 provider/default `sessionHmacSecret`）；确认写在全局锁内执行 expectedVersion CAS；租户审计日志有界轮转；操作临时文件可安全恢复；native 预演目标按真实 router 解析。
+- `npm test`：183 suites / 1625 passed / 3 skipped；U02 草稿 193/193、真实 Chrome V05/V06 171/171、V04 错误矩阵 72/72、U08 多连接压力 45/45、真实 Orca/AT-SPI 39/39 通过；0 次推理。重型浏览器/读屏报告属于切换前指纹 `4ab8600e…`；当前树根入口由离线 HTTP 与生产 curl 验证，人工视觉签收仍待所有者。
+- 代理 CONNECT 测试改为等待实际 `CONNECT` 数据到达后再断言，消除 TCP 已连接但数据尚未到达的竞态；未降低超时、隧道关闭或 504 断言强度。
+- V13.1 样例布局真实 Chrome 冒烟 35/35：18 个路由、服务弹窗、真实 route-preview、设置备份页、360px 五页、零 JS/network error、零上游推理；证据 `browser/sample-smoke/report.json`，当前指纹 `a0df9a9f…`。生产与基线并排截图见 `browser/baseline-compare/compare-1440x900.png`。
+- G15（2026-11-25）：持久观测 10/10、兼容回归 8/8、全量 `npm test` 179 suites / 1600 passed / 3 skipped；`npm run check`、docs/metadata/product-contract 门禁通过。仅临时目录与回环 mock，无依赖下载、真实上游或生产变更。
+- V04（2026-11-25）：`PASS_FIXTURE`，真实 Chrome 错误矩阵 72/72；V05/V06 质量回归 171/171；`npm run check` 与服务/池/能力 HTTP 相关离线回归 21/21 通过；native dialog、JS error、推理与上游写入均为 0。
+- U08（2026-11-25）：`PASS_FIXTURE`，40 连接/8 provider 压力 45/45；修复共享额度域继续独立域、半开单飞与真实发送尝试记账。
+- 单实例多租户、持久 Operation/Preview/取消、DNS 固定、U04 在途删除保护、U08 调度与 V04 交互已完成隔离 fixture；仅 V07 原 35 条权威清单等外部输入与人工/真实签收未完成，不宣称整体发布就绪。
+- 2026-11-25 22:52:54 CST 经所有者授权完成本地生产切换：8787 重启到 Node v24.22.2（PID `179489`），根入口改为 `/ui-vnext/`，Codex 本地入口从失效的 `15721` 改为 `8787`；未 push/merge/commit/对外发布。回滚见 `docs/evidence/v13.1-r2/migration-rollback.md`。
+- 2026-11-26 修复通用“服务面板”托盘的第二入口：`~/.local/bin/service-panel.py` 的 8787 映射从 `/ui-next/` 改为 `/ui-vnext/`，所有者授权重启后 PID `664439`；ModelGate 专用托盘与网关不受影响。
+
+## [Unreleased] —— V13.1 A3 稳定服务资源写切片
+
+### Added / Changed
+
+- 新增 `mg-services/1`：稳定 `serviceId`、服务列表/详情、创建/编辑/删除影响预览与确认写入。预览绑定版本/requestId/操作/计划 hash，5 分钟一次性；删除引用返回 422。
+- 服务删除可选择同事务删除或保留加密凭据；`deleteProviderCredentials` 只在本次确实删除既有 provider 时允许，Key 与配置共用现有原子事务。
+- `/ui-vnext` 服务页接入真实添加/编辑/删除/凭据弹窗：Modal 焦点圈定、Esc/焦点恢复、忙碌防重复、错误就近反馈；Key 不进入 localStorage/URL/日志/导出。
+- 新服务地址仅 http(s)，本地/私网需显式确认，禁止 URL userinfo/fragment/云元数据地址。服务启停、模板授权、发现、多连接仍未实现。
+
+### Tests
+
+- 真实隔离 HTTP 8/8；真实 Chrome 20/20，服务弹窗 3 尺寸 × 2 主题 6/6，页面 84/84；整个旅程零上游。
+- `npm test`：151 suites / 1413 passed / 3 skipped。真实 DeepSeek/Luna/Codex GUI 仍未授权。
+
+### 回滚
+
+- 见 `docs/evidence/v13.1-r2/migration-rollback.md`。写操作仅在隔离实例验证；未修改生产配置、8787 或 Codex。
+
+## [Unreleased] —— V13.1 独立只读控制面（A0–A2）
+
+### Added / Changed
+
+- 新增 `GET|HEAD /api/capabilities`（`mg-capabilities/1`）：统一版本、配置代际、固定六项导航、能力阶段/证据、脱敏服务/模型/旧虚拟模型池与可靠性配置；不返回 Key、认证头、代理凭据或文件路径，不触发上游。
+- 新增独立 `/ui-vnext/` 原生 Web 预览：共享 V13.1 设计令牌、六项一级导航、真实状态/配置/用量投影、服务搜索、池候选、零上游 route-preview、主题/密度偏好及 loading/partial/error/offline 状态。根 `/` 仍指向 `/ui-next/`，旧 UI 与 8787 未改。
+- A0/A1 交付基线报告、外部源码研究、差距矩阵、资源 API 契约、ADR、125 个动作与 31 个窗口映射、MG-R 状态及迁移回滚文档。
+
+### Tests
+
+- 隔离真实 HTTP + 本地 fixture 4/4；真实 Chrome 用户旅程 14/14；6 页 × 7 尺寸 × 2 主题 84/84 无页面级横溢出；404/500/offline 与零上游预演通过。
+- `npm test`：149 suites / 1409 passed / 3 skipped；`npm run check`、`docs:check`、metadata、contract check 均通过。真实 DeepSeek/Luna/Codex GUI 未授权，保持 BLOCKED。
+
+### 回滚
+
+- 见 `docs/evidence/v13.1-r2/migration-rollback.md`。仅移除独立预览与只读端点即可，无配置迁移；不得自行重启生产或切根入口。
+
 ## [Unreleased] —— deepseek 子代理 unsent 断连不再作废整轮
 
 ### Added / Changed

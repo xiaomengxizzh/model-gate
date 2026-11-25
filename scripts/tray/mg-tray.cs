@@ -2,7 +2,7 @@
 // 编译：scripts\tray\build.cmd → 项目根 mg-tray.exe；双击运行，无控制台窗口。
 // 职责：拉起/守护 node src/index.js（崩溃 5s 退避自动拉活，连续快速失败熔断）、
 //       悬浮小窗显示状态与快捷操作、托盘常驻、开机自启（HKCU Run）、启动前清端口残留 node（同 start.bat 语义）。
-// 外观：赛璐璐 = gate-model 控制面板（admin.html dark）同源配色（--sink/--card/--card2/--edge/--cel-accent），
+// 外观：赛璐璐 = gate-model 控制面板（ui-vnext dark）同源配色（--sink/--card/--card2/--edge/--cel-accent），
 //       Form.Opacity 整体半透明（0.9）；两列布局，卡内左右排布（同字号）：
 //       状态词即标题（有流量点亮「传输中」）+ 两列数据卡 + 主次分组按钮（primary 随运行态切换）。
 //       中文萝莉体（用户级字体，回退雅黑），西文/数字 Cascadia Mono，小字号 + 大间距留呼吸感。
@@ -66,7 +66,7 @@ namespace MgTray
         }
     }
 
-    // 赛璐璐配色 = gate-model 自己的控制面板（admin.html [data-theme="dark"]）真值，严格同源
+    // 赛璐璐配色 = gate-model 自己的控制面板（ui-vnext [data-theme="dark"]）真值，严格同源
     static class Theme
     {
         public static readonly Color Sink = Color.FromArgb(0x10, 0x1A, 0x4E);      // --sink
@@ -833,7 +833,7 @@ namespace MgTray
 
         public void OpenPanel()
         {
-            try { Process.Start("http://127.0.0.1:" + _port + "/"); } catch { }
+            try { Process.Start("http://127.0.0.1:" + _port + "/ui-vnext/"); } catch { }
         }
 
         public void OpenLogs()

@@ -1,0 +1,3942 @@
+{
+  "layout": [
+    {
+      "page": "harness",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "dark",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "dark",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "dark",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "dark",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "设置",
+      "nav": true,
+      "theme": "dark",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "dark",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "dark",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "dark",
+      "case": "logs"
+    },
+    {
+      "page": "harness",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "dark",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "dark",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "dark",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "dark",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "设置",
+      "nav": true,
+      "theme": "dark",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "dark",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "dark",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "dark",
+      "case": "logs"
+    },
+    {
+      "page": "harness",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "dark",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "dark",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "dark",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "dark",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "设置",
+      "nav": true,
+      "theme": "dark",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "dark",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "dark",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "dark",
+      "case": "logs"
+    },
+    {
+      "page": "harness",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "dark",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "dark",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "dark",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "dark",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "设置",
+      "nav": true,
+      "theme": "dark",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "dark",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "dark",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "dark",
+      "case": "logs"
+    },
+    {
+      "page": "harness",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "dark",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "dark",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "dark",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "dark",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "设置",
+      "nav": true,
+      "theme": "dark",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "dark",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "dark",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "dark",
+      "case": "logs"
+    },
+    {
+      "page": "harness",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "dark",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "dark",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "dark",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "dark",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "设置",
+      "nav": true,
+      "theme": "dark",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "dark",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "dark",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "dark",
+      "case": "logs"
+    },
+    {
+      "page": "harness",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "dark",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "dark",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "dark",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "dark",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "dark",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "dark",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "dark",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "设置",
+      "nav": true,
+      "theme": "dark",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "dark",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "dark",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "dark",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "dark",
+      "case": "logs"
+    },
+    {
+      "page": "harness",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "light",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "light",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "light",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "light",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "设置",
+      "nav": true,
+      "theme": "light",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "light",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "light",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "light",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 1440,
+      "view": 1214,
+      "client": 1214,
+      "w": 1440,
+      "h": 900,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "light",
+      "case": "logs"
+    },
+    {
+      "page": "harness",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "light",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "light",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "light",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "light",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "设置",
+      "nav": true,
+      "theme": "light",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "light",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "light",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "light",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 1920,
+      "view": 1694,
+      "client": 1694,
+      "w": 1920,
+      "h": 1080,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "light",
+      "case": "logs"
+    },
+    {
+      "page": "harness",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "light",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "light",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "light",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "light",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "设置",
+      "nav": true,
+      "theme": "light",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "light",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "light",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "light",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 1024,
+      "view": 798,
+      "client": 798,
+      "w": 1024,
+      "h": 768,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "light",
+      "case": "logs"
+    },
+    {
+      "page": "harness",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "light",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "light",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "light",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "light",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "设置",
+      "nav": true,
+      "theme": "light",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "light",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "light",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "light",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 768,
+      "view": 688,
+      "client": 688,
+      "w": 768,
+      "h": 1024,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "light",
+      "case": "logs"
+    },
+    {
+      "page": "harness",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "light",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "light",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "light",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "light",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "设置",
+      "nav": true,
+      "theme": "light",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "light",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "light",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "light",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 360,
+      "view": 360,
+      "client": 360,
+      "w": 360,
+      "h": 740,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "light",
+      "case": "logs"
+    },
+    {
+      "page": "harness",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "light",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "light",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "light",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "light",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "设置",
+      "nav": true,
+      "theme": "light",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "light",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "light",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "light",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 1280,
+      "view": 1054,
+      "client": 1054,
+      "w": 1280,
+      "h": 500,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "light",
+      "case": "logs"
+    },
+    {
+      "page": "harness",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "应用接入",
+      "nav": true,
+      "theme": "light",
+      "case": "harness"
+    },
+    {
+      "page": "mode",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "Codex 接入配置",
+      "nav": true,
+      "theme": "light",
+      "case": "mode"
+    },
+    {
+      "page": "providers",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "providers"
+    },
+    {
+      "page": "providers",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "模型服务",
+      "nav": true,
+      "theme": "light",
+      "case": "directory"
+    },
+    {
+      "page": "serviceDetail",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "OpenCode Go",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceDetail"
+    },
+    {
+      "page": "accountDetail",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "默认连接",
+      "nav": true,
+      "theme": "light",
+      "case": "accountDetail"
+    },
+    {
+      "page": "serviceModels",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "可选模型",
+      "nav": true,
+      "theme": "light",
+      "case": "serviceModels"
+    },
+    {
+      "page": "pools",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "pools"
+    },
+    {
+      "page": "pools",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolStrategy"
+    },
+    {
+      "page": "pools",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolApps"
+    },
+    {
+      "page": "pools",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "模型池",
+      "nav": true,
+      "theme": "light",
+      "case": "poolTest"
+    },
+    {
+      "page": "usage",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "用量分析",
+      "nav": true,
+      "theme": "light",
+      "case": "usage"
+    },
+    {
+      "page": "reliability",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliability"
+    },
+    {
+      "page": "reliability",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "稳定性策略",
+      "nav": true,
+      "theme": "light",
+      "case": "reliabilityDetail"
+    },
+    {
+      "page": "settings",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "设置",
+      "nav": true,
+      "theme": "light",
+      "case": "settings"
+    },
+    {
+      "page": "models",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "高级模型目录",
+      "nav": true,
+      "theme": "light",
+      "case": "models"
+    },
+    {
+      "page": "routing",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "路由策略",
+      "nav": true,
+      "theme": "light",
+      "case": "routing"
+    },
+    {
+      "page": "clients",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "客户端与密钥",
+      "nav": true,
+      "theme": "light",
+      "case": "clients"
+    },
+    {
+      "page": "logs",
+      "doc": 2560,
+      "view": 2334,
+      "client": 2334,
+      "w": 2560,
+      "h": 1080,
+      "heading": "请求日志",
+      "nav": true,
+      "theme": "light",
+      "case": "logs"
+    }
+  ],
+  "tests": [
+    [
+      "服务目录弹窗、Esc、服务详情、面包屑",
+      true
+    ],
+    [
+      "模型池标签切换",
+      true
+    ],
+    [
+      "弹窗内反馈可见、关闭提示",
+      true
+    ],
+    [
+      "明暗切换",
+      true
+    ],
+    [
+      "窄窗口目录弹窗",
+      true
+    ]
+  ],
+  "errors": [],
+  "dialogs": [
+    {
+      "case": "service-catalog",
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "连接模型服务 · 选择预设"
+    },
+    {
+      "case": "service-template",
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "OpenRouter · 接入模板"
+    },
+    {
+      "case": "service-custom",
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "添加自定义服务"
+    },
+    {
+      "case": "service-edit",
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "编辑服务"
+    },
+    {
+      "case": "service-delete",
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "删除服务 · 自定义 API"
+    },
+    {
+      "case": "account-add",
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "添加连接"
+    },
+    {
+      "case": "account-edit",
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "编辑连接"
+    },
+    {
+      "case": "model-add",
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "手动添加模型"
+    },
+    {
+      "case": "pool-create",
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "新建模型池"
+    },
+    {
+      "case": "pool-candidates",
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "添加候选模型"
+    },
+    {
+      "case": "pool-bind",
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "将 日常通用池 用于 Codex"
+    },
+    {
+      "case": "generic-access",
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "其他应用 / API · 模型接入目标"
+    },
+    {
+      "case": "service-catalog",
+      "theme": "dark",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "连接模型服务 · 选择预设"
+    },
+    {
+      "case": "service-template",
+      "theme": "dark",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "OpenRouter · 接入模板"
+    },
+    {
+      "case": "service-custom",
+      "theme": "dark",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "添加自定义服务"
+    },
+    {
+      "case": "service-edit",
+      "theme": "dark",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "编辑服务"
+    },
+    {
+      "case": "service-delete",
+      "theme": "dark",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "删除服务 · 自定义 API"
+    },
+    {
+      "case": "account-add",
+      "theme": "dark",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "添加连接"
+    },
+    {
+      "case": "account-edit",
+      "theme": "dark",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "编辑连接"
+    },
+    {
+      "case": "model-add",
+      "theme": "dark",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "手动添加模型"
+    },
+    {
+      "case": "pool-create",
+      "theme": "dark",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "新建模型池"
+    },
+    {
+      "case": "pool-candidates",
+      "theme": "dark",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "添加候选模型"
+    },
+    {
+      "case": "pool-bind",
+      "theme": "dark",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "将 日常通用池 用于 Codex"
+    },
+    {
+      "case": "generic-access",
+      "theme": "dark",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "其他应用 / API · 模型接入目标"
+    },
+    {
+      "case": "service-catalog",
+      "theme": "dark",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "连接模型服务 · 选择预设"
+    },
+    {
+      "case": "service-template",
+      "theme": "dark",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "OpenRouter · 接入模板"
+    },
+    {
+      "case": "service-custom",
+      "theme": "dark",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "添加自定义服务"
+    },
+    {
+      "case": "service-edit",
+      "theme": "dark",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "编辑服务"
+    },
+    {
+      "case": "service-delete",
+      "theme": "dark",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "删除服务 · 自定义 API"
+    },
+    {
+      "case": "account-add",
+      "theme": "dark",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "添加连接"
+    },
+    {
+      "case": "account-edit",
+      "theme": "dark",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "编辑连接"
+    },
+    {
+      "case": "model-add",
+      "theme": "dark",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "手动添加模型"
+    },
+    {
+      "case": "pool-create",
+      "theme": "dark",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "新建模型池"
+    },
+    {
+      "case": "pool-candidates",
+      "theme": "dark",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "添加候选模型"
+    },
+    {
+      "case": "pool-bind",
+      "theme": "dark",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "将 日常通用池 用于 Codex"
+    },
+    {
+      "case": "generic-access",
+      "theme": "dark",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "其他应用 / API · 模型接入目标"
+    },
+    {
+      "case": "service-catalog",
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "连接模型服务 · 选择预设"
+    },
+    {
+      "case": "service-template",
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "OpenRouter · 接入模板"
+    },
+    {
+      "case": "service-custom",
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "添加自定义服务"
+    },
+    {
+      "case": "service-edit",
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "编辑服务"
+    },
+    {
+      "case": "service-delete",
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "删除服务 · 自定义 API"
+    },
+    {
+      "case": "account-add",
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "添加连接"
+    },
+    {
+      "case": "account-edit",
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "编辑连接"
+    },
+    {
+      "case": "model-add",
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "手动添加模型"
+    },
+    {
+      "case": "pool-create",
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "新建模型池"
+    },
+    {
+      "case": "pool-candidates",
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "添加候选模型"
+    },
+    {
+      "case": "pool-bind",
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "将 日常通用池 用于 Codex"
+    },
+    {
+      "case": "generic-access",
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "fits": true,
+      "title": "其他应用 / API · 模型接入目标"
+    },
+    {
+      "case": "service-catalog",
+      "theme": "light",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "连接模型服务 · 选择预设"
+    },
+    {
+      "case": "service-template",
+      "theme": "light",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "OpenRouter · 接入模板"
+    },
+    {
+      "case": "service-custom",
+      "theme": "light",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "添加自定义服务"
+    },
+    {
+      "case": "service-edit",
+      "theme": "light",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "编辑服务"
+    },
+    {
+      "case": "service-delete",
+      "theme": "light",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "删除服务 · 自定义 API"
+    },
+    {
+      "case": "account-add",
+      "theme": "light",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "添加连接"
+    },
+    {
+      "case": "account-edit",
+      "theme": "light",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "编辑连接"
+    },
+    {
+      "case": "model-add",
+      "theme": "light",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "手动添加模型"
+    },
+    {
+      "case": "pool-create",
+      "theme": "light",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "新建模型池"
+    },
+    {
+      "case": "pool-candidates",
+      "theme": "light",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "添加候选模型"
+    },
+    {
+      "case": "pool-bind",
+      "theme": "light",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "将 日常通用池 用于 Codex"
+    },
+    {
+      "case": "generic-access",
+      "theme": "light",
+      "size": [
+        360,
+        740
+      ],
+      "fits": true,
+      "title": "其他应用 / API · 模型接入目标"
+    },
+    {
+      "case": "service-catalog",
+      "theme": "light",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "连接模型服务 · 选择预设"
+    },
+    {
+      "case": "service-template",
+      "theme": "light",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "OpenRouter · 接入模板"
+    },
+    {
+      "case": "service-custom",
+      "theme": "light",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "添加自定义服务"
+    },
+    {
+      "case": "service-edit",
+      "theme": "light",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "编辑服务"
+    },
+    {
+      "case": "service-delete",
+      "theme": "light",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "删除服务 · 自定义 API"
+    },
+    {
+      "case": "account-add",
+      "theme": "light",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "添加连接"
+    },
+    {
+      "case": "account-edit",
+      "theme": "light",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "编辑连接"
+    },
+    {
+      "case": "model-add",
+      "theme": "light",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "手动添加模型"
+    },
+    {
+      "case": "pool-create",
+      "theme": "light",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "新建模型池"
+    },
+    {
+      "case": "pool-candidates",
+      "theme": "light",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "添加候选模型"
+    },
+    {
+      "case": "pool-bind",
+      "theme": "light",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "将 日常通用池 用于 Codex"
+    },
+    {
+      "case": "generic-access",
+      "theme": "light",
+      "size": [
+        1280,
+        500
+      ],
+      "fits": true,
+      "title": "其他应用 / API · 模型接入目标"
+    }
+  ],
+  "dialogErrors": []
+}

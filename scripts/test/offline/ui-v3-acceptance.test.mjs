@@ -252,7 +252,7 @@ test('UI-05: POST /api/keys 写虚构 Key 的状态回执与零回显', { timeou
   const add = await gw.post('/api/aggregation/providers', { id: 'opencodego', kind: 'opencode-go', baseUrl: 'http://127.0.0.1:1/v1' }, AUTH)
   assert.equal(add.status, 201)
 
-  const keyRes = await gw.post('/api/keys', { id: 'opencodego', key: KEY }, AUTH)
+  const keyRes = await gw.write('/api/keys', { id: 'opencodego', key: KEY }, AUTH)
   assert.equal(keyRes.status, 200)
   const keyRaw = await keyRes.text()
   assert.equal(keyRaw.includes(KEY), false, '/api/keys 响应不得回显 Key')
@@ -275,7 +275,7 @@ test('UI-05: POST /api/keys 写虚构 Key 的状态回执与零回显', { timeou
   assert.equal(Object.prototype.hasOwnProperty.call(cfg, '_keys'), false, '/api/config 不得返回 _keys')
 
   // 非白名单 Key 标识必须被拒绝（不能留孤儿键）
-  const orphan = await gw.post('/api/keys', { id: 'not-a-provider', key: KEY + '2' }, AUTH)
+  const orphan = await gw.write('/api/keys', { id: 'not-a-provider', key: KEY + '2' }, AUTH)
   assert.equal(orphan.status, 400)
 })
 
@@ -389,7 +389,7 @@ test('UI-13: /ui-next 深链可用；根路径 302 跳转；旧 /admin 410 退�
   // redirect:'manual' 才能看到 302 本身（fetch 默认自动跟随，会把跳转掩盖成 200）。
   const root = await fetch(gw.base + '/', { redirect: 'manual' })
   assert.equal(root.status, 302, '根路径必须跳到唯一控制台')
-  assert.equal(root.headers.get('location'), '/ui-next/')
+  assert.equal(root.headers.get('location'), '/ui-vnext/')
   for (const p of ['/admin', '/admin.html']) {
     const r = await gw.get(p)
     assert.equal(r.status, 410, p + ' 旧管理台必须明确退役（410）')

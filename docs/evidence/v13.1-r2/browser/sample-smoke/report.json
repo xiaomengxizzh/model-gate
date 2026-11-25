@@ -1,0 +1,346 @@
+{
+  "contract": "mg-ui-vnext-sample-smoke/1",
+  "startedAt": "2026-11-25T16:52:53.730Z",
+  "headSha": "48325bf0027e583108c66677c7dec15fd5007228",
+  "codeFingerprint": {
+    "algorithm": "sha256(path+NUL+bytes)",
+    "files": 176,
+    "sha256": "a0df9a9f91fed8620963ce5689d39a5d74e846ecec42b4af6e3d294eaa343123"
+  },
+  "boundary": "real Chrome + isolated HTTP gateway + local mock; no real upstream",
+  "checks": [
+    {
+      "id": "SHELL-01",
+      "ok": true,
+      "detail": "sample title and route title"
+    },
+    {
+      "id": "SHELL-02",
+      "ok": true,
+      "detail": "sample shell classes"
+    },
+    {
+      "id": "SHELL-03",
+      "ok": true,
+      "detail": "six primary navigation items"
+    },
+    {
+      "id": "SHELL-04",
+      "ok": true,
+      "detail": "production badge replaces preview badge"
+    },
+    {
+      "id": "SHELL-05",
+      "ok": true,
+      "detail": "no old frontend navigation action"
+    },
+    {
+      "id": "ROUTE-harness",
+      "ok": true,
+      "detail": "应用接入 · #/harness"
+    },
+    {
+      "id": "ROUTE-mode",
+      "ok": true,
+      "detail": "Codex 接入配置 · #/mode"
+    },
+    {
+      "id": "ROUTE-services",
+      "ok": true,
+      "detail": "模型服务 · #/services"
+    },
+    {
+      "id": "ROUTE-pools",
+      "ok": true,
+      "detail": "模型池 · #/pools"
+    },
+    {
+      "id": "ROUTE-usage",
+      "ok": true,
+      "detail": "用量分析 · #/usage"
+    },
+    {
+      "id": "ROUTE-reliability",
+      "ok": true,
+      "detail": "稳定性策略 · #/reliability"
+    },
+    {
+      "id": "ROUTE-settings",
+      "ok": true,
+      "detail": "设置 · #/settings"
+    },
+    {
+      "id": "ROUTE-service-detail",
+      "ok": true,
+      "detail": "mock · #/service-detail?service=mock"
+    },
+    {
+      "id": "ROUTE-account-detail",
+      "ok": true,
+      "detail": "连接详情 · #/account-detail?service=mock&connection="
+    },
+    {
+      "id": "ROUTE-service-models",
+      "ok": true,
+      "detail": "服务模型 · #/service-models?service=mock"
+    },
+    {
+      "id": "ROUTE-pool-strategy",
+      "ok": true,
+      "detail": "模型池 · #/pool-strategy"
+    },
+    {
+      "id": "ROUTE-pool-apps",
+      "ok": true,
+      "detail": "模型池 · #/pool-apps"
+    },
+    {
+      "id": "ROUTE-pool-test",
+      "ok": true,
+      "detail": "模型池 · #/pool-test"
+    },
+    {
+      "id": "ROUTE-reliability-detail",
+      "ok": true,
+      "detail": "稳定性详细 · #/reliability-detail"
+    },
+    {
+      "id": "ROUTE-models",
+      "ok": true,
+      "detail": "高级模型目录 · #/models"
+    },
+    {
+      "id": "ROUTE-routing",
+      "ok": true,
+      "detail": "手动路由 · #/routing"
+    },
+    {
+      "id": "ROUTE-clients",
+      "ok": true,
+      "detail": "API 与密钥 · #/clients"
+    },
+    {
+      "id": "ROUTE-logs",
+      "ok": true,
+      "detail": "请求日志 · #/logs"
+    },
+    {
+      "id": "POOL-01",
+      "ok": true,
+      "detail": "pool-test route opens simulation tab"
+    },
+    {
+      "id": "DIALOG-01",
+      "ok": true,
+      "detail": "sample service connection dialog opens"
+    },
+    {
+      "id": "ROUTE-PREVIEW-01",
+      "ok": true,
+      "detail": "real same-core route preview"
+    },
+    {
+      "id": "SETTINGS-01",
+      "ok": true,
+      "detail": "sample settings subnavigation and real backup panel"
+    },
+    {
+      "id": "MOBILE-harness",
+      "ok": true,
+      "detail": "应用接入 · 360/360"
+    },
+    {
+      "id": "MOBILE-mode",
+      "ok": true,
+      "detail": "Codex 接入配置 · 360/360"
+    },
+    {
+      "id": "MOBILE-services",
+      "ok": true,
+      "detail": "模型服务 · 360/360"
+    },
+    {
+      "id": "MOBILE-pools",
+      "ok": true,
+      "detail": "模型池 · 360/360"
+    },
+    {
+      "id": "MOBILE-settings",
+      "ok": true,
+      "detail": "设置 · 360/360"
+    },
+    {
+      "id": "ERRORS-01",
+      "ok": true,
+      "detail": "zero JavaScript errors"
+    },
+    {
+      "id": "ERRORS-02",
+      "ok": true,
+      "detail": "zero network errors"
+    },
+    {
+      "id": "UPSTREAM-01",
+      "ok": true,
+      "detail": "zero upstream inference calls"
+    }
+  ],
+  "routes": [
+    {
+      "id": "harness",
+      "ok": true,
+      "hash": "#/harness",
+      "h1": "应用接入",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "mode",
+      "ok": true,
+      "hash": "#/mode",
+      "h1": "Codex 接入配置",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "services",
+      "ok": true,
+      "hash": "#/services",
+      "h1": "模型服务",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "pools",
+      "ok": true,
+      "hash": "#/pools",
+      "h1": "模型池",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "usage",
+      "ok": true,
+      "hash": "#/usage",
+      "h1": "用量分析",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "reliability",
+      "ok": true,
+      "hash": "#/reliability",
+      "h1": "稳定性策略",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "settings",
+      "ok": true,
+      "hash": "#/settings",
+      "h1": "设置",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "service-detail",
+      "ok": true,
+      "hash": "#/service-detail?service=mock",
+      "h1": "mock",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "account-detail",
+      "ok": true,
+      "hash": "#/account-detail?service=mock&connection=",
+      "h1": "连接详情",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "service-models",
+      "ok": true,
+      "hash": "#/service-models?service=mock",
+      "h1": "服务模型",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "pool-strategy",
+      "ok": true,
+      "hash": "#/pool-strategy",
+      "h1": "模型池",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "pool-apps",
+      "ok": true,
+      "hash": "#/pool-apps",
+      "h1": "模型池",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "pool-test",
+      "ok": true,
+      "hash": "#/pool-test",
+      "h1": "模型池",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "reliability-detail",
+      "ok": true,
+      "hash": "#/reliability-detail",
+      "h1": "稳定性详细",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "models",
+      "ok": true,
+      "hash": "#/models",
+      "h1": "高级模型目录",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "routing",
+      "ok": true,
+      "hash": "#/routing",
+      "h1": "手动路由",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "clients",
+      "ok": true,
+      "hash": "#/clients",
+      "h1": "API 与密钥",
+      "doc": 1440,
+      "view": 1440
+    },
+    {
+      "id": "logs",
+      "ok": true,
+      "hash": "#/logs",
+      "h1": "请求日志",
+      "doc": 1440,
+      "view": 1440
+    }
+  ],
+  "screenshots": [
+    "docs/evidence/v13.1-r2/browser/sample-smoke/sample-service-dialog.png",
+    "docs/evidence/v13.1-r2/browser/sample-smoke/sample-harness-360.png"
+  ],
+  "errors": [],
+  "networkErrors": [],
+  "chrome": {
+    "binary": "/usr/bin/google-chrome",
+    "browser": "Chrome/153.0.8010.36"
+  },
+  "ok": true,
+  "finishedAt": "2026-11-25T16:52:55.300Z"
+}

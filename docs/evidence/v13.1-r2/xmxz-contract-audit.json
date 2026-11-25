@@ -1,0 +1,224 @@
+{
+  "schema": "modelgate.xmxz-contract-audit/1",
+  "auditedAt": "2026-11-25",
+  "scope": "Local installed software, configuration, source and docs only; no downloads, installs, network calls, real model calls or production changes.",
+  "verdict": {
+    "status": "BLOCKED_INCOMPLETE_CONFIG_CONTRACT",
+    "adapterImplemented": false,
+    "capability": "unsupported",
+    "reason": "Official config paths and ProviderProfile are verifiable, but the owner config wrapper, priceBooks mapping, loader and production config-writing entry point are not implemented or schema-defined. Generating a usable xmxz route would require guessing."
+  },
+  "provenance": {
+    "repository": "$HOME/ai/workplace/idproject/xmxz_harness",
+    "remote": "https://github.com/xiaomengxizzh/xmxz_harness.git",
+    "remotePublicStatus": "NOT_VERIFIED_OFFLINE",
+    "branch": "main",
+    "commit": "b05b6ce0e42e8bf0b891177ab86040c48eb45834",
+    "commitDate": "2026-11-25T03:54:30+08:00",
+    "trackedWorktreeClean": true,
+    "tags": [],
+    "packages": {
+      "xmxz-harness": "0.1.0; private=true; no bin field",
+      "@xmxz/product": "1.0.0-dev.0; private=true"
+    },
+    "runtimeLock": {
+      "node": "26.13.1",
+      "npm": "12.2.2",
+      "typescript": "6.0.3",
+      "schemaSha256": "f1bdee7a8141c1b5087511a49fe7db000a61f99fb3acb54810e871e94c4c504f"
+    },
+    "evidenceFiles": [
+      {
+        "path": "$HOME/ai/workplace/idproject/xmxz_harness/docs/product-v1/delivery.md",
+        "sha256": "7c8736f229a3a96f527750976c9f9a5296d5e63e23184c33b887d2547337a3bf",
+        "lines": "3, 68-71, 77-98"
+      },
+      {
+        "path": "$HOME/ai/workplace/idproject/xmxz_harness/docs/product-v1/READ-MODEL.md",
+        "lines": "26"
+      },
+      {
+        "path": "$HOME/ai/workplace/idproject/xmxz_harness/docs/product-v1/runtime.md",
+        "lines": "19-21, 57-83"
+      },
+      {
+        "path": "$HOME/ai/workplace/idproject/xmxz_harness/docs/product-v1/authority.json",
+        "lines": "11-15, 20-22"
+      },
+      {
+        "path": "$HOME/ai/workplace/idproject/xmxz_harness/product/contract/wire.schema.json",
+        "sha256": "f1bdee7a8141c1b5087511a49fe7db000a61f99fb3acb54810e871e94c4c504f",
+        "lines": "1803-2216"
+      },
+      {
+        "path": "$HOME/ai/workplace/idproject/xmxz_harness/product/src/provider/profile.ts",
+        "sha256": "08d87e8f1d9f46930d1bc62696de94cbabf79b39f7d666e2b159ada10af69c00",
+        "lines": "12, 25-79, 95-180"
+      },
+      {
+        "path": "$HOME/ai/workplace/idproject/xmxz_harness/product/src/daemon/config.ts",
+        "sha256": "dd654fd17a7e11a74b7e9fae9c82eb8adddc3978afd0081923f052749df3091b",
+        "lines": "32-46"
+      },
+      {
+        "path": "$HOME/ai/workplace/idproject/xmxz_harness/README.md",
+        "lines": "3, 9, 11-25, 40-42"
+      }
+    ]
+  },
+  "localInstallation": {
+    "xmxzExecutableOnPath": false,
+    "systemPackageRecord": "NO_MATCH_RETURNED_BY_DPKG_QUERY",
+    "globalNpmPackage": "NO_MATCH_RETURNED_BY_NPM_LS_G",
+    "flatpakOrSnapRecord": "NO_MATCH_RETURNED_BY_LOCAL_FLATPAK_OR_SNAP_QUERY",
+    "productConfigRootPresent": false,
+    "binaryStrings": "NOT_RUN_NO_XMXZ_PRODUCT_BINARY_FOUND",
+    "checkedPaths": [
+      "~/.xmxz",
+      "~/.config/xmxz",
+      "~/.config/xmxz/v1",
+      "~/.local/share/xmxz",
+      "~/.local/share/xmxz/v1",
+      "~/.local/bin",
+      "/usr/bin",
+      "/usr/local/bin"
+    ],
+    "note": "~/.config/xmxz-plan is project governance/signing data, not xmxz product configuration. Local container overlays contain only an identical wire schema and runner contract, not a product binary/config loader."
+  },
+  "verifiedContract": {
+    "format": "JSON; no TOML or YAML product config found",
+    "paths": {
+      "config": "$XDG_CONFIG_HOME/xmxz/v1/config.json (default ~/.config/xmxz/v1/config.json)",
+      "environmentFile": "$XDG_CONFIG_HOME/xmxz/v1/secrets.env; owner-managed mode 0600; loaded by systemd EnvironmentFile or existing process environment",
+      "dataRoot": "$XDG_DATA_HOME/xmxz/v1 (default ~/.local/share/xmxz/v1)",
+      "runtimeRoot": "$XDG_RUNTIME_DIR/xmxz",
+      "daemonEnvironment": "XMXZ_V1_DATA_DIR and XMXZ_V1_RUNTIME_DIR are required by product/src/daemon/config.ts"
+    },
+    "ownerConfig": {
+      "documentedTopLevelFields": [
+        "dataDirectory",
+        "runtimeDirectory",
+        "providerProfiles",
+        "priceBooks",
+        "verifiedJobProfiles",
+        "sandboxImages",
+        "artifactQuotaBytes"
+      ],
+      "jsonSchema": null,
+      "sample": null,
+      "loader": null,
+      "unknowns": [
+        "Whether providerProfiles and priceBooks are arrays or keyed objects",
+        "Required/optional fields, defaults and unknown-field policy",
+        "How priceDigest resolves to a priceBooks entry",
+        "How a profile is selected or enabled",
+        "Config validation, atomic write, conflict and rollback semantics"
+      ]
+    },
+    "providerProfile": {
+      "schema": "product/contract/wire.schema.json#/$defs/ProviderProfile",
+      "kinds": [
+        "OPENAI",
+        "ANTHROPIC",
+        "CHAT_COMPLETIONS"
+      ],
+      "requiredCommonFields": [
+        "id",
+        "kind",
+        "modelId",
+        "keyEnv",
+        "maxContextTokens",
+        "maxOutputTokens",
+        "maxEgress",
+        "priceDigest",
+        "connectMs",
+        "requestMs"
+      ],
+      "chatRequiredFields": [
+        "endpoint",
+        "systemRole",
+        "outputLimit",
+        "usageMode",
+        "reasoningReplay",
+        "structuredOutput",
+        "parallelToolCalls",
+        "probeDigest"
+      ],
+      "additionalProperties": false
+    },
+    "endpoints": {
+      "OPENAI": "fixed https://api.openai.com:443/v1/responses; keyEnv=OPENAI_API_KEY",
+      "ANTHROPIC": "fixed https://api.anthropic.com:443/v1/messages; keyEnv=ANTHROPIC_API_KEY",
+      "CHAT_COMPLETIONS_LOOPBACK": {
+        "endpoint": {"kind": "LOOPBACK_HTTP", "port": "1024-65535 except 47321"},
+        "resolvedUrl": "http://127.0.0.1:<port>/v1/chat/completions",
+        "keyEnv": "null or /^XMXZ_CHAT_API_KEY(?:_[A-Z0-9_]{1,32})?$/",
+        "usageMode": ["OPENAI_FINAL_CHUNK", "LOOPBACK_UNMETERED"]
+      },
+      "CHAT_COMPLETIONS_PUBLIC": {
+        "endpoint": {"kind": "PUBLIC_HTTPS", "host": "ASCII FQDN", "pathPrefix": ["/v1", "/api/v1", "/v1beta/openai"]},
+        "resolvedUrl": "https://<host>:443<pathPrefix>/chat/completions",
+        "keyEnv": "/^XMXZ_CHAT_API_KEY(?:_[A-Z0-9_]{1,32})?$/",
+        "usageMode": "OPENAI_FINAL_CHUNK"
+      }
+    },
+    "credentials": "Only environment-variable names are stored in providerProfiles. Secret values must not enter config JSON, CLI arguments, task containers, tests, state exports, logs or errors.",
+    "permissions": "Directories default 0700, data/config files 0600, umask 077; config and environment paths reject symlink/ownership escapes.",
+    "atomicWriteAndRollback": {
+      "configFile": "NOT_SPECIFIED by the verifiable xmxz contract",
+      "deploymentPointer": "delivery.md specifies atomic current-pointer rename, but this is release deployment, not provider config mutation",
+      "conclusion": "ModelGate's existing backup/atomic-write/rollback machinery cannot establish xmxz config compatibility without the missing owner-config schema and loader."
+    }
+  },
+  "implementationGaps": [
+    "README.md states the current CLI is an offline three-domain skeleton; package scripts expose only actions/run/status.",
+    "Local CLI --help prints only 'xmxz actions | run WORKFLOW --db DATABASE --id RUN_ID [--full] | status RUN_ID --db DATABASE [--full]'.",
+    "No product/src/cli or production xmxz serve implementation exists in the audited tree.",
+    "wire.schema.json has no OwnerConfig definition and no priceBooks container schema; ProviderProfile is the only config-like $defs entry.",
+    "git log --all -S'providerProfiles' and -S'XDG_CONFIG_HOME' find only the original documentation commit f1b1056, not a loader or writer.",
+    "A09 proves ProviderProfile/Chat transport behavior, not owner-config parsing or end-to-end profile activation."
+  ],
+  "historicalModelGateEvidence": [
+    "docs/evidence/v13.1-r2/a1-source-research.md:97 previously recorded xmxz as UNKNOWN; this audit supersedes that search result with a local source finding.",
+    "src/resources/harness-adapters.js and scripts/test/offline/v13-harness-adapters.test.mjs already fail closed with unsupported_harness/422.",
+    "docs/evidence/v13.1-r2/completion-audit.md and docs/contracts/v13.1/resource-api-v1.md retain xmxz as unsupported."
+  ],
+  "validation": {
+    "focused": {
+      "command": "node --test scripts/test/offline/v13-harness-adapters.test.mjs scripts/test/offline/v13-harness-http.test.mjs scripts/test/offline/v13-capabilities.test.mjs scripts/test/offline/v13-capabilities-http.test.mjs",
+      "result": "PASS: 21 tests, 0 failed, 0 skipped"
+    },
+    "syntaxAndUi": {
+      "command": "npm run check",
+      "result": "PASS; UI 19/19, UI vNext 18/18"
+    },
+    "fullOffline": {
+      "command": "npm test",
+      "result": "PASS: 177 suites, 1582 tests passed, 3 skipped, 0 failed, 165.4s"
+    },
+    "docs": {
+      "command": "npm run docs:check",
+      "result": "PASS: 150 files, 743 links"
+    },
+    "metadata": {
+      "command": "node scripts/check-metadata.mjs",
+      "result": "PASS: 39 checks"
+    },
+    "whitespace": {
+      "command": "git diff --check",
+      "result": "PASS"
+    }
+  },
+  "modelGateChanges": [
+    "Kept xmxz unsupported; no serializer, path guessing or write capability added.",
+    "Refined the API/capability reason to distinguish verified ProviderProfile evidence from the missing owner-config contract.",
+    "Strengthened existing harness registry/HTTP assertions; updated CHANGELOG and development plan.",
+    "No dependency, binary, package, browser, model, upstream, production service or user config was installed or modified."
+  ],
+  "unblockRequirements": [
+    "Provide the versioned OwnerConfig JSON schema or canonical config sample including providerProfiles and priceBooks container shapes.",
+    "Provide the matching production loader/validator and config activation semantics for the same xmxz release.",
+    "Define supported config write/rollback behavior and confirm environment-variable-only credential handling.",
+    "Then add a version-pinned xmxz adapter with new serialization, conflict, atomic-write and byte-rollback tests."
+  ]
+}

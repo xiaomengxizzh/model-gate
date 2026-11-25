@@ -13,7 +13,10 @@
 //
 // 本模块不联网、不读宿主凭据、不写用户真实 HOME。
 
-import { appendFile, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import {
+  lstat, mkdir, open, readFile, readdir, rename, writeFile,
+} from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
 
 export const TENANCY_MODES = Object.freeze({ SINGLE: 'single', MULTI: 'multi' })
@@ -32,6 +35,12 @@ const ENTRY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const CONTENT_FIELDS = Object.freeze(['body', 'messages', 'input', 'history', 'prompt', 'content', 'output'])
 const SECRET_FIELD_RE = /(token|secret|password|passwd|authorization|bearer|cookie|credential|api[_-]?key)/i
 const REDACTED = '[redacted]'
+const DEFAULT_LOG_MAX_BYTES = 1024 * 1024
+const DEFAULT_LOG_MAX_RECORDS = 5000
+const MAX_LOG_MAX_BYTES = 64 * 1024 * 1024
+const MAX_LOG_MAX_RECORDS = 100000
+const ENV_CREDENTIAL_FIELD_RE = /^api[_-]?key[_-]?env$/i
+const NOFOLLOW = constants.O_NOFOLLOW || 0
 
 export class TenancyError extends Error {
   constructor(code, message, options = {}) {
@@ -117,6 +126,34 @@ function assertEntryName(name) {
   return n
 }
 
+// Tenant credentials may only come from the scope's encrypted keys.local.json. Scan the
+// entire merged config (not just providers): connection arrays and future nested resources
+// must not be able to name a host process/user-registry variable. Values are never echoed.
+export function assertTenantCredentialRefs(config) {
+  const seen = new WeakSet()
+  let visited = 0
+  function visit(value, path, depth) {
+    if (value == null || typeof value !== 'object') return
+    if (depth > 32 || seen.has(value) || ++visited > 100000) {
+      throw deny('tenant_config_invalid', '租户配置必须是有界且无循环的对象')
+    }
+    seen.add(value)
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) visit(value[i], path + '[' + i + ']', depth + 1)
+    } else {
+      for (const [key, child] of Object.entries(value)) {
+        if (ENV_CREDENTIAL_FIELD_RE.test(key) && child != null && child !== '') {
+          throw deny('tenant_env_credential_forbidden', '租户配置禁止环境变量凭据引用：' + path + '.' + key)
+        }
+        visit(child, path + '.' + key, depth + 1)
+      }
+    }
+    seen.delete(value)
+  }
+  visit(config, 'config', 0)
+  return config
+}
+
 function redactValue(key, value) {
   // 计数类数值（例如 tokens）不是凭据；只有字符串/对象才按敏感字段名脱敏。
   if (typeof value === 'number' || typeof value === 'boolean') return value
@@ -140,6 +177,94 @@ export function sanitizeLogEntry(entry) {
   return out
 }
 
+function boundedLogLimit(value, fallback, max) {
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? Math.min(max, Math.max(1, Math.trunc(n))) : fallback
+}
+
+function logUnsafePath() {
+  return deny('scope_log_unsafe_path', '租户日志路径必须是私有普通文件/目录，不能是符号链接', { status: 500 })
+}
+
+async function assertPrivateDir(path, create) {
+  let st
+  try { st = await lstat(path) } catch (error) {
+    if (error && error.code === 'ENOENT' && create) {
+      await mkdir(path, { mode: 0o700 })
+      st = await lstat(path)
+    } else if (error && error.code === 'ENOENT') return false
+    else throw error
+  }
+  if (!st.isDirectory() || st.isSymbolicLink()) throw logUnsafePath()
+  let handle
+  try {
+    handle = await open(path, constants.O_RDONLY | (constants.O_DIRECTORY || 0) | NOFOLLOW)
+    const opened = await handle.stat()
+    if (!opened.isDirectory()) throw logUnsafePath()
+    await handle.chmod(0o700)
+  } finally { if (handle) await handle.close() }
+  return true
+}
+
+// Check every owned path component before creating the next one. A symlinked scope or
+// logs directory must be rejected before any append/rename can touch its outside target.
+async function ensureLogDir(base, path, create = true) {
+  const relative = path.slice(base.length)
+  let current = base
+  if (!await assertPrivateDir(current, create)) return false
+  for (const part of relative.split(sep).filter(Boolean)) {
+    current = join(current, part)
+    if (!await assertPrivateDir(current, create)) return false
+  }
+  return true
+}
+
+async function assertPrivateFile(path) {
+  let st
+  try { st = await lstat(path) } catch (error) {
+    if (error && error.code === 'ENOENT') return null
+    throw error
+  }
+  if (!st.isFile() || st.isSymbolicLink()) throw logUnsafePath()
+  let handle
+  try {
+    handle = await open(path, constants.O_RDONLY | NOFOLLOW)
+    const opened = await handle.stat()
+    if (!opened.isFile()) throw logUnsafePath()
+    await handle.chmod(0o600)
+    return opened
+  } finally { if (handle) await handle.close() }
+}
+
+async function readPrivateFile(path, maxBytes = MAX_LOG_MAX_BYTES) {
+  if (!await assertPrivateFile(path)) return ''
+  let handle
+  try {
+    handle = await open(path, constants.O_RDONLY | NOFOLLOW)
+    const st = await handle.stat()
+    if (!st.isFile()) throw logUnsafePath()
+    await handle.chmod(0o600)
+    if (st.size <= maxBytes) return await handle.readFile({ encoding: 'utf8' })
+    // Legacy files may predate rotation. Read only a bounded tail and discard a partial
+    // first line rather than loading an unbounded log into memory.
+    const start = st.size - maxBytes
+    const buffer = Buffer.alloc(maxBytes)
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes, start)
+    const text = buffer.subarray(0, bytesRead).toString('utf8')
+    const newline = text.indexOf('\n')
+    return newline < 0 ? '' : text.slice(newline + 1)
+  } finally { if (handle) await handle.close() }
+}
+
+async function syncDir(path) {
+  let handle
+  try {
+    handle = await open(path, constants.O_RDONLY | (constants.O_DIRECTORY || 0))
+    await handle.sync()
+  } catch { /* directory fsync is not available on every supported platform */ }
+  finally { if (handle) await handle.close() }
+}
+
 async function writeJsonPrivate(path, value) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
   const tmp = path + '.' + process.pid + '.' + Date.now() + '.tmp'
@@ -155,6 +280,12 @@ export function createScopeStore(root, options = {}) {
   const base = resolve(String(root == null ? '' : root))
   if (!base || base === sep) throw deny('scope_root_invalid', '作用域根目录无效', { status: 400 })
   const tenancy = options.tenancy || resolveTenancy(options.config)
+  const logMaxBytes = boundedLogLimit(options.logMaxBytes, DEFAULT_LOG_MAX_BYTES, MAX_LOG_MAX_BYTES)
+  const logMaxRecords = boundedLogLimit(options.logMaxRecords, DEFAULT_LOG_MAX_RECORDS, MAX_LOG_MAX_RECORDS)
+  // scope usage/log 的读改写必须串行；并发请求不能交叉轮转或互相覆盖。
+  let usageWriteChain = Promise.resolve()
+  const logWriteChains = new Map()
+  const logStates = new Map()
 
   function scopeDir(scope) {
     const id = scope && typeof scope === 'object' ? assertScopeId(scope.scopeId) : ''
@@ -168,6 +299,21 @@ export function createScopeStore(root, options = {}) {
   function entryPath(scope, kind, name) {
     if (!KIND_VALUES.includes(kind)) throw deny('scope_kind_invalid', '未知的作用域存储类别：' + String(kind), { status: 400 })
     return join(scopeDir(scope), kind, assertEntryName(name))
+  }
+
+  // 现有网关配置事务要求 config/keys 同目录、同代际提交。租户运行时从已验证的
+  // scopeDir 派生这组路径；keys/stats/videos/logs 仍全部位于该 scope 自己的根下。
+  function runtimePaths(scope) {
+    const root = scopeDir(scope)
+    const dir = join(root, SCOPE_KINDS.CONFIG)
+    return Object.freeze({
+      dir,
+      local: join(dir, 'gateway.local.json'),
+      keys: join(dir, 'keys.local.json'),
+      stats: join(root, SCOPE_KINDS.USAGE, 'stats.json'),
+      videos: join(root, SCOPE_KINDS.USAGE, 'videos.json'),
+      logs: join(root, SCOPE_KINDS.LOGS, 'gateway.log'),
+    })
   }
 
   async function ensure(scope) {
@@ -218,27 +364,90 @@ export function createScopeStore(root, options = {}) {
       })
     }
     async function recordUsage(delta = {}) {
-      const current = await usage()
-      const next = {
-        requests: current.requests + (Number(delta.requests) || 0),
-        tokens: current.tokens + (Number(delta.tokens) || 0),
-        errors: current.errors + (Number(delta.errors) || 0),
+      const run = usageWriteChain.then(async () => {
+        const current = await usage()
+        const next = {
+          requests: current.requests + (Number(delta.requests) || 0),
+          tokens: current.tokens + (Number(delta.tokens) || 0),
+          errors: current.errors + (Number(delta.errors) || 0),
+        }
+        await writeJsonPrivate(entryPath(scope, SCOPE_KINDS.USAGE, 'usage.json'), next)
+        return Object.freeze(next)
+      })
+      usageWriteChain = run.then(() => {}, () => {})
+      return run
+    }
+
+    function logPaths() {
+      const path = entryPath(scope, SCOPE_KINDS.LOGS, 'events.jsonl')
+      return { path, archive: path + '.1', dir: dirname(path) }
+    }
+
+    async function loadLogState(paths) {
+      const state = logStates.get(scopeId)
+      if (state) return state
+      const st = await assertPrivateFile(paths.path)
+      const text = await readPrivateFile(paths.path, logMaxBytes)
+      const next = { bytes: st ? st.size : 0, records: text.split('\n').filter(Boolean).length }
+      logStates.set(scopeId, next)
+      return next
+    }
+
+    async function appendLogLine(paths, text) {
+      const current = await assertPrivateFile(paths.path)
+      await assertPrivateFile(paths.archive)
+      const state = await loadLogState(paths)
+      const bytes = Buffer.byteLength(text)
+      const records = text.split('\n').filter(Boolean).length
+      if (bytes > logMaxBytes || records > logMaxRecords) {
+        throw deny('log_record_too_large', '单条租户日志超过保留上限', { status: 500 })
       }
-      await writeJsonPrivate(entryPath(scope, SCOPE_KINDS.USAGE, 'usage.json'), next)
-      return Object.freeze(next)
+      if (current && (state.bytes + bytes > logMaxBytes || state.records + records > logMaxRecords)) {
+        // rename is atomic and replaces the previous .1; there is never more than one
+        // rotated segment. Check the destination first so a symlink is rejected, not followed.
+        await rename(paths.path, paths.archive)
+        await syncDir(paths.dir)
+        state.bytes = 0
+        state.records = 0
+      }
+      let handle
+      try {
+        handle = await open(paths.path, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | NOFOLLOW, 0o600)
+        const st = await handle.stat()
+        if (!st.isFile()) throw logUnsafePath()
+        await handle.chmod(0o600)
+        await handle.writeFile(text, { encoding: 'utf8' })
+        await handle.sync()
+        state.bytes += bytes
+        state.records += records
+      } finally { if (handle) await handle.close() }
     }
 
     async function logLine(entry) {
       const line = Object.assign({ at: new Date().toISOString(), scopeId }, sanitizeLogEntry(entry))
-      const path = entryPath(scope, SCOPE_KINDS.LOGS, 'events.jsonl')
-      await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-      await appendFile(path, JSON.stringify(line) + '\n', { mode: 0o600 })
+      const text = JSON.stringify(line) + '\n'
+      const paths = logPaths()
+      const previous = logWriteChains.get(scopeId) || Promise.resolve()
+      const run = previous.catch(() => {}).then(async () => {
+        await ensureLogDir(base, paths.dir)
+        await appendLogLine(paths, text)
+      })
+      logWriteChains.set(scopeId, run.catch(() => {}))
+      await run
       return line
     }
+
     async function readLogs() {
-      let text = ''
-      try { text = await readFile(entryPath(scope, SCOPE_KINDS.LOGS, 'events.jsonl'), 'utf8') } catch { return [] }
-      return text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
+      const paths = logPaths()
+      const previous = logWriteChains.get(scopeId)
+      if (previous) await previous
+      if (!await ensureLogDir(base, paths.dir, false)) return []
+      const segments = []
+      for (const path of [paths.archive, paths.path]) {
+        const text = await readPrivateFile(path, logMaxBytes)
+        segments.push(...text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean))
+      }
+      return segments
     }
 
     // 对外描述：只有计数与文件名，没有凭据值、没有正文。
@@ -259,6 +468,11 @@ export function createScopeStore(root, options = {}) {
       scopeId,
       mode: scope.mode || tenancy.mode,
       dir,
+      runtimePaths: () => runtimePaths(scope),
+      flush: async () => {
+        await usageWriteChain
+        await logWriteChains.get(scopeId)
+      },
       ensure: () => ensure(scope),
       readConfig,
       writeConfig,

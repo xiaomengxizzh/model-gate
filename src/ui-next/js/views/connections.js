@@ -334,7 +334,8 @@ export async function runConnectFlow (deps = {}) {
     return finishConnect(result)
   } else {
     try {
-      const res = await post('/api/keys', buildKeyRequest(key))
+      const writeKey = typeof deps.writeKey === 'function' ? deps.writeKey : (body) => post('/api/keys', body)
+      const res = await writeKey(buildKeyRequest(key))
       if (res && res.ok === false) {
         throw Object.assign(new Error('key_save_rejected'), { code: res.code || 'key_save_rejected', data: res })
       }
@@ -767,7 +768,7 @@ function keyPanel (ctx, product) {
     field('apiKeyEnv（高级）', envInput, { help: '只填环境变量名，不要粘贴 Key。' }))
 
   const keyField = field('OpenCode Go API Key', input, {
-    help: '只会提交给本机 ModelGate（POST /api/keys）。不会回显、不写入浏览器存储、不进入页面地址或日志。',
+    help: '先提交本机 ModelGate 生成凭据预览，再经自定义确认对话框写入（POST /api/keys）。不会回显、不写入浏览器存储、不进入页面地址或日志。',
   })
   keyField.append(error)
 
@@ -835,6 +836,26 @@ function keyPanel (ctx, product) {
     try {
       result = await runConnectFlow({
         post: viewPost(ctx),
+        writeKey: async (keyBody) => {
+          const post = viewPost(ctx)
+          const requestId = 'connect-key-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)
+          const latestConfig = ctx && ctx.deps && typeof ctx.deps.post === 'function'
+            ? { configVersion: currentConfigVersion() }
+            : await request('/api/config')
+          const preview = await post('/api/config/write:preview', {
+            ...keyBody, action: 'keys.update', expectedVersion: latestConfig.configVersion, requestId,
+          })
+          const confirmKey = ctx && ctx.deps && typeof ctx.deps.confirmKey === 'function' ? ctx.deps.confirmKey : confirmDialog
+          const confirmed = await confirmKey({
+            title: '确认保存 OpenCode Go Key',
+            desc: '供应商已注册，凭据预览已持久化；确认后才保存 Key 并同步模型。',
+            message: '动作：设置新 Key；指纹：' + preview.summary.credentialFingerprint + '；基准版本：' + preview.expectedVersion +
+              '。预览编号 ' + preview.previewId + '。明文 Key 不会进入预览计划或操作回执。',
+            confirmLabel: '确认保存并继续', danger: true,
+          })
+          if (!confirmed) throw Object.assign(new Error('已取消 Key 保存'), { code: 'key_save_cancelled' })
+          return post('/api/keys', { ...keyBody, expectedVersion: preview.expectedVersion, requestId: preview.requestId, previewId: preview.previewId, confirmToken: preview.confirmToken })
+        },
         key: raw.trim(),
         configVersion: currentConfigVersion(),
         overrides: {

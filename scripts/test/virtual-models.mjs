@@ -52,10 +52,20 @@ const child = spawn(process.execPath, ['src/index.js'], {
 let ready = false
 for (let i = 0; i < 40 && !ready; i++) { try { ready = (await fetch(BASE + '/healthz')).ok } catch {} ; if (!ready) await sleep(250) }
 
-const j = async r => ({ code: r.status, ...(await r.json().catch(() => ({}))) })
+const j = async r => ({ ...(await r.json().catch(() => ({}))), code: r.status })
 const status = () => fetch(BASE + '/api/status', { headers: ADMIN }).then(j)
-const save = (body) => fetch(BASE + '/api/config/save', { method: 'POST', headers: ADMIN, body: JSON.stringify(body) }).then(j)
-const saveKey = (body) => fetch(BASE + '/api/keys', { method: 'POST', headers: ADMIN, body: JSON.stringify(body) }).then(j)
+let writeSeq = 0
+const confirmedWrite = async (path, body) => {
+  const action = path === '/api/keys' ? 'keys.update' : 'config.save'
+  const current = await status()
+  const requestId = 'vm-write-' + (++writeSeq)
+  const expectedVersion = Number.isFinite(Number(body.expectedVersion ?? body.version)) ? Number(body.expectedVersion ?? body.version) : current.configVersion
+  const preview = await fetch(BASE + '/api/config/write:preview', { method: 'POST', headers: ADMIN, body: JSON.stringify({ ...body, action, expectedVersion, requestId }) }).then(j)
+  if (preview.code !== 200) return preview
+  return fetch(BASE + path, { method: 'POST', headers: ADMIN, body: JSON.stringify({ ...body, expectedVersion, requestId, previewId: preview.previewId, confirmToken: preview.confirmToken }) }).then(j)
+}
+const save = (body) => confirmedWrite('/api/config/save', body)
+const saveKey = (body) => confirmedWrite('/api/keys', body)
 const chat = async (model, key, extra) => { const r = await fetch(BASE + '/v1/chat/completions', { method: 'POST', headers: { 'Authorization': 'Bearer ' + (key === undefined ? 'testkey123' : key), 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 5, ...(extra || {}) }) }); const d = await r.json().catch(() => ({})); if (r.status >= 500) console.log('  [502 body]', JSON.stringify(d).slice(0, 200)); return { code: r.status, ...d } }
 const snap = (s) => ({ providers: Object.fromEntries(s.providers.map(p => [p.id, { baseUrl: p.baseUrl, apiKeyEnv: p.apiKeyEnv || '', pathPrefix: p.pathPrefix || '', extraHeaders: {}, api: p.api || 'openai' }])), models: Object.fromEntries(s.models.map(m => [m.name, { provider: m.provider, alias: [], fallbacks: [], maxConcurrent: 0, qps: 0, reasoning: '', effortOptions: m.effortOptions || [], dailyQuota: 0, quota: 0, maxContext: 0 }])), defaults: s.defaults, virtualModels: (s.virtualModels || []).map(v => ({ name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps, expiresAt: v.expiresAt || '', note: v.note || '' })) })
 
@@ -71,7 +81,7 @@ if (!ready) {
   check('status 暴露 configVersion', typeof s.configVersion === 'number')
   let cur = s.configVersion
   let r = await save({ ...snap(s) })
-  check('缺 version 宽容放行且递增', r.code === 200 && r.status.configVersion === cur + 1)
+  check('预览确认后按 expectedVersion 递增', r.code === 200 && r.status.configVersion === cur + 1)
   cur = r.status.configVersion
   r = await save({ ...snap(await status()), version: cur - 1 })
   check('过期 version 409', r.code === 409 && r.currentVersion === cur)

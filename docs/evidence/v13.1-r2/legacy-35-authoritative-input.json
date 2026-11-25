@@ -1,0 +1,339 @@
+{
+  "schema": "modelgate-legacy-35/1",
+  "status": "TEMPLATE_NOT_EVIDENCE",
+  "notice": "Fill every field from the authoritative historical source. This template is intentionally invalid and cannot pass verification.",
+  "source": {
+    "origin": "",
+    "sha256": ""
+  },
+  "originalCommand": "",
+  "groups": [
+    {
+      "id": "",
+      "name": "",
+      "assertionIds": []
+    },
+    {
+      "id": "",
+      "name": "",
+      "assertionIds": []
+    }
+  ],
+  "assertions": [
+    {
+      "id": "L35-01",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-02",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-03",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-04",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-05",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-06",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-07",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-08",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-09",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-10",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-11",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-12",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-13",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-14",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-15",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-16",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-17",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-18",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-19",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-20",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-21",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-22",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-23",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-24",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-25",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-26",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-27",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-28",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-29",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-30",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-31",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-32",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-33",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-34",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    },
+    {
+      "id": "L35-35",
+      "name": "",
+      "body": "",
+      "mapping": {
+        "file": "",
+        "testName": ""
+      }
+    }
+  ]
+}

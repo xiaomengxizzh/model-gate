@@ -151,6 +151,32 @@ test('tool_call 后断流 → stop_with_error，不换上游（p2 命中 0）', 
   assert.ok(!/sk-[A-Za-z0-9]/.test(log), '日志不得含凭据')
 })
 
+test('同一响应内多个工具调用重复进入副作用阶段应幂等且不记录阶段拒绝', { timeout: 30000 }, async (t) => {
+  const toolCall = (id, args) => sse({ choices: [{ delta: { tool_calls: [{ index: 0, id, type: 'function', function: { name: 'shell', arguments: args } }] } }] })
+  const primary = await startScriptedUpstream(async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+    res.write(toolCall('call_1', '{"cmd":"pwd"}'))
+    await wait(20)
+    res.write(toolCall('call_2', '{"cmd":"ls"}'))
+    await wait(20)
+    res.write(sse({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }))
+    res.write('data: [DONE]\n\n')
+    res.end()
+  })
+  t.after(async () => { await primary.stop() })
+  const gw = await startGw(t, 'mg-fb-tool-chunks', {
+    defaults: baseDefaults(),
+    providers: { p1: { baseUrl: primary.base } },
+    models: { 'mg-fb-tool-chunks': { provider: 'p1', codex: { capabilities: { shellType: 'disabled' } } } },
+  })
+  const res = await postChat(gw, chatBody('mg-fb-tool-chunks', { stream: true, tools: [{ type: 'function', function: { name: 'shell' } }] }))
+  const text = await res.text()
+  assert.equal(res.status, 200, '工具调用流应正常完成：' + text.slice(0, 300))
+  assert.equal(primary.hits.length, 1)
+  const log = await gwLog(gw)
+  assert.doesNotMatch(log, /codex phase rejected/, '同一副作用阶段的重复分片不是非法迁移')
+})
+
 // ============================================================================
 // 5. 已交付内容后断流 → stop（不得拼接另一模型输出）
 // ============================================================================

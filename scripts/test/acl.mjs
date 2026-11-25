@@ -8,10 +8,10 @@ const fx = await startGateway({
   config: { providers: { 'deepseek-official': { baseUrl: up.base, apiKeyEnv: '', api: 'openai', pathPrefix: '', extraHeaders: {} } }, models: {} },
 })
 try {
-  const r1 = await fx.post('/api/keys', { id: 'deepseek-official', key: 'sk-acl-check' }, fx.admin)
+  const r1 = await fx.write('/api/keys', { id: 'deepseek-official', key: 'sk-acl-check' }, fx.admin)
   await new Promise(r => setTimeout(r, 90))
   const on = ((await fx.status()).providers || []).find(p => p.id === 'deepseek-official')?.hasKey
-  const r2 = await fx.post('/api/keys', { id: 'deepseek-official', key: '' }, fx.admin)
+  const r2 = await fx.write('/api/keys', { id: 'deepseek-official', key: '' }, fx.admin)
   await new Promise(r => setTimeout(r, 90))
   const off = ((await fx.status()).providers || []).find(p => p.id === 'deepseek-official')?.hasKey
   check('key 写入(ACL 加固下)仍正常', r1.status === 200, { status: r1.status })

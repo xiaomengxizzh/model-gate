@@ -10,6 +10,8 @@ import { classify429, parseRetryAfterMs, retryWaitCap, retryAfterHeader, isToolB
 import { createDeadline, deadlineError, abortPromise, DEADLINE_TIMEOUT, DEADLINE_CANCELLED } from './deadline.js'
 import { STAGES, OUTCOMES, createAttempt, createExecutionContext, latestAttempt, retrySafetyOf, summarizeAttempt } from './attempt-state.js'
 import { newHeaders as opencodeGoHeaders, isGoBinding } from './providers/opencode-go.js'
+import { validateEndpointNetwork, validateProxyNetwork, pinnedLookup } from './resources/network-policy.js'
+import { registerProviderInFlight, releaseProviderInFlight } from './resources/in-flight.js'
 
 // 上游连接复用（keep-alive）：减少每次 TLS/TCP 握手，改善连接体验与延迟
 const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 64 })
@@ -49,25 +51,52 @@ export function protocolRequest(api, openaiBody) {
 // ---------- 上游 HTTP 代理（CONNECT 隧道，零第三方依赖） ----------
 // provider.proxy 形如 http://user:pass@host:port。仅用于非回环上游（本地 3050/9877 等自动直连）。
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '0.0.0.0'])
-function normalizeProxy(proxy) {
-  if (proxy && typeof proxy === 'object') return { host: proxy.host, port: Number(proxy.port) || 7890, auth: proxy.auth || null }
-  if (typeof proxy === 'string' && proxy) {
-    try {
-      const u = new URL(proxy)
-      if (!u.hostname) return null
-      return { host: u.hostname, port: Number(u.port) || 7890, auth: (u.username ? 'Basic ' + Buffer.from(decodeURIComponent(u.username) + ':' + decodeURIComponent(u.password || '')).toString('base64') : null) }
-    } catch { return null }
-  }
-  return null
+const DEFAULT_NETWORK_TIMEOUT_MS = 5000
+
+function bareHost(hostname) {
+  return String(hostname || '').replace(/^\[|\]$/g, '')
 }
-// 经代理打开一条到目标:端口的 TLS 隧道（HTTP CONNECT）。
-// MG-002：CONNECT 阶段此前无任何超时，代理接受 TCP 但不应答 CONNECT 会永久挂起，
-// 连请求级 deadline 都兜不住（预算在 request 生命周期之外）。这里接受 signal + 墙钟超时。
-function connectViaProxy(targetHost, targetPort, p, opts = {}) {
+
+function connectAuthority(address) {
+  return address.includes(':') ? `[${address}]` : address
+}
+
+function privateNetworkAllowed(provider) {
+  if (!provider) return false
+  if (Object.hasOwn(provider, 'allowPrivateNetwork')) return provider.allowPrivateNetwork === true
+  if (provider._def && Object.hasOwn(provider._def, 'allowPrivateNetwork')) return provider._def.allowPrivateNetwork === true
+  // 旧单用户配置没有该字段，保留既有本地上游能力；新资源与多租户默认严格拒绝。
+  return !provider._tenancyScope
+}
+
+function ctlSignal(ctl) {
+  return (ctl && (ctl.signal || (ctl.budget && ctl.budget.signal) || (ctl.deadline && ctl.deadline.signal))) || null
+}
+
+function networkError(result, ctl) {
+  if (result && result.aborted) {
+    const budget = ctl && (ctl.budget || ctl.deadline)
+    return abortedError((budget && budget.reason) || 'request_timeout', result.error || 'upstream DNS validation aborted')
+  }
+  const error = new Error((result && result.error) || 'upstream network validation failed')
+  error.code = (result && result.code) || 'network_policy_denied'
+  error.status = 502
+  error.networkPolicy = true
+  return error
+}
+// 经代理打开一条到已验证 IP:端口的 TLS 隧道。目标 Host/SNI 仍是原主机名，
+// 但代理看到的 CONNECT 目标固定为本次校验地址，代理侧 DNS 重绑定不能改道。
+function connectViaProxy(targetHost, targetPort, targetAddress, p, opts = {}) {
   return new Promise((resolve, reject) => {
     const signal = opts.signal || null
     const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : 0
-    const raw = net.connect(p.port, p.host)
+    if (signal && signal.aborted) { reject(abortedError('request_timeout', 'proxy CONNECT aborted')); return }
+    if (!targetAddress || typeof opts.lookup !== 'function') {
+      reject(Object.assign(new Error('proxy connection is not DNS-pinned'), { code: 'ENOTFOUND' }))
+      return
+    }
+    const raw = net.connect({ host: p.host, port: p.port, lookup: opts.lookup })
+    const authority = connectAuthority(targetAddress) + ':' + targetPort
     let settled = false
     let timer = null
     const onAbort = () => fail(abortedError((opts.budget && opts.budget.reason) || 'request_timeout', 'proxy CONNECT aborted'))
@@ -83,7 +112,7 @@ function connectViaProxy(targetHost, targetPort, p, opts = {}) {
     if (timeoutMs) timer = setTimeout(() => fail(Object.assign(new Error('proxy CONNECT timeout (' + timeoutMs + 'ms)'), { code: 'ETIMEDOUT', status: 504 })), timeoutMs)
     raw.on('error', (e) => fail(new Error('proxy error: ' + (e && e.message))))
     raw.once('connect', () => {
-      let r = 'CONNECT ' + targetHost + ':' + targetPort + ' HTTP/1.1\r\nHost: ' + targetHost + ':' + targetPort + '\r\n'
+      let r = 'CONNECT ' + authority + ' HTTP/1.1\r\nHost: ' + authority + '\r\n'
       if (p.auth) r += 'Proxy-Authorization: ' + p.auth + '\r\n'
       r += '\r\n'
       raw.write(r)
@@ -97,16 +126,15 @@ function connectViaProxy(targetHost, targetPort, p, opts = {}) {
       const line = buf.slice(0, idx).toString('utf8').split('\r\n')[0]
       const code = parseInt(line.split(' ')[1] || '', 10)
       if (code !== 200) { fail(new Error('proxy CONNECT failed: ' + line)); return }
-      const tlsSock = tls.connect({ socket: raw, servername: targetHost })
+      const tlsSock = tls.connect({ socket: raw, servername: net.isIP(targetHost) ? undefined : targetHost })
       tlsSock.once('secureConnect', () => { if (settled) { try { tlsSock.destroy() } catch { } ; return } settled = true; cleanup(); resolve(tlsSock) })
       tlsSock.on('error', (e) => fail(e))
     })
   })
 }
 const PROXY_CACHE = new Map()
-function proxyAgentFor(proxy) {
-  const p = normalizeProxy(proxy); if (!p) return null
-  const key = JSON.stringify(p)
+function proxyAgentFor(p) {
+  const key = JSON.stringify({ host: p.host, port: p.port, auth: p.auth })
   let e = PROXY_CACHE.get(key); if (e) return e
   const make = (isHttps) => {
     const Base = isHttps ? https.Agent : http.Agent
@@ -114,10 +142,12 @@ function proxyAgentFor(proxy) {
     if (isHttps) ag.createConnection = (options, cb) => {
       // 每请求的取消/预算上下文通过自定义请求选项传入（Node 会把 reqOpts 透传给 createConnection）。
       const ctl = options._mgCtl || {}
-      const remaining = ctl.budget ? ctl.budget.remaining() : Infinity
+      const remaining = ctl.budget ? ctl.budget.remaining() : (ctl.deadline ? ctl.deadline.remaining() : Infinity)
       const capMs = Number(ctl.connectMs) > 0 ? Number(ctl.connectMs) : 0
       const timeoutMs = Number.isFinite(remaining) ? (capMs > 0 ? Math.min(capMs, remaining) : remaining) : capMs
-      connectViaProxy(options.host, Number(options.port) || 443, p, { signal: ctl.signal, timeoutMs, budget: ctl.budget }).then((s) => cb(null, s), (er) => cb(er))
+      connectViaProxy(options.host, Number(options.port) || 443, ctl.targetAddress, p, {
+        signal: ctl.signal, timeoutMs, budget: ctl.budget || ctl.deadline, lookup: ctl.proxyNetwork && ctl.proxyNetwork.lookup,
+      }).then((s) => cb(null, s), (er) => cb(er))
     }
     return ag
   }
@@ -125,18 +155,69 @@ function proxyAgentFor(proxy) {
   PROXY_CACHE.set(key, e)
   return e
 }
-// 统一构建请求上下文：按是否回环 + 是否配置代理，决定直连还是走代理。
-//  - https 目标经代理：CONNECT 隧道（origin-form 路径 + 保持目标 host 供 SNI/Host）
-//  - http 目标经代理：absolute-form（path 为完整 URL + 注入 Host 头）
-function ctxFor(provider, url, method, headers, ctl) {
+// 每次真实发送前解析全部 A/AAAA，校验目标与代理，再把 socket lookup 固定到
+// 本次答案。HTTP(S) 默认不跟随重定向；调用方若显式处理重定向，必须重新进入本函数。
+async function ctxFor(provider, url, method, headers, ctl = {}) {
+  const signal = ctlSignal(ctl)
+  if (signal && signal.aborted) throw abortedError('request_timeout', 'upstream request aborted before DNS validation')
   const isHttps = url.protocol === 'https:'
   const mod = isHttps ? https : http
-  const proxy = (provider && provider.proxy && !LOOPBACK.has(url.hostname)) ? proxyAgentFor(provider.proxy) : null
-  if (proxy) {
-    if (isHttps) return { mod, reqOpts: { method, hostname: url.hostname, port: url.port || 443, path: url.pathname + url.search, headers, agent: proxy.https, _mgCtl: ctl } }
-    return { mod, reqOpts: { method, hostname: proxy.host, port: proxy.port, path: url.href, headers: Object.assign({}, headers, { host: url.host }), agent: proxy.http } }
+  const hostname = bareHost(url.hostname)
+  const budget = ctl.budget || ctl.deadline || null
+  const remaining = budget && typeof budget.remaining === 'function' ? budget.remaining() : Infinity
+  const phaseMs = Number(ctl.connectMs) > 0 ? Number(ctl.connectMs) : DEFAULT_NETWORK_TIMEOUT_MS
+  const timeoutMs = Math.max(1, Math.min(DEFAULT_NETWORK_TIMEOUT_MS, phaseMs, Number.isFinite(remaining) ? remaining : Infinity))
+  const networkStarted = Date.now()
+  const networkOptions = {
+    allowPrivateNetwork: privateNetworkAllowed(provider),
+    lookup: ctl.lookup,
+    timeoutMs,
+    signal,
   }
-  return { mod, reqOpts: { method, hostname: url.hostname, port: url.port || (isHttps ? 443 : 80), path: url.pathname + url.search, headers, agent: isHttps ? HTTPS_AGENT : HTTP_AGENT } }
+  const useProxy = provider && provider.proxy && provider.proxy !== 'direct' && !LOOPBACK.has(hostname)
+  const [network, proxyNetwork] = await Promise.all([
+    validateEndpointNetwork(url.href, networkOptions),
+    useProxy ? validateProxyNetwork(provider.proxy, networkOptions) : null,
+  ])
+  if (signal && signal.aborted) throw abortedError('request_timeout', 'upstream request aborted during DNS validation')
+  if (network.error) throw networkError(network, ctl)
+  if (proxyNetwork && proxyNetwork.error) throw networkError(proxyNetwork, ctl)
+  const networkElapsedMs = Date.now() - networkStarted
+  const targetAddress = network.addresses[0].address
+  const targetLookup = pinnedLookup(network)
+  if (proxyNetwork) {
+    const proxy = proxyAgentFor(proxyNetwork)
+    if (isHttps) {
+      return {
+        mod,
+        networkElapsedMs,
+        reqOpts: {
+          method, hostname, servername: net.isIP(hostname) ? undefined : hostname, port: url.port || 443, path: url.pathname + url.search,
+          headers, agent: proxy.https,
+          _mgCtl: Object.assign({}, ctl, { targetAddress, proxyNetwork }),
+        },
+      }
+    }
+    // absolute-form 的 authority 固定到已验证 IP；原始 Host 仍发给代理/上游。
+    const path = url.protocol + '//' + connectAuthority(targetAddress) + (url.port ? ':' + url.port : '') + url.pathname + url.search
+    return {
+      mod,
+      networkElapsedMs,
+      reqOpts: {
+        method, hostname: proxyNetwork.host, port: proxyNetwork.port, path,
+        headers: Object.assign({}, headers, { host: url.host }, proxyNetwork.auth ? { 'proxy-authorization': proxyNetwork.auth } : {}), agent: proxy.http,
+        lookup: proxyNetwork.lookup,
+      },
+    }
+  }
+  return {
+    mod,
+    networkElapsedMs,
+    reqOpts: {
+      method, hostname, servername: isHttps && !net.isIP(hostname) ? hostname : undefined, port: url.port || (isHttps ? 443 : 80), path: url.pathname + url.search,
+      headers, agent: isHttps ? HTTPS_AGENT : HTTP_AGENT, lookup: targetLookup,
+    },
+  }
 }
 
 const RETRYABLE_HTTP = new Set([408, 409, 425, 429, 500, 502, 503, 504])
@@ -180,16 +261,20 @@ async function readSmall(stream, signal, limit = MAX_ERR_BODY_BYTES) {
 
 // 单次转发（全双工，流式）。resolve: 收到上游响应头即返回 stream
 // ctl = { signal, budget, connectMs }：整体预算中止时立即销毁在途请求。
-function single(provider, url, method, headers, bodyBuf, timeout, ctl = {}) {
+async function single(provider, url, method, headers, bodyBuf, timeout, ctl = {}) {
   const signal = ctl.signal || null
   const budget = ctl.budget || null
+  const { mod, reqOpts, networkElapsedMs } = await ctxFor(provider, url, method, headers, Object.assign({}, ctl, { connectMs: timeout.firstByteMs }))
+  if (signal && signal.aborted) throw abortedError(reasonOf(budget), 'upstream request aborted during DNS validation')
+  if (budget && budget.expired()) throw abortedError(reasonOf(budget), 'upstream budget expired during DNS validation')
   return new Promise((resolve, reject) => {
     const remaining = budget ? budget.remaining() : Infinity
     // 剩余预算已耗尽：不再建连
     if (budget && budget.expired()) { reject(abortedError((budget && budget.reason) || 'request_timeout')); return }
-    const effFirstByte = Number.isFinite(remaining) ? Math.min(timeout.firstByteMs, Math.max(0, remaining)) : timeout.firstByteMs
+    const firstByteBudget = Math.max(1, timeout.firstByteMs - networkElapsedMs)
+    const effFirstByte = Number.isFinite(remaining) ? Math.min(firstByteBudget, Math.max(1, remaining)) : firstByteBudget
     const effIdle = Number.isFinite(remaining) ? Math.min(timeout.idleMs || 60000, Math.max(1, remaining)) : (timeout.idleMs || 60000)
-    const { mod, reqOpts } = ctxFor(provider, url, method, headers, Object.assign({}, ctl, { connectMs: effFirstByte }))
+    if (reqOpts._mgCtl) reqOpts._mgCtl.connectMs = effFirstByte
     let settled = false
     let firstByteTimer = null
     const cleanup = () => {
@@ -265,6 +350,18 @@ export function upstreamUrl(provider, path) {
  * 把最后一次状态/归因/Retry-After 上抛，由外层决定换上游或回 429 —— 绝不空等越过 deadline。
  */
 export async function forward(provider, path, method, headers, bodyBuf, opts = {}, log, ctl = {}) {
+  const requestId = registerProviderInFlight(provider)
+  try {
+    const result = await forwardInternal(provider, path, method, headers, bodyBuf, opts, log, ctl)
+    releaseProviderInFlight(provider, requestId, result && result.stream)
+    return result
+  } catch (error) {
+    releaseProviderInFlight(provider, requestId, null)
+    throw error
+  }
+}
+
+async function forwardInternal(provider, path, method, headers, bodyBuf, opts = {}, log, ctl = {}) {
   const url = upstreamUrl(provider, path)
   const retry = Object.assign({ maxAttempts: 1, initialDelayMs: 500, maxDelayMs: 8000, jitter: 0.2 }, opts.retry)
   const timeout = Object.assign({ connectMs: 10000, firstByteMs: 60000, idleMs: 60000 }, opts.timeout)
@@ -341,14 +438,18 @@ export async function forward(provider, path, method, headers, bodyBuf, opts = {
 }
 
 // 探测上游可用性（在线检活）：GET {base}{prefix}/v1/models，单次不重试
-export function probe(provider) {
+export async function probe(provider) {
   const url = upstreamUrl(provider, '/v1/models')
-  const { mod, reqOpts } = ctxFor(provider, url, 'GET', {})
+  const started = Date.now()
+  let context
+  try { context = await ctxFor(provider, url, 'GET', { connectMs: 20000 }) } catch (err) {
+    return { ok: false, code: null, ms: Date.now() - started, err: err.code || err.message }
+  }
+  const { mod, reqOpts, networkElapsedMs } = context
   return new Promise((resolve) => {
     const headers = applyProviderHeaders({ 'user-agent': 'model-gateway/0.1', accept: 'application/json' }, provider)
     if (provider.apiKey) headers.authorization = 'Bearer ' + provider.apiKey
     reqOpts.headers = headers
-    const started = Date.now()
     const req = mod.request(reqOpts, (res) => {
       res.resume()
       // 检活语义=可达性：只要拿到 HTTP 响应（含 4xx/5xx）即视为"通"，避免把慢/401 误判为不通；
@@ -363,7 +464,7 @@ export function probe(provider) {
 
 // 缓存预热：向模型上游发送一个携带长 system 前缀的最小请求（max_tokens=1），保持厂商侧 prefix cache 存活。
 // 在「预热」语义下只关心能否成功送达（拿到 2xx 响应头），不读响应体、不累计额度，避免污染配额统计。
-export function warm(provider, model, systemPrompt, opts = {}, log) {
+export async function warm(provider, model, systemPrompt, opts = {}, log) {
   // MG-008：预热与转发共用模型解析（api/上游模型名），否则 anthropic/gemini 上游会被打到 chat 路径，
   // providerModels 覆盖名也会失效（发网关名 → 上游 404）。
   const api = (opts && opts.api) || provider.api || 'openai'
@@ -375,9 +476,13 @@ export function warm(provider, model, systemPrompt, opts = {}, log) {
   const headers = protocolHeaders(applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json' }, provider), provider, api)
   const payload = Buffer.from(JSON.stringify(spec.body))
   headers['content-length'] = payload.length
-  const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
   const to = Object.assign({ connectMs: 10000, firstByteMs: 60000 }, (opts && opts.timeout) || {})
   const started = Date.now()
+  let context
+  try { context = await ctxFor(provider, url, 'POST', headers) } catch (err) {
+    return { ok: false, status: null, ms: Date.now() - started, err: err.code || err.message }
+  }
+  const { mod, reqOpts } = context
   return new Promise((resolve) => {
     const req = mod.request(reqOpts, (res) => {
       res.resume(); res.destroy() // 只需状态码，立即释放，不读响应
@@ -397,7 +502,7 @@ export function warm(provider, model, systemPrompt, opts = {}, log) {
 // 按真实使用形态（stream:true）判定"恢复"：仅回 2xx 头不算数，流式上游必须收到首条 SSE 数据才算可用，
 // 否则间歇性「头 2xx + 流中断」的上游会被探活误判为已恢复、亲和被切回故障主上游（回切后又立刻断流）。
 // 兼容返回 JSON 的上游（非 event-stream 的 2xx 直接视为恢复）。
-export function probeChat(provider, model, message, opts = {}, log) {
+export async function probeChat(provider, model, message, opts = {}, log) {
   // MG-008：failback 探活与转发共用模型解析（api/上游模型名），否则非 OpenAI 上游/覆盖名会被误判"未恢复"。
   const api = (opts && opts.api) || provider.api || 'openai'
   const upstreamModel = (opts && opts.upstreamModel) || model
@@ -406,9 +511,13 @@ export function probeChat(provider, model, message, opts = {}, log) {
   const headers = protocolHeaders(applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'text/event-stream' }, provider), provider, api)
   const payload = Buffer.from(JSON.stringify(spec.body))
   headers['content-length'] = payload.length
-  const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
   const to = Object.assign({ connectMs: 10000, firstByteMs: 60000 }, (opts && opts.timeout) || {})
   const started = Date.now()
+  let context
+  try { context = await ctxFor(provider, url, 'POST', headers) } catch (err) {
+    return { ok: false, status: null, ms: Date.now() - started, err: err.code || err.message }
+  }
+  const { mod, reqOpts } = context
   return new Promise((resolve) => {
     let settled = false
     let timer = null
@@ -437,14 +546,18 @@ export function probeChat(provider, model, message, opts = {}, log) {
 }
 
 // 非 chat 能力探测的通用 POST（MG-011/012）：路径/请求体由调用方给出，2xx 即通，响应体上限 1MiB。
-function probeJsonUpstream(provider, api, path, bodyObj) {
+async function probeJsonUpstream(provider, api, path, bodyObj) {
   const url = upstreamUrl(provider, path)
   const headers = protocolHeaders(applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }, provider), provider, api)
   const payload = Buffer.from(JSON.stringify(bodyObj))
   headers['content-length'] = payload.length
-  const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
+  const started = Date.now()
+  let context
+  try { context = await ctxFor(provider, url, 'POST', headers) } catch (err) {
+    return { ok: false, code: null, ms: Date.now() - started, err: err.code || err.message }
+  }
+  const { mod, reqOpts } = context
   return new Promise((resolve) => {
-    const started = Date.now()
     let settled = false
     const done = (o) => { if (!settled) { settled = true; resolve(o) } }
     const req = mod.request(reqOpts, (res) => {
@@ -480,15 +593,19 @@ export function probeRerank(provider, model, api = provider.api || 'openai', ups
 
 // 模型连通测试：向该模型所属上游发一个极小量的真实 chat 请求（max_tokens=1），验证"这个模型名能真正被调用"
 // 返回 { ok, code, ms, err, body }，body 为响应首片段用于展示后端告警。
-export function probeModel(provider, model, api = provider.api || 'openai', upstreamModel = model) {
+export async function probeModel(provider, model, api = provider.api || 'openai', upstreamModel = model) {
   const request = protocolRequest(api, { model: upstreamModel, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false })
   const url = upstreamUrl(provider, request.path)
   const headers = protocolHeaders(applyProviderHeaders({ 'content-type': 'application/json', 'user-agent': 'model-gateway/0.1', accept: 'application/json', 'accept-encoding': 'identity' }, provider), provider, api)
   const payload = Buffer.from(JSON.stringify(request.body))
   headers['content-length'] = payload.length
-  const { mod, reqOpts } = ctxFor(provider, url, 'POST', headers)
+  const started = Date.now()
+  let context
+  try { context = await ctxFor(provider, url, 'POST', headers) } catch (err) {
+    return { ok: false, code: null, ms: Date.now() - started, err: err.code || err.message }
+  }
+  const { mod, reqOpts } = context
   return new Promise((resolve) => {
-    const started = Date.now()
     let settled = false
     const done = (o) => { if (!settled) { settled = true; resolve(o) } }
     const req = mod.request(reqOpts, (res) => {
@@ -566,25 +683,29 @@ function deadlineAbortError(deadline, detail) {
  * 返回 { ok, status, headers, stream, retryAfter, bodyText?, wroteBody }；
  * 非 2xx 会读取上限 8KB 的错误体（归因用）并销毁连接，不把错误流留给调用方。
  */
-export function forwardOnce(provider, path, method, headers, bodyBuf, opts = {}, attempt = null, ctl = {}) {
+export async function forwardOnce(provider, path, method, headers, bodyBuf, opts = {}, attempt = null, ctl = {}) {
   const url = upstreamUrl(provider, path)
   const timeout = Object.assign({ connectMs: 10000, firstByteMs: 60000, idleMs: 60000 }, opts.timeout)
   const deadline = ctl.deadline || null
   const budget = ctl.budget || null
   const signal = ctl.signal || (deadline && deadline.signal) || (budget && budget.signal) || null
   const timers = timersOf(deadline)
+  const remaining = () => (deadline ? deadline.remaining() : (budget ? budget.remaining() : Infinity))
+  const expiredNow = () => (deadline ? deadline.expired() : (budget ? budget.expired() : false))
+  const abortErr = (detail) => deadlineAbortError(deadline, detail)
   const maxErrBody = Number(opts.maxErrorBodyBytes) > 0 ? Number(opts.maxErrorBodyBytes) : MAX_ERR_BODY_BYTES
+  if (expiredNow()) throw abortErr('deadline exceeded before send')
+  if (signal && signal.aborted) throw abortErr('request aborted before send')
+  const { mod, reqOpts, networkElapsedMs } = await ctxFor(provider, url, method, headers, Object.assign({}, ctl, { connectMs: timeout.firstByteMs }))
   return new Promise((resolve, reject) => {
-    const remaining = () => (deadline ? deadline.remaining() : (budget ? budget.remaining() : Infinity))
-    const expiredNow = () => (deadline ? deadline.expired() : (budget ? budget.expired() : false))
-    const abortErr = (detail) => deadlineAbortError(deadline, detail)
     if (expiredNow()) { reject(abortErr('deadline exceeded before send')); return }
     if (signal && signal.aborted) { reject(abortErr('request aborted before send')); return }
     const rem = remaining()
-    const firstByteMs = Number(timeout.firstByteMs) > 0 ? Number(timeout.firstByteMs) : 60000
+    const firstByteMs = Math.max(1, (Number(timeout.firstByteMs) > 0 ? Number(timeout.firstByteMs) : 60000) - networkElapsedMs)
     const idleMs = Number(timeout.idleMs) > 0 ? Number(timeout.idleMs) : 60000
     const effFirstByte = Number.isFinite(rem) ? Math.max(1, Math.min(firstByteMs, rem)) : firstByteMs
     const effIdle = Number.isFinite(rem) ? Math.max(1, Math.min(idleMs, rem)) : idleMs
+    if (reqOpts._mgCtl) reqOpts._mgCtl.connectMs = effFirstByte
     let settled = false
     let req = null
     let res = null
@@ -603,7 +724,6 @@ export function forwardOnce(provider, path, method, headers, bodyBuf, opts = {},
       try { if (res) res.destroy(err) } catch {}
     }
     try {
-      const { mod, reqOpts } = ctxFor(provider, url, method, headers, Object.assign({}, ctl, { connectMs: effFirstByte }))
       if (opts.redirect) reqOpts.redirect = String(opts.redirect)
       req = mod.request(reqOpts, (response) => {
         res = response
@@ -727,6 +847,8 @@ async function acquireWithDeadline(request, permit, deadline) {
 
 /**
  * 强制 adapter 工厂（M1-3a）：在真实 write 之前置位 onWriteBegin。
+ * 注入 adapter 会绕过真实 HTTP transport 的 DNS 校验/固定，仅限显式 fixture；
+ * 生产发送必须走 forwardOnce/forward。
  * execute 自身也会在 dispatch 前置位；两层都做是为了让"写后异常"在任何调用方式下都落成
  * SENT_UNKNOWN，绝不因为 adapter 忘了回调而退化成 UNSENT（E 用此路径击穿过 sends=2 的重放）。
  */

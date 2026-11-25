@@ -41,7 +41,7 @@ test('GET /api/config 无令牌可读（管理面安全降级）；投影可直�
   assert.equal(first.status, 200, '管理面无令牌，回环直接可读')
   const proj = await first.json()
   assert.equal(proj.providers.mock.vendorRateClass, 'tier-a')
-  const save = await gw.post('/api/config/save', Object.assign({}, proj, { version: proj.configVersion }), { 'content-type': 'application/json' })
+  const save = await gw.write('/api/config/save', Object.assign({}, proj, { version: proj.configVersion }), { 'content-type': 'application/json' })
   assert.equal(save.status, 200, '投影可直接保存（含未知字段）')
   const again = await (await gw.get('/api/config')).json()
   assert.equal(again.providers.mock.vendorRateClass, 'tier-a', '保存后扩展字段仍在')

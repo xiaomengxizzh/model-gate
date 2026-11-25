@@ -23,6 +23,11 @@ contracts:
     signature: "POST /v1/chat/completions（OpenAI 兼容）"
     version: "0.1"
     compatibility: backward
+  - id: C-mg-route-preview
+    iface: http
+    signature: "POST /api/route-preview（G11 同核零上游预演）"
+    version: "1.0"
+    compatibility: backward
 depends: []
 
 

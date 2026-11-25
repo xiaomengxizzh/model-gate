@@ -140,14 +140,14 @@ test('P0-1 省略字段不清空全局 Key；掩码保留；替换与显式清�
   const KEY2 = 'sk-client-tristate-002'
 
   assert.equal((await ctx.chat()).status, 200, '未配置 Key 时匿名放行')
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: KEY1 } })).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { clientKey: KEY1 } })).status, 200)
   assert.equal((await ctx.chat()).status, 401)
   assert.equal((await ctx.chat(KEY1)).status, 200)
 
   // 核心回归：补丁省略 clientKey（只改其它 defaults）不得撤销数据面全局 Key。
   const keysPath = join(ctx.gw.dir, 'keys.local.json')
   const keysBefore = await readFile(keysPath, 'utf8')
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
   assert.equal(await readFile(keysPath, 'utf8'), keysBefore, 'KEEP 不得写入/删除密钥条目')
   const projected = await (await ctx.gw.get('/api/config')).json()
   assert.equal(projected.defaults.clientKey, CLIENT_KEY_MASK, '省略字段保存后仍回显掩码')
@@ -155,24 +155,24 @@ test('P0-1 省略字段不清空全局 Key；掩码保留；替换与显式清�
   assert.equal((await ctx.chat(KEY1)).status, 200, '省略保存后原 Key 仍有效')
 
   // 掩码 = 未改动。
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: CLIENT_KEY_MASK } })).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { clientKey: CLIENT_KEY_MASK } })).status, 200)
   assert.equal((await ctx.chat(KEY1)).status, 200)
   assert.equal((await ctx.chat()).status, 401)
 
   // F-a2：掩码 + 尾随空格不得当成真实 Key 写入（否则旧 Key 与新值都 401 → 数据面锁死）
   const keysBeforeSpacedMask = await readFile(keysPath, 'utf8')
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: CLIENT_KEY_MASK + '  ' } })).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { clientKey: CLIENT_KEY_MASK + '  ' } })).status, 200)
   assert.equal(await readFile(keysPath, 'utf8'), keysBeforeSpacedMask, '掩码变体不得改写 keys')
   assert.equal((await ctx.chat(KEY1)).status, 200, '掩码变体保存后旧 Key 仍然有效')
   assert.equal((await ctx.chat(CLIENT_KEY_MASK + '  ')).status, 401, '掩码字面量绝不能成为真实 Key')
 
   // 替换生效（旧 Key 立即失效）。
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: KEY2 } })).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { clientKey: KEY2 } })).status, 200)
   assert.equal((await ctx.chat(KEY1)).status, 401)
   assert.equal((await ctx.chat(KEY2)).status, 200)
 
   // 只有显式空串才删除。
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: '' } })).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { clientKey: '' } })).status, 200)
   assert.equal((await ctx.chat()).status, 200, '显式清空后匿名放行')
   const cleared = await (await ctx.gw.get('/api/config')).json()
   assert.equal(cleared.defaults.clientKey, '')
@@ -196,7 +196,7 @@ test('T-KEY-01 旧明文迁移：省略字段时把 defaults.clientKey 迁入加
 
   assert.equal((await ctx.chat()).status, 401, '旧明文 Key 已生效')
   assert.equal((await ctx.chat(LEGACY)).status, 200)
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
   assert.equal((await ctx.chat(LEGACY)).status, 200, '迁移后旧 Key 仍然可用')
   assert.equal((await ctx.chat()).status, 401)
 
@@ -214,11 +214,11 @@ test('T-KEY-01 旧明文迁移：省略字段时把 defaults.clientKey 迁入加
 test('T-KEY-01 env 覆盖优先：MG_CLIENT_KEY > keys 库 > 旧 defaults', { timeout: 30000 }, async (t) => {
   const ctx = await boot({ env: { MG_CLIENT_KEY: 'env-key-wins' } })
   t.after(() => ctx.stop())
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: 'sealed-key-loses' } })).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { clientKey: 'sealed-key-loses' } })).status, 200)
   assert.equal((await ctx.chat('env-key-wins')).status, 200, 'env 覆盖优先')
   assert.equal((await ctx.chat('sealed-key-loses')).status, 401)
   // 省略字段保存也不得改变优先级
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
   assert.equal((await ctx.chat('env-key-wins')).status, 200)
 })
 
@@ -226,22 +226,22 @@ test('T-KEY-01 管理面无令牌：写入不再需要令牌，非法值仍 400 
   const ctx = await boot()
   t.after(() => ctx.stop())
   const before = await (await ctx.gw.get('/api/status')).json()
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: 12345 } })).status, 400, '非法值仍 400')
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { clientKey: 12345 } })).status, 400, '非法值仍 400')
   const after = await (await ctx.gw.get('/api/status')).json()
   assert.equal(after.configVersion, before.configVersion, '被拒的保存不得推进版本')
   assert.equal(after.defaults.clientKey, '', '被拒的保存不得写入 Key')
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200, '无令牌回环保存直接放行')
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200, '无令牌回环保存直接放行')
 })
 
 test('T-KEY-01 非法值 400 且不落盘、不改内存', { timeout: 30000 }, async (t) => {
   const ctx = await boot()
   t.after(() => ctx.stop())
   const KEY = 'sk-keep-me-001'
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: KEY } })).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { clientKey: KEY } })).status, 200)
   const localPath = join(ctx.gw.dir, 'gateway.local.json')
   const before = { version: (await (await ctx.gw.get('/api/status')).json()).configVersion, local: await readFile(localPath, 'utf8') }
 
-  const bad = await ctx.gw.post('/api/config/save', { defaults: { clientKey: 12345 } })
+  const bad = await ctx.gw.write('/api/config/save', { defaults: { clientKey: 12345 } })
   assert.equal(bad.status, 400)
   assert.equal(typeof (await bad.json()).error, 'string')
   const after = { version: (await (await ctx.gw.get('/api/status')).json()).configVersion, local: await readFile(localPath, 'utf8') }
@@ -254,7 +254,7 @@ test('T-KEY-01 审计与秘密边界：只记动作+代际，日志/响应不含
   const ctx = await boot()
   t.after(() => ctx.stop())
   const SENTINEL = 'sk-SENTINEL-tristate-999'
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { clientKey: SENTINEL } })).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { clientKey: SENTINEL } })).status, 200)
 
   const status = await (await ctx.gw.get('/api/status')).text()
   const config = await (await ctx.gw.get('/api/config')).text()
@@ -271,10 +271,10 @@ test('T-KEY-02 虚拟 Key 过期：保存校验、规范化落盘、鉴权拒绝
   const ctx = await boot({ virtualModels: VM })
   t.after(() => ctx.stop())
   const VKEY = 'sk-vm-tristate-777'
-  assert.equal((await ctx.gw.post('/api/keys', { id: '__mg_vm_vm-a', key: VKEY })).status, 200)
+  assert.equal((await ctx.gw.write('/api/keys', { id: '__mg_vm_vm-a', key: VKEY })).status, 200)
   assert.equal((await ctx.vmChat(VKEY)).status, 200)
 
-  const saveVmExpiry = (expiresAt) => ctx.gw.post('/api/config/save', { virtualModels: [{ name: 'vm-a', directory: [{ model: 'demo' }], expiresAt }] })
+  const saveVmExpiry = (expiresAt) => ctx.gw.write('/api/config/save', { virtualModels: [{ name: 'vm-a', directory: [{ model: 'demo' }], expiresAt }] })
 
   // 未来：放行
   assert.equal((await saveVmExpiry('2099-01-01T10:00:00Z')).status, 200)
@@ -342,14 +342,14 @@ test('T-KEY-03 省略 virtualModels 不得清空 meta：已过期 Key 保存后�
   const keysPath = join(ctx.gw.dir, 'keys.local.json')
   const vmBody = (extra) => ({ virtualModels: [Object.assign({ name: 'vm-a', directory: [{ model: 'demo' }] }, extra)] })
 
-  assert.equal((await ctx.gw.post('/api/keys', { id: '__mg_vm_vm-a', key: VKEY })).status, 200)
+  assert.equal((await ctx.gw.write('/api/keys', { id: '__mg_vm_vm-a', key: VKEY })).status, 200)
   // 已过期
-  assert.equal((await ctx.gw.post('/api/config/save', vmBody({ expiresAt: '2000-01-01T00:00:00Z', note: '过期备注' }))).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', vmBody({ expiresAt: '2000-01-01T00:00:00Z', note: '过期备注' }))).status, 200)
   assert.equal((await ctx.vmChat(VKEY)).status, 401, '过期 Key 必须拒绝')
   const keysBefore = await readFile(keysPath, 'utf8')
 
   // ① 整个 virtualModels 省略（只改 defaults）→ meta 字节不变，过期 Key 仍 401
-  assert.equal((await ctx.gw.post('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
   assert.equal(await readFile(keysPath, 'utf8'), keysBefore, '省略 virtualModels 不得改写 keys.local.json')
   assert.equal((await ctx.vmChat(VKEY)).status, 401, '省略保存后已过期 Key 不得复活')
 
@@ -358,38 +358,38 @@ test('T-KEY-03 省略 virtualModels 不得清空 meta：已过期 Key 保存后�
     providers: { mock: { baseUrl: ctx.upstream.base, apiKeyEnv: '' } },
     models: { demo: { provider: 'mock', api: 'openai' } },
   }
-  assert.equal((await ctx.gw.post('/api/config/save', providerPatch)).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', providerPatch)).status, 200)
   assert.equal(await readFile(keysPath, 'utf8'), keysBefore, 'providers/models 省略式保存不得改写 keys')
   assert.equal((await ctx.vmChat(VKEY)).status, 401, 'QA F-a1：省略 virtualModels 后已过期 Key 仍必须 401')
 
   // ② 数组里的 vm 对象省略 expiresAt/note → 两项都保留
-  assert.equal((await ctx.gw.post('/api/config/save', vmBody({}))).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', vmBody({}))).status, 200)
   assert.equal(await readFile(keysPath, 'utf8'), keysBefore, '省略字段不得改写 meta')
   assert.equal((await ctx.vmChat(VKEY)).status, 401)
 
   // ③ 只改 note → expiresAt 必须继承，Key 仍然过期
-  assert.equal((await ctx.gw.post('/api/config/save', vmBody({ note: '更新备注' }))).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', vmBody({ note: '更新备注' }))).status, 200)
   assert.equal((await ctx.vmChat(VKEY)).status, 401, '只改 note 不得顺带清掉过期时间')
   const afterNote = await (await ctx.gw.get('/api/config')).json()
   assert.equal(afterNote.virtualModels[0].note, '更新备注')
   assert.equal(afterNote.virtualModels[0].expiresAtState, 'expired')
 
   // ④ 显式清空 expiresAt → 过期限制解除（保留 note），Key 恢复可用
-  assert.equal((await ctx.gw.post('/api/config/save', vmBody({ expiresAt: '' }))).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', vmBody({ expiresAt: '' }))).status, 200)
   assert.equal((await ctx.vmChat(VKEY)).status, 200, '显式清空过期时间后 Key 恢复可用')
   const afterClearExpiry = await (await ctx.gw.get('/api/config')).json()
   assert.equal(afterClearExpiry.virtualModels[0].expiresAtState, 'none')
   assert.equal(afterClearExpiry.virtualModels[0].note, '更新备注', '清 expiresAt 不得误删 note')
 
   // ⑤ 显式清空两项 → meta 删除
-  assert.equal((await ctx.gw.post('/api/config/save', vmBody({ expiresAt: '', note: '' }))).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', vmBody({ expiresAt: '', note: '' }))).status, 200)
   const keysAfterClear = JSON.parse(JSON.stringify(await (await ctx.gw.get('/api/config')).json()))
   assert.equal(keysAfterClear.virtualModels[0].expiresAt, '')
   assert.equal(keysAfterClear.virtualModels[0].note, '')
 
   // ⑥ 删除虚拟模型仍然清理独立 Key 与 meta（该行为不能修坏）
-  assert.equal((await ctx.gw.post('/api/config/save', { virtualModels: [] })).status, 200)
-  assert.equal((await ctx.gw.post('/api/config/save', vmBody({}))).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', { virtualModels: [] })).status, 200)
+  assert.equal((await ctx.gw.write('/api/config/save', vmBody({}))).status, 200)
   const readded = await (await ctx.gw.get('/api/status')).json()
   assert.equal(readded.virtualModels[0].keySet, false, '删除虚拟模型必须清理其独立 Key（同名重建不得继承旧 Key）')
 })
@@ -423,12 +423,12 @@ test('F02 旧明文 keys + 主密钥不可用：加密写失败 → 500 key_encr
   assert.equal((await chat(oldKey)).status, 200, '旧明文 Key 仍可用（读路径不需要加密）')
   const before = readFileSync(join(dir, 'keys.local.json'), 'utf8')
 
-  const rotated = await gw.post('/api/keys', { id: '__mg_client', key: 'sk-plain-new-02' })
+  const rotated = await gw.write('/api/keys', { id: '__mg_client', key: 'sk-plain-new-02' })
   assert.equal(rotated.status, 500, '无法加密时必须拒绝保存（服务端凭据材料问题）')
   assert.equal((await rotated.json()).code, 'key_encryption_unavailable')
   assert.equal(readFileSync(join(dir, 'keys.local.json'), 'utf8'), before, '不得退回明文重写，也不得写一半')
 
-  const saved = await gw.post('/api/config/save', { defaults: { clientKey: 'sk-plain-new-03' } })
+  const saved = await gw.write('/api/config/save', { defaults: { clientKey: 'sk-plain-new-03' } })
   assert.equal(saved.status, 500)
   assert.equal((await saved.json()).code, 'key_encryption_unavailable')
   assert.equal(readFileSync(join(dir, 'keys.local.json'), 'utf8'), before, '配置保存路径同样不得改写 keys')

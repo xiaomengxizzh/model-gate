@@ -302,12 +302,12 @@ function renderSecurityTab (root, ctx) {
   const exportButtons = h('div', { class: 'flex flex-wrap' },
     copyButton(JSON.stringify({ configVersion: c.configVersion, providers: Object.keys(c.providers || {}).length, models: Object.keys(c.models || {}).length }), '复制版本摘要'),
     h('button', { class: 'btn', type: 'button', text: '导出管理配置投影（脱敏）', onclick: () => downloadJson('modelgate-config-' + (c.configVersion ?? 0) + '.json', sanitizeForExport(c)) }),
-    h('button', { class: 'btn', type: 'button', text: '查看原始配置', onclick: () => dialog({ title: '只读配置投影', desc: '敏感 header 与代理凭据在前端显示时仍按原值；请勿截图分享。', wide: true, content: codeBlock(pretty(c)) }) }))
+    h('button', { class: 'btn', type: 'button', text: '查看原始配置', onclick: () => dialog({ title: '只读配置投影', desc: '敏感 header 与代理凭据已由后端脱敏；请勿截图分享。', wide: true, content: codeBlock(pretty(c)) }) }))
   root.append(card('配置事务与导出', '当前可编辑配置投影，不含明文 Key',
     h('div', null,
-      callout('info', 'GET /api/config 只返回可编辑字段与 configVersion；运行时统计与凭据不在其中。保存时必须携带读取时的版本号。'),
+      callout('info', 'GET /api/config 只返回可编辑字段与 configVersion；运行时统计与凭据不在其中。保存时先请求持久预览，再经自定义确认对话框应用；服务端按 expectedVersion 执行 CAS。'),
       exportButtons),
-    { foot: '差异只在本标签页计算，不发送到服务端；保存请求只包含被动过的字段。' }))
+    { foot: '差异先在本标签页脱敏核对；预览请求只包含可编辑字段，服务端仅持久化哈希与动作摘要，确认后再应用。' }))
 
   root.append(card('备份与恢复', '当前后端没有备份/恢复管理 API',
     h('div', null,

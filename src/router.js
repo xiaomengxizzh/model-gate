@@ -6,11 +6,13 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 import { isAggregateModelId, aggregatePrefixes } from './codex/identity.js'
 import { OFFICIAL_PROVIDER_IDS } from './codex/catalog.js'
 import { GO_CLI_ALIAS, V2_TARGET_PUBLIC_ID, V2_TARGET_UPSTREAM_MODEL, isGoBinding } from './providers/opencode-go.js'
+import { assertTenantCredentialRefs } from './tenancy/scope.js'
 
-export function configPaths() {
+export function configPaths(dirOverride) {
   // MG_CONFIG_DIR：可选。多实例隔离时为实例指定独立配置目录（keys/stats 随之独立）；未设置=cwd/config（单实例零配置）
+  // dirOverride 仅供已解析的租户运行时使用；普通启动仍只读 MG_CONFIG_DIR，保持旧行为。
   const envDir = (process.env.MG_CONFIG_DIR || '').trim()
-  const dir = envDir || join(process.cwd(), 'config')
+  const dir = dirOverride || envDir || join(process.cwd(), 'config')
   return { dir, local: join(dir, 'gateway.local.json'), keys: join(dir, 'keys.local.json'), stats: join(dir, 'stats.json'), videos: join(dir, 'videos.json') }
 }
 
@@ -76,8 +78,9 @@ function normalizeVirtualModels(vms, base) {
     const dir = (Array.isArray(vm.directory) ? vm.directory : []).filter(e => e && typeof e.model === 'string' && models[e.model])
     if (!dir.length) { console.warn('[virtualModels] 跳过：目录为空或引用不存在的模型: ' + name); continue }
     out.push({
+      ...structuredClone(vm),
       name,
-      directory: dir.map(e => ({ model: e.model, mode: e.mode === 'onFail' ? 'onFail' : 'afterAll', providers: Array.isArray(e.providers) ? e.providers.filter(Boolean) : [] })),
+      directory: dir.map(e => ({ ...structuredClone(e), model: e.model, mode: e.mode === 'onFail' ? 'onFail' : 'afterAll', providers: Array.isArray(e.providers) ? e.providers.filter(Boolean) : [] })),
       quota: Number(vm.quota) || 0, dailyQuota: Number(vm.dailyQuota) || 0, maxContext: Number(vm.maxContext) || 0,
       maxConcurrent: Number(vm.maxConcurrent) || 0, qps: Number(vm.qps) || 0,
     })
@@ -203,7 +206,7 @@ function keysFromRaw(raw, path) {
 }
 
 export function loadConfig(opts = {}) {
-  const p = configPaths()
+  const p = opts.paths || configPaths(opts.configDir)
   let mainFile = opts.configFile || (process.env.MG_CONFIG && existsSync(process.env.MG_CONFIG) ? process.env.MG_CONFIG : null)
   if (!mainFile) mainFile = join(p.dir, 'gateway.json')
   if (!existsSync(mainFile)) throw new Error('配置文件不存在: ' + mainFile)
@@ -222,9 +225,17 @@ export function loadConfig(opts = {}) {
     base.defaults = Object.assign({}, base.defaults, patch.defaults)
     base.configVersion = Number(patch.configVersion) || 0
     if (patch.virtualModels !== undefined) base.virtualModels = patch.virtualModels
+    if (patch.policies !== undefined) base.policies = patch.policies
+    if (patch.harnessBindings !== undefined) base.harnessBindings = patch.harnessBindings
   }
   base.virtualModels = normalizeVirtualModels(base.virtualModels, base)
   const keysRaw = readFileIfExists(p.keys)     // 一次读盘：解析与指纹用同一份字节
+  // Scope-aware callers (including index.js prepareTenantConfig/reload) pass scopeId.
+  // Validate after base+local merge so an overlay cannot reintroduce a nested env ref.
+  if (opts.scopeId) {
+    assertTenantCredentialRefs(base)
+    base._tenancyScope = String(opts.scopeId)
+  }
   base._keys = keysFromRaw(keysRaw, p.keys)    // { providerId: key }，gitignored，不入库；损坏时抛 keys_unreadable
   base._disk = { local: rawFingerprint(localRaw), keys: rawFingerprint(keysRaw) }
   base._paths = p
@@ -335,6 +346,12 @@ export function configInlineCredentialWarnings(cfg) {
 }
 
 export function resolveKey(cfg, def, id) {
+  if (!cfg || typeof cfg !== 'object' || !def || typeof def !== 'object') return { key: '', source: null }
+  if (cfg._tenancyScope) {
+    // Defense in depth for callers that construct cfg without loadConfig: never consult
+    // process.env, systemd user environment, environment.d, or the Windows registry.
+    assertTenantCredentialRefs(def)
+  }
   if (cfg._keys && cfg._keys[id]) return { key: cfg._keys[id], source: 'keys' }
   if (def.apiKeyEnv) {
     const envVal = process.env[def.apiKeyEnv]
@@ -348,10 +365,12 @@ export function resolveKey(cfg, def, id) {
   return { key: '', source: null }
 }
 
-export function buildProvider(cfg, id) {
-  const def = (cfg.providers || {})[id]
-  if (!def) throw new Error('unknown provider: ' + id)
-  const pk = resolveKey(cfg, def, id)
+export function buildProvider(cfg, id, connection = null) {
+  const base = (cfg.providers || {})[id]
+  if (!base) throw new Error('unknown provider: ' + id)
+  const def = connection ? { ...base, ...connection, connectionId: connection.connectionId || connection.id } : base
+  const keyId = connection ? (connection.credentialKeyId || connection.connectionId || connection.id) : id
+  const pk = resolveKey(cfg, def, keyId)
   // 上游 HTTP 代理（三模式）：defaults.proxyMode = auto(默认) | direct | global。
   //  - auto   ：现状——per-provider `proxy` > defaults.proxy > 环境变量；单上游显式 `direct`/`false` 关闭（强制直连）；
   //             单上游留空/缺省 = 继承 defaults.proxy（全局）；
@@ -378,6 +397,10 @@ export function buildProvider(cfg, id) {
     keyOk: !!pk.key,
     keySource: pk.source,
     proxy: String(proxy || ''),
+    _tenancyScope: cfg._tenancyScope || null,
+    _inFlight: cfg._runtimeInFlight || null,
+    _modelNames: Object.keys(cfg.models || {}).filter((name) => cfg.models[name]?.provider === id),
+    _modelIds: Object.values(cfg.models || {}).filter((model) => model?.provider === id).map((model) => model.modelId).filter(Boolean),
     _def: def,
   }
 }
@@ -386,12 +409,13 @@ export function createRouter(cfg) {
   const models = cfg.models || {}
   const alias = new Map()
   for (const [name, def] of Object.entries(models)) {
+    if (def.enabled === false || (def.provider && (cfg.providers?.[def.provider]?.enabled === false))) continue
     alias.set(name, { name, def })
     for (const a of def.alias || []) alias.set(a, { name, def })
   }
   const defaultProvider = cfg.defaults && cfg.defaults.provider
   const virtualModel = cfg.defaults && cfg.defaults.model
-  const vms = new Map((cfg.virtualModels || []).map(v => [v.name, v]))
+  const vms = new Map((cfg.virtualModels || []).filter((v) => v.enabled !== false).flatMap(v => [[v.name, v], ...(typeof v.slug === 'string' && v.slug ? [[v.slug, v]] : [])]))
   // 聚合保留 ID 未命中：明确 404 unknown_model，**绝不**回退 defaults.provider。
   // 错误对象自带 code/status/available，forward.js 与 /api/route-preview 据此给出稳定错误码；
   // 不在这里直接猜上游——「同名不同源」的静默改绑正是 D1 禁止的行为。
@@ -538,11 +562,13 @@ export function createRouter(cfg) {
   // opts.snapshot：调用方固定的目录快照（N01 同代解析）。缺省时沿用旧的「读 cfg._codexCatalog」行为。
   function resolve(model, opts = {}) {
     const snapshot = opts && opts.snapshot ? opts.snapshot : null
+    if (model && models[model]?.enabled === false) throw catalogError(model, 'model_disabled', '模型 ' + model + ' 已停用')
+    if (model && models[model] && cfg.providers?.[models[model].provider]?.enabled === false) throw catalogError(model, 'service_disabled', '模型 ' + model + ' 所属服务已停用')
     // 优先级：虚拟模型 → 旧 defaults.model → 目录 slug（官方/聚合）→ 真实模型/别名
     //          → 聚合保留 ID 严格闸门 → 默认上游兜底（旧接口兼容）
     if (model && vms.has(model)) {
       const vm = vms.get(model)
-      return { canonicalName: vm.name, known: true, def: { isVirtualModel: true, name: vm.name, directory: vm.directory, quota: vm.quota, dailyQuota: vm.dailyQuota, maxContext: vm.maxContext, maxConcurrent: vm.maxConcurrent, qps: vm.qps } }
+      return { canonicalName: vm.name, known: true, def: { ...vm, isVirtualModel: true, name: vm.name, directory: vm.directory, quota: vm.quota, dailyQuota: vm.dailyQuota, maxContext: vm.maxContext, maxConcurrent: vm.maxConcurrent, qps: vm.qps } }
     }
     if (model && virtualModel && model === virtualModel) {
       if (!defaultProvider) throw new Error('defaults.provider 未设置，无法用虚拟共用模型名: ' + model)

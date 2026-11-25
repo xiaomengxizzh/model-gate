@@ -1,0 +1,126 @@
+action,prototype_label,first_line,occurrences,api_or_local_contract,stage,success_feedback,error_cancel_conflict,acceptance,production_disposition
+account-auth9,重新授权说明,197,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+account-check9:,模拟检查,197,1,NONE: production removes simulated control,A4/A5,真实操作反馈或隐藏,不得用模拟结果冒充运行资格,U06-U11/V07,REMOVE_MOCK
+account-delete9:,删除连接,197,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+account-edit9:,编辑连接,197,2,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+account-new9,+ 添加连接,196,3,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+account-open9:,详情,196,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+account-remove9:,确认删除,200,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+account-save9:,保存连接,199,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+account-sim9,模拟选择,196,3,NONE: production removes simulated control,A4/A5,真实操作反馈或隐藏,不得用模拟结果冒充运行资格,U06-U11/V07,REMOVE_MOCK
+account-state9:expired,模拟授权失效,197,2,NONE: production removes simulated control,A4/A5,真实操作反馈或隐藏,不得用模拟结果冒充运行资格,U06-U11/V07,REMOVE_MOCK
+account-state9:limited,模拟限流,197,2,NONE: production removes simulated control,A4/A5,真实操作反馈或隐藏,不得用模拟结果冒充运行资格,U06-U11/V07,REMOVE_MOCK
+account-state9:unknown,清除模拟异常,197,2,NONE: production removes simulated control,A4/A5,真实操作反馈或隐藏,不得用模拟结果冒充运行资格,U06-U11/V07,REMOVE_MOCK
+app-save11:,保存接入偏好,281,1,POST /api/aggregation/switch|rollback|reconcile (extend role targets),A5,428预览→确认→回执→需重启,漂移409;过期consent428;无previousMode拒绝;实际生效待GUI,U02/U05/U10/U11,PLANNED
+catalog,刷新目录预览,67,1,/api/config + /api/keys + /api/route-preview; resource wrapper planned,A3/A4,真实配置或只读命中,整体替换冲突;不得回存status数组;无能力标规划,U03/U05/U06,PLANNED
+catalog-back12,返回目录,310,1,LOCAL: vnext router between connected services and planned directory,A2/A3,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,UI_ROUTE
+catalog-open12:,详情,301,4,GET /api/services/:id; template details planned A3,A3,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,PLANNED
+catalog-tab12:connected,返回我的服务,305,3,LOCAL: vnext router between connected services and planned directory,A2/A3,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,UI_ROUTE
+catalog-tab12:directory,浏览全部服务模板,305,1,LOCAL: vnext router between connected services and planned directory,A2/A3,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,UI_ROUTE
+check-all9,检查所有连接（模拟）,195,1,NONE: production removes simulated control,A4/A5,真实操作反馈或隐藏,不得用模拟结果冒充运行资格,U06-U11/V07,REMOVE_MOCK
+check-service9,模拟检查,196,1,NONE: prototype simulation removed; real detection/probe requires separate authorized implementation,A3/A6,真实检测回执或隐藏,不得把模拟检测当运行资格,U01/U03/U04/U13/U14,REMOVE_MOCK
+client-delete13:,删除,355,1,GET /api/clients + POST /api/clients + local clipboard,A6,权限/标识/复制反馈,剪贴板失败可见;不复制Key;权限未实现不显示,U14/U17,PLANNED
+client-edit:,编辑,69,1,GET /api/clients + POST /api/clients + local clipboard,A6,权限/标识/复制反馈,剪贴板失败可见;不复制Key;权限未实现不显示,U14/U17,PLANNED
+client-new,+ 添加客户端,69,1,GET /api/clients + POST /api/clients + local clipboard,A6,权限/标识/复制反馈,剪贴板失败可见;不复制Key;权限未实现不显示,U14/U17,PLANNED
+client-remove13:,确认删除,387,1,GET /api/clients + POST /api/clients + local clipboard,A6,权限/标识/复制反馈,剪贴板失败可见;不复制Key;权限未实现不显示,U14/U17,PLANNED
+close,关闭,72,43,LOCAL: non-sensitive UI state only,A2,关闭/放弃并恢复焦点,进行中事务不可假装已取消,U02/V03,UI_LOCAL
+codex-bind11:,前往接入配置,282,1,POST /api/aggregation/switch|rollback|reconcile (extend role targets),A5,428预览→确认→回执→需重启,漂移409;过期consent428;无previousMode拒绝;实际生效待GUI,U02/U05/U10/U11,PLANNED
+codex-detach-confirm13,确认解除管理（演示）,412,1,POST /api/aggregation/switch|rollback|reconcile (extend role targets),A5,428预览→确认→回执→需重启,漂移409;过期consent428;无previousMode拒绝;实际生效待GUI,U02/U05/U10/U11,PLANNED
+codex-detach13,停止管理,335,2,POST /api/aggregation/switch|rollback|reconcile (extend role targets),A5,428预览→确认→回执→需重启,漂移409;过期consent428;无previousMode拒绝;实际生效待GUI,U02/U05/U10/U11,PLANNED
+config-export,导出原型配置,71,1,GET /api/usage|logs|config/backups (planned),A6,下载真实筛选结果,公式注入防护;Key排除;无数据显示空,U12/U14,PLANNED
+copy-url,复制示例地址,69,1,GET /api/clients + POST /api/clients + local clipboard,A6,权限/标识/复制反馈,剪贴板失败可见;不复制Key;权限未实现不显示,U14/U17,PLANNED
+detect-apps,模拟检测本机应用,83,2,NONE: prototype simulation removed; real detection/probe requires separate authorized implementation,A3/A6,真实检测回执或隐藏,不得把模拟检测当运行资格,U16/U17,REMOVE_MOCK
+discard,放弃修改,62,2,LOCAL: non-sensitive UI state only,A2,关闭/放弃并恢复焦点,进行中事务不可假装已取消,U02/V03,UI_LOCAL
+export-v6,导出,91,1,GET /api/policies/effective + POST /api/config/preview (planned),A4,有效值/来源/上限/保存回执,超范围422;硬约束不可覆盖;未实现字段禁用,U06-U09,PLANNED
+generic-guide,通用 API 接入,83,1,GET /api/clients + POST /api/clients + local clipboard,A6,权限/标识/复制反馈,剪贴板失败可见;不复制Key;权限未实现不显示,U14/U17,PLANNED
+history,配置历史,62,8,GET /api/config/backups (planned),A6,版本/差异/回滚入口,无后端时标规划，不显示模拟历史,U13/U14,PLANNED
+log-detail:,详情,70,1,GET /api/capabilities; exact binding pending source review,A2,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,REVIEW
+logs-export,导出筛选日志,70,1,GET /api/usage|logs|config/backups (planned),A6,下载真实筛选结果,公式注入防护;Key排除;无数据显示空,U12/U14,PLANNED
+manual-provider,手动添加示例,92,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+model-delete-confirm13:,确认删除,341,1,/api/config + /api/keys + /api/route-preview; resource wrapper planned,A3/A4,真实配置或只读命中,整体替换冲突;不得回存status数组;无能力标规划,U03/U05/U06,PLANNED
+model-delete13:,删除,351,2,/api/config + /api/keys + /api/route-preview; resource wrapper planned,A3/A4,真实配置或只读命中,整体替换冲突;不得回存status数组;无能力标规划,U03/U05/U06,PLANNED
+model-detail:,详情,67,1,/api/config + /api/keys + /api/route-preview; resource wrapper planned,A3/A4,真实配置或只读命中,整体替换冲突;不得回存status数组;无能力标规划,U03/U05/U06,PLANNED
+model-edit:,编辑,67,4,/api/config + /api/keys + /api/route-preview; resource wrapper planned,A3/A4,真实配置或只读命中,整体替换冲突;不得回存status数组;无能力标规划,U03/U05/U06,PLANNED
+model-new,+ 添加模型,67,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+model-save13,保存模型,345,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+model-select-provider13,继续,381,1,/api/config + /api/keys + /api/route-preview; resource wrapper planned,A3/A4,真实配置或只读命中,整体替换冲突;不得回存status数组;无能力标规划,U03/U05/U06,PLANNED
+model-to-pool11:,加入模型池,198,1,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+native-add13,添加官方登录配置（演示）,354,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+new-from-model11:,新建池,288,1,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+open-api,高级接入管理,92,2,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+open-codex,进入 Codex 配置,92,1,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+open-pool9:,打开,196,4,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+open-pools10,前往模型池,245,1,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+page:clients,查看接入,84,1,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+page:harness,返回应用,150,2,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+page:logs,查看诊断,62,5,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+page:mode,打开模式配置,69,8,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+page:models,高级管理,84,3,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+page:pools,管理模型池,84,12,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+page:providers,连接更多服务,108,8,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+page:reliability,稳定性策略,91,5,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+page:routing,高级路由规则,90,1,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+page:settings,高级配置,62,1,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+policy-app11:codex,调整 Codex 稳定性,276,1,GET /api/policies/effective + POST /api/config/preview (planned),A4,有效值/来源/上限/保存回执,超范围422;硬约束不可覆盖;未实现字段禁用,U06-U09,PLANNED
+policy-details13,收起详细参数,359,2,GET /api/policies/effective + POST /api/config/preview (planned),A4,有效值/来源/上限/保存回执,超范围422;硬约束不可覆盖;未实现字段禁用,U06-U09,PLANNED
+policy-discard,放弃修改,90,2,LOCAL: non-sensitive UI state only,A2,关闭/放弃并恢复焦点,进行中事务不可假装已取消,U02/V03,UI_LOCAL
+policy-inherit,恢复继承全局,90,2,GET /api/policies/effective + POST /api/config/preview (planned),A4,有效值/来源/上限/保存回执,超范围422;硬约束不可覆盖;未实现字段禁用,U06-U09,PLANNED
+policy-test,查看模拟故障测试,90,2,NONE: production removes simulated control,A4/A5,真实操作反馈或隐藏,不得用模拟结果冒充运行资格,U06-U11/V07,REMOVE_MOCK
+pool-add,+ 添加候选,108,2,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+pool-bind-confirm:,保存规划偏好,112,1,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+pool-bind:,选择候选池,82,3,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+pool-check,检查候选（模拟）,108,2,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+pool-delete,删除,108,2,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+pool-delete-confirm:,确认删除,114,2,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+pool-edit,编辑,108,2,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+pool-new,+ 新建模型池,108,3,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+pool-remove:,移除,107,2,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+pool-sim,运行模拟,108,3,NONE: production removes simulated control,A4/A5,真实操作反馈或隐藏,不得用模拟结果冒充运行资格,U06-U11/V07,REMOVE_MOCK
+pool-strategy11:,调整池回退,267,1,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+provider-edit:,编辑,66,1,/api/config + /api/keys + /api/route-preview; resource wrapper planned,A3/A4,真实配置或只读命中,整体替换冲突;不得回存status数组;无能力标规划,U03/U05/U06,PLANNED
+provider-new,+ 添加供应商,66,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+provider-test:,测试,66,2,NONE: production removes simulated control,A4/A5,真实操作反馈或隐藏,不得用模拟结果冒充运行资格,U06-U11/V07,REMOVE_MOCK
+provider-testall,全部测试（模拟）,66,2,NONE: prototype simulation removed; real detection/probe requires separate authorized implementation,A3/A6,真实检测回执或隐藏,不得把模拟检测当运行资格,U06-U11/V07,REMOVE_MOCK
+quick-switch9,快速切换,212,1,POST /api/aggregation/switch|rollback|reconcile (extend role targets),A5,428预览→确认→回执→需重启,漂移409;过期consent428;无previousMode拒绝;实际生效待GUI,U02/U05/U10/U11,PLANNED
+quick-target9:,选择,288,1,POST /api/aggregation/switch|rollback|reconcile (extend role targets),A5,428预览→确认→回执→需重启,漂移409;过期consent428;无previousMode拒绝;实际生效待GUI,U02/U05/U10/U11,PLANNED
+reset,重置演示数据,71,2,NONE: production removes simulated control,A4/A5,真实操作反馈或隐藏,不得用模拟结果冒充运行资格,U06-U11/V07,REMOVE_MOCK
+reset-confirm,重置,76,1,NONE: production removes simulated control,A4/A5,真实操作反馈或隐藏,不得用模拟结果冒充运行资格,U06-U11/V07,REMOVE_MOCK
+route-delete:,删除,68,1,GET /api/capabilities; exact binding pending source review,A2,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,REVIEW
+route-edit:,编辑,68,1,GET /api/capabilities; exact binding pending source review,A2,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,REVIEW
+route-new,+ 新建策略,68,1,/api/config + /api/keys + /api/route-preview; resource wrapper planned,A3/A4,真实配置或只读命中,整体替换冲突;不得回存status数组;无能力标规划,U03/U05/U06,PLANNED
+route-preview,生成模拟决策,68,1,/api/config + /api/keys + /api/route-preview; resource wrapper planned,A3/A4,真实配置或只读命中,整体替换冲突;不得回存status数组;无能力标规划,U03/U05/U06,PLANNED
+route-remove:,确认删除,76,1,GET /api/capabilities; exact binding pending source review,A2,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,REVIEW
+save-edit,保存演示配置,72,4,GET /api/capabilities; exact binding pending source review,A2,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,REVIEW
+save-model-pool11:,加入模型池,288,1,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+service-clear13,清除筛选,349,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+service-custom13,添加自定义服务,349,4,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+service-delete-confirm13:,确认删除,340,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+service-delete13:,删除服务,350,2,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+service-edit:,编辑示例配置,86,6,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+service-manage:,管理连接,84,8,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+service-more13:,更多,349,2,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+service-new,+ 连接模型服务,84,8,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+service-select:,选择,85,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+service-sync9,模拟同步目录,198,3,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+snippet,查看接入示例,69,1,GET /api/clients + POST /api/clients + local clipboard,A6,权限/标识/复制反馈,剪贴板失败可见;不复制Key;权限未实现不显示,U14/U17,PLANNED
+test-target11:,模拟故障切换,267,1,NONE: production removes simulated control,A4/A5,真实操作反馈或隐藏,不得用模拟结果冒充运行资格,U06-U11/V07,REMOVE_MOCK
+unbind-app11:,解除,283,1,POST /api/aggregation/switch|rollback|reconcile (extend role targets),A5,428预览→确认→回执→需重启,漂移409;过期consent428;无previousMode拒绝;实际生效待GUI,U02/U05/U10/U11,PLANNED
+unbind-confirm11:,确认解除,288,1,POST /api/aggregation/switch|rollback|reconcile (extend role targets),A5,428预览→确认→回执→需重启,漂移409;过期consent428;无previousMode拒绝;实际生效待GUI,U02/U05/U10/U11,PLANNED
+usage-export,导出 CSV,65,1,GET /api/usage|logs|config/backups (planned),A6,下载真实筛选结果,公式注入防护;Key排除;无数据显示空,U12/U14,PLANNED
+use-pool11,用于应用,284,2,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+ux-bind-confirm:,确认更改,152,1,GET /api/capabilities; exact binding pending source review,A2,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,REVIEW
+ux-bind-here:,引用此池,134,1,GET /api/capabilities; exact binding pending source review,A2,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,REVIEW
+ux-check-service:,检查连接,147,1,GET /api/capabilities; exact binding pending source review,A2,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,REVIEW
+ux-create-confirm,创建模型池,140,1,GET /api/capabilities; exact binding pending source review,A2,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,REVIEW
+ux-help,连接诊断,145,4,GET /api/capabilities + /api/harnesses (planned),A2/A6,检测证据/未知原因,检测不等于推理成功;xmxz未知,U16/U17,PLANNED
+ux-member-remove:,移除,131,1,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+ux-open-pools,进入模型池,162,1,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+ux-open-reliability,查看稳定性策略,152,1,LOCAL: vnext router + real target page,A2,路由/面包屑/选中态,草稿保留或明确丢弃；刷新可恢复非敏感草稿,U02/V03,UI_ROUTE
+ux-pool-duplicate,复制模型池,152,1,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+ux-pool-menu,更多,136,1,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+ux-pool-tab:strategy,设置回退,240,2,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+ux-pool-tab:test,测试故障链,240,1,POST /api/config/preview + /api/pools + POST /api/route-preview,A4,池revision/成员/引用/预演回执,最后候选422;引用冲突409;零上游预演,U05/U06,PLANNED
+ux-service-model-new:,添加示例模型,161,4,GET /api/capabilities; exact binding pending source review,A2,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,REVIEW
+ux-service-models:,查看模型,146,6,GET /api/capabilities; exact binding pending source review,A2,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,REVIEW
+ux-template-confirm:,添加示例服务,160,1,POST /api/config/preview + /api/services|connections|models + /api/keys,A3,loading/成功回执/实际配置代际,400就地错;409差异;428确认;401重授权;部分失败可恢复,U01/U03/U04/U13/U14,PLANNED
+ux-unbind:,解除,134,1,GET /api/capabilities; exact binding pending source review,A2,只读状态或明确规划,未绑定动作不得进入生产,V03/V04,REVIEW

@@ -139,7 +139,11 @@ async function main () {
   // (the mock upstream ignores Authorization). Each key save advances configVersion.
   for (const id of ['mock-openai', 'mock-backup']) {
     const c = await (await fetch(base + '/api/config', { headers: auth })).json()
-    await call('/api/keys', { id, key: 'fixture-key-' + id, version: c.configVersion })
+    const requestId = 'fixture-key-' + id
+    const preview = await call('/api/config/write:preview', { action: 'keys.update', id, key: 'fixture-key-' + id, expectedVersion: c.configVersion, requestId })
+    const plan = await preview.json()
+    if (!preview.ok) throw new Error('fixture key preview failed: ' + JSON.stringify(plan))
+    await call('/api/keys', { id, key: 'fixture-key-' + id, expectedVersion: plan.expectedVersion, requestId, previewId: plan.previewId, confirmToken: plan.confirmToken })
   }
   // Seed deterministic, zero-cost fixture traffic (local mock upstream only).
   for (let i = 0; i < 14; i++) {

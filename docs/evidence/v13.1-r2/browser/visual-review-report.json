@@ -1,0 +1,45 @@
+{
+  "contract": "mg-v13-visual-review/1",
+  "reviewedAt": "2026-11-25",
+  "sourceFingerprint": {
+    "algorithm": "sha256(path+NUL+bytes)",
+    "files": 171,
+    "sha256": "4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834"
+  },
+  "method": "AI visual inspection of six contact sheets generated from the current real-Chrome matrix; not owner/human signoff.",
+  "coverage": {
+    "pages": 19,
+    "pageThemeViewportCombinations": 76,
+    "dialogs": 12,
+    "dialogThemeViewportCombinations": 24,
+    "totalInspectedSamples": 100,
+    "contactSheets": [
+      "docs/evidence/v13.1-r2/browser/visual-review/pages-dark-360x740.png",
+      "docs/evidence/v13.1-r2/browser/visual-review/pages-light-360x740.png",
+      "docs/evidence/v13.1-r2/browser/visual-review/pages-dark-1440x900.png",
+      "docs/evidence/v13.1-r2/browser/visual-review/pages-light-1440x900.png",
+      "docs/evidence/v13.1-r2/browser/visual-review/dialogs-dark-360x740.png",
+      "docs/evidence/v13.1-r2/browser/visual-review/dialogs-light-360x740.png"
+    ]
+  },
+  "checks": [
+    {"id": "VISUAL-HIERARCHY", "ok": true, "detail": "Page title, breadcrumb, primary action, panels and status footer form a consistent hierarchy across all 19 routes."},
+    {"id": "VISUAL-NAV", "ok": true, "detail": "Six primary navigation items remain fixed and selected parent state is visually distinct."},
+    {"id": "VISUAL-NARROW", "ok": true, "detail": "At 360x740, long tables and content use internal scrolling; no blocking page-level clipping or overlapping fixed actions was observed."},
+    {"id": "VISUAL-DIALOGS", "ok": true, "detail": "All 12 dialog types keep title, body and footer visible at 360x740; candidate/model lists scroll internally and footer actions remain reachable."},
+    {"id": "VISUAL-THEME-PARITY", "ok": true, "detail": "Dark and light themes preserve spacing, hierarchy, control affordances and status semantics."},
+    {"id": "VISUAL-WIDE", "ok": true, "detail": "At 1440x900, panels use the available width without empty fragmented layouts or overlapping controls."},
+    {"id": "VISUAL-TEXT-DENSITY", "ok": true, "detail": "Narrow view is dense but readable; no truncated primary labels or inaccessible icon-only actions were observed."}
+  ],
+  "observations": [
+    "The narrow topbar intentionally wraps the non-production badge and refresh control; no collision was observed.",
+    "Pool strategy/app/test routes share the same pool shell with distinct panels; this is consistent with the six-primary-navigation information architecture.",
+    "Some secondary metadata is visually compact at 360px; retained as a watch item, not a blocking defect."
+  ],
+  "result": "PASS_AI_VISUAL_REVIEW",
+  "limitations": [
+    "This is an AI visual review, not the owner's human visual signoff.",
+    "OS-native IME candidate-window presentation and audible Orca listening were not assessed.",
+    "Contact-sheet thumbnails do not replace the full-resolution matrix screenshots."
+  ]
+}

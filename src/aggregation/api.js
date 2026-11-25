@@ -38,6 +38,7 @@ import {
   status as desktopStatus,
 } from '../codex/desktop-integration.js'
 import { AGGREGATION_MODES, listModeMetadata, listSelectableParents } from '../codex/profiles.js'
+import { stableModelId } from '../codex/catalog.js'
 
 export const AGGREGATION_API_CONTRACT = 'mg-aggregation-api/1'
 const BASE = '/api/aggregation'
@@ -355,11 +356,34 @@ function activationOptions (cfg, body, deps) {
     }
   } catch { /* 目录不可读时交给 preview 报 catalog_path_required，不伪造路径 */ }
   opts.model = pickModel(catalog, cfg, body && body.model)
+  opts.catalog = catalog
   return opts
 }
 
 // 三模式切换选项：在普通接入选项上补 mode/parentModel。route 固定父模型；
 // aggregated 显式 parentModel 时让 model 与父保持一致，避免预览与实际写入不一致。
+function resolveRoleTarget(cfg, catalog, target, label) {
+  if (!target || typeof target !== 'object' || Array.isArray(target)) throw new DesktopError('invalid_role_target', label + ' 必须是 model 或 pool 目标', null, 422)
+  const kind = String(target.kind || '')
+  const id = String(target.id || '').trim()
+  if (!id) throw new DesktopError('invalid_role_target', label + ' 缺少稳定 ID', null, 422)
+  const slugs = new Set((catalog?.models || []).map((model) => model.slug).filter(Boolean))
+  if (kind === 'model') {
+    const entry = Object.entries(cfg.models || {}).find(([name, def]) => name === id || def.modelId === id)
+    if (!entry || entry[1].enabled === false) throw new DesktopError('role_target_unavailable', label + ' 模型不存在或已停用', { target }, 422)
+    const slug = [entry[0], stableModelId(entry[1].provider, entry[0])].find((candidate) => slugs.has(candidate))
+    if (!slug) throw new DesktopError('role_target_unavailable', label + ' 模型尚未发布到当前 Codex 目录', { target }, 422)
+    return { kind, id, slug }
+  }
+  if (kind === 'pool') {
+    const pool = (cfg.virtualModels || []).find((item) => item.poolId === id || item.slug === id || item.name === id)
+    const slug = pool?.slug || pool?.name || ''
+    if (!pool || pool.enabled === false || !slugs.has(slug)) throw new DesktopError('role_target_unavailable', label + ' 模型池不存在、已停用或尚未发布目录', { target }, 422)
+    return { kind, id: pool.poolId || id, slug }
+  }
+  throw new DesktopError('invalid_role_target', label + ' kind 仅支持 model/pool', null, 422)
+}
+
 function switchOptions (cfg, body, deps) {
   const opts = activationOptions(cfg, body, deps)
   const mode = String((body && body.mode) || '').trim()
@@ -369,6 +393,19 @@ function switchOptions (cfg, body, deps) {
     if (parent) {
       opts.parentModel = parent
       if (mode !== 'route') opts.model = parent
+    }
+    if (mode === 'route' && (body.routeTarget || body.childTarget)) {
+      const role = resolveRoleTarget(cfg, opts.catalog, body.routeTarget || body.childTarget, '纯路由目标')
+      opts.routeTarget = role
+      opts.model = role.slug
+      opts.parentModel = role.slug
+      opts.agentModel = role.slug
+    } else if (mode === 'aggregated' && body.childTarget) {
+      const role = resolveRoleTarget(cfg, opts.catalog, body.childTarget, '聚合子目标')
+      opts.childTarget = role
+      opts.agentModel = role.slug
+    } else if (mode === 'official' && (body.routeTarget || body.childTarget)) {
+      throw new DesktopError('official_target_forbidden', '官方直连不接受第三方模型或模型池目标', null, 422)
     }
   }
   return opts

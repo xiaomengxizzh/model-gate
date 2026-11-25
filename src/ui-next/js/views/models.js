@@ -6,7 +6,7 @@ import {
 import { state, loadAll, loadStatus } from '../store.js'
 import { ensureDraft, setDraft } from '../config-draft.js'
 import { reviewAndSave, dirtyChip } from '../save-flow.js'
-import { api } from '../api.js'
+import { api, request } from '../api.js'
 import { fmtInt, fmtMs, fmtAgo, parseKv, kvText } from '../format.js'
 
 const CAPABILITIES = ['chat', 'embedding', 'rerank', 'audio', 'image', 'video']
@@ -776,7 +776,7 @@ function openVirtualKeyDialog(draft, vm, st, rerender) {
   const clearBtn = hasKey ? h('button', { class: 'btn btn-danger', type: 'button', text: '清除虚拟 Key', disabled: dirty }) : null
 
   const content = h('div', null,
-    callout('info', h('strong', { text: 'Key 走独立通道。' }), ' 只提交到 POST /api/keys，id 为 ' + keyId + '；页面与状态接口都不会回显 Key 值。'),
+    callout('info', h('strong', { text: 'Key 走独立通道。' }), ' 先预览凭据动作与指纹，再经自定义确认对话框提交 POST /api/keys，id 为 ' + keyId + '；页面与状态接口都不会回显 Key 值。'),
     dirty ? callout('warn', h('strong', { text: '当前有未保存的配置更改。' }), ' Key 保存会推进 configVersion，使草稿版本过期；请先保存或放弃草稿。') : null,
     kvList([
       ['虚拟入口', vm.name],
@@ -800,7 +800,27 @@ function openVirtualKeyDialog(draft, vm, st, rerender) {
     save.disabled = true
     if (clearBtn) clearBtn.disabled = true
     try {
-      await api.saveKey({ id: keyId, key: keyValue, version: draft.baseVersion })
+      const requestId = 'vm-key-' + keyId + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)
+      const preview = await request('/api/config/write:preview', {
+        method: 'POST', body: { action: 'keys.update', id: keyId, key: keyValue, expectedVersion: draft.baseVersion, requestId },
+      })
+      const confirmed = await confirmDialog({
+        title: keyValue ? '确认更新虚拟模型 Key' : '确认清除虚拟模型 Key',
+        desc: '服务端已生成持久凭据操作预览；确认后才写入加密 Key 库。',
+        message: '目标：' + keyId + '；动作：' + (keyValue ? '设置新 Key' : '清除独立 Key') +
+          '；指纹：' + preview.summary.credentialFingerprint + '；基准版本：' + preview.expectedVersion +
+          '。预览编号 ' + preview.previewId + '。操作存储只保存动作与 SHA-256 指纹，不保存明文 Key。',
+        confirmLabel: keyValue ? '确认更新 Key' : '确认清除', danger: true,
+      })
+      if (!confirmed) {
+        save.disabled = dirty
+        if (clearBtn) clearBtn.disabled = dirty
+        return
+      }
+      await api.saveKey({
+        id: keyId, key: keyValue, expectedVersion: preview.expectedVersion, requestId: preview.requestId,
+        previewId: preview.previewId, confirmToken: preview.confirmToken,
+      })
       input.value = ''
       setDraft(null)
       let reloadErr = null
@@ -823,15 +843,7 @@ function openVirtualKeyDialog(draft, vm, st, rerender) {
     submit(value)
   })
   if (clearBtn) {
-    clearBtn.addEventListener('click', async () => {
-      const ok = await confirmDialog({
-        title: '清除虚拟模型 Key',
-        message: '将删除该虚拟入口在 keys 库中的独立 Key。若全局客户端 Key 仍启用，入口鉴权规则以服务端为准。',
-        confirmLabel: '清除', danger: true,
-      })
-      if (!ok) return
-      submit('')
-    })
+    clearBtn.addEventListener('click', () => submit(''))
   }
 }
 

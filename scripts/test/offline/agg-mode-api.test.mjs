@@ -29,14 +29,14 @@ const PARENT = 'gpt-6-luna'
 const ROUTE = 'mg-opencodego-deepseek-v4-1-flash'
 const CHILD = 'deepseek-v4.1-flash'
 
-function catalogText () {
+function catalogText (slugs = [PARENT, ROUTE, CHILD]) {
   const model = (slug, extra = {}) => Object.assign({
     slug, display_name: slug, visibility: 'list', supported_in_api: true,
   }, extra)
-  return JSON.stringify({ models: [model(PARENT), model(ROUTE), model(CHILD)] })
+  return JSON.stringify({ models: slugs.map((slug) => model(slug)) })
 }
 
-async function setup () {
+async function setup (options = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'agg-mode-api-cfg-'))
   const codexHome = await mkdtemp(join(tmpdir(), 'agg-mode-api-home-'))
   const configPath = join(codexHome, 'config.toml')
@@ -45,7 +45,7 @@ async function setup () {
   // verifyAll 也要求该文件存在且包含目标模型。
   const catDir = join(dir, 'aggregation', 'catalog', 'local')
   await mkdir(join(catDir, 'versions'), { recursive: true })
-  const text = catalogText()
+  const text = catalogText(options.catalogSlugs)
   const sha = createHash('sha256').update(text).digest('hex')
   await writeFile(join(catDir, 'current.json'), text)
   await writeFile(join(catDir, 'versions', 'v000001-' + sha.slice(0, 8) + '.json'), text)
@@ -54,7 +54,7 @@ async function setup () {
     current: {
       version: 1, file: 'versions/v000001-' + sha.slice(0, 8) + '.json',
       sha256: sha, generatedAt: new Date(0).toISOString(), format: 'json',
-      counts: { total: 3 }, bindings: {}, aliases: {}, officialSlugs: [PARENT],
+      counts: { total: (options.catalogSlugs || [PARENT, ROUTE, CHILD]).length }, bindings: {}, aliases: {}, officialSlugs: [PARENT],
     },
     history: [], retiredBindings: {}, lastRollback: null,
   }))
@@ -62,7 +62,7 @@ async function setup () {
     name: 'agg-mode-api',
     dir,
     env: { MG_ADMIN_TOKEN: TOKEN, CODEX_HOME: codexHome },
-    config: { defaults: {}, providers: {}, models: {} },
+    config: options.config || { defaults: {}, providers: {}, models: {} },
   })
   const statePath = join(codexHome, '.modelgate-desktop-state.json')
   return {
@@ -316,6 +316,28 @@ test('三个端点均已接线：对已鉴权请求不再返回 404', async (t) 
   assert.notEqual(sw.status, 404)
   const rb = await api(f, '/api/aggregation/rollback', { method: 'POST', body: {} })
   assert.notEqual(rb.status, 404)
+})
+
+test('角色池目标：route 父子同池、aggregated 官方父 + 第三方池子', async (t) => {
+  const poolSlug = 'mg-pool-fixture'
+  const f = await setup({
+    catalogSlugs: [PARENT, poolSlug],
+    config: { defaults: {}, providers: { fixture: { baseUrl: 'https://example.test/v1' } }, models: { unused: { provider: 'fixture', maxContext: 8192 } }, virtualModels: [{ name: 'fixture', slug: poolSlug, enabled: true, directory: [{ model: 'unused' }] }] },
+  })
+  t.after(f.cleanup)
+  const routePreview = await api(f, '/api/aggregation/switch', { method: 'POST', body: { mode: 'route', routeTarget: { kind: 'pool', id: poolSlug } } })
+  assert.equal(routePreview.status, 428, routePreview.text)
+  const routeApplied = await api(f, '/api/aggregation/switch', { method: 'POST', body: { mode: 'route', routeTarget: { kind: 'pool', id: poolSlug }, consentToken: routePreview.body.preview.consentToken, expectedSha: routePreview.body.preview.expectedSha } })
+  assert.equal(routeApplied.status, 200, routeApplied.text)
+  assert.match(await f.readConfig(), new RegExp('model = "' + poolSlug + '"'))
+  assert.equal((await f.readState()).routeTarget.kind, 'pool')
+
+  const aggPreview = await api(f, '/api/aggregation/switch', { method: 'POST', body: { mode: 'aggregated', parentModel: PARENT, childTarget: { kind: 'pool', id: poolSlug } } })
+  assert.equal(aggPreview.status, 428, aggPreview.text)
+  const aggApplied = await api(f, '/api/aggregation/switch', { method: 'POST', body: { mode: 'aggregated', parentModel: PARENT, childTarget: { kind: 'pool', id: poolSlug }, consentToken: aggPreview.body.preview.consentToken, expectedSha: aggPreview.body.preview.expectedSha } })
+  assert.equal(aggApplied.status, 200, aggApplied.text)
+  assert.equal((await f.readState()).childTarget.kind, 'pool')
+  assert.match(await f.readConfig(), /model = "gpt-6-luna"/)
 })
 
 // ---------------------------------------------------------------------------

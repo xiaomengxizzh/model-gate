@@ -19,9 +19,9 @@ import gi
 gi.require_version('AyatanaAppIndicator3', '0.1')
 from gi.repository import AyatanaAppIndicator3, GLib
 
-PROJ = '/home/xiaomengxizi/ai/workplace/idproject/model-gateway'
+PROJ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BASE = 'http://127.0.0.1:8787'
-PANEL_URL = BASE + '/ui-next/'
+PANEL_URL = BASE + '/ui-vnext/'
 UNIT = 'model-gateway.service'
 ICON_DIR = os.path.join(PROJ, 'scripts', 'tray', 'icons')
 PRICE_FILE = os.path.join(PROJ, 'scripts', 'tray', 'mg-prices.json')

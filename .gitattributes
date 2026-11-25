@@ -7,3 +7,5 @@
 *.md text eol=lf
 *.json text eol=lf
 *.yml text eol=lf
+# Authoritative R2 inputs are hash-pinned; preserve their bytes exactly.
+docs/evidence/v13.1-r2/input/** binary

@@ -7,7 +7,7 @@ import { startGateway } from './isolate.mjs'
 import { check, finish } from './utils.mjs'
 
 const fx = await startGateway({ name: 'z-defaults-merge', config: { providers: {}, models: {} } })
-const saveDefaults = (defaults) => fx.post('/api/config/save', defaults === undefined ? {} : { defaults }, fx.admin)
+const saveDefaults = (defaults) => fx.write('/api/config/save', defaults === undefined ? {} : { defaults }, fx.admin)
 const status = () => fx.status()
 
 try {

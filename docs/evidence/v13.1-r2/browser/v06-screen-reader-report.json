@@ -1,0 +1,3184 @@
+{
+  "contract": "mg-v13-v06-screen-reader/1",
+  "command": "node scripts/e2e/ui-v13-screen-reader.mjs",
+  "cwd": ".",
+  "startedAt": "2026-11-25T05:37:49.998Z",
+  "headSha": "48325bf0027e583108c66677c7dec15fd5007228",
+  "worktreeDirty": true,
+  "sourceFingerprint": {
+    "algorithm": "sha256(path+NUL+bytes)",
+    "files": 175,
+    "sha256": "4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834"
+  },
+  "scriptSha256": "8e95e9649d13ec4a748dc5b40ee252112ca9fee090a49babeef21141d78231bf",
+  "boundary": "real Orca + AT-SPI2 + real headed Chrome + isolated loopback gateway; not a CDP-only AX test; no production 8787, private config, real upstream, install, or download",
+  "helperProvenance": {
+    "shared": [
+      "scripts/test/offline/harness.mjs:startGateway",
+      "scripts/test/offline/harness.mjs:startMockUpstream"
+    ],
+    "patterns": [
+      "scripts/e2e/ui-v13-browser.mjs:findChrome/freePort/connect",
+      "scripts/e2e/ui-v13-quality.mjs:findChrome/freePort/connect/waitFor/check"
+    ],
+    "note": "Existing E2E files execute on import; their transport patterns are copied to keep this runner standalone without changing helper runners."
+  },
+  "resourcePreflight": {
+    "downloads": 0,
+    "installs": 0,
+    "action": "reuse-existing-only",
+    "python": {
+      "binary": "/usr/bin/python3",
+      "state": "EXISTS",
+      "action": "reuse"
+    },
+    "orca": {
+      "binary": "/usr/bin/orca",
+      "state": "EXISTS",
+      "action": "reuse"
+    },
+    "xvfb": {
+      "binary": "/usr/bin/Xvfb",
+      "state": "EXISTS",
+      "action": "reuse"
+    },
+    "atspiLauncher": {
+      "binary": "/usr/libexec/at-spi-bus-launcher",
+      "state": "EXISTS",
+      "action": "reuse"
+    },
+    "dbusSession": {
+      "binary": "/usr/bin/dbus-run-session",
+      "state": "EXISTS",
+      "action": "reuse"
+    },
+    "chrome": {
+      "binary": "/usr/bin/google-chrome",
+      "state": "EXISTS",
+      "action": "reuse"
+    }
+  },
+  "toolVersions": {
+    "node": "v24.22.2",
+    "python": "3.14.4",
+    "atspi": "(major=2, minor=60, micro=4)",
+    "pyatspi": "pyatspi=False",
+    "chrome": "Google Chrome 153.0.8010.36",
+    "xvfb": "2:21.1.22-1ubuntu1",
+    "atspiPackage": "2.60.4-0ubuntu0.1",
+    "orcaPackage": "50.2-0ubuntu0.1",
+    "dbusRunSessionPackage": "1.16.2-2ubuntu4",
+    "orca": "Orca version 50.2, AT-SPI2 version: 2.60.4, Session: x11 KDE"
+  },
+  "preflightCommands": [
+    {
+      "command": "/usr/bin/python3 -c import gi,importlib.util,sys; gi.require_version('Atspi','2.0'); from gi.repository import Atspi; print(sys.version.split()[0]); print(Atspi.get_version()); print('pyatspi=' + str(importlib.util.find_spec('pyatspi') is not None))",
+      "status": "EXIT_0"
+    },
+    {
+      "command": "node --version",
+      "status": "EXIT_0"
+    },
+    {
+      "command": "/usr/bin/google-chrome --version",
+      "status": "EXIT_0"
+    },
+    {
+      "command": "/usr/bin/dpkg-query -W -f=${Version} xvfb",
+      "status": "EXIT_0"
+    },
+    {
+      "command": "/usr/bin/dpkg-query -W -f=${Version} at-spi2-core",
+      "status": "EXIT_0"
+    },
+    {
+      "command": "/usr/bin/dpkg-query -W -f=${Version} orca",
+      "status": "EXIT_0"
+    },
+    {
+      "command": "/usr/bin/dpkg-query -W -f=${Version} dbus-daemon",
+      "status": "EXIT_0"
+    },
+    {
+      "command": "HOME=\"/tmp/mg-v06-screen-reader-GIUZOR\" XDG_CONFIG_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/config\" XDG_CACHE_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/cache\" XDG_RUNTIME_DIR=\"/tmp/mg-v06-screen-reader-GIUZOR/runtime\" NO_AT_BRIDGE=\"0\" ACCESSIBILITY_ENABLED=\"1\" GTK_MODULES=\"gail:atk-bridge\" XDG_CURRENT_DESKTOP=\"GNOME\" DESKTOP_SESSION=\"gnome\" XDG_SESSION_TYPE=\"x11\" GDK_BACKEND=\"x11\" QT_QPA_PLATFORM=\"xcb\" KDE_FULL_SESSION=\"\" GTK_USE_PORTAL=\"0\" GNOME_KEYRING_CONTROL=\"\" SSH_AUTH_SOCK=\"\" GSETTINGS_BACKEND=\"memory\" DISPLAY=\":3250\" AT_SPI_BUS=\"unix:path=/tmp/mg-v06-screen-reader-GIUZOR/runtime/at-spi/bus_3250\" /usr/bin/orca --version",
+      "status": "EXIT_0"
+    },
+    {
+      "command": "HOME=\"/tmp/mg-v06-screen-reader-GIUZOR\" XDG_CONFIG_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/config\" XDG_CACHE_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/cache\" XDG_RUNTIME_DIR=\"/tmp/mg-v06-screen-reader-GIUZOR/runtime\" NO_AT_BRIDGE=\"0\" ACCESSIBILITY_ENABLED=\"1\" GTK_MODULES=\"gail:atk-bridge\" XDG_CURRENT_DESKTOP=\"GNOME\" DESKTOP_SESSION=\"gnome\" XDG_SESSION_TYPE=\"x11\" GDK_BACKEND=\"x11\" QT_QPA_PLATFORM=\"xcb\" KDE_FULL_SESSION=\"\" GTK_USE_PORTAL=\"0\" GNOME_KEYRING_CONTROL=\"\" SSH_AUTH_SOCK=\"\" GSETTINGS_BACKEND=\"memory\" DISPLAY=\":3250\" AT_SPI_BUS=\"unix:path=/tmp/mg-v06-screen-reader-GIUZOR/runtime/at-spi/bus_3250\" /usr/bin/gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetConnectionUnixProcessID org.a11y.Bus",
+      "status": "EXIT_0"
+    },
+    {
+      "command": "HOME=\"/tmp/mg-v06-screen-reader-GIUZOR\" XDG_CONFIG_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/config\" XDG_CACHE_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/cache\" XDG_RUNTIME_DIR=\"/tmp/mg-v06-screen-reader-GIUZOR/runtime\" NO_AT_BRIDGE=\"0\" ACCESSIBILITY_ENABLED=\"1\" GTK_MODULES=\"gail:atk-bridge\" XDG_CURRENT_DESKTOP=\"GNOME\" DESKTOP_SESSION=\"gnome\" XDG_SESSION_TYPE=\"x11\" GDK_BACKEND=\"x11\" QT_QPA_PLATFORM=\"xcb\" KDE_FULL_SESSION=\"\" GTK_USE_PORTAL=\"0\" GNOME_KEYRING_CONTROL=\"\" SSH_AUTH_SOCK=\"\" GSETTINGS_BACKEND=\"memory\" DISPLAY=\":3250\" AT_SPI_BUS=\"unix:path=/tmp/mg-v06-screen-reader-GIUZOR/runtime/at-spi/bus_3250\" /usr/bin/python3 -c import gi,os; gi.require_version('Atspi','2.0'); from gi.repository import Atspi; print('DISPLAY='+os.environ['DISPLAY']); print('ATSPI_BUS='+os.environ.get('AT_SPI_BUS','auto')); print('desktop='+Atspi.get_desktop(0).get_name())",
+      "status": "EXIT_0"
+    }
+  ],
+  "processCommands": [
+    {
+      "name": "xvfb",
+      "command": "HOME=\"/tmp/mg-v06-screen-reader-GIUZOR\" XDG_CONFIG_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/config\" XDG_CACHE_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/cache\" XDG_RUNTIME_DIR=\"/tmp/mg-v06-screen-reader-GIUZOR/runtime\" NO_AT_BRIDGE=\"0\" ACCESSIBILITY_ENABLED=\"1\" GTK_MODULES=\"gail:atk-bridge\" XDG_CURRENT_DESKTOP=\"GNOME\" DESKTOP_SESSION=\"gnome\" XDG_SESSION_TYPE=\"x11\" GDK_BACKEND=\"x11\" QT_QPA_PLATFORM=\"xcb\" KDE_FULL_SESSION=\"\" GTK_USE_PORTAL=\"0\" GNOME_KEYRING_CONTROL=\"\" SSH_AUTH_SOCK=\"\" GSETTINGS_BACKEND=\"memory\" /usr/bin/Xvfb :3250 -screen 0 1440x900x24 -nolisten tcp -ac -noreset",
+      "pid": 2313097
+    },
+    {
+      "name": "at-spi-bus-launcher",
+      "command": "HOME=\"/tmp/mg-v06-screen-reader-GIUZOR\" XDG_CONFIG_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/config\" XDG_CACHE_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/cache\" XDG_RUNTIME_DIR=\"/tmp/mg-v06-screen-reader-GIUZOR/runtime\" NO_AT_BRIDGE=\"0\" ACCESSIBILITY_ENABLED=\"1\" GTK_MODULES=\"gail:atk-bridge\" XDG_CURRENT_DESKTOP=\"GNOME\" DESKTOP_SESSION=\"gnome\" XDG_SESSION_TYPE=\"x11\" GDK_BACKEND=\"x11\" QT_QPA_PLATFORM=\"xcb\" KDE_FULL_SESSION=\"\" GTK_USE_PORTAL=\"0\" GNOME_KEYRING_CONTROL=\"\" SSH_AUTH_SOCK=\"\" GSETTINGS_BACKEND=\"memory\" DISPLAY=\":3250\" /usr/libexec/at-spi-bus-launcher --launch-immediately",
+      "pid": 2313098
+    },
+    {
+      "name": "orca",
+      "command": "HOME=\"/tmp/mg-v06-screen-reader-GIUZOR\" XDG_CONFIG_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/config\" XDG_CACHE_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/cache\" XDG_RUNTIME_DIR=\"/tmp/mg-v06-screen-reader-GIUZOR/runtime\" NO_AT_BRIDGE=\"0\" ACCESSIBILITY_ENABLED=\"1\" GTK_MODULES=\"gail:atk-bridge\" XDG_CURRENT_DESKTOP=\"GNOME\" DESKTOP_SESSION=\"gnome\" XDG_SESSION_TYPE=\"x11\" GDK_BACKEND=\"x11\" QT_QPA_PLATFORM=\"xcb\" KDE_FULL_SESSION=\"\" GTK_USE_PORTAL=\"0\" GNOME_KEYRING_CONTROL=\"\" SSH_AUTH_SOCK=\"\" GSETTINGS_BACKEND=\"memory\" DISPLAY=\":3250\" AT_SPI_BUS=\"unix:path=/tmp/mg-v06-screen-reader-GIUZOR/runtime/at-spi/bus_3250\" /usr/bin/orca --debug-file /tmp/mg-v06-screen-reader-GIUZOR/orca-debug.out --speech-system speech-dispatcher",
+      "pid": 2313238
+    },
+    {
+      "name": "at-spi-event-probe",
+      "command": "HOME=\"/tmp/mg-v06-screen-reader-GIUZOR\" XDG_CONFIG_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/config\" XDG_CACHE_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/cache\" XDG_RUNTIME_DIR=\"/tmp/mg-v06-screen-reader-GIUZOR/runtime\" NO_AT_BRIDGE=\"0\" ACCESSIBILITY_ENABLED=\"1\" GTK_MODULES=\"gail:atk-bridge\" XDG_CURRENT_DESKTOP=\"GNOME\" DESKTOP_SESSION=\"gnome\" XDG_SESSION_TYPE=\"x11\" GDK_BACKEND=\"x11\" QT_QPA_PLATFORM=\"xcb\" KDE_FULL_SESSION=\"\" GTK_USE_PORTAL=\"0\" GNOME_KEYRING_CONTROL=\"\" SSH_AUTH_SOCK=\"\" GSETTINGS_BACKEND=\"memory\" DISPLAY=\":3250\" AT_SPI_BUS=\"unix:path=/tmp/mg-v06-screen-reader-GIUZOR/runtime/at-spi/bus_3250\" /usr/bin/python3 -c \nimport gi, json, sys, time, signal\ngi.require_version('Atspi', '2.0')\nfrom gi.repository import Atspi, GLib\n\ndef safe(fn, *args, default=None, **kwargs):\n    try: return fn(*args, **kwargs)\n    except Exception: return default\n\ndef text(value, limit=500):\n    return str(value or '')[:limit]\n\ndef relations(node):\n    result = []\n    relset = safe(node.get_relation_set)\n    if relset:\n        items = relset if isinstance(relset, (list, tuple)) else (safe(relset.get_relations) or [])\n        for rel in items:\n            result.append({'type': safe(rel.get_relation_type, default=''), 'targets': [text(safe(lambda: safe(rel.get_target, 0).get_name))]})\n    return result\n\ndef info(node, index=-1, parent=-1):\n    states = safe(node.get_state_set)\n    names = [getattr(state, 'value_nick', str(state)).upper() for state in (safe(states.get_states) or [])]\n    return {\n        'index': index, 'parent': parent,\n        'role': safe(node.get_role_name, default=''), 'name': text(safe(node.get_name), 400),\n        'description': text(safe(node.get_description), 300),\n        'states': names,\n        'level': safe(lambda: node.get_attribute('level'), default=''),\n        'relations': relations(node),\n    }\n\ndef chrome_app():\n    desktop = Atspi.get_desktop(0)\n    deadline = time.time() + 20\n    while time.time() < deadline:\n        for i in range(safe(desktop.get_child_count) or 0):\n            app = safe(desktop.get_child_at_index, i)\n            if not app: continue\n            name = text(safe(app.get_name)).lower()\n            if 'chrome' in name or 'chromium' in name: return app\n        time.sleep(.1)\n    raise RuntimeError('AT-SPI desktop has no Chrome application')\n\ndef snapshot():\n    nodes, ancestors = [], []\n    max_nodes = 12000\n    def visit(node, parent=-1):\n        if not node or len(nodes) >= max_nodes: return\n        states = safe(node.get_state_set)\n        if states and not states.contains(Atspi.StateType.SHOWING): return\n        index = len(nodes)\n        item = info(node, index, parent)\n        item['ancestors'] = [{'role': n['role'], 'name': n['name']} for n in ancestors]\n        nodes.append(item)\n        ancestors.append(item)\n        for i in range(safe(node.get_child_count) or 0): visit(safe(node.get_child_at_index, i), index)\n        ancestors.pop()\n    visit(chrome_app())\n    return {'toolkitVersion': Atspi.get_version(), 'applicationCount': safe(Atspi.get_desktop(0).get_child_count) or 0, 'nodes': nodes}\n\ndef events():\n    global event_stream\n    event_stream = open(sys.argv[2], 'a', buffering=1)\n    def emit(value):\n        event_stream.write(json.dumps(value, ensure_ascii=False) + '\\n')\n        event_stream.flush()\n    emit({'stage': 'listener-new'})\n    listener = Atspi.EventListener.new(callback)\n    emit({'stage': 'listener-created'})\n    for kind in ('object:state-changed:focused',):\n        listener.register(kind)\n        emit({'stage': 'registered', 'event': kind})\n    emit({'ready': True, 'pid': __import__('os').getpid()})\n    GLib.MainLoop().run()\n\nevent_stream = None\ndef callback(event):\n    if event.type != 'object:state-changed:focused' or not safe(event.detail1):\n        return\n    item = info(event.source)\n    item.update({'event': event.type, 'at': time.time()})\n    event_stream.write(json.dumps(item, ensure_ascii=False) + '\\n')\n    event_stream.flush()\n\nif sys.argv[1] == 'snapshot': print(json.dumps(snapshot(), ensure_ascii=False))\nelif sys.argv[1] == 'events': events()\nelse: raise SystemExit('unknown probe mode')\n events /tmp/mg-v06-screen-reader-GIUZOR/at-spi-events.jsonl",
+      "pid": 2313416
+    },
+    {
+      "name": "chrome",
+      "command": "HOME=\"/tmp/mg-v06-screen-reader-GIUZOR\" XDG_CONFIG_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/config\" XDG_CACHE_HOME=\"/tmp/mg-v06-screen-reader-GIUZOR/cache\" XDG_RUNTIME_DIR=\"/tmp/mg-v06-screen-reader-GIUZOR/runtime\" NO_AT_BRIDGE=\"0\" ACCESSIBILITY_ENABLED=\"1\" GTK_MODULES=\"gail:atk-bridge\" XDG_CURRENT_DESKTOP=\"GNOME\" DESKTOP_SESSION=\"gnome\" XDG_SESSION_TYPE=\"x11\" GDK_BACKEND=\"x11\" QT_QPA_PLATFORM=\"xcb\" KDE_FULL_SESSION=\"\" GTK_USE_PORTAL=\"0\" GNOME_KEYRING_CONTROL=\"\" SSH_AUTH_SOCK=\"\" GSETTINGS_BACKEND=\"memory\" DISPLAY=\":3250\" AT_SPI_BUS=\"unix:path=/tmp/mg-v06-screen-reader-GIUZOR/runtime/at-spi/bus_3250\" /usr/bin/google-chrome --ozone-platform=x11 --no-sandbox --disable-dev-shm-usage --disable-background-networking --disable-component-update --disable-sync --disable-extensions --password-store=basic --use-mock-keychain --no-first-run --no-default-browser-check --force-renderer-accessibility --remote-debugging-port=37405 --remote-allow-origins=* --user-data-dir=/tmp/mg-v06-screen-reader-GIUZOR/chrome-profile --window-size=1440,900 about:blank",
+      "pid": 2313418
+    }
+  ],
+  "ownedProcesses": [
+    {
+      "name": "xvfb",
+      "pid": 2313097,
+      "processGroup": 2313097
+    },
+    {
+      "name": "at-spi-bus-launcher",
+      "pid": 2313098,
+      "processGroup": 2313098
+    },
+    {
+      "name": "orca",
+      "pid": 2313238,
+      "processGroup": 2313238
+    },
+    {
+      "name": "at-spi-event-probe",
+      "pid": 2313416,
+      "processGroup": 2313416
+    },
+    {
+      "name": "chrome",
+      "pid": 2313418,
+      "processGroup": 2313418
+    }
+  ],
+  "checks": [
+    {
+      "id": "V06-SR-PREFLIGHT",
+      "ok": true,
+      "detail": "reuse existing Orca/Xvfb/AT-SPI/GI/Chrome; no install or download",
+      "measured": {
+        "downloads": 0,
+        "installs": 0,
+        "action": "reuse-existing-only",
+        "python": {
+          "binary": "/usr/bin/python3",
+          "state": "EXISTS",
+          "action": "reuse"
+        },
+        "orca": {
+          "binary": "/usr/bin/orca",
+          "state": "EXISTS",
+          "action": "reuse"
+        },
+        "xvfb": {
+          "binary": "/usr/bin/Xvfb",
+          "state": "EXISTS",
+          "action": "reuse"
+        },
+        "atspiLauncher": {
+          "binary": "/usr/libexec/at-spi-bus-launcher",
+          "state": "EXISTS",
+          "action": "reuse"
+        },
+        "dbusSession": {
+          "binary": "/usr/bin/dbus-run-session",
+          "state": "EXISTS",
+          "action": "reuse"
+        },
+        "chrome": {
+          "binary": "/usr/bin/google-chrome",
+          "state": "EXISTS",
+          "action": "reuse"
+        }
+      }
+    },
+    {
+      "id": "V06-SR-XVFB",
+      "ok": true,
+      "detail": "private Xvfb display :3250",
+      "measured": {
+        "display": ":3250",
+        "pid": 2313097
+      }
+    },
+    {
+      "id": "V06-SR-ORCA",
+      "ok": true,
+      "detail": "real Orca process running with isolated HOME and debug log",
+      "measured": {
+        "pid": 2313238,
+        "debugFile": "/tmp/mg-v06-screen-reader-GIUZOR/orca-debug.out"
+      }
+    },
+    {
+      "id": "V06-SR-EVENT-LISTENER",
+      "ok": true,
+      "detail": "GI AT-SPI focus listener attached to private bus",
+      "measured": {
+        "pid": 2313416,
+        "log": "/tmp/mg-v06-screen-reader-GIUZOR/at-spi-events.jsonl"
+      }
+    },
+    {
+      "id": "V06-SR-ISOLATION",
+      "ok": true,
+      "detail": "all HTTP/CDP ports dynamic loopback; 8787 never used",
+      "measured": {
+        "gateway": 42927,
+        "upstream": 39187,
+        "cdp": 37405
+      }
+    },
+    {
+      "id": "V06-SR-REAL-TREE",
+      "ok": true,
+      "detail": "Orca-independent GI query sees real Chrome AT-SPI application tree (not CDP AX)",
+      "measured": {
+        "nodeCount": 144,
+        "toolkitVersion": [
+          2,
+          60,
+          4
+        ],
+        "chromePid": 2313418
+      }
+    },
+    {
+      "id": "V06-SR-HEADING-harness",
+      "ok": true,
+      "detail": "AT-SPI exposes heading \"应用接入\"",
+      "measured": [
+        {
+          "index": 55,
+          "parent": 54,
+          "role": "heading",
+          "name": "应用接入",
+          "description": "",
+          "states": [
+            "ENABLED",
+            "SENSITIVE",
+            "SHOWING",
+            "VISIBLE"
+          ],
+          "level": "",
+          "relations": [],
+          "ancestors": [
+            {
+              "role": "application",
+              "name": "Google Chrome"
+            },
+            {
+              "role": "frame",
+              "name": "应用接入 · ModelGate V13.1 预览 - Google Chrome"
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": "应用接入 · ModelGate V13.1 预览"
+            },
+            {
+              "role": "landmark",
+              "name": ""
+            },
+            {
+              "role": "header",
+              "name": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-NAV-harness",
+      "ok": true,
+      "detail": "AT-SPI navigation exposes exactly six named nav controls; roles=button/button/button/button/button/button",
+      "measured": [
+        {
+          "label": "应用接入",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型服务",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型池",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "用量分析",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "稳定性策略",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "设置",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-ACTION-harness",
+      "ok": true,
+      "detail": "AT-SPI exposes primary action \"连接诊断\"",
+      "measured": [
+        {
+          "index": 59,
+          "parent": 54,
+          "role": "button",
+          "name": "连接诊断",
+          "description": "",
+          "states": [
+            "ENABLED",
+            "FOCUSABLE",
+            "SENSITIVE",
+            "SHOWING",
+            "VISIBLE"
+          ],
+          "level": "",
+          "relations": [],
+          "ancestors": [
+            {
+              "role": "application",
+              "name": "Google Chrome"
+            },
+            {
+              "role": "frame",
+              "name": "应用接入 · ModelGate V13.1 预览 - Google Chrome"
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": "应用接入 · ModelGate V13.1 预览"
+            },
+            {
+              "role": "landmark",
+              "name": ""
+            },
+            {
+              "role": "header",
+              "name": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-FORM-LABELS-harness",
+      "ok": true,
+      "detail": "PASS; AT-SPI controls=1",
+      "measured": {
+        "controls": 1,
+        "named": 1,
+        "labelRelations": 0,
+        "unnamed": []
+      }
+    },
+    {
+      "id": "V06-SR-HEADING-services",
+      "ok": true,
+      "detail": "AT-SPI exposes heading \"模型服务\"",
+      "measured": [
+        {
+          "index": 55,
+          "parent": 54,
+          "role": "heading",
+          "name": "模型服务",
+          "description": "",
+          "states": [
+            "ENABLED",
+            "SENSITIVE",
+            "SHOWING",
+            "VISIBLE"
+          ],
+          "level": "",
+          "relations": [],
+          "ancestors": [
+            {
+              "role": "application",
+              "name": "Google Chrome"
+            },
+            {
+              "role": "frame",
+              "name": "模型服务 · ModelGate V13.1 预览 - Google Chrome"
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": "模型服务 · ModelGate V13.1 预览"
+            },
+            {
+              "role": "landmark",
+              "name": ""
+            },
+            {
+              "role": "header",
+              "name": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-NAV-services",
+      "ok": true,
+      "detail": "AT-SPI navigation exposes exactly six named nav controls; roles=button/button/button/button/button/button",
+      "measured": [
+        {
+          "label": "应用接入",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型服务",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型池",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "用量分析",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "稳定性策略",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "设置",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-ACTION-services",
+      "ok": true,
+      "detail": "AT-SPI exposes primary action \"添加服务\"",
+      "measured": [
+        {
+          "index": 59,
+          "parent": 54,
+          "role": "button",
+          "name": "添加服务",
+          "description": "",
+          "states": [
+            "ENABLED",
+            "FOCUSABLE",
+            "SENSITIVE",
+            "SHOWING",
+            "VISIBLE"
+          ],
+          "level": "",
+          "relations": [],
+          "ancestors": [
+            {
+              "role": "application",
+              "name": "Google Chrome"
+            },
+            {
+              "role": "frame",
+              "name": "模型服务 · ModelGate V13.1 预览 - Google Chrome"
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": "模型服务 · ModelGate V13.1 预览"
+            },
+            {
+              "role": "landmark",
+              "name": ""
+            },
+            {
+              "role": "header",
+              "name": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-FORM-LABELS-services",
+      "ok": true,
+      "detail": "PASS; AT-SPI controls=2",
+      "measured": {
+        "controls": 2,
+        "named": 2,
+        "labelRelations": 0,
+        "unnamed": []
+      }
+    },
+    {
+      "id": "V06-SR-HEADING-pools",
+      "ok": true,
+      "detail": "AT-SPI exposes heading \"模型池\"",
+      "measured": [
+        {
+          "index": 55,
+          "parent": 54,
+          "role": "heading",
+          "name": "模型池",
+          "description": "",
+          "states": [
+            "ENABLED",
+            "SENSITIVE",
+            "SHOWING",
+            "VISIBLE"
+          ],
+          "level": "",
+          "relations": [],
+          "ancestors": [
+            {
+              "role": "application",
+              "name": "Google Chrome"
+            },
+            {
+              "role": "frame",
+              "name": "模型池 · ModelGate V13.1 预览 - Google Chrome"
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": "模型池 · ModelGate V13.1 预览"
+            },
+            {
+              "role": "landmark",
+              "name": ""
+            },
+            {
+              "role": "header",
+              "name": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-NAV-pools",
+      "ok": true,
+      "detail": "AT-SPI navigation exposes exactly six named nav controls; roles=button/button/button/button/button/button",
+      "measured": [
+        {
+          "label": "应用接入",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型服务",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型池",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "用量分析",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "稳定性策略",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "设置",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-ACTION-pools",
+      "ok": true,
+      "detail": "AT-SPI exposes primary action \"新建模型池\"",
+      "measured": [
+        {
+          "index": 59,
+          "parent": 54,
+          "role": "button",
+          "name": "新建模型池",
+          "description": "",
+          "states": [
+            "ENABLED",
+            "FOCUSABLE",
+            "SENSITIVE",
+            "SHOWING",
+            "VISIBLE"
+          ],
+          "level": "",
+          "relations": [],
+          "ancestors": [
+            {
+              "role": "application",
+              "name": "Google Chrome"
+            },
+            {
+              "role": "frame",
+              "name": "模型池 · ModelGate V13.1 预览 - Google Chrome"
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": "模型池 · ModelGate V13.1 预览"
+            },
+            {
+              "role": "landmark",
+              "name": ""
+            },
+            {
+              "role": "header",
+              "name": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-FORM-LABELS-pools",
+      "ok": true,
+      "detail": "PASS; AT-SPI controls=3",
+      "measured": {
+        "controls": 3,
+        "named": 3,
+        "labelRelations": 0,
+        "unnamed": []
+      }
+    },
+    {
+      "id": "V06-SR-HEADING-usage",
+      "ok": true,
+      "detail": "AT-SPI exposes heading \"用量分析\"",
+      "measured": [
+        {
+          "index": 55,
+          "parent": 54,
+          "role": "heading",
+          "name": "用量分析",
+          "description": "",
+          "states": [
+            "ENABLED",
+            "SENSITIVE",
+            "SHOWING",
+            "VISIBLE"
+          ],
+          "level": "",
+          "relations": [],
+          "ancestors": [
+            {
+              "role": "application",
+              "name": "Google Chrome"
+            },
+            {
+              "role": "frame",
+              "name": "用量分析 · ModelGate V13.1 预览 - Google Chrome"
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": "用量分析 · ModelGate V13.1 预览"
+            },
+            {
+              "role": "landmark",
+              "name": ""
+            },
+            {
+              "role": "header",
+              "name": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-NAV-usage",
+      "ok": true,
+      "detail": "AT-SPI navigation exposes exactly six named nav controls; roles=button/button/button/button/button/button",
+      "measured": [
+        {
+          "label": "应用接入",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型服务",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型池",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "用量分析",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "稳定性策略",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "设置",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-ACTION-usage",
+      "ok": true,
+      "detail": "AT-SPI exposes primary action \"导出 CSV\"",
+      "measured": [
+        {
+          "index": 60,
+          "parent": 54,
+          "role": "button",
+          "name": "导出 CSV",
+          "description": "",
+          "states": [
+            "ENABLED",
+            "FOCUSABLE",
+            "SENSITIVE",
+            "SHOWING",
+            "VISIBLE"
+          ],
+          "level": "",
+          "relations": [],
+          "ancestors": [
+            {
+              "role": "application",
+              "name": "Google Chrome"
+            },
+            {
+              "role": "frame",
+              "name": "用量分析 · ModelGate V13.1 预览 - Google Chrome"
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": "用量分析 · ModelGate V13.1 预览"
+            },
+            {
+              "role": "landmark",
+              "name": ""
+            },
+            {
+              "role": "header",
+              "name": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-FORM-LABELS-usage",
+      "ok": true,
+      "detail": "PASS; AT-SPI controls=2",
+      "measured": {
+        "controls": 2,
+        "named": 2,
+        "labelRelations": 0,
+        "unnamed": []
+      }
+    },
+    {
+      "id": "V06-SR-HEADING-reliability",
+      "ok": true,
+      "detail": "AT-SPI exposes heading \"稳定性策略\"",
+      "measured": [
+        {
+          "index": 55,
+          "parent": 54,
+          "role": "heading",
+          "name": "稳定性策略",
+          "description": "",
+          "states": [
+            "ENABLED",
+            "SENSITIVE",
+            "SHOWING",
+            "VISIBLE"
+          ],
+          "level": "",
+          "relations": [],
+          "ancestors": [
+            {
+              "role": "application",
+              "name": "Google Chrome"
+            },
+            {
+              "role": "frame",
+              "name": "稳定性策略 · ModelGate V13.1 预览 - Google Chrome"
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": "稳定性策略 · ModelGate V13.1 预览"
+            },
+            {
+              "role": "landmark",
+              "name": ""
+            },
+            {
+              "role": "header",
+              "name": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-NAV-reliability",
+      "ok": true,
+      "detail": "AT-SPI navigation exposes exactly six named nav controls; roles=button/button/button/button/button/button",
+      "measured": [
+        {
+          "label": "应用接入",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型服务",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型池",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "用量分析",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "稳定性策略",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "设置",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-ACTION-reliability",
+      "ok": true,
+      "detail": "AT-SPI exposes primary action \"调整全局预算\"",
+      "measured": [
+        {
+          "index": 59,
+          "parent": 54,
+          "role": "button",
+          "name": "调整全局预算",
+          "description": "",
+          "states": [
+            "ENABLED",
+            "FOCUSABLE",
+            "SENSITIVE",
+            "SHOWING",
+            "VISIBLE"
+          ],
+          "level": "",
+          "relations": [],
+          "ancestors": [
+            {
+              "role": "application",
+              "name": "Google Chrome"
+            },
+            {
+              "role": "frame",
+              "name": "稳定性策略 · ModelGate V13.1 预览 - Google Chrome"
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": "稳定性策略 · ModelGate V13.1 预览"
+            },
+            {
+              "role": "landmark",
+              "name": ""
+            },
+            {
+              "role": "header",
+              "name": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-FORM-LABELS-reliability",
+      "ok": true,
+      "detail": "PASS; AT-SPI controls=1",
+      "measured": {
+        "controls": 1,
+        "named": 1,
+        "labelRelations": 0,
+        "unnamed": []
+      }
+    },
+    {
+      "id": "V06-SR-HEADING-settings",
+      "ok": true,
+      "detail": "AT-SPI exposes heading \"设置\"",
+      "measured": [
+        {
+          "index": 55,
+          "parent": 54,
+          "role": "heading",
+          "name": "设置",
+          "description": "",
+          "states": [
+            "ENABLED",
+            "SENSITIVE",
+            "SHOWING",
+            "VISIBLE"
+          ],
+          "level": "",
+          "relations": [],
+          "ancestors": [
+            {
+              "role": "application",
+              "name": "Google Chrome"
+            },
+            {
+              "role": "frame",
+              "name": "设置 · ModelGate V13.1 预览 - Google Chrome"
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": "设置 · ModelGate V13.1 预览"
+            },
+            {
+              "role": "landmark",
+              "name": ""
+            },
+            {
+              "role": "header",
+              "name": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-NAV-settings",
+      "ok": true,
+      "detail": "AT-SPI navigation exposes exactly six named nav controls; roles=button/button/button/button/button/button",
+      "measured": [
+        {
+          "label": "应用接入",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型服务",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型池",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "用量分析",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "稳定性策略",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "设置",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-ACTION-settings",
+      "ok": true,
+      "detail": "AT-SPI exposes primary action \"返回现有控制台\"",
+      "measured": [
+        {
+          "index": 125,
+          "parent": 119,
+          "role": "button",
+          "name": "返回现有控制台",
+          "description": "",
+          "states": [
+            "ENABLED",
+            "FOCUSABLE",
+            "SENSITIVE",
+            "SHOWING",
+            "VISIBLE"
+          ],
+          "level": "",
+          "relations": [],
+          "ancestors": [
+            {
+              "role": "application",
+              "name": "Google Chrome"
+            },
+            {
+              "role": "frame",
+              "name": "设置 · ModelGate V13.1 预览 - Google Chrome"
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "panel",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": "设置 · ModelGate V13.1 预览"
+            },
+            {
+              "role": "landmark",
+              "name": ""
+            },
+            {
+              "role": "section",
+              "name": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-FORM-LABELS-settings",
+      "ok": true,
+      "detail": "PASS; AT-SPI controls=3",
+      "measured": {
+        "controls": 3,
+        "named": 3,
+        "labelRelations": 0,
+        "unnamed": []
+      }
+    },
+    {
+      "id": "V06-SR-KEYBOARD-FOCUS",
+      "ok": true,
+      "detail": "20 real Tab presses have matching focused AT-SPI objects",
+      "measured": [
+        {
+          "index": 1,
+          "atSpi": [
+            {
+              "role": "link",
+              "name": "ModelGate 应用接入首页"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "a",
+            "text": "ModelGate 应用接入首页",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 2,
+          "atSpi": [
+            {
+              "role": "button",
+              "name": "应用接入"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "应用接入",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 3,
+          "atSpi": [
+            {
+              "role": "button",
+              "name": "模型服务"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "模型服务",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 4,
+          "atSpi": [
+            {
+              "role": "button",
+              "name": "模型池"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "模型池",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 5,
+          "atSpi": [
+            {
+              "role": "document web",
+              "name": "模型服务 · ModelGate V13.1 预览"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "body",
+            "text": "跳到主要内容 MG ModelGate DESKTOP · V13.1 预览 工作台 接 应用接入 服 模型服务 池 模型池 量 用量分析 稳 稳定性策略 设 设置 高级管理 控制面已连接 快照 13:38:10 隔离预览 · 非生产入口 ",
+            "focusVisible": false
+          }
+        },
+        {
+          "index": 6,
+          "atSpi": [
+            {
+              "role": "button",
+              "name": "应用接入"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "应用接入",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 7,
+          "atSpi": [
+            {
+              "role": "button",
+              "name": "模型服务"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "模型服务",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 8,
+          "atSpi": [
+            {
+              "role": "button",
+              "name": "模型池"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "模型池",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 9,
+          "atSpi": [
+            {
+              "role": "button",
+              "name": "用量分析"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "用量分析",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 10,
+          "atSpi": [
+            {
+              "role": "button",
+              "name": "稳定性策略"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "稳定性策略",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 11,
+          "atSpi": [
+            {
+              "role": "button",
+              "name": "设置"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "设置",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 12,
+          "atSpi": [
+            {
+              "role": "toggle button",
+              "name": "高级管理"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "summary",
+            "text": "高级管理",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 13,
+          "atSpi": [
+            {
+              "role": "button",
+              "name": "刷新状态"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "刷新状态",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 14,
+          "atSpi": [
+            {
+              "role": "button",
+              "name": "切换明暗主题"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "切换明暗主题",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 15,
+          "atSpi": [
+            {
+              "role": "link",
+              "name": "工作台"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "a",
+            "text": "工作台",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 16,
+          "atSpi": [
+            {
+              "role": "button",
+              "name": "添加服务"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "添加服务",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 17,
+          "atSpi": [
+            {
+              "role": "page tab",
+              "name": "我的服务 1"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "我的服务 1",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 18,
+          "atSpi": [
+            {
+              "role": "page tab",
+              "name": "服务模型 2"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "服务模型 2",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 19,
+          "atSpi": [
+            {
+              "role": "page tab",
+              "name": "服务目录"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "button",
+            "text": "服务目录",
+            "focusVisible": true
+          }
+        },
+        {
+          "index": 20,
+          "atSpi": [
+            {
+              "role": "entry",
+              "name": "搜索模型服务"
+            },
+            {
+              "role": "document web",
+              "name": ""
+            },
+            {
+              "role": "document web",
+              "name": ""
+            }
+          ],
+          "dom": {
+            "tag": "input",
+            "text": "搜索模型服务",
+            "focusVisible": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-KEYBOARD-DISTINCT",
+      "ok": true,
+      "detail": "keyboard reaches at least six distinct AT-SPI focus targets",
+      "measured": 17
+    },
+    {
+      "id": "V06-SR-FORM-FOCUS",
+      "ok": true,
+      "detail": "real AT-SPI search/form control is keyboard reachable and named",
+      "measured": {
+        "search": {
+          "role": "entry",
+          "name": "地址和搜索栏",
+          "relations": []
+        }
+      }
+    },
+    {
+      "id": "V06-SR-DIALOG-LABELS",
+      "ok": true,
+      "detail": "keyboard-opened service dialog exposes 7 named AT-SPI form controls",
+      "measured": [
+        {
+          "role": "entry",
+          "name": "地址和搜索栏",
+          "relations": []
+        },
+        {
+          "role": "entry",
+          "name": "服务显示名称",
+          "relations": []
+        },
+        {
+          "role": "entry",
+          "name": "服务地址",
+          "relations": []
+        },
+        {
+          "role": "combo box",
+          "name": "服务协议",
+          "relations": []
+        },
+        {
+          "role": "entry",
+          "name": "区域（可选）",
+          "relations": []
+        },
+        {
+          "role": "check box",
+          "name": "允许本地或私有网络地址",
+          "relations": []
+        },
+        {
+          "role": "check box",
+          "name": "启用服务",
+          "relations": []
+        }
+      ]
+    },
+    {
+      "id": "V06-SR-FOCUS-EVENTS",
+      "ok": true,
+      "detail": "observed real AT-SPI object:state-changed:focused events",
+      "measured": 1
+    },
+    {
+      "id": "V06-SR-SPEECH-OUTPUT",
+      "ok": true,
+      "detail": "Orca generated actual speech output for 66 measured utterances (not an audible-human signoff)",
+      "measured": 66
+    },
+    {
+      "id": "V06-SR-SPEECH-CONTENT",
+      "ok": true,
+      "detail": "Orca speech includes measured UI content; primary labels=应用接入, actions=none observed",
+      "measured": {
+        "spokenLabels": [
+          "应用接入"
+        ],
+        "spokenActions": []
+      }
+    },
+    {
+      "id": "V06-SR-NO-UPSTREAM",
+      "ok": true,
+      "detail": "zero local mock upstream hits and zero real upstream requests",
+      "measured": 0
+    },
+    {
+      "id": "V06-SR-NO-JS-ERRORS",
+      "ok": true,
+      "detail": "zero uncaught JS, console, or network errors",
+      "measured": []
+    }
+  ],
+  "pages": [
+    {
+      "id": "harness",
+      "hash": "#/harness",
+      "expectedHeading": "应用接入",
+      "expectedAction": "连接诊断",
+      "durationMs": 1434.94,
+      "nodeCount": 139,
+      "heading": [
+        {
+          "role": "heading",
+          "name": "应用接入",
+          "level": ""
+        }
+      ],
+      "navigationRoot": {
+        "role": "landmark",
+        "name": "常用功能"
+      },
+      "navControlCount": 6,
+      "nav": [
+        {
+          "label": "应用接入",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型服务",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型池",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "用量分析",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "稳定性策略",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "设置",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        }
+      ],
+      "action": [
+        {
+          "role": "button",
+          "name": "连接诊断",
+          "description": ""
+        }
+      ],
+      "controls": [
+        {
+          "role": "entry",
+          "name": "地址和搜索栏",
+          "labelledBy": [],
+          "named": true
+        }
+      ],
+      "dom": {
+        "hash": "#/harness",
+        "heading": "应用接入",
+        "navCount": 6,
+        "primary": "连接诊断",
+        "controls": []
+      }
+    },
+    {
+      "id": "services",
+      "hash": "#/services",
+      "expectedHeading": "模型服务",
+      "expectedAction": "添加服务",
+      "durationMs": 1434.93,
+      "nodeCount": 140,
+      "heading": [
+        {
+          "role": "heading",
+          "name": "模型服务",
+          "level": ""
+        }
+      ],
+      "navigationRoot": {
+        "role": "landmark",
+        "name": "常用功能"
+      },
+      "navControlCount": 6,
+      "nav": [
+        {
+          "label": "应用接入",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型服务",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型池",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "用量分析",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "稳定性策略",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "设置",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        }
+      ],
+      "action": [
+        {
+          "role": "button",
+          "name": "添加服务",
+          "description": ""
+        }
+      ],
+      "controls": [
+        {
+          "role": "entry",
+          "name": "地址和搜索栏",
+          "labelledBy": [],
+          "named": true
+        },
+        {
+          "role": "entry",
+          "name": "搜索模型服务",
+          "labelledBy": [],
+          "named": true
+        }
+      ],
+      "dom": {
+        "hash": "#/services",
+        "heading": "模型服务",
+        "navCount": 6,
+        "primary": "添加服务",
+        "controls": [
+          {
+            "tag": "input",
+            "name": "搜索模型服务"
+          }
+        ]
+      }
+    },
+    {
+      "id": "pools",
+      "hash": "#/pools",
+      "expectedHeading": "模型池",
+      "expectedAction": "新建模型池",
+      "durationMs": 1413.62,
+      "nodeCount": 161,
+      "heading": [
+        {
+          "role": "heading",
+          "name": "模型池",
+          "level": ""
+        }
+      ],
+      "navigationRoot": {
+        "role": "landmark",
+        "name": "常用功能"
+      },
+      "navControlCount": 6,
+      "nav": [
+        {
+          "label": "应用接入",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型服务",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型池",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "用量分析",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "稳定性策略",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "设置",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        }
+      ],
+      "action": [
+        {
+          "role": "button",
+          "name": "新建模型池",
+          "description": ""
+        }
+      ],
+      "controls": [
+        {
+          "role": "entry",
+          "name": "地址和搜索栏",
+          "labelledBy": [],
+          "named": true
+        },
+        {
+          "role": "entry",
+          "name": "搜索模型池",
+          "labelledBy": [],
+          "named": true
+        },
+        {
+          "role": "entry",
+          "name": "预演模型名称",
+          "labelledBy": [],
+          "named": true
+        }
+      ],
+      "dom": {
+        "hash": "#/pools",
+        "heading": "模型池",
+        "navCount": 6,
+        "primary": "新建模型池",
+        "controls": [
+          {
+            "tag": "input",
+            "name": "搜索模型池"
+          },
+          {
+            "tag": "input",
+            "name": "预演模型名称"
+          }
+        ]
+      }
+    },
+    {
+      "id": "usage",
+      "hash": "#/usage",
+      "expectedHeading": "用量分析",
+      "expectedAction": "导出 CSV",
+      "durationMs": 1434.56,
+      "nodeCount": 201,
+      "heading": [
+        {
+          "role": "heading",
+          "name": "用量分析",
+          "level": ""
+        }
+      ],
+      "navigationRoot": {
+        "role": "landmark",
+        "name": "常用功能"
+      },
+      "navControlCount": 6,
+      "nav": [
+        {
+          "label": "应用接入",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型服务",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型池",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "用量分析",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "稳定性策略",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "设置",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        }
+      ],
+      "action": [
+        {
+          "role": "button",
+          "name": "导出 CSV",
+          "description": ""
+        }
+      ],
+      "controls": [
+        {
+          "role": "entry",
+          "name": "地址和搜索栏",
+          "labelledBy": [],
+          "named": true
+        },
+        {
+          "role": "combo box",
+          "name": "用量时间范围",
+          "labelledBy": [],
+          "named": true
+        }
+      ],
+      "dom": {
+        "hash": "#/usage",
+        "heading": "用量分析",
+        "navCount": 6,
+        "primary": "导出 CSV",
+        "controls": [
+          {
+            "tag": "select",
+            "name": "用量时间范围"
+          }
+        ]
+      }
+    },
+    {
+      "id": "reliability",
+      "hash": "#/reliability",
+      "expectedHeading": "稳定性策略",
+      "expectedAction": "调整全局预算",
+      "durationMs": 1443.25,
+      "nodeCount": 150,
+      "heading": [
+        {
+          "role": "heading",
+          "name": "稳定性策略",
+          "level": ""
+        }
+      ],
+      "navigationRoot": {
+        "role": "landmark",
+        "name": "常用功能"
+      },
+      "navControlCount": 6,
+      "nav": [
+        {
+          "label": "应用接入",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型服务",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型池",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "用量分析",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "稳定性策略",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "设置",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        }
+      ],
+      "action": [
+        {
+          "role": "button",
+          "name": "调整全局预算",
+          "description": ""
+        }
+      ],
+      "controls": [
+        {
+          "role": "entry",
+          "name": "地址和搜索栏",
+          "labelledBy": [],
+          "named": true
+        }
+      ],
+      "dom": {
+        "hash": "#/reliability",
+        "heading": "稳定性策略",
+        "navCount": 6,
+        "primary": "调整全局预算",
+        "controls": []
+      }
+    },
+    {
+      "id": "settings",
+      "hash": "#/settings",
+      "expectedHeading": "设置",
+      "expectedAction": "返回现有控制台",
+      "durationMs": 1474.66,
+      "nodeCount": 161,
+      "heading": [
+        {
+          "role": "heading",
+          "name": "设置",
+          "level": ""
+        }
+      ],
+      "navigationRoot": {
+        "role": "landmark",
+        "name": "常用功能"
+      },
+      "navControlCount": 6,
+      "nav": [
+        {
+          "label": "应用接入",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型服务",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "模型池",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "用量分析",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "稳定性策略",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        },
+        {
+          "label": "设置",
+          "count": 1,
+          "role": "button",
+          "inNavigation": true
+        }
+      ],
+      "action": [
+        {
+          "role": "button",
+          "name": "返回现有控制台",
+          "description": ""
+        }
+      ],
+      "controls": [
+        {
+          "role": "entry",
+          "name": "地址和搜索栏",
+          "labelledBy": [],
+          "named": true
+        },
+        {
+          "role": "combo box",
+          "name": "界面主题",
+          "labelledBy": [],
+          "named": true
+        },
+        {
+          "role": "combo box",
+          "name": "界面密度",
+          "labelledBy": [],
+          "named": true
+        }
+      ],
+      "dom": {
+        "hash": "#/settings",
+        "heading": "设置",
+        "navCount": 6,
+        "primary": "返回现有控制台",
+        "controls": [
+          {
+            "tag": "select",
+            "name": "界面主题"
+          },
+          {
+            "tag": "select",
+            "name": "界面密度"
+          },
+          {
+            "tag": "input",
+            "name": "搜索诊断日志"
+          }
+        ]
+      }
+    }
+  ],
+  "accessibilityEvents": [
+    {
+      "stage": "registered",
+      "event": "object:state-changed:focused"
+    }
+  ],
+  "speechEvidence": {
+    "method": "Orca --debug-file actual SPEECH/SAY ALL/SPEECH DISPATCHER lines; audible output not claimed",
+    "lineCount": 66,
+    "lines": [
+      "13:37:52.462711 - SPEECH PRESENTER: Adjusted text: '屏幕阅读器启用。'",
+      "13:37:52.462717 - SPEECH: Speak '屏幕阅读器启用。' acss: {'established': False}",
+      "13:37:52.462727 - SPEECH DISPATCHER: Speaking '屏幕阅读器启用。' as string",
+      "13:37:52.464033 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:8\"/>屏幕阅读器启用。</speak>' ",
+      "13:37:55.138500 - SPEECH PRESENTER: Adjusted text: 'about:blank - Google Chrome'",
+      "13:37:55.139411 - SPEECH: Speak [about:blank - Google Chrome, {'established': 'False', 'family': \"{'dialect': 'CN', 'lang': 'zh', 'name': ''}\"}], acss: None",
+      "13:37:55.139459 - SPEECH DISPATCHER: Speaking 'about:blank - Google Chrome' as string",
+      "13:37:55.140446 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:11\"/>about:blank <mark name=\"12:13\"/>- <mark name=\"14:20\"/>Google <mark name=\"21:27\"/>Chrome</speak>' ",
+      "13:37:55.168534 - SPEECH PRESENTER: Adjusted text: '地址和搜索栏'",
+      "13:37:55.171052 - SPEECH PRESENTER: Adjusted text: 'about:blank'",
+      "13:37:55.175755 - SPEECH: Speak [[], 地址和搜索栏, {'established': 'False', 'family': \"{'dialect': 'CN', 'lang': 'zh', 'name': ''}\"}, autocomplete, {'established': 'False', 'family': '{}'}, about:blank, {'established': 'False', 'family': \"{'dialect': 'CN', 'lang': 'zh', 'name': ''}\"}, 已选中, {'established': 'False', 'family': '{}'}, PAUSE, PAUSE], acss: None",
+      "13:37:55.175917 - SPEECH DISPATCHER: Speaking '地址和搜索栏' as string",
+      "13:37:55.177039 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:6\"/>地址和搜索栏</speak>' ",
+      "13:37:55.177396 - SPEECH DISPATCHER: Speaking 'autocomplete' as string",
+      "13:37:55.177889 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:12\"/>autocomplete</speak>' ",
+      "13:37:55.192663 - SPEECH DISPATCHER: Speaking 'about:blank' as string",
+      "13:37:55.193176 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:11\"/>about:blank</speak>' ",
+      "13:37:55.193331 - SPEECH DISPATCHER: Speaking '已选中.' as string",
+      "13:37:55.193968 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:4\"/>已选中.</speak>' ",
+      "13:37:55.290887 - SPEECH PRESENTER: Adjusted text: '应用接入 · ModelGate V13.1 预览'",
+      "13:37:55.299751 - SPEECH: Speak [应用接入 · ModelGate V13.1 预览, {'established': 'False', 'family': \"{'dialect': 'CN', 'lang': 'zh', 'name': ''}\"}, page tab, {'established': 'False', 'family': '{}'}, PAUSE, PAUSE], acss: None",
+      "13:37:55.300101 - SPEECH DISPATCHER: Speaking '应用接入 · ModelGate V13.1 预览' as string",
+      "13:37:55.302364 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:4\"/>应用接入 <mark name=\"5:6\"/>· <mark name=\"7:16\"/>ModelGate <mark name=\"17:22\"/>V13.1 <mark name=\"23:25\"/>预览</speak>' ",
+      "13:37:55.303064 - SPEECH DISPATCHER: Speaking 'page tab.' as string",
+      "13:37:55.304515 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:4\"/>page <mark name=\"5:9\"/>tab.</speak>' ",
+      "13:37:55.371436 - SPEECH PRESENTER: Adjusted text: '127.0.0.1:42927/ui-vnext/'",
+      "13:37:55.371450 - SPEECH: Speak '127.0.0.1:42927/ui-vnext/' acss: {'established': False, 'family': {'lang': 'zh', 'dialect': 'CN', 'name': ''}}",
+      "13:37:55.371487 - SPEECH DISPATCHER: Speaking '127.0.0.1:42927/ui-vnext/' as string",
+      "13:37:55.372255 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:25\"/>127.0.0.1:42927/ui-vnext/</speak>' ",
+      "13:37:55.466758 - SPEECH PRESENTER: Adjusted text: '应用接入 · ModelGate V13.1 预览'",
+      "13:37:55.481719 - SPEECH: Speak [应用接入 · ModelGate V13.1 预览, {'established': 'False', 'family': \"{'dialect': 'CN', 'lang': 'zh', 'name': ''}\"}, document web, {'established': 'False', 'family': '{}'}], acss: None",
+      "13:37:55.482198 - SPEECH DISPATCHER: Speaking '应用接入 · ModelGate V13.1 预览' as string",
+      "13:37:55.484953 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:4\"/>应用接入 <mark name=\"5:6\"/>· <mark name=\"7:16\"/>ModelGate <mark name=\"17:22\"/>V13.1 <mark name=\"23:25\"/>预览</speak>' ",
+      "13:37:55.485964 - SPEECH DISPATCHER: Speaking 'document web' as string",
+      "13:37:55.487595 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:8\"/>document <mark name=\"9:12\"/>web</speak>' ",
+      "13:37:55.524145 - SPEECH PRESENTER: Adjusted text: '浏览模式'",
+      "13:37:55.524151 - SPEECH: Speak '浏览模式' acss: {'established': False}",
+      "13:37:55.524160 - SPEECH DISPATCHER: Speaking '浏览模式' as string",
+      "13:37:55.524835 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:4\"/>浏览模式</speak>' ",
+      "13:37:55.563560 - SPEECH PRESENTER: Adjusted text: '载入 应用接入 · ModelGate V13.1 预览 完成。'",
+      "13:37:55.563569 - SPEECH: Speak '载入 应用接入 · ModelGate V13.1 预览 完成。' acss: {'established': False}",
+      "13:37:55.563584 - SPEECH DISPATCHER: Speaking '载入 应用接入 · ModelGate V13.1 预览 完成。' as string",
+      "13:37:55.564742 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:2\"/>载入 <mark name=\"3:7\"/>应用接入 <mark name=\"8:9\"/>· <mark name=\"10:19\"/>ModelGate <mark name=\"20:25\"/>V13.1 <mark name=\"26:28\"/>预览 <mark name=\"29:32\"/>完成。</speak>' ",
+      "13:37:55.572429 - SPEECH PRESENTER: Adjusted text: '有 5 个界标, 11 个标题, 3 个未访问的连接 页。'",
+      "13:37:55.572441 - SPEECH: Speak '有 5 个界标, 11 个标题, 3 个未访问的连接 页。' acss: {'established': False}",
+      "13:37:55.572460 - SPEECH DISPATCHER: Speaking '有 5 个界标, 11 个标题, 3 个未访问的连接 页。' as string",
+      "13:37:55.573309 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:1\"/>有 <mark name=\"2:3\"/>5 <mark name=\"4:8\"/>个界标, <mark name=\"9:11\"/>11 <mark name=\"12:16\"/>个标题, <mark name=\"17:18\"/>3 <mark name=\"19:26\"/>个未访问的连接 <mark name=\"27:29\"/>页。</speak>' ",
+      "13:37:55.588949 - SPEECH PRESENTER: Adjusted text: '浏览模式'",
+      "13:37:55.588956 - SPEECH: Speak '浏览模式' acss: {'established': False}",
+      "13:37:55.588968 - SPEECH DISPATCHER: Speaking '浏览模式' as string",
+      "13:37:55.590046 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:4\"/>浏览模式</speak>' ",
+      "13:37:55.634277 - SPEECH PRESENTER: Adjusted text: '跳到主要内容'",
+      "13:37:55.640067 - SAY ALL PRESENTER: Speaking (contents): [link: '跳到主要内容' (0x755722294480)]  '跳到主要内容' (0-6)",
+      "13:37:55.655507 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:6\"/>跳到主要内容</speak>' ",
+      "13:38:03.867250 - SPEECH PRESENTER: Adjusted text: '安全底线401 不反复重试；共享额度耗尽不无意义轮换；429 不提前发送；非幂等、未知提交与已执行工具不自动重放。原生压缩只由 Codex 执行。'",
+      "13:38:03.867269 - SPEECH: Speak '安全底线401 不反复重试；共享额度耗尽不无意义轮换；429 不提前发送；非幂等、未知提交与已执行工具不自动重放。原生压缩只由 Codex 执行。' acss: {'established': False}",
+      "13:38:03.867301 - SPEECH DISPATCHER: Speaking '安全底线401 不反复重试；共享额度耗尽不无意义轮换；429 不提前发送；非幂等、未知提交与已执行工具不自动重放。原生压缩只由 Codex 执行。' as string",
+      "13:38:03.869339 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:7\"/>安全底线401 <mark name=\"8:30\"/>不反复重试；共享额度耗尽不无意义轮换；429 <mark name=\"31:63\"/>不提前发送；非幂等、未知提交与已执行工具不自动重放。原生压缩只由 <mark name=\"64:69\"/>Codex <mark name=\"70:73\"/>执行。</speak>' ",
+      "13:38:04.019499 - SPEECH PRESENTER: Adjusted text: '安全底线'",
+      "13:38:04.019543 - SPEECH: Speak '安全底线' acss: {'established': False}",
+      "13:38:04.019614 - SPEECH DISPATCHER: Speaking '安全底线' as string",
+      "13:38:04.021509 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:4\"/>安全底线</speak>' ",
+      "13:38:04.118740 - SPEECH PRESENTER: Adjusted text: '安全底线401 不反复重试；共享额度耗尽不无意义轮换；429 不提前发送；非幂等、未知提交与已执行工具不自动重放。原生压缩只由 Codex 执行。'",
+      "13:38:04.118775 - SPEECH: Speak '安全底线401 不反复重试；共享额度耗尽不无意义轮换；429 不提前发送；非幂等、未知提交与已执行工具不自动重放。原生压缩只由 Codex 执行。' acss: {'established': False}",
+      "13:38:04.118832 - SPEECH DISPATCHER: Speaking '安全底线401 不反复重试；共享额度耗尽不无意义轮换；429 不提前发送；非幂等、未知提交与已执行工具不自动重放。原生压缩只由 Codex 执行。' as string",
+      "13:38:04.121287 - SPEECH DISPATCHER: Speaking '<speak><mark name=\"0:7\"/>安全底线401 <mark name=\"8:30\"/>不反复重试；共享额度耗尽不无意义轮换；429 <mark name=\"31:63\"/>不提前发送；非幂等、未知提交与已执行工具不自动重放。原生压缩只由 <mark name=\"64:69\"/>Codex <mark name=\"70:73\"/>执行。</speak>' "
+    ],
+    "spokenLabels": [
+      "应用接入"
+    ],
+    "spokenActions": [],
+    "orcaExited": false
+  },
+  "cleanup": [
+    {
+      "name": "at-spi-event-probe",
+      "pid": 2313416,
+      "action": "terminated-own-process-group",
+      "code": null,
+      "signal": "SIGTERM"
+    },
+    {
+      "name": "chrome",
+      "pid": 2313418,
+      "action": "terminated-own-process-group",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "name": "orca",
+      "pid": 2313238,
+      "action": "terminated-own-process-group",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "name": "at-spi-bus-launcher",
+      "pid": 2313098,
+      "action": "terminated-own-process-group",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "name": "xvfb",
+      "pid": 2313097,
+      "action": "terminated-own-process-group",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "name": "temporary-home",
+      "path": "/tmp/mg-v06-screen-reader-GIUZOR",
+      "action": "removed"
+    },
+    {
+      "name": "dbus-run-session",
+      "pid": 2313075,
+      "action": "session-exit-terminates-own-bus"
+    }
+  ],
+  "errors": [],
+  "isolation": {
+    "temporaryHome": "/tmp/mg-v06-screen-reader-GIUZOR",
+    "profile": "/tmp/mg-v06-screen-reader-GIUZOR/chrome-profile",
+    "runtimeDir": "/tmp/mg-v06-screen-reader-GIUZOR/runtime",
+    "environment": {
+      "HOME": "/tmp/mg-v06-screen-reader-GIUZOR",
+      "XDG_CONFIG_HOME": "/tmp/mg-v06-screen-reader-GIUZOR/config",
+      "XDG_CACHE_HOME": "/tmp/mg-v06-screen-reader-GIUZOR/cache",
+      "XDG_RUNTIME_DIR": "/tmp/mg-v06-screen-reader-GIUZOR/runtime",
+      "NO_AT_BRIDGE": "0",
+      "ACCESSIBILITY_ENABLED": "1",
+      "GTK_MODULES": "gail:atk-bridge",
+      "XDG_CURRENT_DESKTOP": "GNOME",
+      "DESKTOP_SESSION": "gnome",
+      "XDG_SESSION_TYPE": "x11",
+      "GDK_BACKEND": "x11",
+      "QT_QPA_PLATFORM": "xcb",
+      "KDE_FULL_SESSION": "",
+      "GTK_USE_PORTAL": "0",
+      "GNOME_KEYRING_CONTROL": "",
+      "SSH_AUTH_SOCK": "",
+      "GSETTINGS_BACKEND": "memory",
+      "DISPLAY": ":3250",
+      "AT_SPI_BUS": "unix:path=/tmp/mg-v06-screen-reader-GIUZOR/runtime/at-spi/bus_3250"
+    },
+    "productionPortUsed": false,
+    "gateway": {
+      "base": "http://127.0.0.1:42927",
+      "port": 42927,
+      "configDir": "/tmp/mg-v06-screen-reader-GIUZOR/gateway",
+      "command": "MG_CONFIG_DIR=\"/tmp/mg-v06-screen-reader-GIUZOR/gateway\" MG_CONFIG=\"/tmp/mg-v06-screen-reader-GIUZOR/gateway/gateway.json\" MG_KEYS_MASTER=\"isolated-test-master\" node src/index.js"
+    },
+    "upstream": {
+      "base": "http://127.0.0.1:39187",
+      "port": 39187,
+      "mockOnly": true
+    }
+  },
+  "display": ":3250",
+  "atspiBus": {
+    "socket": "/tmp/mg-v06-screen-reader-GIUZOR/runtime/at-spi/bus_3250",
+    "launcherPid": 2313098,
+    "address": "unix:path=/tmp/mg-v06-screen-reader-GIUZOR/runtime/at-spi/bus_3250",
+    "registryPid": null,
+    "probe": "DISPLAY=:3250\nATSPI_BUS=unix:path=/tmp/mg-v06-screen-reader-GIUZOR/runtime/at-spi/bus_3250\ndesktop=main"
+  },
+  "atspiEventsProbePid": 2313416,
+  "chrome": {
+    "binary": "/usr/bin/google-chrome",
+    "browser": "Chrome/153.0.8010.36",
+    "protocol": "1.3",
+    "debugPort": 37405,
+    "headed": true,
+    "display": ":3250"
+  },
+  "keyboard": [
+    {
+      "index": 1,
+      "atSpi": [
+        {
+          "role": "link",
+          "name": "ModelGate 应用接入首页"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "a",
+        "text": "ModelGate 应用接入首页",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 2,
+      "atSpi": [
+        {
+          "role": "button",
+          "name": "应用接入"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "应用接入",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 3,
+      "atSpi": [
+        {
+          "role": "button",
+          "name": "模型服务"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "模型服务",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 4,
+      "atSpi": [
+        {
+          "role": "button",
+          "name": "模型池"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "模型池",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 5,
+      "atSpi": [
+        {
+          "role": "document web",
+          "name": "模型服务 · ModelGate V13.1 预览"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "body",
+        "text": "跳到主要内容 MG ModelGate DESKTOP · V13.1 预览 工作台 接 应用接入 服 模型服务 池 模型池 量 用量分析 稳 稳定性策略 设 设置 高级管理 控制面已连接 快照 13:38:10 隔离预览 · 非生产入口 ",
+        "focusVisible": false
+      }
+    },
+    {
+      "index": 6,
+      "atSpi": [
+        {
+          "role": "button",
+          "name": "应用接入"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "应用接入",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 7,
+      "atSpi": [
+        {
+          "role": "button",
+          "name": "模型服务"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "模型服务",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 8,
+      "atSpi": [
+        {
+          "role": "button",
+          "name": "模型池"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "模型池",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 9,
+      "atSpi": [
+        {
+          "role": "button",
+          "name": "用量分析"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "用量分析",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 10,
+      "atSpi": [
+        {
+          "role": "button",
+          "name": "稳定性策略"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "稳定性策略",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 11,
+      "atSpi": [
+        {
+          "role": "button",
+          "name": "设置"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "设置",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 12,
+      "atSpi": [
+        {
+          "role": "toggle button",
+          "name": "高级管理"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "summary",
+        "text": "高级管理",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 13,
+      "atSpi": [
+        {
+          "role": "button",
+          "name": "刷新状态"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "刷新状态",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 14,
+      "atSpi": [
+        {
+          "role": "button",
+          "name": "切换明暗主题"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "切换明暗主题",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 15,
+      "atSpi": [
+        {
+          "role": "link",
+          "name": "工作台"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "a",
+        "text": "工作台",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 16,
+      "atSpi": [
+        {
+          "role": "button",
+          "name": "添加服务"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "添加服务",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 17,
+      "atSpi": [
+        {
+          "role": "page tab",
+          "name": "我的服务 1"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "我的服务 1",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 18,
+      "atSpi": [
+        {
+          "role": "page tab",
+          "name": "服务模型 2"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "服务模型 2",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 19,
+      "atSpi": [
+        {
+          "role": "page tab",
+          "name": "服务目录"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "button",
+        "text": "服务目录",
+        "focusVisible": true
+      }
+    },
+    {
+      "index": 20,
+      "atSpi": [
+        {
+          "role": "entry",
+          "name": "搜索模型服务"
+        },
+        {
+          "role": "document web",
+          "name": ""
+        },
+        {
+          "role": "document web",
+          "name": ""
+        }
+      ],
+      "dom": {
+        "tag": "input",
+        "text": "搜索模型服务",
+        "focusVisible": true
+      }
+    }
+  ],
+  "serviceDialog": {
+    "controls": [
+      {
+        "role": "entry",
+        "name": "地址和搜索栏",
+        "relations": []
+      },
+      {
+        "role": "entry",
+        "name": "服务显示名称",
+        "relations": []
+      },
+      {
+        "role": "entry",
+        "name": "服务地址",
+        "relations": []
+      },
+      {
+        "role": "combo box",
+        "name": "服务协议",
+        "relations": []
+      },
+      {
+        "role": "entry",
+        "name": "区域（可选）",
+        "relations": []
+      },
+      {
+        "role": "check box",
+        "name": "允许本地或私有网络地址",
+        "relations": []
+      },
+      {
+        "role": "check box",
+        "name": "启用服务",
+        "relations": []
+      }
+    ]
+  },
+  "atspiEventLog": [
+    {
+      "stage": "listener-new"
+    },
+    {
+      "stage": "listener-created"
+    },
+    {
+      "ready": true,
+      "pid": 2313416
+    }
+  ],
+  "result": "PASS_REAL_ORCA_AT_SPI",
+  "finishedAt": "2026-11-25T05:38:24.714Z",
+  "summary": {
+    "checks": 39,
+    "passed": 39,
+    "failed": 0,
+    "pages": 6,
+    "atSpiNodes": [
+      139,
+      140,
+      161,
+      201,
+      150,
+      161
+    ],
+    "focusEvents": 1,
+    "keyboardPresses": 20,
+    "audibleHumanSignoff": "NOT_RUN",
+    "productionPortUsed": false,
+    "upstreamHits": 0
+  },
+  "cleanupAudit": [
+    {
+      "name": "xvfb",
+      "pid": 2313097,
+      "aliveAfterCleanup": false,
+      "probe": "ESRCH"
+    },
+    {
+      "name": "at-spi-bus-launcher",
+      "pid": 2313098,
+      "aliveAfterCleanup": false,
+      "probe": "ESRCH"
+    },
+    {
+      "name": "orca",
+      "pid": 2313238,
+      "aliveAfterCleanup": false,
+      "probe": "ESRCH"
+    },
+    {
+      "name": "at-spi-event-probe",
+      "pid": 2313416,
+      "aliveAfterCleanup": false,
+      "probe": "ESRCH"
+    },
+    {
+      "name": "chrome",
+      "pid": 2313418,
+      "aliveAfterCleanup": false,
+      "probe": "ESRCH"
+    }
+  ]
+}

@@ -24,7 +24,7 @@ test('D-2 保存配置剥离投影运行时字段，未知扩展字段保留', {
   const status = await (await gw.get('/api/status')).json()
   const version = status.configVersion || 0
 
-  const save = await gw.post('/api/config/save', {
+  const save = await gw.write('/api/config/save', {
     version,
     providers: {
       mock: {
@@ -80,22 +80,22 @@ test('/api/keys 标识白名单：只允许投影/历史可达的身份', { time
   })
   t.after(async () => { await gw.stop(); await upstream.stop() })
 
-  assert.equal((await gw.post('/api/keys', { id: 'mock', key: 'sk-provider-test' }, json())).status, 200, '现有上游 id 允许')
-  assert.equal((await gw.post('/api/keys', { id: '__mg_vm_vm1', key: 'sk-vm-test' }, json())).status, 200, '现有虚拟模型 Key 允许')
-  assert.equal((await gw.post('/api/keys', { id: '__mg_client', key: 'sk-client-test' }, json())).status, 200, '内部客户端 Key 允许')
+  assert.equal((await gw.write('/api/keys', { id: 'mock', key: 'sk-provider-test' }, json())).status, 200, '现有上游 id 允许')
+  assert.equal((await gw.write('/api/keys', { id: '__mg_vm_vm1', key: 'sk-vm-test' }, json())).status, 200, '现有虚拟模型 Key 允许')
+  assert.equal((await gw.write('/api/keys', { id: '__mg_client', key: 'sk-client-test' }, json())).status, 200, '内部客户端 Key 允许')
 
-  const bad = await gw.post('/api/keys', { id: 'no-such-provider', key: 'x' }, json())
+  const bad = await gw.write('/api/keys', { id: 'no-such-provider', key: 'x' }, json())
   assert.equal(bad.status, 400, '未知标识必须拒绝（防孤儿键）')
   assert.match(String((await bad.json()).error), /未知的 Key 标识/, '错误信封沿用管理面 {error:string}')
-  assert.equal((await gw.post('/api/keys', { id: '__mg_vm_missing', key: 'x' }, json())).status, 400, '不存在的虚拟模型 Key 拒绝')
-  assert.equal((await gw.post('/api/keys', { id: '__mg_vm_meta_vm1', key: 'x' }, json())).status, 400, '未存在的内部元数据条目拒绝')
-  assert.equal((await gw.post('/api/keys', { id: 'legacy-orphan', key: 'x' }, json())).status, 400, '历史孤儿键不得被新建')
+  assert.equal((await gw.write('/api/keys', { id: '__mg_vm_missing', key: 'x' }, json())).status, 400, '不存在的虚拟模型 Key 拒绝')
+  assert.equal((await gw.write('/api/keys', { id: '__mg_vm_meta_vm1', key: 'x' }, json())).status, 400, '未存在的内部元数据条目拒绝')
+  assert.equal((await gw.write('/api/keys', { id: 'legacy-orphan', key: 'x' }, json())).status, 400, '历史孤儿键不得被新建')
 
   // 已有条目仍可删除（白名单不锁死清理路径）
-  assert.equal((await gw.post('/api/keys', { id: 'mock', key: '' }, json())).status, 200, '已有 Key 条目允许删除')
+  assert.equal((await gw.write('/api/keys', { id: 'mock', key: '' }, json())).status, 200, '已有 Key 条目允许删除')
 })
 
-test('D-7 /api/keys 带版本：过期 409、当前 200、缺省 200', { timeout: 30000 }, async (t) => {
+test('D-7 /api/keys 带版本：过期 409、当前 200、helper 自动携带当前 expectedVersion', { timeout: 30000 }, async (t) => {
   const upstream = await startMockUpstream()
   const gw = await startGateway({ name: 'mg009-version', config: config(upstream.base) })
   t.after(async () => { await gw.stop(); await upstream.stop() })
@@ -103,12 +103,12 @@ test('D-7 /api/keys 带版本：过期 409、当前 200、缺省 200', { timeout
   const status = await (await gw.get('/api/status')).json()
   const version = status.configVersion || 0
 
-  const stale = await gw.post('/api/keys', { id: 'mock', key: 'sk-x', version: version + 99 }, json())
+  const stale = await gw.write('/api/keys', { id: 'mock', key: 'sk-x', version: version + 99 }, json())
   assert.equal(stale.status, 409, '过期版本必须 409，不得静默覆盖')
   assert.equal((stale.json ? true : true), true)
 
-  assert.equal((await gw.post('/api/keys', { id: 'mock', key: 'sk-ok', version }, json())).status, 200, '当前版本允许')
-  assert.equal((await gw.post('/api/keys', { id: 'mock', key: 'sk-no-version' }, json())).status, 200, '缺省版本保持旧客户端兼容')
+  assert.equal((await gw.write('/api/keys', { id: 'mock', key: 'sk-ok', version }, json())).status, 200, '当前版本允许')
+  assert.equal((await gw.write('/api/keys', { id: 'mock', key: 'sk-no-version' }, json())).status, 200, 'helper 从状态读取版本并显式预览确认')
 })
 
 test('D-3 面板：dirty 时冻结 baseVersion 且 Key 保存带版本（静态检查）', () => {

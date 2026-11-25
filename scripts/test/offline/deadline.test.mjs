@@ -203,7 +203,7 @@ test('AC-2 代理 CONNECT 挂起：预算内 504、隧道 socket 关闭', { time
       overallMs: 500,
       proxyMode: 'auto',
       // 非回环目标 + 显式代理 → 走 CONNECT 隧道（request.js ctxFor）
-      providers: { mock: { baseUrl: 'https://upstream.invalid', proxy: proxy.url } },
+      providers: { mock: { baseUrl: 'https://192.0.2.10', proxy: proxy.url, allowPrivateNetwork: true } },
       models: jsonModels(),
     }),
   })
@@ -228,7 +228,7 @@ test('AC-2 代理 CONNECT 挂起：预算内 504、隧道 socket 关闭', { time
   req.end(JSON.stringify(chatBody()))
 
   // 1) 等本地代理收到 CONNECT 连接
-  await waitFor(() => proxy.connections.length > 0, 2000, 'AC-2 前置：本地代理收到连接')
+  await waitFor(() => proxy.connections.length > 0 && /CONNECT /.test(proxy.connections[0].data), 2000, 'AC-2 前置：本地代理收到 CONNECT 请求')
   const conn = proxy.connections[0]
   // 2) 请求仍挂起时：确实走 CONNECT 隧道，且代理不应答 → 隧道保持打开（契约 §2.4）
   assert.match(conn.data, /CONNECT /, 'AC-2 前置：确实走 CONNECT 隧道（而不是直连）')

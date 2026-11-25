@@ -43,7 +43,7 @@ test('MG-005 端到端：通过 API 热更新的凭据在日志里即刻脱敏',
   t.after(async () => { await gw.stop(); await upstream.stop() })
 
   // 启动后才写入的客户端 Key：启动时词表里没有它
-  assert.equal((await gw.post('/api/config/save', { defaults: { clientKey: HOT } })).status, 200)
+  assert.equal((await gw.write('/api/config/save', { defaults: { clientKey: HOT } })).status, 200)
   // 把该 Key 塞进请求模型名，使其必然出现在请求日志行里
   // 未知模型会报错并把模型名（=刚写入的 Key）带进错误摘要，正好检验脱敏是否已热生效
   const r = await gw.post('/v1/chat/completions', { model: HOT, messages: [{ role: 'user', content: 'x' }] }, { authorization: 'Bearer ' + HOT })

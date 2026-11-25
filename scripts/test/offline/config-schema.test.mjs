@@ -42,7 +42,12 @@ test('MG-003 形状与保留键：非法输入返回 400 且不写盘、不改�
     ['虚拟模型 expiresAt 歧义（无时区秒级 ISO）', JSON.stringify({ virtualModels: [{ name: 'v4', directory: [{ model: 'm1' }], expiresAt: '2099-01-01T10:00:00' }] })],
   ]
   for (const [label, rawOrBody] of bad) {
-    const r = await gw.post('/api/config/save', rawOrBody, json())
+    let parsed = null
+    try { parsed = JSON.parse(rawOrBody) } catch {}
+    const objectBody = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+    const r = objectBody
+      ? await gw.write('/api/config/save', objectBody, json())
+      : await gw.post('/api/config/save', rawOrBody, json())
     assert.equal(r.status, 400, label + ' 应返回 400')
     const body = await r.json()
     assert.equal(typeof body.error, 'string', label + ' 应带错误说明')
@@ -62,8 +67,8 @@ test('MG-003 并发保存：同一 version 只有一个成功，另一个 409', 
   t.after(() => gw.stop())
   const v = (await (await gw.get('/api/status')).json()).configVersion
   const results = await Promise.all([
-    gw.post('/api/config/save', { version: v, defaults: { proxyMode: 'direct' } }, json()),
-    gw.post('/api/config/save', { version: v, defaults: { proxyMode: 'direct' } }, json()),
+    gw.write('/api/config/save', { version: v, defaults: { proxyMode: 'direct' } }, json()),
+    gw.write('/api/config/save', { version: v, defaults: { proxyMode: 'direct' } }, json()),
   ])
   const codes = results.map((r) => r.status).sort((a, b) => a - b)
   assert.deepEqual(codes, [200, 409])
@@ -83,7 +88,7 @@ test('MG-003 删除语义：删除的上游/模型重启后不复活，重新加
   t.after(async () => { await gw.stop(); await upstream.stop() })
 
   // 删除 m2（保留 m1）
-  assert.equal((await gw.post('/api/config/save', { models: { m1: { provider: 'p1' } } }, json())).status, 200)
+  assert.equal((await gw.write('/api/config/save', { models: { m1: { provider: 'p1' } } }, json())).status, 200)
   let st = await (await gw.get('/api/status')).json()
   assert.deepEqual(st.models.map((m) => m.name), ['m1'])
 
@@ -95,14 +100,14 @@ test('MG-003 删除语义：删除的上游/模型重启后不复活，重新加
   assert.deepEqual(st.providers.map((p) => p.id).sort(), ['p1', 'p2'])
 
   // 重新加回 m2：墓碑撤销，重启后仍在
-  assert.equal((await gw.post('/api/config/save', { models: { m1: { provider: 'p1' }, m2: { provider: 'p2' } } }, json())).status, 200)
+  assert.equal((await gw.write('/api/config/save', { models: { m1: { provider: 'p1' }, m2: { provider: 'p2' } } }, json())).status, 200)
   await gw.stop()
   gw = await startGateway({ name: 'schema-del', dir })
   st = await (await gw.get('/api/status')).json()
   assert.deepEqual(st.models.map((m) => m.name).sort(), ['m1', 'm2'])
 
   // 删除上游 p2（m2 引用它，需同时删除 m2）
-  assert.equal((await gw.post('/api/config/save', { providers: { p1: { baseUrl: upstream.base } }, models: { m1: { provider: 'p1' } } }, json())).status, 200)
+  assert.equal((await gw.write('/api/config/save', { providers: { p1: { baseUrl: upstream.base } }, models: { m1: { provider: 'p1' } } }, json())).status, 200)
   await gw.stop()
   gw = await startGateway({ name: 'schema-del', dir })
   st = await (await gw.get('/api/status')).json()
@@ -112,9 +117,9 @@ test('MG-003 删除语义：删除的上游/模型重启后不复活，重新加
 test('MG-003/MG-009 keys 标识：保留键、空 id 与未知标识被拒', { timeout: 25000 }, async (t) => {
   const gw = await startGateway({ name: 'schema-keys' })
   t.after(() => gw.stop())
-  assert.equal((await gw.post('/api/keys', { id: '   ', key: 'k' })).status, 400)
-  assert.equal((await gw.post('/api/keys', { id: '__proto__', key: 'k' })).status, 400)
-  assert.equal((await gw.post('/api/keys', { id: 'constructor', key: 'k' })).status, 400)
+  assert.equal((await gw.write('/api/keys', { id: '   ', key: 'k' })).status, 400)
+  assert.equal((await gw.write('/api/keys', { id: '__proto__', key: 'k' })).status, 400)
+  assert.equal((await gw.write('/api/keys', { id: 'constructor', key: 'k' })).status, 400)
   // MG-009 §8.3：未配置的上游/虚拟模型标识不再允许（防孤儿键；白名单见 admin-projection.test.mjs）
-  assert.equal((await gw.post('/api/keys', { id: 'p1', key: 'k' })).status, 400)
+  assert.equal((await gw.write('/api/keys', { id: 'p1', key: 'k' })).status, 400)
 })

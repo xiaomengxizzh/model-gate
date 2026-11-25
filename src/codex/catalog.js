@@ -949,7 +949,7 @@ export function selectThirdPartyModels(config, options = {}) {
     if (!isPlainObject(entry)) {
       throw new CatalogError('invalid_config', 'models.' + name + ' 必须是对象')
     }
-    if (entry.disabled === true) {
+    if (entry.disabled === true || entry.enabled === false) {
       skipped.push({ model: name, reason: 'disabled' })
       continue
     }
@@ -959,6 +959,10 @@ export function selectThirdPartyModels(config, options = {}) {
     }
     if (officialProviders.includes(provider)) {
       skipped.push({ model: name, provider, reason: 'official_provider_passthrough' })
+      continue
+    }
+    if (providers[provider]?.enabled === false) {
+      skipped.push({ model: name, provider, reason: 'provider_disabled' })
       continue
     }
     const capability = entry.capability === undefined ? 'chat' : entry.capability
@@ -1048,7 +1052,41 @@ export function buildCatalog({ base, config = null, options = {} }) {
     }
   }
 
-  const catalog = { models: [...officialCatalog.models, ...thirdParty.map(t => t.model)] }
+  const poolEntries = []
+  const invalidPools = []
+  for (const pool of Array.isArray(config?.virtualModels) ? config.virtualModels : []) {
+    const slug = typeof pool?.slug === 'string' ? pool.slug.trim() : ''
+    if (!slug || pool.enabled === false) continue
+    try {
+      if (officialSlugs.has(slug) || seenSlugs.has(slug)) throw new CatalogError('pool_slug_collision', '模型池 slug 与官方或已有模型冲突: ' + slug)
+      const members = (Array.isArray(pool.members) ? pool.members : Array.isArray(pool.directory) ? pool.directory : []).filter((member) => member?.enabled !== false)
+      if (!members.length) throw new CatalogError('pool_members_required', '模型池没有启用候选: ' + slug)
+      const models = members.map((member) => config.models[member.model || member.modelId]).filter(Boolean)
+      if (models.length !== members.length) throw new CatalogError('pool_model_missing', '模型池候选不存在: ' + slug)
+      const contexts = models.map((model) => Number(model.codex?.contextWindow || model.maxContext)).filter(isPositiveInt)
+      if (!contexts.length) throw new CatalogError('pool_context_missing', '模型池候选缺少可证明上下文窗口: ' + slug)
+      const contextWindow = Math.min(...contexts)
+      const nativeTools = models.every((model) => model.api === 'responses' || model.codex?.plaintextTools === true)
+      const shellEvidence = models.map((model) => model.codex?.evidence?.shellType).filter(Boolean)
+      const declaredTools = nativeTools && shellEvidence.length === models.length && shellEvidence.every((evidence) => typeof evidence.source === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(String(evidence.observedAt || '')))
+      const built = buildThirdPartyEntry('pool-' + String(pool.poolId || slug).replace(/[^A-Za-z0-9_-]/g, '-'), { provider: models[0].provider, maxContext: contextWindow, capability: 'chat', codex: { contextWindow, nativeCompaction: 'unsupported', ...(declaredTools ? { capabilities: { shellType: 'unified_exec' }, evidence: { shellType: shellEvidence[0] } } : {}) } }, template, { ...options, baseModels, providerNames, nextPriority }, warnings)
+      built.model.slug = slug
+      built.model.display_name = pool.name
+      built.model.context_window = contextWindow
+      if (Number.isFinite(Number(built.model.auto_compact_token_limit)) && Number(built.model.auto_compact_token_limit) > contextWindow) built.model.auto_compact_token_limit = Math.max(1, Math.floor(contextWindow * 0.9))
+      built.meta.slug = slug
+      built.meta.poolId = pool.poolId || null
+      built.meta.capabilityEvidence = declaredTools ? 'all-members-native-tool-route-with-evidence' : 'conservative-no-shell-tools'
+      seenSlugs.set(slug, pool.name)
+      poolEntries.push(built.model)
+    } catch (error) {
+      invalidPools.push({ poolId: pool.poolId || null, slug, code: error.code || 'invalid_pool', message: error.message })
+      warnings.push({ code: 'pool_catalog_entry_skipped', path: 'virtualModels.' + slug, message: error.message })
+      if (!skipInvalid) throw error
+    }
+  }
+
+  const catalog = { models: [...officialCatalog.models, ...thirdParty.map(t => t.model), ...poolEntries] }
   assertCatalog(catalog, { source: 'generated catalog' })
 
   const bindings = {}
@@ -1098,6 +1136,8 @@ export function buildCatalog({ base, config = null, options = {} }) {
     counts: { official: officialCatalog.models.length, thirdParty: thirdParty.length, total: catalog.models.length },
     skipped,
     models: thirdParty.map(t => t.meta),
+    pools: poolEntries.length,
+    invalidPools,
     bindings,
     warnings,
   }

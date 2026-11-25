@@ -985,8 +985,8 @@ function resolveModeParams (opts = {}) {
   const explicitMode = AGGREGATION_MODES.includes(opts.mode)
   const toMode = explicitMode ? opts.mode : 'aggregated'
   const target = resolveModeTarget({ mode: toMode, parentModel: opts.parentModel || opts.model })
-  const model = toMode === 'route' ? ROUTE_MODEL : (opts.model || target.model)
-  const childModel = toMode === 'route' ? ROUTE_MODEL
+  const model = toMode === 'route' ? (opts.model || ROUTE_MODEL) : (opts.model || target.model)
+  const childModel = toMode === 'route' ? (opts.agentModel || opts.model || ROUTE_MODEL)
     : (opts.agentModel || (explicitMode && toMode === 'aggregated' ? DEEPSEEK_CHILD_MODEL : opts.model))
   const provider = toMode === 'route' ? (opts.managedProvider || {}) : opts.managedProvider
   return { explicitMode, toMode, target, model, childModel, provider }
@@ -1609,7 +1609,7 @@ export async function activate (opts = {}) {
       }
     }
     const fromState = { mode: fromMode, sha: stateBefore.sha256, desired: previousState ? previousState.desired || null : null, backupPath: previousState ? previousState.backupPath || null : null }
-    const toState = { mode: toMode, sha: afterSha, model: effectiveModel, childModel: effectiveChild }
+    const toState = { mode: toMode, sha: afterSha, model: effectiveModel, childModel: effectiveChild, routeTarget: opts.routeTarget || null, childTarget: opts.childTarget || null }
     const journalBase = {
       schema: JOURNAL_SCHEMA,
       phase: 'applying',
@@ -1729,6 +1729,8 @@ export async function activate (opts = {}) {
       toMode,
       parentModel: opts.parentModel || effectiveModel,
       childModel: effectiveChild,
+      routeTarget: opts.routeTarget || null,
+      childTarget: opts.childTarget || null,
       appliedAt,
       lastApply: { ok: true, at: appliedAt, verification: summarizeVerification(verification), agentChild: childRecord ? { action: childPlan.action } : null },
     })

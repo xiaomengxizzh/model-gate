@@ -6,7 +6,7 @@ import {
 import { state, loadAll, loadStatus } from '../store.js'
 import { ensureDraft, setDraft } from '../config-draft.js'
 import { reviewAndSave, dirtyChip } from '../save-flow.js'
-import { api } from '../api.js'
+import { api, request } from '../api.js'
 import { fmtInt, fmtMs, fmtAgo, fmtDuration, safeHost, safeOrigin, maskValue, parseKv, kvText } from '../format.js'
 
 const PROTOCOLS = ['openai', 'anthropic', 'gemini', 'cohere', 'responses']
@@ -244,7 +244,7 @@ function openProviderDialog(draft, providerId, rerender) {
       } catch { errors.push('Base URL 不是合法的 http(s) 地址') }
     }
     const proxy = proxyInput.value.trim()
-    if (proxy && proxy !== 'direct') {
+    if (proxy && proxy !== 'direct' && proxy !== '********') {
       if (!/^https?:\/\//i.test(proxy)) errors.push('代理必须是 direct 或 http(s):// 地址')
       else {
         try {
@@ -324,7 +324,7 @@ function openKeyDialog(draft, id, sp, rerender) {
   const clearBtn = sp && sp.hasKey ? h('button', { class: 'btn btn-danger', type: 'button', text: '清除面板 Key', disabled: dirty }) : null
 
   const content = h('div', null,
-    callout('info', h('strong', { text: 'Key 走独立通道。' }), ' 只提交到 POST /api/keys，不经 /api/config/save，页面与状态接口都不会回显 Key 值。'),
+    callout('info', h('strong', { text: 'Key 走独立通道。' }), ' 先经 /api/config/write:preview 生成凭据动作与指纹，再在自定义对话框中确认并提交 POST /api/keys；页面与状态接口不会回显 Key 值。'),
     dirty ? callout('warn', h('strong', { text: '当前有未保存的配置更改。' }), ' Key 保存会推进 configVersion，使草稿基于的版本过期；请先在页面上保存或放弃草稿。') : null,
     h('div', { class: 'mb-3' }, h('span', { class: 'hint', text: '当前状态（来自 /api/status）' })),
     h('div', { class: 'mb-3' },
@@ -347,7 +347,27 @@ function openKeyDialog(draft, id, sp, rerender) {
     save.disabled = true
     if (clearBtn) clearBtn.disabled = true
     try {
-      await api.saveKey({ id, key: keyValue, version: draft.baseVersion })
+      const requestId = 'key-' + id + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)
+      const preview = await request('/api/config/write:preview', {
+        method: 'POST', body: { action: 'keys.update', id, key: keyValue, expectedVersion: draft.baseVersion, requestId },
+      })
+      const confirmed = await confirmDialog({
+        title: keyValue ? '确认更新上游 Key' : '确认清除上游 Key',
+        desc: '服务端已生成持久凭据操作预览；确认后才写入加密 Key 库。',
+        message: '目标：' + id + '；动作：' + (keyValue ? '设置新 Key' : '清除面板 Key') +
+          '；指纹：' + preview.summary.credentialFingerprint + '；基准版本：' + preview.expectedVersion +
+          '。预览编号 ' + preview.previewId + '。页面不会回显 Key，操作存储只保存动作与 SHA-256 指纹。',
+        confirmLabel: keyValue ? '确认更新 Key' : '确认清除', danger: true,
+      })
+      if (!confirmed) {
+        save.disabled = dirty
+        if (clearBtn) clearBtn.disabled = dirty
+        return
+      }
+      await api.saveKey({
+        id, key: keyValue, expectedVersion: preview.expectedVersion, requestId: preview.requestId,
+        previewId: preview.previewId, confirmToken: preview.confirmToken,
+      })
       input.value = ''
       setDraft(null)
       let reloadErr = null
@@ -370,15 +390,7 @@ function openKeyDialog(draft, id, sp, rerender) {
     submit(value)
   })
   if (clearBtn) {
-    clearBtn.addEventListener('click', async () => {
-      const ok = await confirmDialog({
-        title: '清除面板 Key',
-        message: '将删除 keys 库中该上游的条目。若 apiKeyEnv 指向的环境变量仍能解析到 Key，实际请求可能仍然可用。',
-        confirmLabel: '清除', danger: true,
-      })
-      if (!ok) return
-      submit('')
-    })
+    clearBtn.addEventListener('click', () => submit(''))
   }
 }
 

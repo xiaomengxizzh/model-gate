@@ -29,7 +29,7 @@
 
 ## 3. 请求阶段状态机
 
-阶段是单调推进的；`advancePhase()` 只接受合法迁移，非法回退返回 `MG_FB_PHASE_INVALID`。
+阶段是单调推进的；`advancePhase()` 接受合法迁移，并把同一阶段的重复事件视为幂等 no-op；非法回退返回 `MG_FB_PHASE_INVALID`。
 
 ```text
 unsent --上游受理--> accepted_no_side_effect --出现工具/hosted 副作用--> tool_side_effect
@@ -49,7 +49,7 @@ unsent --上游受理--> accepted_no_side_effect --出现工具/hosted 副作用
 | `partially_committed` | 任务/会话已部分提交 | **否** |
 | `user_cancelled` | 客户端/用户取消（终态） | **否** |
 
-合法迁移：`unsent -> {accepted, user_cancelled}`；`accepted -> {tool_side_effect, stream_delivered, partially_committed, user_cancelled}`；`tool_side_effect -> {stream_delivered, partially_committed, user_cancelled}`；`stream_delivered -> {tool_side_effect, partially_committed, user_cancelled}`；`partially_committed` 与 `user_cancelled` 无出边。
+合法迁移：`unsent -> {accepted, user_cancelled}`；`accepted -> {tool_side_effect, stream_delivered, partially_committed, user_cancelled}`；`tool_side_effect -> {stream_delivered, partially_committed, user_cancelled}`；`stream_delivered -> {tool_side_effect, partially_committed, user_cancelled}`；`partially_committed` 与 `user_cancelled` 无出边。任意 `phase -> phase` 是幂等 no-op，不改变阶段或重放安全性。
 
 ## 4. 错误分类与重放安全
 

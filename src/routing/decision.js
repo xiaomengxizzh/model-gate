@@ -577,6 +577,7 @@ export function advancePhase(phase, event) {
   if (!VALID_PHASES.has(from) || !VALID_PHASES.has(to)) {
     return { ok: false, code: STOP.PHASE_INVALID, from, to }
   }
+  if (from === to) return { ok: true, phase: to, from }
   if ((TRANSITIONS[from] || []).includes(to)) return { ok: true, phase: to, from }
   return { ok: false, code: STOP.PHASE_INVALID, from, to }
 }

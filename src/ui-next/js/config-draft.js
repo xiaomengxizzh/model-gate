@@ -1,6 +1,7 @@
 // Config editing transaction: immutable base, dirty diff, versioned save, 409 conflict.
 import { clone, diffObjects } from './format.js'
-import { api, ApiError } from './api.js'
+import { api, ApiError, request } from './api.js'
+import { confirmDialog } from './components.js'
 
 // 掩码（允许首尾空白）：代表“已设置/未改动”，永远不能作为真实 Key 上送。
 export const CLIENT_KEY_MASK_RE = /^\s*\*{8}\s*$/
@@ -16,9 +17,24 @@ export function buildSavePayload(draft) {
   const editedClientKey = diff.some((d) => d.path === 'defaults.clientKey')
   const value = defaults.clientKey
   if (!editedClientKey || (value != null && CLIENT_KEY_MASK_RE.test(String(value)))) delete defaults.clientKey
+  const providers = Object.fromEntries(Object.entries(data.providers || {}).map(([id, provider]) => {
+    const out = { ...provider }
+    const original = draft.original?.providers?.[id]
+    delete out.proxyConfigured
+    if (original) {
+      if (JSON.stringify(out.extraHeaders) === JSON.stringify(original.extraHeaders)) delete out.extraHeaders
+      if (out.proxy === original.proxy) delete out.proxy
+      if (original.baseUrlMasked && out.baseUrl === original.baseUrl) delete out.baseUrl
+    }
+    delete out.baseUrlMasked
+    return [id, out]
+  }))
+  if (JSON.stringify(defaults.proxy) === JSON.stringify(draft.original?.defaults?.proxy)) delete defaults.proxy
+  if (JSON.stringify(defaults.extraHeaders) === JSON.stringify(draft.original?.defaults?.extraHeaders)) delete defaults.extraHeaders
+  delete defaults.proxyConfigured
   return {
     version: Number(draft && draft.baseVersion) || 0,
-    providers: data.providers || {},
+    providers,
     models: data.models || {},
     defaults,
     virtualModels: Array.isArray(data.virtualModels) ? data.virtualModels : [],
@@ -60,7 +76,7 @@ export class ConfigDraft {
       if (!p || typeof p !== 'object') { errors.push('上游「' + id + '」必须是对象'); continue }
       if (!/^https?:\/\//.test(String(p.baseUrl || ''))) errors.push('上游「' + id + '」Base URL 必须是 http(s) 地址')
       if (p.api && !['openai', 'anthropic', 'gemini', 'cohere', 'responses'].includes(String(p.api))) errors.push('上游「' + id + '」协议不在允许集合')
-      if (p.proxy && !['', 'direct'].includes(String(p.proxy)) && !/^https?:\/\//.test(String(p.proxy))) errors.push('上游「' + id + '」代理必须是 direct 或 http(s) 地址')
+      if (p.proxy && !['', 'direct', '********'].includes(String(p.proxy)) && !/^https?:\/\//.test(String(p.proxy))) errors.push('上游「' + id + '」代理必须是 direct 或 http(s) 地址')
     }
     for (const [name, m] of Object.entries(this.models)) {
       if (!m || typeof m !== 'object') { errors.push('模型「' + name + '」必须是对象'); continue }
@@ -93,10 +109,31 @@ export class ConfigDraft {
   async save() {
     const errors = this.validate()
     if (errors.length) throw new Error(errors[0])
+    const payload = buildSavePayload(this)
+    const requestId = 'config-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)
     try {
-      const res = await api.saveConfig(buildSavePayload(this))
+      const preview = await request('/api/config/write:preview', {
+        method: 'POST', body: { ...payload, action: 'config.save', expectedVersion: payload.version, requestId },
+      })
+      const confirmed = await confirmDialog({
+        title: '确认应用配置更改',
+        desc: '服务端已生成持久预览；确认后才执行写入。',
+        message: '将基于版本 ' + preview.expectedVersion + ' 保存 ' + (preview.summary?.fields || []).join('、') +
+          '。预览编号 ' + preview.previewId + '，请求编号 ' + preview.requestId +
+          '。若版本已变化将返回 409；确认令牌与明文凭据不会进入操作存储。',
+        confirmLabel: '确认应用', danger: true,
+      })
+      if (!confirmed) {
+        const cancelled = new Error('已取消应用；预览未被消费，配置未写入')
+        cancelled.name = 'SaveCancelledError'
+        throw cancelled
+      }
+      const res = await api.saveConfig({
+        ...payload, expectedVersion: preview.expectedVersion, requestId: preview.requestId,
+        previewId: preview.previewId, confirmToken: preview.confirmToken,
+      })
       const nextVersion = Number(res?.status?.configVersion ?? this.baseVersion + 1)
-      return { ok: true, version: nextVersion, status: res?.status || null }
+      return { ok: true, version: nextVersion, status: res?.status || null, operation: res?.operation || null }
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) throw new ConflictError(e.currentVersion)
       throw e

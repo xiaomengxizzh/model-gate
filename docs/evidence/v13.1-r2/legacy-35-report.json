@@ -1,0 +1,138 @@
+{
+  "schema": "mg-v07-legacy-35-report/1",
+  "task": "V07 historical 35 old business assertions",
+  "generatedAt": "2026-11-24T20:20:14Z",
+  "status": "BLOCKED_AUTHORITATIVE_35_NOT_FOUND",
+  "lastTemplateCheck": {
+    "checkedAt": "2026-11-25T05:50:29+08:00",
+    "path": "docs/evidence/v13.1-r2/legacy-35-authoritative-input.json",
+    "status": "TEMPLATE_NOT_EVIDENCE",
+    "validationCode": "authoritative_input_incomplete",
+    "errorCount": 76,
+    "assertionsRun": 0
+  },
+  "headSha": "48325bf0027e583108c66677c7dec15fd5007228",
+  "branch": "deploy/modelgate-ux-v3",
+  "workingTreeDirtyAtStart": true,
+  "nodeVersion": "v24.22.2",
+  "expectedAssertionCount": 35,
+  "authoritativelyIdentifiedAssertionCount": 0,
+  "assertions": [],
+  "summary": {
+    "pass": 0,
+    "fail": 0,
+    "notRun": 35,
+    "skipped": 0,
+    "blocked": 35
+  },
+  "runner": {
+    "path": "scripts/verify-legacy-35.mjs",
+    "created": true,
+    "command": "node scripts/verify-legacy-35.mjs --self-test && node scripts/verify-legacy-35.mjs --template=<empty.json> && node scripts/verify-legacy-35.mjs --input=<authoritative.json> [--run]",
+    "exitCode": null,
+    "reason": "No authoritative list of the exact 35 existing assertions or original executable regression harness was found. The verifier refuses missing, duplicate, incomplete, unmapped or escaping input and never generates replacement assertions.",
+    "selfTest": {
+      "status": "PASS",
+      "checks": ["exact35", "missingRejected", "duplicateRejected", "traversalRejected", "unknownMappingRejected", "templateRejected", "all35Executed", "mismatchedTestRejected"],
+      "fixtureOnly": true,
+      "tapMatching": "Each assertion requires exactly one matching TAP ok line; all 35 execute even after failures."
+    },
+    "sha256": "e2bc3f9d92e6c47d327b995a3dc83a986b8f934257e855037eb3cf1b0518220d",
+    "withoutInput": "BLOCKED_AUTHORITATIVE_INPUT_MISSING",
+    "templatePath": "docs/evidence/v13.1-r2/legacy-35-authoritative-input.json",
+    "templateStatus": "TEMPLATE_NOT_EVIDENCE",
+    "templateRejected": true
+  },
+  "fingerprints": {
+    "algorithm": "sha256(path+NUL+bytes)",
+    "code": {
+      "files": 145,
+      "sha256": "69896bf7f4f119a041dae2e6462db4c7e7b71f554d713fae1d2dd5a98402ef9c"
+    },
+    "inputs": [
+      {
+        "path": "docs/evidence/v13.1-r2/input/04-执行清单/acceptance-matrix.csv",
+        "sha256": "a166b35bc4f7b072f826ebecf3b73b4a3405dcc826f1ebb6651900df0efd9f9c",
+        "relevantLine": 25
+      },
+      {
+        "path": "docs/evidence/v13.1-r2/input/实施方案.md",
+        "sha256": "20f8fe2bfc713dc5d8e3c7b37acdfb3338d4307783db6c3650682c0cd2a897db",
+        "relevantLines": [
+          22,
+          31,
+          170
+        ]
+      },
+      {
+        "path": "docs/evidence/v13.1-r2/input/01-原型与目录/modelgate-desktop-v13.html",
+        "sha256": "735e6d10250d5ac68f8d721ce2ec3e8f2fda8afcf717f17c96ca9eaff320eb70"
+      },
+      {
+        "path": "docs/evidence/v13.1-r2/input/01-原型与目录/modelgate-desktop-v13.1.html",
+        "sha256": "c3395588357af460708ceae3eac89e3c1b076a7e826fc190e04de040541a7343"
+      },
+      {
+        "path": "docs/evidence/v13.1-r2/input/manifest.json",
+        "sha256": "cdeba56986c608e11c419703c0ffbf9c0d008773d4c8c1fb04e1831c303d7aa3"
+      },
+      {
+        "path": "$HOME/下载/ModelGate-V13.1-%E5%AE%8C%E6%95%B4%E6%89%A7%E8%A1%8C%E4%BA%A4%E4%BB%98%E5%8C%85-R2.zip",
+        "sha256": "a959520beb9912b5f1d2734afe4b93c6f5b044f871875dc8b520be99476dc37d",
+        "note": "Path spelling preserved exactly as recorded by A0; archive presence and hash were previously verified. No archive contents were extracted into the repository."
+      }
+    ]
+  },
+  "findings": [
+    {
+      "source": "docs/evidence/v13.1-r2/input/04-执行清单/acceptance-matrix.csv:25",
+      "finding": "V07 requires 35 old assertions plus U01-U17, but supplies no assertion names, IDs, test paths, selectors, or original command."
+    },
+    {
+      "source": "docs/evidence/v13.1-r2/input/实施方案.md:22",
+      "finding": "The only concrete result is an aggregate historical statement that Chromium page injection reran two V13 regression groups with 35/35 assertions passing. The two groups and all 35 assertion bodies are absent."
+    },
+    {
+      "source": "docs/evidence/v13.1-r2/input/实施方案.md:31,170",
+      "finding": "The contract explicitly says V13.1 did not rerun all 35 and requires them to be rerun on the formal branch; it does not define the assertions."
+    },
+    {
+      "source": "docs/evidence/v13.1-r2/input/manifest.json",
+      "finding": "The manifest describes prior offline Chromium HTML injection evidence, not a reusable business-assertion manifest."
+    },
+    {
+      "source": "Repository docs/evidence, docs, scripts/test, scripts/e2e; all reachable git refs and unreachable git objects; preserved R2 ZIP; relevant local Qoder session/file-history artifacts",
+      "finding": "No authoritative enumeration or executable source for the exact historical 35 was found. The V13 HTML contains prototype behavior but no embedded 35-assertion regression harness."
+    },
+    {
+      "source": "scripts/e2e/ui-v13-browser.mjs and scripts/test/run.mjs",
+      "finding": "The current 26 V13.1 browser checks and 169-suite offline run are different, newer coverage. They were not relabeled or selected as the historical 35."
+    }
+  ],
+  "searchCommands": [
+    "git status --short",
+    "git log --all --oneline -- docs scripts",
+    "git log --all -G '35 条|35条|35.*断言|断言.*35' -- docs scripts",
+    "git log --all -S'35/35' --oneline --all --",
+    "git grep -n -E '35|断言|assert' 886e22a -- docs/evidence docs/roadmap scripts/e2e scripts/test",
+    "git fsck --no-reflogs --unreachable",
+    "unzip -l <preserved R2 ZIP>",
+    "unzip -p <preserved R2 ZIP> '*/archive/V13-R1-历史方案-勿作为当前执行合同.md'",
+    "node scripts/tree-fingerprint.mjs",
+    "sha256sum <fingerprinted inputs>"
+  ],
+  "boundaries": {
+    "execution": "NOT_RUN: no legacy runner exists and no exact selection can be made without fabrication",
+    "testSubstitution": "NONE: newer V13.1 checks, U01-U17, and broad offline suites are not represented as the historical 35",
+    "testWeakening": "NONE: no existing test or application source was edited",
+    "upstream": "NO_REAL_UPSTREAM: no paid API, model, credential, or production service was used",
+    "downloads": "NONE: existing local Node and preserved files only",
+    "production": "UNTOUCHED: no configuration, service restart, merge, commit, or push",
+    "claim": "Historical 35/35 remains a prior report only; current-tree V07 business regression is not proven"
+  },
+  "unblockRequirements": [
+    "Provide the authoritative original 35 assertion names and bodies (or a versioned manifest with stable IDs and source locations).",
+    "Provide the original two regression groups, fixture/setup contract, and exact execution command or an existing executable harness that contains those assertions.",
+    "Confirm the mapping from each historical assertion to existing current-tree tests without replacing or weakening any assertion."
+  ]
+}

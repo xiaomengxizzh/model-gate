@@ -1,9 +1,9 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import http from 'node:http'
 import { pipeline, Transform } from 'node:stream'
 import { readFileSync, chmodSync, existsSync, copyFileSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { basename } from 'node:path'
+import { basename, join } from 'node:path'
 import { gunzipSync, inflateSync, brotliDecompressSync, zstdDecompressSync } from 'node:zlib'
 import { isIP } from 'node:net'
 import { loadConfig, createRouter, buildProvider, resolveKey, configPaths, writeJsonAtomic, keysEncrypt, readKeysFresh, readLocalConfigStrict, isConfigUnreadable, modelTarget, configInlineCredentialWarnings } from './router.js'
@@ -40,6 +40,20 @@ import { handleCodexApi, isCodexApiPath } from './codex/api.js'
 import { handleAggregationApi, isAggregationApiPath } from './aggregation/api.js'
 import { registerConfigRoot, sha256Hex } from './codex/config.js'
 import { attachResponsesWebSocket, looksLikeSse } from './responses-ws.js'
+import { buildCapabilities } from './capabilities.js'
+import { handleServiceApi } from './resources/service-api.js'
+import { handleResourceApi } from './resources/resource-api.js'
+import { handleBackupApi } from './resources/backup-api.js'
+import { RequestLedger } from './resources/request-ledger.js'
+import { listConnections } from './resources/connections.js'
+import { effectivePolicy } from './resources/policies.js'
+import { usageSummary } from './resources/usage.js'
+import { structuredLogs } from './resources/diagnostics.js'
+import { handleHarnessApi } from './resources/harness-api.js'
+import { apiOperationError, apiOperationStore, createApiPreview, executeApiWrite, handleApiOperationRoute, publicApiOperation } from './resources/operation-store.js'
+import { redactProviderForConfig, redactProviderForStatus, redactDefaultsForConfig, restoreProviderSecrets, SECRET_MASK } from './resources/redaction.js'
+import { createTenancyDispatcher, validateRootControlConfig } from './tenancy/http.js'
+import { createScopeStore, resolveTenancy, TenancyError, assertTenantCredentialRefs } from './tenancy/scope.js'
 
 // 数据面 Chat 入口别名：兼容 base URL 不带 /v1 的 OpenAI 兼容客户端（它们会拼 /chat/completions 或 /v1/chat/completions）
 const CHAT_PATHS = new Set(['/v1/chat/completions', '/chat/completions'])
@@ -51,11 +65,10 @@ const GO_CHAT_RESPONSE_PREFIX = 'resp_mgchat_'
 // 第三方目标仍走严格 nativeGate（不声明 → 拒绝），绝不因这条声明而放宽到第三方。
 const OFFICIAL_RESPONSES_NATIVE_CONTRACT = Object.freeze({ store: true, previous_response_id: true, background: true, truncation: true })
 // 2026-11-15 所有者指令：旧管理台（src/admin.html）退役，不再对外提供。
-// 根路径统一跳到 V3 唯一控制台；/admin 与 /admin.html 返回 410 并说明去向。
+// 根路径统一跳到 V13.1 唯一控制台；/admin 与 /admin.html 返回 410 并说明去向。
 // 旧文件保留在仓库中仅作溯源（不参与任何请求处理），不再有 HTML 读取路径。
-const LEGACY_CONSOLE_RETIRED = '旧管理台已退役：请使用 /ui-next/（ModelGate V3 控制台）。旧源码仅作历史留存，不再提供页面。'
-// Isolated /ui-next console: serve only the frozen asset tree, no directory listing,
-// no path traversal, no symlink following. Old '/' and '/admin' remain unchanged.
+const LEGACY_CONSOLE_RETIRED = '旧管理台已退役：请使用 /ui-vnext/（ModelGate V13.1 控制台）。旧源码仅作历史留存，不再提供页面。'
+// Legacy /ui-next console remains available only as a rollback target.
 const UI_NEXT_TYPES = Object.freeze({
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml',
@@ -65,6 +78,23 @@ function uiNextAsset(path) {
   let rel
   if (path === '/ui-next' || path === '/ui-next/') rel = 'index.html'
   else if (path.startsWith('/ui-next/')) rel = path.slice('/ui-next/'.length)
+  else return null
+  try { rel = decodeURIComponent(rel) } catch { return null }
+  if (!rel || rel.startsWith('/') || rel.includes('\\') || rel.includes('\0')) return null
+  const parts = rel.split('/')
+  if (parts.some((p) => !p || p === '.' || p === '..')) return null
+  if (!/^[A-Za-z0-9._/-]+$/.test(rel)) return null
+  const name = parts[parts.length - 1]
+  const ext = name.slice(name.lastIndexOf('.')).toLowerCase()
+  const type = UI_NEXT_TYPES[ext]
+  if (!type) return null
+  return { rel, type }
+}
+
+function previewAsset(path) {
+  let rel
+  if (path === '/ui-vnext' || path === '/ui-vnext/') rel = 'index.html'
+  else if (path.startsWith('/ui-vnext/')) rel = path.slice('/ui-vnext/'.length)
   else return null
   try { rel = decodeURIComponent(rel) } catch { return null }
   if (!rel || rel.startsWith('/') || rel.includes('\\') || rel.includes('\0')) return null
@@ -173,7 +203,7 @@ function codexCatalogView(cfg) {
   let st = null
   try { st = statSync(basePath) } catch { return null }
   const modelsKey = JSON.stringify(Object.keys((cfg && cfg.models) || {}).sort())
-  const key = basePath + '|' + st.mtimeMs + '|' + st.size + '|' + modelsKey
+  const key = basePath + '|' + st.mtimeMs + '|' + st.size + '|' + modelsKey + (cfg && cfg._tenancyScope ? '|scope=' + cfg._tenancyScope : '')
   if (_codexModelsCache && _codexModelsCache.key === key) return _codexModelsCache
   let view = null
   try {
@@ -302,10 +332,10 @@ function tryParse(buf) { try { return JSON.parse(buf.toString('utf8')) } catch {
 function configProjection(state) {
   const cfg = state.cfg
   const providers = {}
-  for (const [id, p] of Object.entries(cfg.providers || {})) providers[id] = stripRuntimeFields(p, PROVIDER_RUNTIME_FIELDS)
+  for (const [id, p] of Object.entries(cfg.providers || {})) providers[id] = redactProviderForConfig(stripRuntimeFields(p, PROVIDER_RUNTIME_FIELDS))
   const models = {}
   for (const [n, m] of Object.entries(cfg.models || {})) models[n] = stripRuntimeFields(m, MODEL_RUNTIME_FIELDS)
-  const defaults = Object.assign({}, cfg.defaults || {})
+  const defaults = redactDefaultsForConfig(Object.assign({}, cfg.defaults || {}))
   // clientKey 实际存于加密 keys 库（__mg_client）；只检查 defaults 会永远回显空串，
   // 前端无法判断「已设置」并可能在保存时误清空。两者任一存在即掩码。
   if (defaults.clientKey || (cfg._keys && cfg._keys.__mg_client)) defaults.clientKey = '********'
@@ -313,10 +343,10 @@ function configProjection(state) {
   // 一次「读→改→保存」会把它们当作已删除而清空（与虚拟模型 Key 的孤儿风险同类）。
   const virtualModels = (cfg.virtualModels || []).map((v) => {
     const meta = (cfg._keys && cfg._keys['__mg_vm_meta_' + v.name]) || {}
-    // T-KEY-02：expiresAt 原值 + 后端判定的状态；前端只展示，不自行比较时间。
-    return { name: v.name, directory: v.directory, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps, ...virtualExpiryProjection(meta.expiresAt), note: meta.note || '' }
+    const { expiresAt: _expiresAt, note: _note, ...rest } = structuredClone(v)
+    return { ...rest, name: v.name, quota: v.quota, dailyQuota: v.dailyQuota, maxContext: v.maxContext, maxConcurrent: v.maxConcurrent, qps: v.qps, ...virtualExpiryProjection(meta.expiresAt), note: meta.note || '' }
   })
-  return { configVersion: cfg.configVersion || 0, providers, models, defaults, virtualModels }
+  return { configVersion: cfg.configVersion || 0, providers, models, defaults, virtualModels, policies: cfg.policies || {}, harnessBindings: cfg.harnessBindings || {} }
 }
 
 function pct(arr, p) { if (!arr || !arr.length) return null; const a = [...arr].sort((x, y) => x - y); const i = Math.min(a.length - 1, Math.max(0, Math.ceil(a.length * p / 100) - 1)); return Math.round(a[i]) }
@@ -446,6 +476,7 @@ function tallyVirtual(state, modelName, serving, tokens, inTokens, outTokens) {
   tallyDaily(state, modelName, tokens, 0, 0, inTokens, outTokens)
 }
 function agg(state, pid, field, delta) { if (state.stats.byProvider[pid]) state.stats.byProvider[pid][field] += delta; state.stats.global[field] += delta }
+function tenantTokenCount(state) { return Object.values(state.stats.byModel || {}).reduce((sum, item) => sum + (Number(item && item.tokens) || 0), 0) }
 
 // ── 缓存降碎片化（A2 会话/上游亲和 + B5 命中率路由）──
 // 记录某模型最近一次成功使用哪个上游，回填到状态，供前端展示。
@@ -471,10 +502,11 @@ function buildStatus(state) {
     const h = ensureHst(state, id)
     const o = s.byProvider[id] || { requests:0, errors:0, retries:0, latencySum:0, latencyCount:0, tokens:0 }
     return {
-      id, baseUrl: p.baseUrl, hasKey: !!pk.key,
+      id, ...redactProviderForStatus(p), hasKey: !!pk.key,
       keySource: pk.source,
       gatewaySubscription: !!(p.gatewaySubscription && p.gatewaySubscription.enabled === true),
-      apiKeyEnv: p.apiKeyEnv || null, pathPrefix: p.pathPrefix || '', api: p.api || 'openai', extraHeaders: p.extraHeaders || {}, proxy: p.proxy || '', circuit: p.circuit || null,
+      apiKeyEnv: p.apiKeyEnv || null, pathPrefix: p.pathPrefix || '', api: p.api || 'openai', circuit: p.circuit || null,
+      connections: listConnections(state.cfg, id),
       st: {
         requests: o.requests, errors: o.errors, retries: o.retries, tokens: o.tokens,
         avgMs: o.latencyCount ? Math.round(o.latencySum / o.latencyCount) : null,
@@ -503,6 +535,8 @@ function buildStatus(state) {
   })
   return {
     needAuth: false,
+    ...(state.cfg._tenancyScope ? { tenancy: { mode: 'multi', scopeId: state.cfg._tenancyScope } } : {}),
+    requestBudget: state.lastRequestBudget || null,
     configVersion: state.cfg.configVersion || 0,
     virtualModels,
     server: { maxBodyBytes: (state.cfg.server && state.cfg.server.maxBodyBytes) || 0, keyEncrypted: !!(process.env.MG_KEYS_MASTER) || keysFileEncrypted(state.paths.keys), host: (state.cfg.server && state.cfg.server.host) || '127.0.0.1', port: (state.cfg.server && state.cfg.server.port) || 8787 },
@@ -512,13 +546,14 @@ function buildStatus(state) {
     global: { requests: s.global.requests, errors: s.global.errors, retries: s.global.retries, interrupts: s.global.interrupts, tokenCount: s.global.tokens, todayTokens: todayTotal, avgMs: s.global.confirmed ? Math.round(s.global.latencySum / s.global.confirmed) : null, p50: pct(s.global.lats, 50), p95: pct(s.global.lats, 95), latTrend: s.global.latTrend || [] },
     cache: { trend: state.cacheTrend || [], alert: state.cacheAlert || null },
     dialogues: Object.values(state.dialogue).filter(d => d.requests > 0).sort((a, b) => b.lastAt - a.lastAt).slice(0, 30).map(d => ({ id: d.id, named: d.named, requests: d.requests, tokens: d.tokens, hit: d.hit, miss: d.miss, hitRate: (d.hit + d.miss) > 0 ? Math.round(d.hit / (d.hit + d.miss) * 1000) / 10 : null, startAt: d.startAt, lastAt: d.lastAt })),
-    nativeUsage: (() => { const n = nativeUsageConfig(state.cfg); return { enabled: n.enabled, dirLabel: n.label } })(),
+    nativeUsage: (() => { const n = nativeUsageConfig(state.cfg); return state.cfg._tenancyScope ? { enabled: false, dirLabel: '', reason: 'tenant_host_usage_disabled' } : { enabled: n.enabled, dirLabel: n.label } })(),
     providers,
     models,
     // UX-00：只读的本机 Codex 登录探测（不返回 token、不刷新、不发请求）。
     // 首页据此区分"检测到 ChatGPT 登录 / 待登录 / 不可用"；这只是 detected 级证据，
     // 不得被 UI 升级成"官方推理已实测"（真实推理证据只能来自 lastServing）。
     official: (() => {
+      if (state.cfg._tenancyScope) return { credential: 'unknown', reason: 'tenant_host_auth_disabled', authMode: null, level: 'unknown', source: 'tenant_api_key_only', checkedAt: new Date(now).toISOString() }
       try {
         const probe = probeLocalCodexAuth()
         const reason = (probe && probe.reason) || null
@@ -550,7 +585,7 @@ function buildStatus(state) {
     })(),
     // defaults 原样返回（仅 clientKey 掩码）：否则自定义字段（affinityTtlMs / failbackProbe 等）
     // 会在任意一次配置保存后被静默丢弃（与 circuit 同源的问题）
-    defaults: Object.assign({ directory: [], preheat: [], retry: {}, timeout: {}, concurrency: {}, extraHeaders: {}, proxy: '', proxyMode: 'auto' }, defaults, { clientKey: currentClientKey(state) ? '********' : '' }),
+    defaults: redactDefaultsForConfig(Object.assign({ directory: [], preheat: [], retry: {}, timeout: {}, concurrency: {}, extraHeaders: {}, proxy: '', proxyMode: 'auto' }, defaults, { clientKey: currentClientKey(state) ? '********' : '' })),
   }
 }
 
@@ -561,8 +596,11 @@ function readLogTail(logFile, lines) {
     return arr.slice(-Math.max(1, Math.min(lines, 5000)))
   } catch { return [] }
 }
+function tenantNativeUsageDisabled(days = 7) {
+  return { enabled: false, source: 'codex-sessions', days, dirLabel: '', totals: null, byDay: [], byModel: [], reason: 'tenant_host_usage_disabled', note: '多租户模式不读取宿主 Codex sessions；租户网关用量仍按作用域隔离统计。' }
+}
 function staticModels(cfg) {
-  const data = Object.keys(cfg.models || {}).map((id) => ({ id, object: 'model', owned_by: 'model-gateway', capability: ((cfg.models && cfg.models[id] && cfg.models[id].capability) || 'chat') }))
+  const data = Object.keys(cfg.models || {}).filter((id) => cfg.models[id].enabled !== false && cfg.providers?.[cfg.models[id].provider]?.enabled !== false).map((id) => ({ id, object: 'model', owned_by: 'model-gateway', capability: ((cfg.models && cfg.models[id] && cfg.models[id].capability) || 'chat') }))
   const vm = (cfg.defaults && cfg.defaults.model) || ''
   if (vm && !data.some((m) => m.id === vm)) data.push({ id: vm, object: 'model', owned_by: 'model-gateway' })
   for (const v of cfg.virtualModels || []) if (!data.some((m) => m.id === v.name)) data.push({ id: v.name, object: 'model', owned_by: 'model-gateway' })
@@ -608,8 +646,77 @@ function pruneStateCapacity(state) {
   trimDialogue(state)
 }
 
+function tenantConfigError(code, message) {
+  const error = new TenancyError(code, message, { status: 403 })
+  error.type = code
+  return error
+}
+
+// Tenant credentials must come only from the scope's encrypted key store. The
+// shared tenancy helper scans connections[].apiKeyEnv and opaque extension bags.
+function assertTenantCredentialReferences(cfg, scopeId) {
+  if (scopeId) assertTenantCredentialRefs(cfg)
+}
+
+function tenantWriteValidationFailure(state, value) {
+  try {
+    assertTenantCredentialReferences(value, state.cfg._tenancyScope)
+    return null
+  } catch (error) {
+    if (!(error instanceof TenancyError)) throw error
+    return { status: error.status || 403, code: error.code, error: error.message }
+  }
+}
+
+function prepareTenantConfig(cfg, options) {
+  if (!options.scopeId) return cfg
+  if (cfg.tenancy != null) throw tenantConfigError('tenant_tenancy_config_forbidden', '租户配置不能重新声明 tenancy')
+  assertTenantCredentialReferences(cfg, options.scopeId)
+  for (const [id, provider] of Object.entries(cfg.providers || {})) {
+    if (provider && (provider.siwcApp === true || (provider.gatewaySubscription && provider.gatewaySubscription.enabled === true))) {
+      throw tenantConfigError('tenant_subscription_credential_unconfigured', '多租户官方订阅凭据尚未接入隔离存储：' + id)
+    }
+  }
+  if (options.scopeId && cfg.defaults && Object.hasOwn(cfg.defaults, 'codexCatalogBasePath')) {
+    throw tenantConfigError('tenant_catalog_path_forbidden', '多租户 defaults.codexCatalogBasePath 必须由宿主控制，租户不得指定')
+  }
+  const rootServer = (options.serverTemplate && options.serverTemplate.server) || {}
+  const tenantServer = (cfg.server && typeof cfg.server === 'object') ? cfg.server : {}
+  const rootMaxBody = Number(rootServer.maxBodyBytes)
+  const maxBodyBytes = Number.isFinite(rootMaxBody) && rootMaxBody > 0
+    ? Math.min(Number(tenantServer.maxBodyBytes) > 0 ? Number(tenantServer.maxBodyBytes) : rootMaxBody, rootMaxBody)
+    : Math.min(Number(tenantServer.maxBodyBytes) > 0 ? Number(tenantServer.maxBodyBytes) : 32 * 1024 * 1024, 32 * 1024 * 1024)
+  cfg.server = Object.assign({}, rootServer, tenantServer, {
+    host: rootServer.host || '127.0.0.1',
+    port: rootServer.port || 8787,
+    maxBodyBytes,
+    logFile: options.paths.logs,
+    allowRemote: rootServer.allowRemote === true,
+    allowedHosts: Array.isArray(rootServer.allowedHosts) ? [...rootServer.allowedHosts] : [],
+    allowedOrigins: Array.isArray(rootServer.allowedOrigins) ? [...rootServer.allowedOrigins] : [],
+    responsesWebSocket: false,
+  })
+  cfg.defaults = Object.assign({}, cfg.defaults || {}, { nativeUsageDir: 'off' })
+  if (cfg.routing && cfg.routing.ledger && typeof cfg.routing.ledger === 'object') {
+    cfg.routing = Object.assign({}, cfg.routing, { ledger: Object.assign({}, cfg.routing.ledger, { dir: join(options.paths.dir, 'usage-ledger') }) })
+  }
+  cfg._tenancyScope = options.scopeId
+  cfg._configFile = options.configFile
+  return cfg
+}
+
 function reloadConfig(state) {
-  state.cfg = loadConfig()
+  state.cfg = prepareTenantConfig(loadConfig({
+    configFile: state.cfg._configFile,
+    paths: state.paths,
+    scopeId: state.cfg._tenancyScope,
+    serverTemplate: state.cfg._serverTemplate,
+  }), {
+    scopeId: state.cfg._tenancyScope,
+    paths: state.paths,
+    configFile: state.cfg._configFile,
+    serverTemplate: state.cfg._serverTemplate,
+  })
   // MG-R008：内联 apiKey 不会被读取（Key 只来自 keys.local.json / apiKeyEnv）。接受却不使用
   // 等于静默失败，因此每次加载配置都为每个受影响的 provider 留一条稳定 code 的告警——
   // 只报 provider id 与字段名，绝不回显值。
@@ -623,6 +730,7 @@ function reloadConfig(state) {
     state.log.warn('Codex 目录不可用，官方/聚合模型将按未知模型处理', _codexCatalogError || '')
   }
   state.router = createRouter(state.cfg)
+  Object.defineProperty(state.cfg, '_runtimeInFlight', { value: state.inFlight, configurable: true, writable: true })
   // M1-3b：热重载同步账本配置（dir/caps 变化时 forward.js 缓存按 spec 区分）。
   state.ledgerOptions = ledgerOptionsOf(state.cfg)
   initForwardLedger(state.cfg, { ledgerOptions: state.ledgerOptions }, state.log)
@@ -632,7 +740,8 @@ function reloadConfig(state) {
   pruneStateCapacity(state)
 }
 // 写盘互斥：saveConfig/saveKeys 当前为同步函数（事件循环天然串行、无交错），
-// 此队列固化「读改写全程独占」语义，防止未来异步化（fs/promises）后出现交错写与 tmp 同名冲突
+// 此队列固化「读改写全程独占」语义，防止未来异步化（fs/promises）后出现交错写与 tmp 同名冲突。
+// expectedVersion CAS 也在排队后的回调内执行，不能把锁外预检当作最终提交条件。
 let _cfgWriteChain = Promise.resolve()
 function withConfigWriteLock(fn) {
   const run = _cfgWriteChain.then(fn, fn)
@@ -1298,7 +1407,7 @@ const NATIVE_COMPACTION_CAPABILITIES = Object.freeze(['codex-owned-local', 'code
 
 function validateConfigShape(body) {
   if (!isPlainObject(body)) return { error: '请求体必须为 JSON 对象' }
-  for (const f of ['providers', 'models', 'defaults']) {
+  for (const f of ['providers', 'models', 'defaults', 'policies', 'harnessBindings']) {
     if (body[f] === undefined) continue
     if (!isPlainObject(body[f])) return { error: f + ' 必须为对象（收到' + (Array.isArray(body[f]) ? '数组' : typeof body[f]) + '）' }
     const r = reservedKeyIn(body[f], f)
@@ -1315,7 +1424,19 @@ function versionConflict(state, body) {
   if (body && body.version !== undefined && Number.isFinite(cv) && cv !== (state.cfg.configVersion || 0)) return { conflict: true, currentVersion: state.cfg.configVersion || 0 }
   return null
 }
-function saveConfig(state, body) { return withConfigWriteLock(() => doSaveConfig(state, body)) }
+function expectedVersionConflict(state, expectedVersion) {
+  if (expectedVersion === undefined) return null
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) return { error: 'expectedVersion 必须为非负整数', status: 400, code: 'invalid_expected_version' }
+  if (expectedVersion !== (state.cfg.configVersion || 0)) return { conflict: true, currentVersion: state.cfg.configVersion || 0 }
+  return null
+}
+function saveConfig(state, body, expectedVersion = body && body.expectedVersion) {
+  return withConfigWriteLock(() => {
+    const conflict = expectedVersionConflict(state, expectedVersion)
+    if (conflict) return conflict
+    return doSaveConfig(state, body)
+  })
+}
 // M0-2b：虚拟模型元数据三态。整个 virtualModels 省略、或数组里的 vm 对象省略 expiresAt/note，都必须 KEEP；
 // 只有字段显式出现在补丁里且值为空才是 EXPLICIT_CLEAR。删除虚拟模型（不在数组里）仍由调用方清理 key+meta。
 export function planVirtualMetaUpdate(rawVm, presence, currentMeta) {
@@ -1342,6 +1463,7 @@ export function planVirtualMetaUpdate(rawVm, presence, currentMeta) {
 // M0-3：把事务错误映射为管理 API 的结构化错误（不含 Key/配置正文）。
 function transactionFailure(error) {
   const code = (error && error.code) || 'transaction_failed'
+  if (error instanceof TenancyError) return { error: error.message, status: error.status || 403, code }
   if (code === 'store_locked') return { error: '配置写入被拒绝：另一个写者持有配置锁（不排队）', status: 409, code }
   if (code === 'store_conflict') return { error: '配置已被外部修改（磁盘指纹不一致）：已停止写入并保留现场；请人工核对或先 /api/config/reload', status: 409, code }
   if (code === 'injected_fault') return { error: '配置事务被中断（故障注入）', status: 500, code }
@@ -1361,16 +1483,34 @@ async function doSaveConfig(state, body) {
   const cur = state.cfg
   const _shape = validateConfigShape(body); if (_shape) return _shape
   const _c = versionConflict(state, body); if (_c) return _c
+  const _tenant = tenantWriteValidationFailure(state, body); if (_tenant) return _tenant
   // M0-3：目录级单写者锁 + 中断恢复 + 磁盘指纹校验。拿不到锁或磁盘被外部修改都立即拒绝（不排队）。
   let tx
   try { tx = beginStoreWrite(state) } catch (error) { return transactionFailure(error) }
   try {
-  const providers = body.providers !== undefined ? body.providers : (cur.providers || {})
+  const providers = body.providers !== undefined ? Object.fromEntries(Object.entries(body.providers).map(([id, provider]) => [id, restoreProviderSecrets(provider, cur.providers?.[id])])) : (cur.providers || {})
   const models = body.models !== undefined ? body.models : (cur.models || {})
+  const policies = body.policies !== undefined ? body.policies : (cur.policies || {})
+  const harnessBindings = body.harnessBindings !== undefined ? body.harnessBindings : (cur.harnessBindings || {})
+  const removedProviderCredentials = body.deleteProviderCredentials === undefined ? [] : body.deleteProviderCredentials
+  if (!Array.isArray(removedProviderCredentials) || removedProviderCredentials.some((id) => typeof id !== 'string' || !id || RESERVED_KEYS.has(id) || !cur.providers?.[id] || providers[id])) {
+    return { error: 'deleteProviderCredentials 只能包含本次确实删除的既有上游 ID' }
+  }
+  const removedConnectionCredentials = body.deleteConnectionCredentials === undefined ? [] : body.deleteConnectionCredentials
+  const priorConnectionKeyIds = new Set(Object.values(cur.providers || {}).flatMap((provider) => Array.isArray(provider.connections) ? provider.connections.map((connection) => connection.credentialKeyId || connection.connectionId || connection.id).filter(Boolean) : []))
+  const nextConnectionKeyIds = new Set(Object.values(providers).flatMap((provider) => Array.isArray(provider.connections) ? provider.connections.map((connection) => connection.credentialKeyId || connection.connectionId || connection.id).filter(Boolean) : []))
+  if (!Array.isArray(removedConnectionCredentials) || removedConnectionCredentials.some((id) => typeof id !== 'string' || RESERVED_KEYS.has(id) || !priorConnectionKeyIds.has(id) || nextConnectionKeyIds.has(id))) {
+    return { error: 'deleteConnectionCredentials 只能包含本次确实删除的连接凭据 ID' }
+  }
   // defaults 合并而非整体替换：面板等客户端只回传它认识的白名单字段，
   // 未回传字段（affinityTtlMs / failbackProbe / preheat 等自定义或扩展项）保留现有值——任何保存都不再冲掉自定义配置。
   // 代价：字段无法经保存接口删除（需要时直接编辑 gateway.local.json 或 /api/config/reload 后手改）。
   const defaults = Object.assign({}, cur.defaults || {}, body.defaults || {})
+  if (body.defaults && body.defaults.proxy === SECRET_MASK) defaults.proxy = cur.defaults?.proxy
+  if (body.defaults && body.defaults.extraHeaders && typeof body.defaults.extraHeaders === 'object' && !Array.isArray(body.defaults.extraHeaders)) {
+    const prior = cur.defaults?.extraHeaders && typeof cur.defaults.extraHeaders === 'object' ? cur.defaults.extraHeaders : {}
+    defaults.extraHeaders = Object.fromEntries(Object.entries(body.defaults.extraHeaders).map(([name, value]) => [name, value === SECRET_MASK && Object.hasOwn(prior, name) ? prior[name] : value]))
+  }
   // 客户端 Key 三态（P0-1）：先看**原始补丁**是否自有该字段（早于 defaults 合并），再决定保留/迁移/清空/替换/拒绝。
   // 任何情况下都不把明文写进 local：落盘的 defaults.clientKey 恒为 ''，真值只进加密 keys 库。
   const clientKeyPlan = planClientKeyUpdate(body, cur)
@@ -1500,12 +1640,17 @@ async function doSaveConfig(state, body) {
       }
     }
   }
-  const cleanVms = vmsIn.map(vm => ({ name: vm.name.trim(), directory: vm.directory.map(e => ({ model: e.model, mode: e.mode === 'onFail' ? 'onFail' : 'afterAll', providers: (e.providers || []).filter(Boolean) })), quota: Number(vm.quota) || 0, dailyQuota: Number(vm.dailyQuota) || 0, maxContext: Number(vm.maxContext) || 0, maxConcurrent: Number(vm.maxConcurrent) || 0, qps: Number(vm.qps) || 0 }))
+  const cleanVms = vmsIn.map(vm => {
+    const { expiresAt: _expiresAt, note: _note, ...rest } = structuredClone(vm)
+    return { ...rest, name: vm.name.trim(), directory: vm.directory.map(e => ({ ...structuredClone(e), model: e.model, mode: e.mode === 'onFail' ? 'onFail' : 'afterAll', providers: (e.providers || []).filter(Boolean) })), quota: Number(vm.quota) || 0, dailyQuota: Number(vm.dailyQuota) || 0, maxContext: Number(vm.maxContext) || 0, maxConcurrent: Number(vm.maxConcurrent) || 0, qps: Number(vm.qps) || 0 }
+  })
   // 删除虚拟模型时同步清理其独立 Key 与元数据，防孤儿 key 被同名新建继承
   const removedVms = (cur.virtualModels || []).filter(v => !vmNames.has(v.name))
   // keys 库同步（一次读盘一次写）：clientKey 迁移 / 虚拟模型 meta（expiresAt/note）/ 删除清理
   const keys = Object.assign({}, readKeysFresh(state.paths.keys))
   let keysChanged = false
+  for (const id of removedProviderCredentials) if (id in keys) { delete keys[id]; keysChanged = true }
+  for (const id of removedConnectionCredentials) if (id in keys) { delete keys[id]; keysChanged = true }
   if (newClientKey != null) { if (newClientKey) keys.__mg_client = newClientKey; else delete keys.__mg_client; keysChanged = true }
   for (const vmRaw of vmsIn) {
     const vmName = vmRaw.name.trim()
@@ -1549,7 +1694,7 @@ async function doSaveConfig(state, body) {
   for (const n of Object.keys(cur.models || {})) if (!Object.prototype.hasOwnProperty.call(models || {}, n)) removedModels.add(n)
   for (const id of Object.keys(providers || {})) removedProviders.delete(id)
   for (const n of Object.keys(models || {})) removedModels.delete(n)
-  const localOut = { configVersion: newVersion, providers: clean, models: cleanModels, defaults, virtualModels: cleanVms }
+  const localOut = { configVersion: newVersion, providers: clean, models: cleanModels, defaults, virtualModels: cleanVms, policies, harnessBindings }
   if (removedProviders.size || removedModels.size) localOut._removed = { providers: [...removedProviders], models: [...removedModels] }
   // M0-3：两个目标作为同一代际提交（每个目标都 rename + fsync 目录；journal/commit marker 保证中断后可恢复）。
   const files = { [TARGET_CONFIG]: JSON.stringify(localOut, null, 2) }
@@ -1565,7 +1710,13 @@ async function doSaveConfig(state, body) {
     tx.release()
   }
 }
-function saveKeys(state, body) { return withConfigWriteLock(() => doSaveKeys(state, body)) }
+function saveKeys(state, body, expectedVersion) {
+  return withConfigWriteLock(() => {
+    const conflict = expectedVersionConflict(state, expectedVersion)
+    if (conflict) return conflict
+    return doSaveKeys(state, body)
+  })
+}
 async function doSaveKeys(state, body) {
   const _c = versionConflict(state, body); if (_c) return _c
   // M0-3：keys 与 configVersion 属于同一代际，必须一起提交或一起回滚。
@@ -1581,6 +1732,7 @@ async function doSaveKeys(state, body) {
   // 允许并集 = 当前上游 id ∪ 当前虚拟模型 __mg_vm_<name> ∪ 内部键 ∪ keys 库已存在条目（用于清理历史孤儿键）。
   const allowedKeyIds = new Set([
     ...Object.keys(state.cfg.providers || {}),
+    ...Object.values(state.cfg.providers || {}).flatMap((provider) => Array.isArray(provider.connections) ? provider.connections.map((connection) => connection.credentialKeyId || connection.connectionId || connection.id).filter(Boolean) : []),
     ...(state.cfg.virtualModels || []).map((v) => '__mg_vm_' + v.name),
     '__mg_client', '__mg_admin',
     ...Object.keys(keys),
@@ -1603,6 +1755,184 @@ async function doSaveKeys(state, body) {
   } finally {
     tx.release()
   }
+}
+
+// Legacy config/key writes use the same durable preview/execute protocol as V13.
+// Plans contain hashes and action metadata only: plaintext credentials (including
+// defaults.clientKey, headers and proxy credentials) are supplied again at apply.
+const LEGACY_WRITE_METADATA = new Set(['action', 'expectedVersion', 'version', 'requestId', 'previewId', 'confirmToken'])
+function legacyWriteHash(value) {
+  const canonical = (entry) => Array.isArray(entry)
+    ? entry.map(canonical)
+    : entry && typeof entry === 'object'
+      ? Object.fromEntries(Object.keys(entry).sort().map((key) => [key, canonical(entry[key])]))
+      : entry
+  return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex')
+}
+function legacyWritePayload(body, action) {
+  const payload = {}
+  for (const [key, value] of Object.entries(body)) if (!LEGACY_WRITE_METADATA.has(key)) payload[key] = value
+  if (action === 'config.save') payload.version = body.version === undefined ? Number(body.expectedVersion) : body.version
+  return payload
+}
+function legacyWriteOperationContext(state, req) {
+  const actor = req && req.mgActor
+  const scopeId = actor?.scopeId || state.cfg._tenancyScope || 'local'
+  const actorId = actor?.actorId || null
+  return {
+    configDir: state.paths.dir,
+    operationNamespace: actorId ? scopeId + '.' + createHash('sha256').update(actorId).digest('hex').slice(0, 24) : scopeId,
+    scope: { scopeId, actorId },
+  }
+}
+function legacyWriteFailure(status, code, error, currentVersion) {
+  return { status, body: { ok: false, code, error, retryable: status >= 500 || status === 409, ...(currentVersion === undefined ? {} : { currentVersion }) } }
+}
+function legacyWriteMetadata(body, expectedVersion) {
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) return legacyWriteFailure(400, 'invalid_expected_version', 'expectedVersion 必须为非负整数')
+  if (typeof body.requestId !== 'string' || !body.requestId.trim() || body.requestId.length > 100 || /[\u0000-\u001f\u007f]/.test(body.requestId)) {
+    return legacyWriteFailure(400, 'invalid_request_id', 'requestId 必须为 1–100 个安全字符')
+  }
+  return null
+}
+function legacyWriteStrings(value, out = []) {
+  if (typeof value === 'string' && value.length >= 4) out.push(value)
+  else if (Array.isArray(value)) for (const entry of value) legacyWriteStrings(entry, out)
+  else if (value && typeof value === 'object') for (const entry of Object.values(value)) legacyWriteStrings(entry, out)
+  return out
+}
+function legacyWriteSafeError(message, payload) {
+  let safe = String(message || '配置写入失败')
+  for (const value of legacyWriteStrings(payload).sort((a, b) => b.length - a.length)) safe = safe.split(value).join('[已脱敏]')
+  return safe
+}
+function legacyKeyPlan(state, body) {
+  const id = typeof body.id === 'string' ? body.id.trim() : ''
+  if (!id) return { error: legacyWriteFailure(400, 'invalid_key_id', '缺少 provider id') }
+  if (RESERVED_KEYS.has(id)) return { error: legacyWriteFailure(400, 'invalid_key_id', '非法的 Key 标识') }
+  if (body.key !== undefined && typeof body.key !== 'string') return { error: legacyWriteFailure(400, 'invalid_key', 'key 必须为字符串') }
+  const keys = readKeysFresh(state.paths.keys)
+  const allowed = new Set([
+    ...Object.keys(state.cfg.providers || {}),
+    ...Object.values(state.cfg.providers || {}).flatMap((provider) => Array.isArray(provider.connections) ? provider.connections.map((connection) => connection.credentialKeyId || connection.connectionId || connection.id).filter(Boolean) : []),
+    ...(state.cfg.virtualModels || []).map((v) => '__mg_vm_' + v.name),
+    '__mg_client', '__mg_admin', ...Object.keys(keys),
+  ])
+  if (!allowed.has(id)) return { error: legacyWriteFailure(400, 'invalid_key_id', '未知的 Key 标识') }
+  if (id.startsWith('__mg_vm_meta_') && body.key) return { error: legacyWriteFailure(400, 'invalid_key_id', '内部元数据条目不可经 /api/keys 写入') }
+  const key = body.key || ''
+  return {
+    payload: { id, key },
+    plan: {
+      action: 'keys.update', expectedVersion: Number(body.expectedVersion), requestId: body.requestId.trim(),
+      keyId: id, credentialAction: key ? 'set' : 'clear', credentialFingerprint: legacyWriteHash(key),
+    },
+  }
+}
+async function previewLegacyWrite(state, req, body) {
+  const action = body.action
+  if (!['config.save', 'keys.update'].includes(action)) return legacyWriteFailure(400, 'invalid_write_action', 'action 必须为 config.save 或 keys.update')
+  const invalid = legacyWriteMetadata(body, body.expectedVersion)
+  if (invalid) return invalid
+  if (body.expectedVersion !== (state.cfg.configVersion || 0)) return legacyWriteFailure(409, 'version_conflict', '配置版本已过期，请刷新后重新预览', state.cfg.configVersion || 0)
+  let plan
+  let payload
+  if (action === 'config.save') {
+    payload = legacyWritePayload(body, action)
+    const shape = validateConfigShape(payload)
+    if (shape) return legacyWriteFailure(400, 'invalid_config', shape.error)
+    const tenant = tenantWriteValidationFailure(state, payload)
+    if (tenant) return legacyWriteFailure(tenant.status, tenant.code, tenant.error)
+    if (body.version !== undefined && Number(body.version) !== body.expectedVersion) return legacyWriteFailure(409, 'version_conflict', 'version 与 expectedVersion 不一致', state.cfg.configVersion || 0)
+    const clientKey = planClientKeyUpdate(payload, state.cfg)
+    if (clientKey.action === 'INVALID_400') return legacyWriteFailure(400, 'invalid_client_key', 'defaults.clientKey 必须为非空字符串、掩码或显式空串')
+    plan = {
+      action, expectedVersion: body.expectedVersion, requestId: body.requestId.trim(),
+      payloadHash: legacyWriteHash(payload),
+      fields: Object.keys(payload).filter((key) => key !== 'version').sort(),
+      credentialAction: clientKey.action,
+      ...(clientKey.action === 'REPLACE_WITH_SEALED' ? { credentialFingerprint: legacyWriteHash(clientKey.value) } : {}),
+    }
+  } else {
+    try {
+      const result = legacyKeyPlan(state, body)
+      if (result.error) return result.error
+      payload = result.payload
+      plan = { ...result.plan, payloadHash: legacyWriteHash(payload) }
+    } catch (error) {
+      const failure = transactionFailure(error)
+      return legacyWriteFailure(failure.status, failure.code, failure.error)
+    }
+  }
+  try {
+    const created = createApiPreview(legacyWriteOperationContext(state, req), {
+      requestId: plan.requestId, plan, ttlMs: body.ttlMs,
+      view: {
+        ok: true, action, expectedVersion: plan.expectedVersion,
+        summary: action === 'config.save'
+          ? { fields: plan.fields, credentialAction: plan.credentialAction, ...(plan.credentialFingerprint ? { credentialFingerprint: plan.credentialFingerprint } : {}) }
+          : { keyId: plan.keyId, credentialAction: plan.credentialAction, credentialFingerprint: plan.credentialFingerprint },
+        apply: '将原始 payload 与 previewId/confirmToken 再次提交；服务端仅保存哈希和脱敏回执。',
+      },
+    })
+    return { status: 200, body: created }
+  } catch (error) { return apiOperationError(error, 'preview_store_failed') }
+}
+async function executeLegacyWrite(state, req, body, action) {
+  if (typeof body.previewId !== 'string' || !body.previewId) return legacyWriteFailure(428, 'confirmation_required', '缺少 previewId，请先预览')
+  if (typeof body.confirmToken !== 'string' || !body.confirmToken) return legacyWriteFailure(428, 'confirmation_required', '缺少 confirmToken，请先预览并确认')
+  const invalid = legacyWriteMetadata(body, body.expectedVersion)
+  if (invalid) return invalid
+  const ctx = legacyWriteOperationContext(state, req)
+  const store = apiOperationStore(ctx)
+  if (!store) return legacyWriteFailure(503, 'operation_store_unavailable', '持久操作存储未配置')
+  let stored
+  try { stored = store.readPreview(body.previewId, { includePlan: true }) } catch (error) {
+    if (error.code === 'preview_not_found') return legacyWriteFailure(428, 'preview_expired', '预览不存在、已使用或已过期，请重新预览')
+    return apiOperationError(error)
+  }
+  const plan = stored.plan
+  if (plan.action !== action || plan.expectedVersion !== body.expectedVersion || plan.requestId !== body.requestId.trim()) {
+    return legacyWriteFailure(409, 'preview_binding_mismatch', '预览与写入动作、版本或 requestId 不匹配')
+  }
+  let payload
+  if (action === 'config.save') {
+    payload = legacyWritePayload(body, action)
+    const shape = validateConfigShape(payload)
+    if (shape) return legacyWriteFailure(400, 'invalid_config', shape.error)
+    const tenant = tenantWriteValidationFailure(state, payload)
+    if (tenant) return legacyWriteFailure(tenant.status, tenant.code, tenant.error)
+  } else {
+    try {
+      const result = legacyKeyPlan(state, body)
+      if (result.error) return result.error
+      payload = result.payload
+    } catch (error) {
+      const failure = transactionFailure(error)
+      return legacyWriteFailure(failure.status, failure.code, failure.error)
+    }
+  }
+  if (legacyWriteHash(payload) !== plan.payloadHash) return legacyWriteFailure(409, 'preview_binding_mismatch', 'apply payload 与预览哈希不一致，请重新预览')
+  const requestFingerprint = legacyWriteHash({ action, previewId: body.previewId, requestId: plan.requestId, expectedVersion: plan.expectedVersion, payloadHash: plan.payloadHash, confirmToken: body.confirmToken })
+  return executeApiWrite(ctx, {
+    previewId: body.previewId, confirmToken: body.confirmToken, requestId: plan.requestId, requestFingerprint,
+    save: () => action === 'config.save'
+      ? saveConfig(state, payload, plan.expectedVersion)
+      : saveKeys(state, payload, plan.expectedVersion),
+    responseFor: (_result, operation) => ({ status: 200, body: {
+      ok: true, requestId: plan.requestId, configVersion: state.cfg.configVersion || 0,
+      status: buildStatus(state), operation: operation ? publicApiOperation(operation) : null,
+    } }),
+    failureFor: (result, operation) => {
+      const failure = legacyWriteFailure(
+        result.conflict ? 409 : result.status || 400,
+        result.conflict ? 'version_conflict' : result.code || 'legacy_write_failed',
+        result.conflict ? '配置版本已过期，请刷新后重新预览' : legacyWriteSafeError(result.error || result.message, payload),
+        result.conflict ? result.currentVersion : undefined,
+      )
+      return { ...failure, body: { ...failure.body, ...(operation ? { operation: publicApiOperation(operation) } : {}) } }
+    },
+  })
 }
 
 async function doProbe(state, id) {
@@ -1912,6 +2242,13 @@ function optionalGate(state, res, capability) {
     },
   })
   return true
+}
+function resolveDataModel(state, modelName, res) {
+  try { return state.router.resolve(modelName) } catch (error) {
+    if (!state.cfg._tenancyScope) throw error
+    sendJson(res, 404, { error: { message: '未知模型名: ' + String(modelName || ''), type: 'unknown_model', code: 'unknown_model', model: modelName || null } })
+    return null
+  }
 }
 
 // F04：可选端点的调用主体（不落 Key 原文）。数据面鉴权只有一把全局 client Key 或无鉴权匿名；
@@ -2752,6 +3089,10 @@ function makeHandler(state) {
   const log = state.log
   const logFile = () => state.cfg.server && state.cfg.server.logFile
   async function requireAdmin(req, res) {
+    if (req.mgActor && req.mgActor.role !== 'admin') {
+      sendJson(res, 403, { ok: false, code: 'admin_required', error: { message: '需要管理员身份', type: 'forbidden' } })
+      return false
+    }
     // 管理面无令牌：只保留来源下界（回环，除非显式 allowRemote 的入口另有校验）。
     if (!isLoopbackPeer(req) && !remoteManagementAllowed(state)) {
       sendJson(res, 403, { error: '拒绝远程管理请求：管理面仅允许本机访问（回环或显式 allowRemote）' })
@@ -2763,6 +3104,10 @@ function makeHandler(state) {
     const path = (req.url || '/').split('?')[0]
     const url = req.url || '/'
     const isApi = path === '/api' || path.startsWith('/api/')
+    const isTenantDataRequest = path === '/v1' || path.startsWith('/v1/') || CHAT_PATHS.has(path) || RESPONSES_PATHS.has(path)
+    const trackTenantRequest = !!state.scopeStore && isTenantDataRequest
+    if (trackTenantRequest) state.tenantActiveRequests = (state.tenantActiveRequests || 0) + 1
+    const tenantTokensBefore = state.scopeStore && isTenantDataRequest ? tenantTokenCount(state) : 0
     // N06：每个数据面请求一条 request 收据（引用一律 sha256 派生；终态按 (requestId,terminal) 去重）。
     let obsRequestId = null
     let obsRecorded = false
@@ -2770,6 +3115,7 @@ function makeHandler(state) {
       try { obsRequestId = hashId(req.headers['x-request-id'] || (process.pid + ':' + Date.now() + ':' + Math.random())) } catch { obsRequestId = null }
     }
     let budget = null
+    let requestLedger = null
     let responsesMode = false
     let responsesMeta = null
     let responsesSession = null
@@ -2796,12 +3142,34 @@ function makeHandler(state) {
         else res.end(data)
         return
       }
-      if ((req.method === 'GET' || req.method === 'HEAD') && path === '/healthz') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok'); return }
+      if ((req.method === 'GET' || req.method === 'HEAD') && (path === '/ui-vnext' || path.startsWith('/ui-vnext/'))) {
+        const asset = previewAsset(path)
+        let data = null
+        if (asset) { try { data = readFileSync(new URL('./ui-vnext/' + asset.rel, import.meta.url)) } catch { data = null } }
+        if (!data) { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }); res.end('not found'); return }
+        res.writeHead(200, {
+          'content-type': asset.type,
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+          'referrer-policy': 'no-referrer',
+          'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        })
+        if (req.method === 'HEAD') res.end()
+        else res.end(data)
+        return
+      }
+      if ((req.method === 'GET' || req.method === 'HEAD') && path === '/healthz') {
+        if (state.cfg._tenancyScope) {
+          const providers = Object.fromEntries(Object.entries(state.health).map(([id, h]) => [id, effState(h, Date.now())]))
+          sendJson(res, 200, { ok: true, scopeId: state.cfg._tenancyScope, providers })
+        } else { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok') }
+        return
+      }
       if (req.method === 'GET' && path === '/favicon.ico') { res.writeHead(204); res.end(); return }
       if ((req.method === 'GET' || req.method === 'HEAD') && path === '/') {
         // 根入口只做跳转，避免出现"第二份前端"。
-        res.writeHead(302, { location: '/ui-next/', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' })
-        res.end(req.method === 'HEAD' ? undefined : 'ModelGate 控制台：/ui-next/'); return
+        res.writeHead(302, { location: '/ui-vnext/', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' })
+        res.end(req.method === 'HEAD' ? undefined : 'ModelGate 控制台：/ui-vnext/'); return
       }
       if ((req.method === 'GET' || req.method === 'HEAD') && (path === '/admin' || path === '/admin.html')) {
         // 旧管理台已按所有者指令退役：明确 410（不是 404），并指向唯一入口。
@@ -2855,32 +3223,81 @@ function makeHandler(state) {
       }
 
 
-      if (path === '/api/status' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; sendJson(res, 200, buildStatus(state)); return }
+      if (path === '/api/config/backups' || path.startsWith('/api/config/backups/') || path === '/api/config/import:preview' || path === '/api/config/import:apply') {
+        if (!await requireAdmin(req, res)) return
+        let body = null
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
+          if (!isPlainObject(body)) { sendJson(res, 400, { ok: false, code: 'invalid_body', error: '请求体必须为 JSON 对象' }); return }
+          const tenant = tenantWriteValidationFailure(state, body)
+          if (tenant) { sendJson(res, tenant.status, { ok: false, code: tenant.code, error: tenant.error }); return }
+        }
+        state.resourceReceipts ||= new Map()
+        const out = await handleBackupApi({ method: req.method, path, body, actor: req.mgActor, scope: req.mgScope, getConfig: () => state.cfg, saveConfig: (payload) => saveConfig(state, payload), state })
+        if (out) sendJson(res, out.status, out.body)
+        else { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }); res.end('not found') }
+        return
+      }
+      if (path === '/api/usage/summary' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const days = Math.min(90, Math.max(1, parseInt(new URL(url, 'http://x').searchParams.get('days') || '7', 10) || 7)); const native = state.cfg._tenancyScope ? tenantNativeUsageDisabled(days) : nativeUsageConfig(state.cfg).enabled ? await readNativeUsage(state.cfg, days) : null; sendJson(res, 200, usageSummary(state, days, native)); return }
+      if (path === '/api/policies/effective' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const query = new URL(url, 'http://x').searchParams; sendJson(res, 200, effectivePolicy(state.cfg, { harnessId: query.get('harnessId'), poolId: query.get('poolId') })); return }
+      if (path === '/api/harnesses' || path === '/api/harnesses/preview' || path === '/api/harnesses/apply' || path === '/api/harnesses/rollback') {
+        if (!await requireAdmin(req, res)) return
+        let body = null
+        if (req.method !== 'GET') {
+          body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
+          if (!isPlainObject(body)) { sendJson(res, 400, { ok: false, code: 'invalid_body', error: '请求体必须为 JSON 对象' }); return }
+        }
+        const out = await handleHarnessApi({ method: req.method, path, body })
+        if (out) sendJson(res, out.status, out.body)
+        else { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }); res.end('not found') }
+        return
+      }
+      if (path === '/api/services' || path.startsWith('/api/services/') || path === '/api/models' || path.startsWith('/api/models/') || path === '/api/pools' || path.startsWith('/api/pools/') || path === '/api/connections' || path.startsWith('/api/connections/') || path === '/api/policies' || path === '/api/harness-bindings' || path.startsWith('/api/harness-bindings/') || path === '/api/provider-templates' || path.startsWith('/api/provider-templates/') || path === '/api/config/preview') {
+        if ((req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE' || path === '/api/config/preview' || path.includes('/operations/')) && !await requireAdmin(req, res)) return
+        let body = null
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
+          if (!isPlainObject(body)) { sendJson(res, 400, { ok: false, code: 'invalid_body', error: '请求体必须为 JSON 对象' }); return }
+        }
+        state.servicePreviews ||= new Map()
+        state.serviceReceipts ||= new Map()
+        state.resourcePreviews ||= new Map()
+        state.resourceReceipts ||= new Map()
+        const serviceRequest = path === '/api/services' || path.startsWith('/api/services/') || (path === '/api/config/preview' && String(body?.action || '').startsWith('service.'))
+        const out = serviceRequest
+          ? await handleServiceApi({ method: req.method, path, body, state, actor: req.mgActor, scope: req.mgScope, getConfig: () => state.cfg, saveConfig: (payload, expectedVersion) => saveConfig(state, payload, expectedVersion), validateConfig: (value) => assertTenantCredentialReferences(value, state.cfg._tenancyScope), previews: state.servicePreviews, receipts: state.serviceReceipts })
+          : await handleResourceApi({ method: req.method, path, url, body, state, actor: req.mgActor, scope: req.mgScope, getConfig: () => state.cfg, saveConfig: (payload, expectedVersion) => saveConfig(state, payload, expectedVersion), validateConfig: (value) => assertTenantCredentialReferences(value, state.cfg._tenancyScope), previews: state.resourcePreviews, receipts: state.resourceReceipts })
+        if (out) sendJson(res, out.status, out.body)
+        else { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }); res.end('not found') }
+        return
+      }
+      if ((path === '/api/capabilities' && (req.method === 'GET' || req.method === 'HEAD'))) {
+        if (!await requireAdmin(req, res)) return
+        if (req.method === 'HEAD') { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': '0' }); res.end(); return }
+        sendJson(res, 200, buildCapabilities(state)); return
+      }
+      if (path === '/api/status' && req.method === 'GET') { if (!state.cfg._tenancyScope && !await requireAdmin(req, res)) return; sendJson(res, 200, buildStatus(state)); return }
       if (path === '/api/native-usage' && req.method === 'GET') {
         if (!await requireAdmin(req, res)) return
         const days = Math.min(90, Math.max(1, parseInt(new URL(url, 'http://x').searchParams.get('days') || '7', 10) || 7))
-        sendJson(res, 200, await readNativeUsage(state.cfg, days))
+        sendJson(res, 200, state.cfg._tenancyScope ? tenantNativeUsageDisabled(days) : await readNativeUsage(state.cfg, days))
         return
       }
       if (path === '/api/model-stats' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const days = Math.min(90, Math.max(1, parseInt(new URL(url, 'http://x').searchParams.get('days') || '7', 10) || 7)); const out = {}; const now = new Date(); const modelNames = Object.keys(state.cfg.models || {}); const pt = (c) => ({ tokens: c ? c.tokens : 0, inTokens: c ? (c.inTokens || 0) : 0, outTokens: c ? (c.outTokens || 0) : 0, hit: c ? (c.hit || 0) : 0, miss: c ? (c.miss || 0) : 0, hitRate: (c && (c.hit + c.miss) > 0) ? Math.round((c.hit / (c.hit + c.miss)) * 1000) / 10 : null }); if (days === 1) { for (const name of modelNames) { const mh = state.stats.hourly[name] || {}; const arr = []; for (let i2 = 23; i2 >= 0; i2--) { const hd = new Date(now.getTime() - i2 * 3600 * 1000); const hk = todayKey(hd) + ':' + String(hd.getHours()).padStart(2, '0'); arr.push(Object.assign({ date: String(hd.getHours()).padStart(2, '0') + ':00' }, pt(mh[hk]))) } out[name] = arr } } else { for (const name of modelNames) { const md = state.stats.daily[name] || {}; const arr = []; for (let i2 = days - 1; i2 >= 0; i2--) { const d = new Date(now); d.setDate(d.getDate() - i2); const k = todayKey(d); arr.push(Object.assign({ date: k }, pt(md[k]))) } out[name] = arr } } sendJson(res, 200, { days, mode: days === 1 ? 'hourly' : 'daily', models: out }); return }
       if (path === '/api/route-preview' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
         const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024)) || {}
-        const model = String(body.model || '').trim()
-        if (!model) { sendJson(res, 400, { error: '缺少 model' }); return }
-        let hit
-        try { hit = state.router.resolve(model) } catch (e) { sendJson(res, 200, { ok: true, hit: { type: 'unknown', model, note: e.message } }); return }
-        const vms = state.cfg.virtualModels || []
-        if (hit.def.isVirtualModel) {
-          const items = hit.def.directory.map(e => {
-            const _m = state.cfg.models
-            const provs = (e.providers && e.providers.length ? e.providers : (_m && _m[e.model] ? [_m[e.model].provider, ...(_m[e.model].fallbacks || [])] : []))
-            return { model: e.model, mode: e.mode, providers: provs, limit: routeLimit(state, state.cfg, e.model, null) }
+        try {
+          const { previewRoute } = await import('./resources/route-preview.js')
+          const out = previewRoute(state, body, {
+            routeLimit, virtualQuotaExceeded,
+            getBillingLedger: () => initForwardLedger(state.cfg, { ledgerOptions: state.ledgerOptions }),
           })
-          sendJson(res, 200, { ok: true, hit: { type: 'virtual', name: hit.def.name, directory: items, quota: hit.def.quota, dailyQuota: hit.def.dailyQuota, used: (state.stats.byModel[hit.def.name] || {}).tokens || 0, quotaState: virtualQuotaExceeded(state, hit.def) } }); return
+          sendJson(res, out.status, out.body)
+        } catch {
+          sendJson(res, 500, { ok: false, code: 'route_preview_failed', error: '路由预演失败；未发送上游', retryable: false })
         }
-        if (hit.def.virtual) { sendJson(res, 200, { ok: true, hit: { type: 'defaults', name: hit.canonicalName, directory: state.cfg.defaults.directory || [] } }); return }
-        sendJson(res, 200, { ok: true, hit: { type: hit.known ? 'model' : 'unknown', name: hit.canonicalName, provider: hit.def.provider || null, note: hit.known ? null : (vms.length ? '将返回 404（已配置虚拟模型）' : '将走默认上游兜底') } }); return
+        return
       }
       if (path === '/api/observability/events' && req.method === 'GET') {
         if (!await requireAdmin(req, res)) return
@@ -2908,6 +3325,13 @@ function makeHandler(state) {
         try { res.once('close', close); res.once('finish', close) } catch {}
         return
       }
+      if (path === '/api/logs/structured' && req.method === 'GET') {
+        if (!await requireAdmin(req, res)) return
+        const query = new URL(url, 'http://x').searchParams
+        const traceId = query.get('traceId') || ''
+        sendJson(res, 200, structuredLogs(readLogTail((log && log.file) ? log.file() : logFile(), 5000), state.observability.history(), { level: query.get('level'), q: traceId || query.get('q'), limit: query.get('limit'), cursor: query.get('cursor') }))
+        return
+      }
       if (path === '/api/logs' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; const lines = parseInt(new URL(url, 'http://x').searchParams.get('lines') || '200', 10) || 200; sendJson(res, 200, { lines: readLogTail((log && log.file) ? log.file() : logFile(), lines) }); return }
       if (path === '/api/config' && req.method === 'GET') { if (!await requireAdmin(req, res)) return; sendJson(res, 200, configProjection(state)); return }
       if (path === '/api/config/reload' && req.method === 'POST') {
@@ -2925,23 +3349,26 @@ function makeHandler(state) {
         sendJson(res, 200, { ok: true })
         return
       }
-      if (path === '/api/config/save' && req.method === 'POST') {
+      if (path === '/api/config/write:preview' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
         const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
         if (!isPlainObject(body)) { sendJson(res, 400, { error: '请求体必须为 JSON 对象' }); return }
-        const r = await saveConfig(state, body)
-        if (r.error) { sendJson(res, r.status || 400, { error: r.error, ...(r.code ? { code: r.code } : {}) }); return }
-        if (r.conflict) { sendJson(res, 409, { error: '配置版本已过期（他处已保存过新版本），请刷新后重试', currentVersion: r.currentVersion }); return }
-        sendJson(res, 200, { ok: true, status: buildStatus(state) }); return
+        const out = await previewLegacyWrite(state, req, body)
+        sendJson(res, out.status, out.body); return
       }
-      if (path === '/api/keys' && req.method === 'POST') {
+      if ((path === '/api/config/save' || path === '/api/keys') && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
         const body = tryParse(await collectBody(req, (state.cfg.server && state.cfg.server.maxBodyBytes) || 32 * 1024 * 1024))
-        if (!body || !body.id) { sendJson(res, 400, { error: '缺少 provider id' }); return }
-        const kr = await saveKeys(state, body)
-        if (kr.error) { sendJson(res, kr.status || 400, { error: kr.error, ...(kr.code ? { code: kr.code } : {}) }); return }
-        if (kr.conflict) { sendJson(res, 409, { error: '配置版本已过期（他处已保存过新版本），请刷新后重试', currentVersion: kr.currentVersion }); return }
-        sendJson(res, 200, { ok: true, status: buildStatus(state) }); return
+        if (!isPlainObject(body)) { sendJson(res, 400, { error: '请求体必须为 JSON 对象' }); return }
+        const out = await executeLegacyWrite(state, req, body, path === '/api/config/save' ? 'config.save' : 'keys.update')
+        sendJson(res, out.status, out.body); return
+      }
+      if (path.startsWith('/api/config/write-operations/operations/')) {
+        if (!await requireAdmin(req, res)) return
+        const out = handleApiOperationRoute(legacyWriteOperationContext(state, req), req.method, path)
+        if (out) sendJson(res, out.status, out.body)
+        else { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }); res.end('not found') }
+        return
       }
       if (path === '/api/probe' && req.method === 'POST') {
         if (!await requireAdmin(req, res)) return
@@ -2969,6 +3396,20 @@ function makeHandler(state) {
       // —— 数据面请求预算（MG-002）：从进入数据面起算，覆盖排队/代理 CONNECT/读 body/等头/流式/续传 ——
       const _to = (state.cfg.defaults && state.cfg.defaults.timeout) || {}
       budget = createBudget({ overallMs: _to.overallMs || 0 })
+      const requestBudget = (state.cfg.defaults && state.cfg.defaults.requestBudget) || {}
+      const perCandidate = Math.max(2, Number(state.cfg.defaults?.retry?.maxAttempts) || 3, (Number(state.cfg.defaults?.codexFallbackLimits?.maxSameProviderAttempts) || 1) + 1)
+      requestLedger = new RequestLedger({
+        signal: budget.signal,
+        limits: {
+          maxTotalAttempts: requestBudget.maxTotalAttempts ?? 24,
+          maxFailovers: requestBudget.maxFailovers ?? 20,
+          maxRecoveryAttempts: requestBudget.maxRecoveryAttempts ?? 5,
+          maxWaitMs: requestBudget.maxWaitMs ?? 30000,
+          maxElapsedMs: requestBudget.maxElapsedMs ?? null,
+        },
+        candidateLimits: Object.fromEntries(Object.keys(state.cfg.providers || {}).map((id) => [id, requestBudget.maxAttemptsPerCandidate ?? perCandidate])),
+      })
+      requestLedger.signal.addEventListener('abort', () => budget.abort('fault_budget_exceeded'), { once: true })
       const onClientGone = () => { if (!res.writableEnded) budget.abort('client_closed') }
       try { res.on('close', onClientGone); req.on('aborted', onClientGone) } catch {}
       if (res.destroyed || req.aborted) budget.abort('client_closed')   // 注册监听前已断开：立即取消
@@ -3019,7 +3460,7 @@ function makeHandler(state) {
         const ebody = tryParse(ebuf)
         const verr = validateEmbeddingRequest(ebody)
         if (verr) { sendJson(res, 400, { error: { message: verr.error, type: 'invalid_request_error' } }); return }
-        const hit = state.router.resolve(ebody.model)
+        const hit = resolveDataModel(state, ebody.model, res); if (!hit) return
         if (!hit.known && (state.cfg.virtualModels || []).length) { sendJson(res, 404, { error: { message: '未知模型名: ' + ebody.model + '。可用虚拟模型见 GET /v1/models', type: 'unknown_model' } }); return }
         const edef = hit.def || null
         if (!edef || edef.isVirtualModel || edef.virtual) { sendJson(res, 400, { error: { message: '虚拟模型/默认共用名不支持 embeddings', type: 'unsupported_model' } }); return }
@@ -3093,7 +3534,7 @@ function makeHandler(state) {
         const rbody = tryParse(rbuf)
         const rerr = validateRerankRequest(rbody)
         if (rerr) { sendJson(res, 400, { error: { message: rerr.error, type: 'invalid_request_error' } }); return }
-        const rhit = state.router.resolve(rbody.model)
+        const rhit = resolveDataModel(state, rbody.model, res); if (!rhit) return
         if (!rhit.known && (state.cfg.virtualModels || []).length) { sendJson(res, 404, { error: { message: '未知模型名: ' + rbody.model, type: 'unknown_model' } }); return }
         const rdef = rhit.def || null
         if (!rdef || rdef.isVirtualModel || rdef.virtual) { sendJson(res, 400, { error: { message: '虚拟模型/默认共用名不支持 rerank', type: 'unsupported_model' } }); return }
@@ -3180,7 +3621,7 @@ function makeHandler(state) {
           if (verr) { sendJson(res, 400, { error: { message: verr.error, type: 'invalid_request_error' } }); return }
           modelName = body.model
         }
-        const mhit = state.router.resolve(modelName)
+        const mhit = resolveDataModel(state, modelName, res); if (!mhit) return
         if (!mhit.known && (state.cfg.virtualModels || []).length) { sendJson(res, 404, { error: { message: '未知模型名: ' + modelName + '。可用虚拟模型见 GET /v1/models', type: 'unknown_model' } }); return }
         const mdef = mhit.def || null
         if (!mdef || mdef.isVirtualModel || mdef.virtual) { sendJson(res, 400, { error: { message: '虚拟模型/默认共用名不支持媒体能力', type: 'unsupported_model' } }); return }
@@ -3211,7 +3652,7 @@ function makeHandler(state) {
         const vbody = tryParse(vbuf)
         const verr = validateVideoCreate(vbody)
         if (verr) { sendJson(res, 400, { error: { message: verr.error, type: 'invalid_request_error' } }); return }
-        const vhit = state.router.resolve(vbody.model)
+        const vhit = resolveDataModel(state, vbody.model, res); if (!vhit) return
         if (!vhit.known && (state.cfg.virtualModels || []).length) { sendJson(res, 404, { error: { message: '未知模型名: ' + vbody.model + '。可用虚拟模型见 GET /v1/models', type: 'unknown_model' } }); return }
         const vdef = vhit.def || null
         if (!vdef || vdef.isVirtualModel || vdef.virtual) { sendJson(res, 400, { error: { message: '虚拟模型/默认共用名不支持 video', type: 'unsupported_model' } }); return }
@@ -3286,6 +3727,7 @@ function makeHandler(state) {
         bodyBuf = rb.buf
       }
       let body = req.__mgBody || (bodyBuf && bodyBuf.length ? tryParse(bodyBuf) : null)
+      if (state.cfg._tenancyScope && body && typeof body.model === 'string' && !resolveDataModel(state, body.model, res)) return
       if ((isChat || isResponses) && (!body || typeof body !== 'object' || Array.isArray(body))) {
         sendJson(res, 400, { error: { message: '请求体必须为 JSON 对象', type: 'invalid_request_error' } })
         return
@@ -3336,7 +3778,7 @@ function makeHandler(state) {
         // 每一轮（含首轮）都登记续轮状态，供下一轮重建。缓存缺失（重启/淘汰/超容量）→
         // 由各路由处理缺失状态。此处处理 native Responses / 官方路由，Go Chat 桥在下方处理。
         let continuation = null
-        const continuationOwner = continuationKey ? sha256Hex(continuationKey) : null
+        const continuationOwner = continuationKey ? sha256Hex(state.cfg._tenancyScope ? state.cfg._tenancyScope + '\u0000' + continuationKey : continuationKey) : null
         if (body && nDef && !nDef.isVirtualModel && !nDef.virtual && nDef.provider && state.cfg.providers[nDef.provider]) {
           const contProv = buildProvider(state.cfg, nDef.provider)
           const contKind = classifyTarget(contProv, state.cfg).kind
@@ -3576,6 +4018,7 @@ function makeHandler(state) {
         authzContext: catalogAuthzContext(state, body && body.model),
         now: injectedNow(),
         adapterFactory: state.adapterFactory,
+        requestLedger,
       })
       // 请求级日志：记录每次数据面请求的请求模型/实际服务模型/上游与结果，便于定位空响应与连接问题（不含消息正文/密钥）
       const reqModel = (body && body.model) || '-'
@@ -3725,6 +4168,26 @@ function makeHandler(state) {
           state.observability.recordTerminal({ requestId: obsRequestId, terminal, status: code })
         } catch { /* 观测不得影响请求结果 */ }
       }
+      if (state.scopeStore) {
+        const status = res.statusCode || 0
+        try {
+          await state.scopeStore.logLine({ event: 'http_request', method: req.method, path, status })
+          if (isTenantDataRequest && path !== '/v1/models' && path !== '/models' && !['GET', 'HEAD'].includes(req.method)) {
+            await state.scopeStore.recordUsage({
+              requests: 1,
+              tokens: Math.max(0, tenantTokenCount(state) - tenantTokensBefore),
+              errors: status >= 400 ? 1 : 0,
+            })
+          }
+        } catch { /* 租户审计写入失败不得改变已完成的响应 */ }
+      }
+      if (trackTenantRequest) {
+        state.tenantActiveRequests = Math.max(0, (state.tenantActiveRequests || 0) - 1)
+        if (state.tenantActiveRequests === 0) {
+          for (const resolve of state.tenantIdleWaiters || []) resolve()
+          state.tenantIdleWaiters = []
+        }
+      }
     }
   }
 }
@@ -3744,15 +4207,14 @@ function writeStats(state) {
   const globalP = { requests: g.requests||0, errors: g.errors||0, retries: g.retries||0, interrupts: g.interrupts||0, tokens: g.tokens||0, latencySum: g.latencySum||0, confirmed: g.confirmed||0, lats: g.lats||[], latTrend: g.latTrend||[] }
   const provP = {}
   for (const [pid, o] of Object.entries(state.stats.byProvider || {})) provP[pid] = { requests: o.requests||0, errors: o.errors||0, retries: o.retries||0, latencySum: o.latencySum||0, latencyCount: o.latencyCount||0, tokens: o.tokens||0, lats: o.lats||[], probe: o.probe||null }
-  writeJsonAtomic(state.paths.stats, { daily: state.stats.daily, hourly: state.stats.hourly, byModel: q, dialogue: state.dialogue, global: globalP, byProvider: provP, lastServing: (state.st && state.st.lastServing) || null })
+  writeJsonAtomic(state.paths.stats, { daily: state.stats.daily, hourly: state.stats.hourly, byModel: q, dialogue: state.dialogue, global: globalP, byProvider: provP, counters: state.st.counters, lastServing: (state.st && state.st.lastServing) || null })
 }
 
-export function start(opts = {}) {
-  // M0-3：先恢复中断事务再读配置；无法判定（外部修改/元数据损坏）时保留现场并 fail-closed。
-  const bootPaths = configPaths()
+function loadGatewayBoot(opts = {}) {
+  const paths = opts.paths || configPaths(opts.configDir)
   let recovery = { status: 'clean' }
   try {
-    recovery = recoverStore(bootPaths)
+    recovery = recoverStore(paths)
   } catch (error) {
     const payload = JSON.stringify({ code: (error && error.code) || 'recovery_failed', message: (error && error.message) || 'unknown', details: (error && error.details) || null })
     process.stderr.write('[config-transaction] RECOVERY_FAILED ' + payload + '\n')
@@ -3760,9 +4222,8 @@ export function start(opts = {}) {
   }
   let cfg
   try {
-    cfg = opts.config ? loadConfig({ configFile: opts.config }) : loadConfig()
+    cfg = loadConfig({ configFile: opts.configFile || opts.config, paths })
   } catch (error) {
-    // F02：配置目标损坏时拒绝启动，不降级到「空配置/空 Key」。
     if (isConfigUnreadable(error)) {
       process.stderr.write('[config] CONFIG_UNREADABLE ' + JSON.stringify({ code: error.code, message: error.message }) + '\n')
       const refused = new Error('配置/Key 文件损坏，已拒绝启动（fail-closed，不降级）：' + error.code)
@@ -3771,7 +4232,22 @@ export function start(opts = {}) {
     }
     throw error
   }
+  return { cfg, recovery, paths }
+}
+
+// 构建隔离运行时但不监听端口。多租户只对已认证 scope 懒调用；单用户 start 也复用它。
+export function createGateway(opts = {}) {
+  const boot = opts.boot || loadGatewayBoot(opts)
+  const recovery = boot.recovery
+  const cfg = prepareTenantConfig(boot.cfg, {
+    scopeId: opts.scopeId,
+    paths: opts.paths || boot.paths,
+    configFile: opts.configFile || opts.config,
+    serverTemplate: opts.serverTemplate,
+  })
+  cfg._serverTemplate = opts.serverTemplate
   const mb = process.env.MG_MAX_BODY ? parseInt(process.env.MG_MAX_BODY, 10) : 0
+  Object.defineProperty(cfg, '_runtimeInFlight', { value: new Map(), configurable: true, writable: true })
   if (mb > 0) cfg.server = Object.assign({}, cfg.server || {}, { maxBodyBytes: mb })
   // 收集所有密钥值供日志脱敏：环境变量 Key + 面板 Key + extraHeaders 值 + 客户端/管理令牌 + 代理内嵌凭据
   const log = createLogger({ logFile: cfg.server && cfg.server.logFile, silent: opts.silent, secrets: collectSecrets(cfg) })
@@ -3795,10 +4271,16 @@ export function start(opts = {}) {
     adapterFactory: opts.adapterFactory,
     chatgptPlan: opts.chatgptPlan,
     paths: cfg._paths || configPaths(),
-    // N06：运行时可观测收据（有界内存 ring；request/attempt/usage 三类事件，终态去重）。
-    observability: createObservability({ capacity: (cfg.defaults && cfg.defaults.observability && cfg.defaults.observability.capacity) || undefined }),
-    st: { startedAt: Date.now(), uses: {}, counters: { requests: 0, errors: 0, retries: 0, interrupts: 0 } },
+    // N06 / G15：实时 ring 与按 scope 持久历史分离；持久文件只从已验证 runtime paths 派生。
+    observability: createObservability({
+      capacity: (cfg.defaults && cfg.defaults.observability && cfg.defaults.observability.capacity) || undefined,
+      persistFile: join((cfg._paths || opts.paths || configPaths()).dir, 'observability', 'events.jsonl'),
+      maxBytes: cfg.defaults && cfg.defaults.observability && cfg.defaults.observability.maxBytes,
+      maxRecords: cfg.defaults && cfg.defaults.observability && cfg.defaults.observability.maxRecords,
+    }),
+    st: { startedAt: Date.now(), uses: {}, counters: { requests: 0, logicalRequests: 0, completedRequests: 0, errors: 0, retries: 0, interrupts: 0 } },
     health: {},
+    inFlight: cfg._runtimeInFlight || new Map(),
     throttle: {},
     throttleModel: {},
     qpsToken: {},
@@ -3815,8 +4297,8 @@ export function start(opts = {}) {
   for (const [pid, p] of Object.entries(cfg.providers || {})) {
     if (p && p.gatewaySubscription && p.gatewaySubscription.enabled === true) log.info('gateway_subscription configured', 'provider=' + pid, 'scope=loopback+official', 'credential=local_codex_auth')
   }
-  // P0-2：受控自管 Codex 配置根只在显式环境开关下登记（默认关闭）；失败保持关闭。
-  setupCodexManagedRoot(state)
+  // P0-2：受控自管 Codex 配置根只在显式环境开关下登记（默认关闭）；租户不共享宿主根。
+  if (!cfg._tenancyScope) setupCodexManagedRoot(state)
   const timers = []
   const every = (ms, fn) => { const h = setInterval(fn, ms); h.unref(); timers.push(h); return h }
   try {
@@ -3830,7 +4312,7 @@ export function start(opts = {}) {
         log.warn('stats 文件损坏，已备份并重建', e.message)
         _j = {}
       }
-    } state.st.lastServing = _j.lastServing || null; state.stats.daily = Object.assign({}, state.stats.daily, _j.daily || {}); state.stats.hourly = Object.assign({}, state.stats.hourly, _j.hourly || {}); for (const [n, t] of Object.entries(_j.byModel || {})) { state.stats.byModel[n] = Object.assign(state.stats.byModel[n] || { requests: 0, errors: 0 }, { tokens: (t && t.tokens) || 0, inTokens: (t && t.inTokens) || 0, outTokens: (t && t.outTokens) || 0 }) }; const _dlg = _j.dialogue || {}; for (const k of Object.keys(_dlg)) state.dialogue[k] = _dlg[k]; let _u = null; for (const k of Object.keys(state.dialogue)) { if (k.startsWith('conv-') && (!_u || state.dialogue[k].lastAt > _u.lastAt)) _u = state.dialogue[k] } state.dUnnamed = _u || null; const _g = _j.global || {}; for (const k of ['requests','errors','retries','interrupts','tokens','latencySum','confirmed']) if (typeof _g[k] === 'number') state.stats.global[k] = _g[k]; if (Array.isArray(_g.lats)) state.stats.global.lats = _g.lats; if (Array.isArray(_g.latTrend)) state.stats.global.latTrend = _g.latTrend; for (const [pid, po] of Object.entries(_j.byProvider || {})) { const o = ensureSt(state, pid); for (const k of ['requests','errors','retries','latencySum','latencyCount','tokens']) if (typeof po[k] === 'number') o[k] = po[k]; if (Array.isArray(po.lats)) o.lats = po.lats; if (po.probe) o.probe = po.probe } } catch { /* 统计文件缺失/损坏则从空开始 */ }
+    } state.st.lastServing = _j.lastServing || null; for (const _k of ['requests','logicalRequests','completedRequests','errors','retries','interrupts']) if (Number.isFinite(_j.counters?.[_k])) state.st.counters[_k] = _j.counters[_k]; state.stats.daily = Object.assign({}, state.stats.daily, _j.daily || {}); state.stats.hourly = Object.assign({}, state.stats.hourly, _j.hourly || {}); for (const [n, t] of Object.entries(_j.byModel || {})) { state.stats.byModel[n] = Object.assign(state.stats.byModel[n] || { requests: 0, errors: 0 }, { tokens: (t && t.tokens) || 0, inTokens: (t && t.inTokens) || 0, outTokens: (t && t.outTokens) || 0 }) }; const _dlg = _j.dialogue || {}; for (const k of Object.keys(_dlg)) state.dialogue[k] = _dlg[k]; let _u = null; for (const k of Object.keys(state.dialogue)) { if (k.startsWith('conv-') && (!_u || state.dialogue[k].lastAt > _u.lastAt)) _u = state.dialogue[k] } state.dUnnamed = _u || null; const _g = _j.global || {}; for (const k of ['requests','errors','retries','interrupts','tokens','latencySum','confirmed']) if (typeof _g[k] === 'number') state.stats.global[k] = _g[k]; if (Array.isArray(_g.lats)) state.stats.global.lats = _g.lats; if (Array.isArray(_g.latTrend)) state.stats.global.latTrend = _g.latTrend; for (const [pid, po] of Object.entries(_j.byProvider || {})) { const o = ensureSt(state, pid); for (const k of ['requests','errors','retries','latencySum','latencyCount','tokens']) if (typeof po[k] === 'number') o[k] = po[k]; if (Array.isArray(po.lats)) o.lats = po.lats; if (po.probe) o.probe = po.probe } } catch { /* 统计文件缺失/损坏则从空开始 */ }
   every(30000, () => { try { writeStats(state) } catch (e) { log && log.warn('stats 写盘失败', e.message) } })
   // —— MG-014 Video 任务池：加载 + GC + 后台轮询（ADR-0001；文件损坏不阻塞启动） ——
   try {
@@ -3932,29 +4414,79 @@ export function start(opts = {}) {
       } else if (state.cacheAlert && recent > hist - 10) state.cacheAlert = null
     }
   }, 30000).unref() })()
-  const bindHost = String((cfg.server && cfg.server.host) || '127.0.0.1').toLowerCase()
+  hardenKeyFile(state.paths.keys)
+  return { cfg, log, state, timers }
+}
+
+export async function closeGatewayRuntime(runtime) {
+  if (!runtime || runtime.disposed) return
+  runtime.disposed = true
+  runtime.state.closed = true
+  for (const timer of runtime.timers) clearInterval(timer)
+  runtime.timers.length = 0
+  try { writeStats(runtime.state) } catch (error) { runtime.log && runtime.log.warn('关闭时统计落盘失败', error.message) }
+  try { saveVideoTasks(runtime.state.paths.videos, runtime.state.videos) } catch (error) { runtime.log && runtime.log.warn('关闭时 video 任务落盘失败', error.message) }
+}
+
+export function start(opts = {}) {
+  const boot = loadGatewayBoot(opts)
+  const rootCfg = boot.cfg
+  const tenancy = resolveTenancy(rootCfg)
+  let runtime = null
+  let dispatcher = null
+  let log
+  let state
+  let handler
+
+  if (tenancy.mode === 'multi') {
+    if (opts.server) throw new Error('multi_tenancy_requires_managed_server：多租户必须由 start() 创建共享 HTTP server')
+    const control = validateRootControlConfig(rootCfg, boot.paths.dir)
+    log = createLogger({ logFile: (rootCfg.server && rootCfg.server.logFile) || join(boot.paths.dir, 'tenancy-control.log'), silent: opts.silent, secrets: [] })
+    const store = createScopeStore(control.root, { tenancy })
+    dispatcher = createTenancyDispatcher({
+      config: rootCfg,
+      configDir: boot.paths.dir,
+      control,
+      log,
+      resolveActor: opts.resolveActor,
+      sendJson,
+      createRuntime: (scope) => {
+        const paths = store.forScope(scope).runtimePaths()
+        return createGateway({ paths, configFile: join(paths.dir, 'gateway.json'), scopeId: scope.scopeId, serverTemplate: rootCfg, silent: opts.silent })
+      },
+      closeRuntime: closeGatewayRuntime,
+    })
+    state = dispatcher.publicState
+    const publicHandler = makeHandler(state)
+    const tenantHandlers = new Map()
+    handler = (req, res) => dispatcher.dispatch(req, res, (tenantState) => {
+      if (!tenantState) return publicHandler(req, res)
+      let tenantHandler = tenantHandlers.get(tenantState.cfg._tenancyScope)
+      if (!tenantHandler) { tenantHandler = makeHandler(tenantState); tenantHandlers.set(tenantState.cfg._tenancyScope, tenantHandler) }
+      return tenantHandler(req, res)
+    })
+  } else {
+    runtime = createGateway(Object.assign({}, opts, { boot }))
+    log = runtime.log
+    state = runtime.state
+    handler = makeHandler(state)
+  }
+
+  const bindHost = String((rootCfg.server && rootCfg.server.host) || '127.0.0.1').toLowerCase()
   const loopbackBind = bindHost === '::1' || bindHost === 'localhost' || bindHost.startsWith('127.')
   if (loopbackBind) log.warn('管理面无令牌（所有者授权的安全降级）：仅回环 + Host/Origin 保护；远程管理请求返回 403')
   else log.error('非回环绑定 ' + bindHost + '：管理面无令牌，仅 Host/Origin 与来源开关保护；数据面仍按客户端 Key 策略开放')
-  hardenKeyFile(state.paths.keys)
-  const server = opts.server || http.createServer(makeHandler(state))
-  const host = (cfg.server && cfg.server.host) || '127.0.0.1'
-  const port = (cfg.server && cfg.server.port) || 8787
-  // Responses WebSocket 桥（消除 Codex 首轮 5/7 次 WS 回退重连）：
-  //  每个 response.create 帧重放进本进程 POST /v1/responses，复用同一鉴权/路由/工具修复链路。
-  //  回滚开关：server.responsesWebSocket = false → 不挂载 upgrade 监听，回到"无 WS 支持"行为。
-  const wsBridgeEnabled = cfg.server && cfg.server.responsesWebSocket === false ? false : true
+  const server = opts.server || http.createServer(handler)
+  const host = (rootCfg.server && rootCfg.server.host) || '127.0.0.1'
+  const port = (rootCfg.server && rootCfg.server.port) || 8787
+  const wsBridgeEnabled = tenancy.mode === 'single' && !(rootCfg.server && rootCfg.server.responsesWebSocket === false)
   attachResponsesWebSocket(server, { state, log, enabled: wsBridgeEnabled })
   server.on('error', (err) => { log.error('server error', err.message); process.exitCode = 1 })
-  // 统一关闭接口（MG-007）：停定时器 → 排空连接（带超时兜底）→ 最终原子落盘。
-  // 幂等：重复调用返回同一个 promise，SIGTERM 与测试代码可以安全各调一次。
   let closing = null
   function close(closeOpts = {}) {
     if (closing) return closing
     closing = (async () => {
       state.closed = true
-      for (const t of timers) clearInterval(t)
-      timers.length = 0
       const timeoutMs = Number(closeOpts.timeoutMs) > 0 ? Number(closeOpts.timeoutMs) : 3000
       await new Promise((resolve) => {
         const finish = () => resolve()
@@ -3962,12 +4494,11 @@ export function start(opts = {}) {
         if (timer.unref) timer.unref()
         server.close(() => { clearTimeout(timer); finish() })
         if (server.closeIdleConnections) server.closeIdleConnections()
-        // 已建立的 keep-alive 连接不会自己结束：短暂宽限后强制关闭，避免关闭被挂起的流拖住
         const force = setTimeout(() => { if (server.closeAllConnections) server.closeAllConnections() }, 50)
         if (force.unref) force.unref()
       })
-      try { writeStats(state) } catch (e) { log && log.warn('关闭时统计落盘失败', e.message) }
-      try { saveVideoTasks(state.paths.videos, state.videos) } catch (e) { log && log.warn('关闭时 video 任务落盘失败', e.message) }
+      if (dispatcher) await dispatcher.close()
+      else if (runtime) await closeGatewayRuntime(runtime)
       log && log.info('model-gateway 已关闭，统计已落盘')
     })()
     return closing
@@ -3978,7 +4509,7 @@ export function start(opts = {}) {
     server.listen(port, host, () => {
       server.off('error', onBindError)
       log.info('model-gateway 已启动: http://' + host + ':' + port + '  (健康检查 /healthz, 控制面板 /)')
-      resolve({ cfg, log, server, router: state.router, st: state.st, state, close })
+      resolve({ cfg: rootCfg, log, server, router: runtime ? runtime.state.router : null, st: state.st, state, close, tenancy: dispatcher })
     })
   })
 }

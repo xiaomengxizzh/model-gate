@@ -87,6 +87,24 @@ export async function startGateway(opts = {}) {
   }
   const get = (path, headers) => call(path, { method: 'GET', headers })
   const post = (path, body, headers) => call(path, { method: 'POST', body, headers })
+  // Explicit migration path for legacy writes: durable preview first, then apply
+  // with the same payload. Raw/invalid bodies still exercise endpoint parsing directly.
+  const write = async (path, body, headers) => {
+    const action = path === '/api/config/save' ? 'config.save' : path === '/api/keys' ? 'keys.update' : null
+    if (!action || !body || typeof body !== 'object' || Array.isArray(body)) return post(path, body, headers)
+    const current = await (await get('/api/status', headers)).json()
+    const expectedVersion = Number.isFinite(Number(body.expectedVersion ?? body.version))
+      ? Number(body.expectedVersion ?? body.version)
+      : current.configVersion
+    const requestId = 'test-' + path.slice(5) + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)
+    const preview = await post('/api/config/write:preview', { ...body, action, expectedVersion, requestId }, headers)
+    if (!preview.ok) return preview
+    const plan = await preview.json()
+    return post(path, {
+      ...body, expectedVersion: plan.expectedVersion, requestId: plan.requestId,
+      previewId: plan.previewId, confirmToken: plan.confirmToken,
+    }, headers)
+  }
 
   let ready = false
   const deadline = Date.now() + 8000
@@ -103,7 +121,7 @@ export async function startGateway(opts = {}) {
     if (child.exitCode === null && child.signalCode === null) { child.kill(); await exited }
     if (!opts.dir) await rm(dir, { recursive: true, force: true })
   }
-  return { base, dir, port, child, call, get, post, stop, stderr: () => stderr }
+  return { base, dir, port, child, call, get, post, write, stop, stderr: () => stderr }
 }
 
 

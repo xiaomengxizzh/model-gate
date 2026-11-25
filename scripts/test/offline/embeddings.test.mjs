@@ -46,7 +46,7 @@ test('OpenAI embedding：请求透传、model 回写、记账与模型发现', {
   assert.equal(list.data.find((x) => x.id === 'emb').capability, 'embedding', '/v1/models 暴露 capability')
 
   // 保存校验：未知 capability 被拒
-  const bad = await gw.post('/api/config/save', { models: { x: { provider: 'mock', capability: 'foo' } } }, json())
+  const bad = await gw.write('/api/config/save', { models: { x: { provider: 'mock', capability: 'foo' } } }, json())
   assert.equal(bad.status, 400)
 })
 
@@ -73,7 +73,7 @@ test('Gemini embedding：batchEmbedContents 路径/请求体/协议头与响应�
   const gw = await startGateway({ name: 'mg011-gem', config: { providers: { mock: { baseUrl: upstream.base, api: 'gemini', apiKey: 'gem-key' } }, models: { 'emb-g': { provider: 'mock', capability: 'embedding' } } } })
   t.after(async () => { await gw.stop(); await upstream.stop() })
   // 网关的上游 Key 走加密 keys 库（配置里的 apiKey 字段不消费），先写入 key 再验证协议头
-  assert.equal((await gw.post('/api/keys', { id: 'mock', key: 'gem-key' }, json())).status, 200)
+  assert.equal((await gw.write('/api/keys', { id: 'mock', key: 'gem-key' }, json())).status, 200)
 
   const res = await gw.post('/v1/embeddings', { model: 'emb-g', input: ['a', 'b'], dimensions: 2 }, json())
   assert.equal(res.status, 200)
@@ -194,15 +194,15 @@ test('F04 可选端点配置：只接受已证实能力，未知能力名/非法
   const gw = await startGateway({ name: 'f04-optional-config', config: { providers: { mock: { baseUrl: upstream.base } }, models: { emb: { provider: 'mock', capability: 'embedding' } } } })
   t.after(async () => { await gw.stop(); await upstream.stop() })
 
-  const unknown = await gw.post('/api/config/save', { defaults: { optionalEndpoints: { brand_new_modal: false } } })
+  const unknown = await gw.write('/api/config/save', { defaults: { optionalEndpoints: { brand_new_modal: false } } })
   assert.equal(unknown.status, 400)
   assert.match((await unknown.json()).error, /未证实/)
 
-  const badShape = await gw.post('/api/config/save', { defaults: { optionalEndpoints: { embedding: 'off' } } })
+  const badShape = await gw.write('/api/config/save', { defaults: { optionalEndpoints: { embedding: 'off' } } })
   assert.equal(badShape.status, 400)
 
   // 合法形状可保存并在下一请求生效
-  assert.equal((await gw.post('/api/config/save', { defaults: { optionalEndpoints: { embedding: false, rerank: { enabled: false, reason: 'contract_not_signed_off' } } } })).status, 200)
+  assert.equal((await gw.write('/api/config/save', { defaults: { optionalEndpoints: { embedding: false, rerank: { enabled: false, reason: 'contract_not_signed_off' } } } })).status, 200)
   const disabled = await gw.post('/v1/embeddings', { model: 'emb', input: 'hi' }, json())
   assert.equal(disabled.status, 501)
   assert.equal((await disabled.json()).error.reason, 'disabled_by_config')

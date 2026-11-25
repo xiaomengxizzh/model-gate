@@ -37,7 +37,7 @@
     "deepseek-official": { "baseUrl": "https://api.deepseek.com", "apiKeyEnv": "DEEPSEEK_API_KEY", "api": "openai", "extraHeaders": {} },
     "claude":           { "baseUrl": "https://api.anthropic.com", "apiKeyEnv": "ANTHROPIC_API_KEY", "api": "anthropic", "circuit": { "maxFailures": 3, "openDurationMs": 10000 } },
     "gemini":           { "baseUrl": "https://generativelanguage.googleapis.com", "apiKeyEnv": "GEMINI_API_KEY", "api": "gemini" },
-    "local-ollama":     { "baseUrl": "http://127.0.0.1:11434", "apiKeyEnv": "" },
+    "local-ollama":     { "baseUrl": "http://127.0.0.1:11434", "apiKeyEnv": "", "allowPrivateNetwork": true },
     // Codex 聚合：官方直连示例（codexIdentity 可省略——官方 host 自动判定；第三方可显式声明 thirdParty）
     // F01：官方目标只走 API Key 直连；/backend-api/codex（ChatGPT 订阅后端）与客户端凭据透传已移除，必须配 apiKeyEnv/面板 Key。
     "codex-official":   { "baseUrl": "https://api.openai.com", "codexIdentity": "official", "apiKeyEnv": "OPENAI_API_KEY" }
@@ -51,7 +51,25 @@
 }
 ```
 
+## 单实例多租户（显式启用）
+
+默认没有 `tenancy` 时仍为单用户 `local`，既有路由与配置不变。显式 `mode:"multi"` 时，根配置只列作用域与存储根，不得放 providers/models/defaults/Key：
+
+```jsonc
+{
+  "server": { "host": "127.0.0.1", "port": 8787, "maxBodyBytes": 33554432 },
+  "tenancy": { "mode": "multi", "scopes": ["alpha", "beta"], "root": "tenants" }
+}
+```
+
+每个作用域使用 `<tenancy.root>/<scopeId>/{config,keys,catalog,usage,logs}/`；运行时配置为 `config/gateway.json`，加密 Key 为 `config/keys.local.json`，统计为 `usage/stats.json`，日志为 `logs/gateway.log`，持久预览/回执为 `config/resource-operations/<scopeId>/`。目录按 0700、文件按 0600 创建。
+
+宿主必须通过 `start({ resolveActor })` 注入已认证身份，返回 `{id,scopeId,role}`；任意 `x-scope` 或请求头都不是授权来源。缺少身份返回 401，未知作用域返回 403。`role:"user"` 可读取本作用域非敏感状态与目录，管理配置、Key、日志、备份和操作回执要求 `role:"admin"`。跨作用域资源返回 404。`tenancy.testHeaders` 只允许显式 fixture 映射，生产宿主不应启用。
+
+租户不得声明 `apiKeyEnv`、官方订阅凭据、`defaults.codexCatalogBasePath` 或提高根 `maxBodyBytes`；租户私网上游必须显式 `allowPrivateNetwork:true`。宿主级 `/api/codex/*`、`/api/aggregation/*`、`/api/harnesses/*` 在多租户下 fail-closed，不共享宿主 HOME/凭据。
+
 要点：
+- `providers.<名>.allowPrivateNetwork`：仅显式布尔 `true` 授权回环、私网、链路本地、保留及云元数据等受限地址。V13 服务预览/确认写入与目录发现会解析全部 DNS 答案并失败关闭；真实推理、探测、预热和代理连接在每次建连前复核并固定 socket lookup，禁止重定向。多租户与新服务默认 `false`；旧单用户 provider 缺省该字段时保留既有本地上游能力，但仍执行 DNS 固定。目录发现注入 transport 无法固定 socket 时会披露 `dns-revalidated-unpinned`，生产原生路径为 `dns-revalidated-pinned`。
 - `defaults.model`：**虚拟共用模型名**。客户端统一请求这个名字时，网关把它当作「默认链」——沿 `defaults.directory` 首项把**真实模型名**发给上游，并把响应里的 `model` 回写为该虚拟名（虚拟名会出现在 `/v1/models`）。不会把虚拟名透传给上游（否则上游会报 `Model <虚拟名> is not supported`）。
 - `defaults.clientKey`：数据面鉴权 Key。面板录入后改存**加密 keys 库**，`/api/status` 与 `/api/config` 只回掩码 `********`，不会明文落盘。保存语义是**三态**：省略该字段或回传掩码（`^\s*\*{8}\s*$`，允许首尾空白）= 保持现有 Key（省略绝不等于清空）；显式发送空字符串 `""` = 删除数据面全局 Key；非空字符串 = 替换。非法值（非字符串/纯空白/控制字符）返回 400 且不落盘。优先级固定为 `MG_CLIENT_KEY` 环境变量 > 加密 keys 库（`__mg_client`）> 旧版 `defaults.clientKey` 明文（省略字段保存时自动迁移进加密库并清掉明文）。审计日志只记动作（`clientKeyAction=...`）与配置代际（`version=N`），不记 Key 值。
 - `defaults.directory`：跨模型兜底。`mode: afterAll` 表示按序全部尝试，`onFail` 表示仅当前模型失败时才启用后续。**整条链(a→b→c)一轮全败后网关会回到队首反复重试（循环兜底）**，直到成功 / 业务 4xx / 整体超时 / 全部熔断；单轮兜底时间上限由 `defaults.timeout.loopMs`（默认 120000ms）约束，最长一次请求的兜底重试时长不会超过它。请求日志会带 `chain=实际尝试过的模型链` 标记，可直接看到兜底是否触发。
@@ -369,6 +387,10 @@ Chat 请求必须为 JSON 对象，否则 400。管理和数据面请求均受 s
 | `defaults.codexBudget.billingPolicy` | 付费候选在「没有预算上限且未接账本」时的放行策略。缺省 fail-closed：发送前拒绝并记 `billing_unmetered`（零上游）；显式 `allow_unmetered` 才放行，且审计面可见。 | 未设置 = 拒绝 |
 | `defaults.opencodeGoHosts` | OpenCode Go 允许的 host 白名单（`src/codex/identity.js`）。 | 内置清单 |
 | `providers.<名>.sessionHmacSecret` | Go 会话头的 HMAC 密钥来源。会话值按「主体 + provider + root/child 域 + 目标域 + 线程」派生，绝不转发客户端原始 `session-id`/`thread-id`。 | 未设置 = 请求内独立 id |
-| `defaults.observability.capacity` | 观测事件环形缓冲容量；超出部分以 `dropped` 如实计数，不伪造历史。 | 见 `src/observability/events.js` |
+| `defaults.observability.capacity` | 实时观测事件环形缓冲容量；只用于 `/api/observability/events` 与 SSE 快照，超出部分以 `dropped` 如实计数。 | 200，最大 5000 |
+| `defaults.observability.maxBytes` | 持久 JSONL 当前文件与 `.1` 轮转文件的总字节上限；单条超限事件只留实时 ring 并计入 `rejected`。 | 1 MiB |
+| `defaults.observability.maxRecords` | 持久 JSONL 当前文件与 `.1` 轮转文件的总记录数上限。 | 5000 |
 
-相关接口：`GET /api/observability/events`（cursor 分页，`mg-observability-v1`）与 `GET /api/observability/stream`（有界快照 + 增量 + 15s keepalive）。
+观测持久文件固定从已验证的 runtime `paths.dir` 派生为 `<配置目录>/observability/events.jsonl`（租户为 `<tenancy.root>/<scopeId>/config/observability/events.jsonl`），调用方不能通过 HTTP 指定路径；目录 0700、文件 0600。追加使用单次 `O_APPEND` 写并 fsync，轮转/收敛使用临时文件 + rename + 目录 fsync。启动时损坏 JSON、截断尾行、含 forbidden 字段或明文引用的事件一律跳过并计入 `corrupt`，不返回坏行；文件级不可读/符号链接 fail-closed，写盘失败不影响请求与实时 ring。
+
+相关接口：`GET /api/observability/events`（实时 ring 的 cursor 分页，`mg-observability-v1`）、`GET /api/observability/stream`（实时 ring 快照 + 增量 + 15s keepalive）与 `GET /api/logs/structured`（文本日志 + 持久事件，`level/q/traceId/limit/cursor` 过滤分页，`mg-logs/1`）。持久事件重启后仍可按 seq 分页；SSE 不重放持久历史。

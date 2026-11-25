@@ -1,0 +1,13 @@
+﻿ID,现行要求,状态,证据类型,SHA,证据,阻塞/备注
+MG-R001,GUI一键进入退出聚合且重启一致,BLOCKED,NONE_REAL_AUTH,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,a0-baseline-report.md,三模式/角色目标fixture通过;真实GUI/重启未授权
+MG-R002,保留ChatGPT登录额度与官方模型,BLOCKED,NONE_REAL_AUTH,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,a0-baseline-report.md,未调用Luna;未触碰auth.json
+MG-R003,Go DeepSeek V4.1 Flash真实推理与目录,BLOCKED,NONE_REAL_AUTH,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,a0-baseline-report.md,真实Go未授权
+MG-R004,原版Codex GUI选择官方与DeepSeek,BLOCKED,NONE_REAL_AUTH,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,a0-baseline-report.md,原版GUI未授权
+MG-R005,Codex原生父子Agent Team,BLOCKED,NONE_REAL_AUTH,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,a1-source-research.md,仅源码边界;无真实父子回执
+MG-R006,原生工具等待追派中断恢复与压缩,BLOCKED,NONE_REAL_AUTH,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,a1-source-research.md,禁止自建压缩;真实同子/压缩未授权
+MG-R007,零手工配置备份写入回滚,BLOCKED,PARTIAL_OFFLINE,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,browser/a2-browser-report.json,持久预览/回执/取消与备份Harness fixture通过;真实Desktop未授权
+MG-R008,无静默降级或替换,BLOCKED,PARTIAL_OFFLINE,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,browser/a2-browser-report.json,预算/工具防重放/DNS固定fixture通过;完整真实反向链未授权
+MG-R009,多用户凭据配置记录隔离,PASS_FIXTURE,REAL_HTTP_FIXTURE,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,../../scripts/test/offline/mg-r009-tenancy-http.test.mjs,单进程双身份配置/Key/目录/统计/日志/额度/角色隔离与重启通过;非真实用户验收
+MG-R010,原Codex环境可恢复,BLOCKED,NONE_REAL_AUTH,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,a0-baseline-report.md,未触碰生产Codex;真实回滚待授权
+MG-R011,每阶段真实证据与费用权限记录,PARTIAL,PASS_PROCESS,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,a3-a6-implementation-report.md,fixture证据完整;非产品PASS_REAL
+MG-R012,真实GPT仅GPT-6 Luna,BLOCKED,NONE_REAL_AUTH,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,a0-baseline-report.md,零真实GPT;未使用其他模型替代

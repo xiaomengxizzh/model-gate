@@ -29,9 +29,9 @@ test('管理 API：状态、日志与磁盘均不泄露明文凭据', { timeout:
   t.after(async () => { await gw.stop(); await upstream.stop() })
 
   // 本地初始化窗口内写入三类凭据：上游 Key、客户端 Key、虚拟模型独立 Key
-  assert.equal((await gw.post('/api/keys', { id: 'mock', key: PROVIDER_KEY })).status, 200)
-  assert.equal((await gw.post('/api/config/save', { defaults: { clientKey: CLIENT_KEY } })).status, 200)
-  assert.equal((await gw.post('/api/keys', { id: '__mg_vm_private', key: VM_KEY })).status, 200)
+  assert.equal((await gw.write('/api/keys', { id: 'mock', key: PROVIDER_KEY })).status, 200)
+  assert.equal((await gw.write('/api/config/save', { defaults: { clientKey: CLIENT_KEY } })).status, 200)
+  assert.equal((await gw.write('/api/keys', { id: '__mg_vm_private', key: VM_KEY })).status, 200)
 
   const res = await gw.get('/api/status')
   assert.equal(res.status, 200)
@@ -51,12 +51,12 @@ test('管理 API：状态、日志与磁盘均不泄露明文凭据', { timeout:
 
   // ③ 客户端 Key 以掩码回显；回存掩码不丢 Key
   assert.equal(status.defaults.clientKey, '********')
-  assert.equal((await gw.post('/api/config/save', { defaults: { clientKey: '********' } })).status, 200)
+  assert.equal((await gw.write('/api/config/save', { defaults: { clientKey: '********' } })).status, 200)
   const afterMask = await (await gw.get('/api/status')).json()
   assert.equal(afterMask.defaults.clientKey, '********')
 
   // P0-1：省略 clientKey 的补丁（只改其它 defaults）不得撤销数据面全局 Key。
-  assert.equal((await gw.post('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
+  assert.equal((await gw.write('/api/config/save', { defaults: { proxyMode: 'direct' } })).status, 200)
   const afterOmit = await (await gw.get('/api/status')).json()
   assert.equal(afterOmit.defaults.clientKey, '********', '省略字段保存后仍应回显掩码')
   const unauth = await gw.post('/v1/chat/completions', { model: 'demo', messages: [{ role: 'user', content: 'hi' }] })

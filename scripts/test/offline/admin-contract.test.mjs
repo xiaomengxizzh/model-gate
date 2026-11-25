@@ -60,37 +60,37 @@ test('管理 API：鉴权矩阵、错误码、版本冲突与参数夹取', { ti
   const hitsBefore = upstream.hits.length
 
   // ② 请求体错误
-  const badJson = await gw.post('/api/config/save', '{bad', Object.assign({ 'content-type': 'application/json' }, ADMIN))
+  const badJson = await gw.write('/api/config/save', '{bad', Object.assign({ 'content-type': 'application/json' }, ADMIN))
   assert.equal(badJson.status, 400)
   assert.equal((await badJson.json()).error, '请求体必须为 JSON 对象')
 
   // ③ 引用校验：模型指向不存在的上游 → 400
-  const badProvider = await gw.post('/api/config/save', { models: { demo: { provider: 'ghost' } } }, ADMIN)
+  const badProvider = await gw.write('/api/config/save', { models: { demo: { provider: 'ghost' } } }, ADMIN)
   assert.equal(badProvider.status, 400)
   assert.match((await badProvider.json()).error, /不存在的上游/)
 
   // ④ 版本冲突：过期 version → 409 且带回 currentVersion
   const status0 = await (await gw.get('/api/status', ADMIN)).json()
-  const stale = await gw.post('/api/config/save', { version: status0.configVersion + 99 }, ADMIN)
+  const stale = await gw.write('/api/config/save', { version: status0.configVersion + 99 }, ADMIN)
   assert.equal(stale.status, 409)
   const staleBody = await stale.json()
   assert.equal(staleBody.currentVersion, status0.configVersion)
   assert.equal(typeof staleBody.error, 'string')
 
-  // ⑤ 正常保存：version 前进一位，缺 version 的旧客户端仍被宽容接受
-  const ok = await gw.post('/api/config/save', { version: status0.configVersion, defaults: { proxyMode: 'direct' } }, ADMIN)
+  // ⑤ 正常保存：预览 helper 自动携带读取版本，确认后 version 前进一位
+  const ok = await gw.write('/api/config/save', { version: status0.configVersion, defaults: { proxyMode: 'direct' } }, ADMIN)
   assert.equal(ok.status, 200)
   const okBody = await ok.json()
   assert.equal(okBody.ok, true)
   assert.equal(okBody.status.configVersion, status0.configVersion + 1)
-  assert.equal((await gw.post('/api/config/save', { defaults: { proxyMode: 'direct' } }, ADMIN)).status, 200)
+  assert.equal((await gw.write('/api/config/save', { defaults: { proxyMode: 'direct' } }, ADMIN)).status, 200)
 
   // ⑥ keys：缺 id → 400；过期 version → 409；正常写入 → 200
-  assert.equal((await gw.post('/api/keys', {}, ADMIN)).status, 400)
-  const keysStale = await gw.post('/api/keys', { id: 'mock', key: 'k', version: 9999 }, ADMIN)
+  assert.equal((await gw.write('/api/keys', {}, ADMIN)).status, 400)
+  const keysStale = await gw.write('/api/keys', { id: 'mock', key: 'k', version: 9999 }, ADMIN)
   assert.equal(keysStale.status, 409)
   assert.equal(typeof (await keysStale.json()).currentVersion, 'number')
-  assert.equal((await gw.post('/api/keys', { id: 'mock', key: 'mock-key' }, ADMIN)).status, 200)
+  assert.equal((await gw.write('/api/keys', { id: 'mock', key: 'mock-key' }, ADMIN)).status, 200)
 
   // ⑦ route-preview：缺 model → 400；虚拟/真实/未知三种命中；不调用上游
   assert.equal((await gw.post('/api/route-preview', {}, ADMIN)).status, 400)
@@ -133,7 +133,7 @@ test('管理 API：鉴权矩阵、错误码、版本冲突与参数夹取', { ti
   assert.ok(upstream.hits.length > hitsBefore, '探测/测试确实发往上游 mock')
 
   // ⑪ 管理面 body 上限 → 413 payload_too_large
-  const tooBig = await gw.post('/api/config/save', 'x'.repeat(70 * 1024), Object.assign({ 'content-type': 'application/json' }, ADMIN))
+  const tooBig = await gw.write('/api/config/save', 'x'.repeat(70 * 1024), Object.assign({ 'content-type': 'application/json' }, ADMIN))
   assert.equal(tooBig.status, 413)
   assert.equal((await tooBig.json()).error.type, 'payload_too_large')
 

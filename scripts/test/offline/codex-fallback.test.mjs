@@ -114,6 +114,7 @@ test('classifyError：Retry-After 秒数 / HTTP-date（注入 now，确定性）
 test('advancePhase：合法推进 / 非法回退 / 未知阶段 / 终态', () => {
   assert.deepEqual(advancePhase(PHASE.UNSENT, PHASE.ACCEPTED), { ok: true, phase: PHASE.ACCEPTED, from: PHASE.UNSENT })
   assert.equal(advancePhase(PHASE.ACCEPTED, PHASE.TOOL_SIDE_EFFECT).ok, true)
+  assert.deepEqual(advancePhase(PHASE.TOOL_SIDE_EFFECT, PHASE.TOOL_SIDE_EFFECT), { ok: true, phase: PHASE.TOOL_SIDE_EFFECT, from: PHASE.TOOL_SIDE_EFFECT }, '同一阶段重复事件应幂等')
   assert.equal(advancePhase(PHASE.ACCEPTED, PHASE.STREAM_DELIVERED).ok, true)
   assert.equal(advancePhase(PHASE.ACCEPTED, PHASE.PARTIALLY_COMMITTED).ok, true)
   assert.equal(advancePhase(PHASE.UNSENT, PHASE.USER_CANCELLED).ok, true)

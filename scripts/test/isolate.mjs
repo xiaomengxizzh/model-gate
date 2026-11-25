@@ -108,6 +108,17 @@ export async function startGateway(opts = {}) {
   const admin = { authorization: 'Bearer devtoken' }
   const get = (path, headers) => call(path, { method: 'GET', headers })
   const post = (path, body, headers) => call(path, { method: 'POST', body, headers })
+  const write = async (path, body, headers = admin) => {
+    const action = path === '/api/config/save' ? 'config.save' : path === '/api/keys' ? 'keys.update' : null
+    if (!action) return post(path, body, headers)
+    const current = await status()
+    const requestId = 'isolate-' + path.slice(5) + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)
+    const expectedVersion = Number.isFinite(Number(body.expectedVersion ?? body.version)) ? Number(body.expectedVersion ?? body.version) : current.configVersion
+    const preview = await post('/api/config/write:preview', { ...body, action, expectedVersion, requestId }, headers)
+    if (!preview.ok) return preview
+    const plan = await preview.json()
+    return post(path, { ...body, expectedVersion: plan.expectedVersion, requestId: plan.requestId, previewId: plan.previewId, confirmToken: plan.confirmToken }, headers)
+  }
   const status = async () => (await (await get('/api/status', admin)).json())
   const chat = (model, stream, extra) => post('/v1/chat/completions', { model, stream: !!stream, messages: [{ role: 'user', content: 'x' }], ...(extra || {}) })
 
@@ -120,7 +131,7 @@ export async function startGateway(opts = {}) {
   }
   if (!ready) { await stop(); throw new Error('isolated gateway did not become ready: ' + stderr.slice(-2000)) }
 
-  return { base, dir, port, child, get, post, call, admin, status, chat, stop, stderr: () => stderr }
+  return { base, dir, port, child, get, post, write, call, admin, status, chat, stop, stderr: () => stderr }
 }
 
 // 杀子进程并等它真正退出：网关退出前仍可能写日志/统计，先等退出再删目录，否则目录会被重建。

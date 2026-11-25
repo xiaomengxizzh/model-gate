@@ -1,0 +1,25 @@
+{
+  "package": "ModelGate V13.1 R2",
+  "asOf": "2026-11-24",
+  "mainHistorical": "886e22a863343192e4ae5ab41e38396df4d4813c",
+  "developmentHistorical": "0ba7c1fe7c8becd97a927004208cbc06c89f269c",
+  "contract": "实施方案.md",
+  "prototype": "01-原型与目录/modelgate-desktop-v13.1.html",
+  "productReference": "01-原型与目录/modelgate-desktop-v13.html",
+  "evidence": {
+    "type": "prior offline Chromium HTML injection, records verified not rerun",
+    "layout": 266,
+    "dialogs": 72,
+    "interactions": 5,
+    "documentOverflow": 0,
+    "dialogsOutOfView": 0,
+    "errors": 0
+  },
+  "catalog": {
+    "templates": 63,
+    "modelExamples": 87,
+    "notLiveAccountCatalog": true
+  },
+  "productionReady": false,
+  "newRemoteWrites": false
+}

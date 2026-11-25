@@ -56,6 +56,14 @@ test('HTTP boundaries, virtual credentials and isolated configuration', { timeou
   }
   assert.ok(ready, 'isolated gateway ready')
   const post = (path, body, headers = {}) => fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) })
+  const write = async (path, body, headers = {}) => {
+    const current = await (await fetch(base + '/api/status', { headers })).json()
+    const requestId = 'boundary-' + Math.random().toString(36).slice(2)
+    const preview = await post('/api/config/write:preview', { ...body, action: path === '/api/keys' ? 'keys.update' : 'config.save', expectedVersion: current.configVersion, requestId }, headers)
+    if (!preview.ok) return preview
+    const plan = await preview.json()
+    return post(path, { ...body, expectedVersion: plan.expectedVersion, requestId: plan.requestId, previewId: plan.previewId, confirmToken: plan.confirmToken }, headers)
+  }
   const chat = { model: 'private', messages: [{ role: 'user', content: 'hello' }] }
   const admin = { authorization: 'Bearer test-admin' }
   assert.equal((await fetch(base + '/api/status')).status, 200, '管理面无令牌，回环直接可读')
@@ -66,7 +74,7 @@ test('HTTP boundaries, virtual credentials and isolated configuration', { timeou
   assert.equal(model.maxTokensMax, 10)
   assert.equal(model.forceNoStream, true)
 
-  assert.equal((await post('/api/keys', { id: '__mg_vm_private', key: 'private-key' }, admin)).status, 200)
+  assert.equal((await write('/api/keys', { id: '__mg_vm_private', key: 'private-key' }, admin)).status, 200)
   for (const headers of [{}, { authorization: 'Bearer wrong-key' }]) {
     const before = hits
     assert.equal((await post('/v1/chat/completions', chat, headers)).status, 401)
@@ -94,11 +102,11 @@ test('HTTP boundaries, virtual credentials and isolated configuration', { timeou
     assert.equal(r.status, 413)
     assert.equal((await r.json()).error.type, 'payload_too_large')
   }
-  assert.equal((await post('/api/config/save', { defaults: { clientKey: 'global-key' } }, admin)).status, 200)
+  assert.equal((await write('/api/config/save', { defaults: { clientKey: 'global-key' } }, admin)).status, 200)
   assert.equal((await post('/v1/chat/completions', { ...chat, model: 'demo' })).status, 401)
   assert.equal((await post('/v1/chat/completions', chat, { authorization: 'Bearer private-key' })).status, 200)
   assert.equal((await post('/v1/chat/completions', chat, { authorization: 'Bearer global-key' })).status, 200)
-  assert.equal((await post('/api/config/save', { models: { demo: { provider: 'mock', qps: 5 } } }, admin)).status, 200)
+  assert.equal((await write('/api/config/save', { models: { demo: { provider: 'mock', qps: 5 } } }, admin)).status, 200)
   const beforeBurst = arrivals.length
   const burst = await Promise.all(Array.from({ length: 10 }, () => post('/v1/chat/completions', { ...chat, model: 'demo' }, { authorization: 'Bearer global-key' })))
   assert.ok(burst.every(r => r.status === 200))

@@ -301,7 +301,7 @@ test('409：三方差异可用、只保留非 same 行，且没有强制覆盖�
 })
 
 // ---------- 5) Key 不回显 / 不持久化 / 不进结果 ----------
-test('Key 安全：请求体只在 /api/keys 出现；结果与 DOM 文本都不回显 Key', async () => {
+test('Key 安全：Key 只在预览/写入请求体出现；结果与 DOM 文本都不回显 Key', async () => {
   const rec = recorder({})
   const result = await connections.runConnectFlow({ post: rec.post, key: FAKE_KEY, configVersion: 0 })
   assert.equal(JSON.stringify(result).includes(FAKE_KEY), false, '编排结果不得包含 Key')
@@ -313,10 +313,11 @@ test('Key 安全：请求体只在 /api/keys 出现；结果与 DOM 文本都不
   const uiPost = async (path, body) => {
     uiCalls.push({ path, body })
     if (path === EP.providers) return { ok: true }
+    if (path === '/api/config/write:preview') return { ok: true, expectedVersion: 0, requestId: body.requestId, previewId: 'prv_ui', confirmToken: 'token_ui', summary: { credentialFingerprint: 'a'.repeat(64) } }
     if (path === '/api/keys') return { ok: true }
     return { ok: true, completeness: 'complete' }
   }
-  const el = renderRoot({ step: 'key', product: () => productFixture(), deps: { post: uiPost } })
+  const el = renderRoot({ step: 'key', product: () => productFixture(), deps: { post: uiPost, confirmKey: async () => true } })
   const passwordInputs = findAll(el, (e) => e.tagName === 'INPUT' && e.getAttribute('type') === 'password')
   assert.equal(passwordInputs.length, 1, '默认只应有一个 Key 密码输入框')
   const input = passwordInputs[0]
@@ -328,9 +329,11 @@ test('Key 安全：请求体只在 /api/keys 出现；结果与 DOM 文本都不
   await submit.listeners.click[0]({})
   assert.equal(input.value, '', '提交后必须立即清空输入框')
   assert.equal(el.textContent.includes(FAKE_KEY), false, 'DOM 文本不得回显 Key')
-  const nonKeyCalls = uiCalls.filter((c) => c.path !== '/api/keys')
-  assert.equal(JSON.stringify(nonKeyCalls).includes(FAKE_KEY), false, '除 /api/keys 外不得出现 Key')
-  assert.equal(JSON.stringify(uiCalls.filter((c) => c.path === '/api/keys')).includes(FAKE_KEY), true, 'Key 只能出现在 /api/keys 请求体')
+  const credentialCalls = uiCalls.filter((c) => c.path === '/api/keys' || c.path === '/api/config/write:preview')
+  const otherCalls = uiCalls.filter((c) => !credentialCalls.includes(c))
+  assert.equal(JSON.stringify(otherCalls).includes(FAKE_KEY), false, '非凭据请求不得出现 Key')
+  assert.equal(credentialCalls.length, 2, '必须先预览再确认写入')
+  assert.equal(JSON.stringify(credentialCalls).includes(FAKE_KEY), true, 'Key 只出现在凭据预览与写入请求体')
   assert.match(el.textContent, /已注册并保存 Key/)
 })
 
@@ -425,7 +428,7 @@ test('product=null：只显示"正在读取真实状态"，不出现"已连接/�
   const text = el.textContent
   // 集成后（A3 状态层 + 状态投影）在没有真实快照时会给出"读取失败/正在读取"这类诚实降级，
   // 而不是恒定的"正在读取"。两者都必须满足：绝不出现成功状态。
-  assert.match(text, /正在读取真实状态|读取失败|出现问题/)
+  assert.match(text, /正在读取(真实)?状态|读取失败|出现问题/)
   assert.doesNotMatch(text, /已连接|已启用/)
 })
 
@@ -523,7 +526,7 @@ test('HTTP 契约：preset 注册返回 201/opencodego/非空 baseUrl，响应�
   assert.equal(Object.prototype.hasOwnProperty.call(createdBody.provider, 'key'), false)
   assert.doesNotMatch(createdText, /sk-|apiKey"/)
 
-  const keyRes = await gw.post('/api/keys', { id: 'opencodego', key: FAKE_KEY }, auth)
+  const keyRes = await gw.write('/api/keys', { id: 'opencodego', key: FAKE_KEY }, auth)
   const keyText = await keyRes.text()
   assert.equal(keyRes.status, 200, keyText)
   assert.equal(keyText.includes(FAKE_KEY), false, 'Key 不得出现在响应里')

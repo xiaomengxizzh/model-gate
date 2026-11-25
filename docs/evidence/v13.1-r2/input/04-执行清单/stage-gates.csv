@@ -1,0 +1,9 @@
+﻿阶段,依赖,交付,退出门槛,状态,实现SHA,证据链接,阻塞/责任人
+A0,无,基线清单/远端与工作区审计/动作 inventory/授权,哈希与范围确认,PASS,48325bf0027e583108c66677c7dec15fd5007228,../../a0-baseline-report.md,真实付费/GUI未授权;不触碰生产
+A1,A0,源码级调研/ADR/API契约/差距矩阵,逐来源证据及架构决策,PASS,48325bf0027e583108c66677c7dec15fd5007228,../../a1-source-research.md,外部为研究快照;真实能力未签收
+A2,A1,共享组件/设计令牌/真实只读/API数据层,真实浏览器与隔离后端；基础 V01–V04,CORE_PASS_REAL_BLOCKED,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,../../a3-a6-implementation-report.md,19页+12弹窗/V02/V04/V05/V06通过;真实场景与人工签收待授权
+A3,A2,服务/模型/账户/目录/授权/资源事务,CRUD+发现+关联保护真实 HTTP,CORE_PASS_REAL_BLOCKED,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,../../a3-a6-implementation-report.md,持久操作/多租户/DNS固定/在途删除保护通过;真实账户待补
+A4,A3,池/调度/预算/恢复/预演,A→B→C、错误/共享额度/取消准确,CORE_PASS_REAL_BLOCKED,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,../../a3-a6-implementation-report.md,U08多连接压力45/45通过;真实套餐待补
+A5,A4,Codex 三模式与池/原生能力,原版 GUI、同子续轮、原生压缩、回滚,CODE_PASS_REAL_BLOCKED,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,../../a3-a6-implementation-report.md,真实GUI/Luna/Go/native compact未授权
+A6,A5（可前置独立研究）,用量/日志/备份/其他 Harness,真实对账与独立适配证据,CORE_PASS_REAL_BLOCKED,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,../../a3-a6-implementation-report.md,持久备份/回执/三Harness通过;真实客户端与xmxz资料待补
+A7,A2–A6,完整真实验收/迁移/发布候选,同 SHA U01–U17 与 V01–V07；人工审批,IN_PROGRESS_BLOCKED,4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834,../../completion-audit.md,V07权威清单/真实场景/人工签收未完成

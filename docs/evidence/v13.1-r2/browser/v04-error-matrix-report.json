@@ -1,0 +1,2416 @@
+{
+  "contract": "mg-v13-v04-error-matrix/1",
+  "command": "node scripts/e2e/ui-v13-error-matrix.mjs",
+  "cwd": ".",
+  "startedAt": "2026-11-25T05:37:22.209Z",
+  "headSha": "48325bf0027e583108c66677c7dec15fd5007228",
+  "worktreeDirty": true,
+  "sourceFingerprint": {
+    "algorithm": "sha256(path+NUL+bytes)",
+    "files": 175,
+    "sha256": "4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834"
+  },
+  "scriptSha256": "5f713ce753d8722ffecdb7c4a7a2445a05c2a9d56ea854df618f70c485745d32",
+  "environment": {
+    "node": "v24.22.2",
+    "platform": "linux",
+    "arch": "x64"
+  },
+  "boundary": "real Chrome + real isolated HTTP gateway + loopback catalog fixture + CDP API fault injection; no production config, port 8787, real upstream, inference, install, or download",
+  "evidenceType": "REAL_BROWSER_FIXTURE",
+  "resourcePreflight": {
+    "action": "reuse-existing-only",
+    "downloads": 0,
+    "installs": 0,
+    "chrome": {
+      "binary": "/usr/bin/google-chrome",
+      "version": "Google Chrome 153.0.8010.36",
+      "state": "existing-reused"
+    }
+  },
+  "isolation": {
+    "gateway": {
+      "host": "127.0.0.1",
+      "port": 34387,
+      "base": "http://127.0.0.1:34387"
+    },
+    "upstream": {
+      "host": "127.0.0.1",
+      "port": 41301,
+      "base": "http://127.0.0.1:41301"
+    },
+    "chromePort": 33091,
+    "configDir": "/tmp/modelgate-v04-error-matrix-E2gQ0M",
+    "home": "/tmp/mg-v04-home-cpOwMW",
+    "codexHome": "/tmp/mg-v04-codex-P06F0N",
+    "harnessRoot": "/tmp/mg-v04-harness-KfWUJo",
+    "productionPortUsed": false
+  },
+  "checks": [
+    {
+      "id": "V04-ISOLATION",
+      "ok": true,
+      "detail": "dynamic loopback ports; production 8787 not used",
+      "expected": "all ports dynamic and non-8787",
+      "actual": {
+        "gateway": 34387,
+        "upstream": 41301,
+        "chrome": 33091
+      }
+    },
+    {
+      "id": "V04-LOADING-INITIAL",
+      "ok": true,
+      "detail": "initial load is explicit and does not show stale success",
+      "expected": "loading without service data",
+      "actual": {
+        "hash": "#/services",
+        "gatewayState": "loading",
+        "gatewayText": "正在连接",
+        "mainText": "正在读取…",
+        "dialogs": [],
+        "activeElement": {
+          "tag": "BODY",
+          "id": "",
+          "text": "跳到主要内容\n  \n    \n      \n        MG\n        ModelGateDESKTOP · V13.1 预览\n      \n      工作台接应用接入服模型服务池模型池量用量分析稳稳定性策略设设置\n      ",
+          "label": "",
+          "inDialog": false
+        },
+        "successToasts": [],
+        "errorToasts": [],
+        "nativeDialogCount": 0
+      }
+    },
+    {
+      "id": "V04-LOADING-REFRESH",
+      "ok": true,
+      "detail": "held capabilities response resolves to ready"
+    },
+    {
+      "id": "V04-LOADING-SLOW-REFRESH",
+      "ok": true,
+      "detail": "slow refresh reports loading rather than fake completion",
+      "expected": "正在连接",
+      "actual": "正在连接"
+    },
+    {
+      "id": "V04-CORE-ERRORS-401",
+      "ok": true,
+      "detail": "HTTP 401 clears stale data and exposes retry",
+      "expected": "V04_AUTH_401：控制面暂不可用，请确认本机访问后重试",
+      "actual": "暂时无法读取\n\nV04_AUTH_401：控制面暂不可用，请确认本机访问后重试\n\n重试"
+    },
+    {
+      "id": "V04-CORE-ERRORS-401-RECOVER",
+      "ok": true,
+      "detail": "HTTP 401 recovers through the rendered retry action"
+    },
+    {
+      "id": "V04-CORE-ERRORS-403",
+      "ok": true,
+      "detail": "HTTP 403 clears stale data and exposes retry",
+      "expected": "V04_ORIGIN_403：只读，来源校验拒绝；请从本机回环访问后重试",
+      "actual": "暂时无法读取\n\nV04_ORIGIN_403：只读，来源校验拒绝；请从本机回环访问后重试\n\n重试"
+    },
+    {
+      "id": "V04-CORE-ERRORS-403-RECOVER",
+      "ok": true,
+      "detail": "HTTP 403 recovers through the rendered retry action"
+    },
+    {
+      "id": "V04-CORE-ERRORS-404",
+      "ok": true,
+      "detail": "HTTP 404 clears stale data and exposes retry",
+      "expected": "V04_LEGACY_404：当前实例不支持该控制面接口",
+      "actual": "暂时无法读取\n\nV04_LEGACY_404：当前实例不支持该控制面接口\n\n重试"
+    },
+    {
+      "id": "V04-CORE-ERRORS-404-RECOVER",
+      "ok": true,
+      "detail": "HTTP 404 recovers through the rendered retry action"
+    },
+    {
+      "id": "V04-CORE-ERRORS-500",
+      "ok": true,
+      "detail": "HTTP 500 clears stale data and exposes retry",
+      "expected": "V04_CORE_500：本地控制面暂时失败，可重试",
+      "actual": "暂时无法读取\n\nV04_CORE_500：本地控制面暂时失败，可重试\n\n重试"
+    },
+    {
+      "id": "V04-CORE-ERRORS-500-RECOVER",
+      "ok": true,
+      "detail": "HTTP 500 recovers through the rendered retry action"
+    },
+    {
+      "id": "V04-CORE-ERRORS-OFFLINE",
+      "ok": true,
+      "detail": "offline is distinct from HTTP error and offers retry",
+      "expected": "网关离线 + retry",
+      "actual": {
+        "hash": "#/services",
+        "gatewayState": "offline",
+        "gatewayText": "网关离线",
+        "mainText": "暂时无法读取\n\n无法连接本地网关，请确认隔离实例正在运行\n\n重试",
+        "dialogs": [],
+        "activeElement": {
+          "tag": "BUTTON",
+          "id": "refresh",
+          "text": "刷新状态",
+          "label": "",
+          "inDialog": false
+        },
+        "successToasts": [],
+        "errorToasts": [],
+        "nativeDialogCount": 0
+      }
+    },
+    {
+      "id": "V04-PARTIAL-STATE",
+      "ok": true,
+      "detail": "one failed partition is not reported as all-ready",
+      "expected": "partial + local error",
+      "actual": {
+        "hash": "#/pools",
+        "gatewayState": "partial",
+        "gatewayText": "部分数据不可用",
+        "mainText": "模型池\n\n组合候选、设置选择与回退，并查看应用引用。\n\n新建模型池\n模型池读取失败V04_POOLS_500：模型池分区暂时不可用\n我的模型池 1\nFixture Pool\n1 个候选 · priority\nFixture Pool\n稳定池 ID\n已启用 · 未推理验收\n编辑\n复制\n删除\n候选模型\n选择与回退\n应用引用 1\n模型 / 服务\t顺序\t权重\t状态\n\nmdl_0123456789abcdeffixture\n\t0\t0\t候选已配置\n无副作用路由预演\n\n调用同一后端解析器，只显示命中结果，不请求上游、不执行工具、不消耗额度。\n\n运行预演\n应用引用双向 Harness 绑定与统一恢复预算仍在后续接线；此页不把旧虚拟模型或规划引用称为已生效。",
+        "dialogs": [],
+        "activeElement": {
+          "tag": "BUTTON",
+          "id": "refresh",
+          "text": "刷新状态",
+          "label": "",
+          "inDialog": false
+        },
+        "successToasts": [],
+        "errorToasts": [],
+        "nativeDialogCount": 0
+      }
+    },
+    {
+      "id": "V04-PARTIAL-GOOD-DATA",
+      "ok": true,
+      "detail": "successful model data remains usable while pools fail"
+    },
+    {
+      "id": "V04-PARTIAL-RETRY",
+      "ok": true,
+      "detail": "refresh retry restores the failed partition and ready status"
+    },
+    {
+      "id": "V04-EMPTY-NO-RESULTS",
+      "ok": true,
+      "detail": "no-results is distinct from error and offers clear-search recovery"
+    },
+    {
+      "id": "V04-EMPTY-STALE-DETAIL",
+      "ok": true,
+      "detail": "stale deep link reports invalidation with a return action",
+      "expected": "invalid detail + return",
+      "actual": "服务详情\n\n服务不存在或已被删除。\n\n返回模型服务"
+    },
+    {
+      "id": "V04-EMPTY-CONNECTIONS",
+      "ok": true,
+      "detail": "empty connection manager has an explicit empty state"
+    },
+    {
+      "id": "V04-EMPTY-MODELS",
+      "ok": true,
+      "detail": "empty model catalog is not reported as success"
+    },
+    {
+      "id": "V04-EMPTY-POOLS",
+      "ok": true,
+      "detail": "empty pool list is explicit"
+    },
+    {
+      "id": "V04-EMPTY-CLIENTS",
+      "ok": true,
+      "detail": "empty client entry list is explicit"
+    },
+    {
+      "id": "V04-EMPTY-USAGE",
+      "ok": true,
+      "detail": "zero usage is not presented as successful inference"
+    },
+    {
+      "id": "V04-EMPTY-BACKUPS",
+      "ok": true,
+      "detail": "empty backup list is explicit"
+    },
+    {
+      "id": "V04-EMPTY-LOGS",
+      "ok": true,
+      "detail": "unqueried logs are distinct from empty results"
+    },
+    {
+      "id": "V04-EMPTY-SERVICES",
+      "ok": true,
+      "detail": "fresh empty install has an explicit service empty state"
+    },
+    {
+      "id": "V04-CANCEL-ESCAPE-FOCUS",
+      "ok": true,
+      "detail": "Escape closes the HTML dialog, restores opener focus, and opens no native dialog",
+      "expected": "添加服务 focused",
+      "actual": {
+        "tag": "BUTTON",
+        "id": "",
+        "text": "添加服务",
+        "label": "",
+        "inDialog": false
+      }
+    },
+    {
+      "id": "V04-CANCEL-BUSY-GUARD",
+      "ok": true,
+      "detail": "Escape cannot abandon an in-flight transaction or leave a native dialog stuck",
+      "expected": "one busy HTML dialog",
+      "actual": {
+        "before": [
+          {
+            "title": "连接模型服务",
+            "busy": true,
+            "error": "",
+            "buttons": [
+              {
+                "text": "×",
+                "disabled": true
+              },
+              {
+                "text": "取消",
+                "disabled": true
+              },
+              {
+                "text": "预览变更",
+                "disabled": true
+              }
+            ]
+          }
+        ],
+        "after": [
+          {
+            "title": "连接模型服务",
+            "busy": true,
+            "error": "",
+            "buttons": [
+              {
+                "text": "×",
+                "disabled": true
+              },
+              {
+                "text": "取消",
+                "disabled": true
+              },
+              {
+                "text": "预览变更",
+                "disabled": true
+              }
+            ]
+          }
+        ],
+        "cancelEvents": [],
+        "closeCalls": []
+      }
+    },
+    {
+      "id": "V04-CANCEL-NO-WRITE",
+      "ok": true,
+      "detail": "cancelling after preview performs no write"
+    },
+    {
+      "id": "V04-CANCEL-DISCOVERY-FOCUS",
+      "ok": true,
+      "detail": "cancelled discovery closes and restores focus without success feedback",
+      "expected": "从连接发现 focused",
+      "actual": {
+        "tag": "BUTTON",
+        "id": "",
+        "text": "从连接发现",
+        "label": "",
+        "inDialog": false
+      }
+    },
+    {
+      "id": "V04-CANCEL-DISCOVERY-LATE",
+      "ok": true,
+      "detail": "late discovery completion does not reopen a cancelled dialog or claim success",
+      "expected": "no dialog / no success",
+      "actual": {
+        "hash": "#/service-models?service=fixture",
+        "gatewayState": "ready",
+        "gatewayText": "控制面已连接",
+        "mainText": "服务模型\n\n模型公共名、稳定 ID 与上游 ID 分离。\n\n服务模型\n模型\t服务\t上游 ID\t能力\t状态\t操作\n\nFixture Modelmdl_0123456789abcdef\n\tsvc_0123456789abcdef\tvendor-model\tchat\t已启用 · 未推理验收\t\n编辑\n停用\n删除\n从连接发现\n添加模型",
+        "dialogs": [],
+        "activeElement": {
+          "tag": "BUTTON",
+          "id": "",
+          "text": "从连接发现",
+          "label": "",
+          "inDialog": false
+        },
+        "successToasts": [],
+        "errorToasts": [],
+        "nativeDialogCount": 0
+      }
+    },
+    {
+      "id": "V04-CANCEL-DISCOVERY-READONLY",
+      "ok": true,
+      "detail": "cancelled UI discovery only performs one read-only catalog GET"
+    },
+    {
+      "id": "V04-DIALOG-RETRY-500",
+      "ok": true,
+      "detail": "500 stays in the dialog, clears busy state, and does not claim success",
+      "expected": "visible retryable error",
+      "actual": {
+        "title": "连接模型服务",
+        "busy": false,
+        "error": "V04_SERVICE_500：服务预览暂时失败，可重试",
+        "buttons": [
+          {
+            "text": "×",
+            "disabled": false
+          },
+          {
+            "text": "取消",
+            "disabled": false
+          },
+          {
+            "text": "预览变更",
+            "disabled": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "V04-DIALOG-RETRY-SUCCESS",
+      "ok": true,
+      "detail": "retry success is backed by a real isolated backend write"
+    },
+    {
+      "id": "V04-DIALOG-RETRY-DELETE",
+      "ok": true,
+      "detail": "successful delete is backed by backend absence"
+    },
+    {
+      "id": "V04-DIALOG-AUTH-401",
+      "ok": true,
+      "detail": "401 gives credential/retry guidance without fake success",
+      "expected": "update credential + retry",
+      "actual": "V04_AUTH_401：认证失败，请更新凭据后重试"
+    },
+    {
+      "id": "V04-DIALOG-AUTH-403",
+      "ok": true,
+      "detail": "403 is reported as read-only/source rejection, not a generic empty result",
+      "expected": "read-only + loopback guidance",
+      "actual": "V04_ORIGIN_403：只读，来源校验拒绝；请从本机回环访问后重试"
+    },
+    {
+      "id": "V04-DIALOG-AUTH-403-NO-WRITE",
+      "ok": true,
+      "detail": "403 writes no binding"
+    },
+    {
+      "id": "V04-DIALOG-AUTH-HARNESS-403",
+      "ok": true,
+      "detail": "Harness 403 remains an actionable dialog error"
+    },
+    {
+      "id": "V04-CONFLICT-409",
+      "ok": true,
+      "detail": "409 explains external modification and does not overwrite or claim success",
+      "expected": "not overwritten + refresh/retry",
+      "actual": "配置已被其他程序修改，未覆盖。请关闭弹窗并刷新后重试。"
+    },
+    {
+      "id": "V04-CONFLICT-409-DATA",
+      "ok": true,
+      "detail": "stale UI write is absent; external writer remains"
+    },
+    {
+      "id": "V04-CONFLICT-409-FOCUS",
+      "ok": true,
+      "detail": "failed async confirmation keeps focus inside the open dialog",
+      "expected": "focus in dialog",
+      "actual": {
+        "tag": "DIV",
+        "id": "",
+        "text": "配置已被其他程序修改，未覆盖。请关闭弹窗并刷新后重试。",
+        "label": "",
+        "inDialog": true
+      }
+    },
+    {
+      "id": "V04-CONFLICT-428-PREVIEW",
+      "ok": true,
+      "detail": "real preview exists before injected expiry"
+    },
+    {
+      "id": "V04-CONFLICT-428",
+      "ok": true,
+      "detail": "428 requires a fresh preview and never reports creation",
+      "expected": "fresh preview required",
+      "actual": "预览已过期或已使用，请关闭弹窗并重新操作。"
+    },
+    {
+      "id": "V04-CONFLICT-428-NO-WRITE",
+      "ok": true,
+      "detail": "428 creates no service"
+    },
+    {
+      "id": "V04-422-SERVICE",
+      "ok": true,
+      "detail": "422 remains visible with reference-specific recovery guidance",
+      "expected": "服务仍被引用",
+      "actual": "服务仍被引用，不能删除。请先处理列出的模型、池或应用引用。"
+    },
+    {
+      "id": "V04-422-SERVICE-DATA",
+      "ok": true,
+      "detail": "referenced service remains"
+    },
+    {
+      "id": "V04-422-MODEL",
+      "ok": true,
+      "detail": "422 remains visible with reference-specific recovery guidance",
+      "expected": "模型仍被",
+      "actual": "模型仍被默认目录、模型池、其他模型或 Codex 引用，请先解绑。"
+    },
+    {
+      "id": "V04-422-MODEL-DATA",
+      "ok": true,
+      "detail": "referenced model remains"
+    },
+    {
+      "id": "V04-422-CONNECTION",
+      "ok": true,
+      "detail": "422 remains visible with reference-specific recovery guidance",
+      "expected": "最后一个启用连接",
+      "actual": "不能停用或删除服务最后一个启用连接。"
+    },
+    {
+      "id": "V04-422-CONNECTION-DATA",
+      "ok": true,
+      "detail": "last enabled connection remains"
+    },
+    {
+      "id": "V04-422-POOL",
+      "ok": true,
+      "detail": "422 remains visible with reference-specific recovery guidance",
+      "expected": "池成员不足或池仍被应用引用",
+      "actual": "池成员不足或池仍被应用引用，不能完成操作。"
+    },
+    {
+      "id": "V04-422-POOL-DATA",
+      "ok": true,
+      "detail": "referenced pool remains"
+    },
+    {
+      "id": "V04-ASYNC-CANCEL-CONTROL",
+      "ok": true,
+      "detail": "slow route preview exposes a cancellation action",
+      "expected": "cancel action while pending",
+      "actual": "模型池\n\n组合候选、设置选择与回退，并查看应用引用。\n\n新建模型池\n我的模型池 1\nFixture Pool\n1 个候选 · priority\nFixture Pool\n稳定池 ID\n已启用 · 未推理验收\n编辑\n复制\n删除\n候选模型\n选择与回退\n应用引用 1\n期望引用引用稳定保存；实际生效取决于对应 Harness 适配器，Codex 请在接入页预览应用。\ncodex · parentdesired-only · desired 1\n编辑\n解除\n添加应用引用\n无副作用路由预演\n\n调用同一后端解析器，只显示命中结果，不请求上游、不执行工具、不消耗额度。\n\n正在预演…\n取消预演\n应用引用双向 Harness 绑定与统一恢复预算仍在后续接线；此页不把旧虚拟模型或规划引用称为已生效。"
+    },
+    {
+      "id": "V04-ASYNC-FOCUS-PRESERVED",
+      "ok": true,
+      "detail": "late async completion does not steal focus from the current search field",
+      "expected": "搜索模型服务 focused",
+      "actual": {
+        "tag": "INPUT",
+        "id": "",
+        "text": "",
+        "label": "搜索模型服务",
+        "inDialog": false
+      }
+    },
+    {
+      "id": "V04-ASYNC-NO-NATIVE-DIALOG",
+      "ok": true,
+      "detail": "slow async completion opens no native dialog"
+    },
+    {
+      "id": "V04-ASYNC-RETRY-ROUTE-500",
+      "ok": true,
+      "detail": "route preview 500 is explicit and not fake success"
+    },
+    {
+      "id": "V04-ASYNC-RETRY-ROUTE-SUCCESS",
+      "ok": true,
+      "detail": "successful retry states zero upstream calls"
+    },
+    {
+      "id": "V04-ASYNC-RETRY-DISCOVERY-500",
+      "ok": true,
+      "detail": "discovery failure stays in its dialog"
+    },
+    {
+      "id": "V04-ASYNC-RETRY-DISCOVERY-SUCCESS",
+      "ok": true,
+      "detail": "discovery retry performs only a catalog GET"
+    },
+    {
+      "id": "V04-ASYNC-RETRY-LOGS-500",
+      "ok": true,
+      "detail": "log query failure is visible"
+    },
+    {
+      "id": "V04-ASYNC-RETRY-LOGS-SUCCESS",
+      "ok": true,
+      "detail": "log query retry returns a real table without inference"
+    },
+    {
+      "id": "V04-ASYNC-RETRY-POLICY-500",
+      "ok": true,
+      "detail": "policy 500 stays local and retryable"
+    },
+    {
+      "id": "V04-ASYNC-RETRY-POLICY-SUCCESS",
+      "ok": true,
+      "detail": "policy retry reaches a real confirmation preview"
+    },
+    {
+      "id": "V04-ASYNC-RETRY-BACKUP-500",
+      "ok": true,
+      "detail": "backup 500 is an error toast, not success"
+    },
+    {
+      "id": "V04-ASYNC-RETRY-BACKUP-500-NO-WRITE",
+      "ok": true,
+      "detail": "failed backup creates no artifact"
+    },
+    {
+      "id": "V04-ASYNC-RETRY-BACKUP-SUCCESS",
+      "ok": true,
+      "detail": "backup retry success is backed by a real sanitized artifact"
+    },
+    {
+      "id": "V04-INFERENCE-ZERO",
+      "ok": true,
+      "detail": "zero browser inference endpoints and zero upstream writes",
+      "expected": "0 inference requests / 0 upstream writes",
+      "actual": {
+        "inferenceRequests": 0,
+        "upstreamWrites": 0,
+        "upstreamMethods": {
+          "GET": 2
+        }
+      }
+    },
+    {
+      "id": "V04-JS-ERRORS-ZERO",
+      "ok": true,
+      "detail": "no uncaught JS exceptions or console errors",
+      "expected": 0,
+      "actual": []
+    },
+    {
+      "id": "V04-CDP-ERRORS-ZERO",
+      "ok": true,
+      "detail": "no CDP interception errors",
+      "expected": 0,
+      "actual": []
+    },
+    {
+      "id": "V04-NATIVE-DIALOGS-ZERO",
+      "ok": true,
+      "detail": "no native confirm/alert/prompt dialog opened or remained stuck",
+      "expected": 0,
+      "actual": []
+    },
+    {
+      "id": "V04-EXPECTED-NETWORK-ERRORS",
+      "ok": true,
+      "detail": "fault-injected HTTP/offline failures reached the browser network layer",
+      "expected": "> 0 expected network errors",
+      "actual": 21
+    }
+  ],
+  "cases": [
+    {
+      "id": "V04-LOADING",
+      "title": "initial and refresh loading states",
+      "status": "PASS",
+      "startedAt": "2026-11-25T05:37:23.052Z",
+      "checks": [
+        "V04-LOADING-INITIAL",
+        "V04-LOADING-REFRESH",
+        "V04-LOADING-SLOW-REFRESH"
+      ],
+      "finishedAt": "2026-11-25T05:37:23.385Z"
+    },
+    {
+      "id": "V04-CORE-ERRORS",
+      "title": "401/403/404/500/offline with actionable retry",
+      "status": "PASS",
+      "startedAt": "2026-11-25T05:37:23.385Z",
+      "checks": [
+        "V04-CORE-ERRORS-401",
+        "V04-CORE-ERRORS-401-RECOVER",
+        "V04-CORE-ERRORS-403",
+        "V04-CORE-ERRORS-403-RECOVER",
+        "V04-CORE-ERRORS-404",
+        "V04-CORE-ERRORS-404-RECOVER",
+        "V04-CORE-ERRORS-500",
+        "V04-CORE-ERRORS-500-RECOVER",
+        "V04-CORE-ERRORS-OFFLINE"
+      ],
+      "finishedAt": "2026-11-25T05:37:24.370Z"
+    },
+    {
+      "id": "V04-PARTIAL",
+      "title": "partial success keeps good data and exposes the failed partition",
+      "status": "PASS",
+      "startedAt": "2026-11-25T05:37:24.370Z",
+      "checks": [
+        "V04-PARTIAL-STATE",
+        "V04-PARTIAL-GOOD-DATA",
+        "V04-PARTIAL-RETRY"
+      ],
+      "finishedAt": "2026-11-25T05:37:24.891Z"
+    },
+    {
+      "id": "V04-EMPTY",
+      "title": "empty resources, no results, and stale detail",
+      "status": "PASS",
+      "startedAt": "2026-11-25T05:37:24.891Z",
+      "checks": [
+        "V04-EMPTY-NO-RESULTS",
+        "V04-EMPTY-STALE-DETAIL",
+        "V04-EMPTY-CONNECTIONS",
+        "V04-EMPTY-MODELS",
+        "V04-EMPTY-POOLS",
+        "V04-EMPTY-CLIENTS",
+        "V04-EMPTY-USAGE",
+        "V04-EMPTY-BACKUPS",
+        "V04-EMPTY-LOGS",
+        "V04-EMPTY-SERVICES"
+      ],
+      "finishedAt": "2026-11-25T05:37:26.356Z"
+    },
+    {
+      "id": "V04-CANCEL",
+      "title": "dialog cancellation, busy guard, and async discovery cancellation",
+      "status": "PASS",
+      "startedAt": "2026-11-25T05:37:26.356Z",
+      "checks": [
+        "V04-CANCEL-ESCAPE-FOCUS",
+        "V04-CANCEL-BUSY-GUARD",
+        "V04-CANCEL-NO-WRITE",
+        "V04-CANCEL-DISCOVERY-FOCUS",
+        "V04-CANCEL-DISCOVERY-LATE",
+        "V04-CANCEL-DISCOVERY-READONLY"
+      ],
+      "finishedAt": "2026-11-25T05:37:27.121Z"
+    },
+    {
+      "id": "V04-DIALOG-RETRY",
+      "title": "500 preview retry, real service success, and delete round trip",
+      "status": "PASS",
+      "startedAt": "2026-11-25T05:37:27.121Z",
+      "checks": [
+        "V04-DIALOG-RETRY-500",
+        "V04-DIALOG-RETRY-SUCCESS",
+        "V04-DIALOG-RETRY-DELETE"
+      ],
+      "finishedAt": "2026-11-25T05:37:27.820Z"
+    },
+    {
+      "id": "V04-DIALOG-AUTH",
+      "title": "401/403 write failures remain local and actionable",
+      "status": "PASS",
+      "startedAt": "2026-11-25T05:37:27.820Z",
+      "checks": [
+        "V04-DIALOG-AUTH-401",
+        "V04-DIALOG-AUTH-403",
+        "V04-DIALOG-AUTH-403-NO-WRITE",
+        "V04-DIALOG-AUTH-HARNESS-403"
+      ],
+      "finishedAt": "2026-11-25T05:37:28.660Z"
+    },
+    {
+      "id": "V04-CONFLICT",
+      "title": "409 external writer and 428 stale preview preserve data",
+      "status": "PASS",
+      "startedAt": "2026-11-25T05:37:28.660Z",
+      "checks": [
+        "V04-CONFLICT-409",
+        "V04-CONFLICT-409-DATA",
+        "V04-CONFLICT-409-FOCUS",
+        "V04-CONFLICT-428-PREVIEW",
+        "V04-CONFLICT-428",
+        "V04-CONFLICT-428-NO-WRITE"
+      ],
+      "finishedAt": "2026-11-25T05:37:29.781Z"
+    },
+    {
+      "id": "V04-422",
+      "title": "referenced resource deletion is blocked across service/model/connection/pool dialogs",
+      "status": "PASS",
+      "startedAt": "2026-11-25T05:37:29.781Z",
+      "checks": [
+        "V04-422-SERVICE",
+        "V04-422-SERVICE-DATA",
+        "V04-422-MODEL",
+        "V04-422-MODEL-DATA",
+        "V04-422-CONNECTION",
+        "V04-422-CONNECTION-DATA",
+        "V04-422-POOL",
+        "V04-422-POOL-DATA"
+      ],
+      "finishedAt": "2026-11-25T05:37:30.865Z"
+    },
+    {
+      "id": "V04-ASYNC",
+      "title": "slow route preview cancellation and focus preservation",
+      "status": "PASS",
+      "startedAt": "2026-11-25T05:37:30.865Z",
+      "checks": [
+        "V04-ASYNC-CANCEL-CONTROL",
+        "V04-ASYNC-FOCUS-PRESERVED",
+        "V04-ASYNC-NO-NATIVE-DIALOG"
+      ],
+      "finishedAt": "2026-11-25T05:37:31.306Z"
+    },
+    {
+      "id": "V04-ASYNC-RETRY",
+      "title": "route preview, discovery, logs, policy, and backup retries",
+      "status": "PASS",
+      "startedAt": "2026-11-25T05:37:31.306Z",
+      "checks": [
+        "V04-ASYNC-RETRY-ROUTE-500",
+        "V04-ASYNC-RETRY-ROUTE-SUCCESS",
+        "V04-ASYNC-RETRY-DISCOVERY-500",
+        "V04-ASYNC-RETRY-DISCOVERY-SUCCESS",
+        "V04-ASYNC-RETRY-LOGS-500",
+        "V04-ASYNC-RETRY-LOGS-SUCCESS",
+        "V04-ASYNC-RETRY-POLICY-500",
+        "V04-ASYNC-RETRY-POLICY-SUCCESS",
+        "V04-ASYNC-RETRY-BACKUP-500",
+        "V04-ASYNC-RETRY-BACKUP-500-NO-WRITE",
+        "V04-ASYNC-RETRY-BACKUP-SUCCESS"
+      ],
+      "finishedAt": "2026-11-25T05:37:32.954Z"
+    }
+  ],
+  "failures": [],
+  "requests": [
+    {
+      "serial": 1,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/api.js"
+    },
+    {
+      "serial": 2,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/drafts.js"
+    },
+    {
+      "serial": 3,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/mode.js"
+    },
+    {
+      "serial": 4,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/harnesses.js"
+    },
+    {
+      "serial": 5,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/components/modal.js"
+    },
+    {
+      "serial": 6,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/models.js"
+    },
+    {
+      "serial": 7,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/connections.js"
+    },
+    {
+      "serial": 9,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 10,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 11,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 12,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 13,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 14,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 15,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 16,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 17,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 19,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 20,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 21,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 22,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 23,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 24,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 25,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 27,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 28,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 29,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 30,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 31,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 32,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 33,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 34,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 36,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 37,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 38,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 39,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 40,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 41,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 42,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 43,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 45,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 46,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 47,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 48,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 49,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 50,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 51,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 52,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 54,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 55,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 56,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 57,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 58,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 59,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 60,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 61,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 63,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 64,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 65,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 66,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 67,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 68,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 69,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 70,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 71,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 72,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 73,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 74,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 75,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 76,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 77,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 79,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 80,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 81,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 82,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 83,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 84,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 85,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 86,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 87,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 88,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 89,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 90,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/"
+    },
+    {
+      "serial": 91,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/styles.css"
+    },
+    {
+      "serial": 92,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/app.js"
+    },
+    {
+      "serial": 93,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/store.js"
+    },
+    {
+      "serial": 94,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/router.js"
+    },
+    {
+      "serial": 95,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/preferences.js"
+    },
+    {
+      "serial": 96,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/components/index.js"
+    },
+    {
+      "serial": 97,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/harness.js"
+    },
+    {
+      "serial": 98,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/services.js"
+    },
+    {
+      "serial": 99,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/pools.js"
+    },
+    {
+      "serial": 100,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/usage.js"
+    },
+    {
+      "serial": 101,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/reliability.js"
+    },
+    {
+      "serial": 102,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/settings.js"
+    },
+    {
+      "serial": 103,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/secondary-pages.js"
+    },
+    {
+      "serial": 104,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/mode.js"
+    },
+    {
+      "serial": 105,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/harnesses.js"
+    },
+    {
+      "serial": 106,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/api.js"
+    },
+    {
+      "serial": 107,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/drafts.js"
+    },
+    {
+      "serial": 108,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/components/modal.js"
+    },
+    {
+      "serial": 109,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/models.js"
+    },
+    {
+      "serial": 110,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/connections.js"
+    },
+    {
+      "serial": 112,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 114,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 115,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 116,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 117,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 118,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 119,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 120,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 125,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 126,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 127,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 128,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 129,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 130,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/config/backups"
+    },
+    {
+      "serial": 132,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 133,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 134,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 135,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 137,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 138,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 139,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 140,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 141,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 142,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 143,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/"
+    },
+    {
+      "serial": 144,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/styles.css"
+    },
+    {
+      "serial": 145,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/app.js"
+    },
+    {
+      "serial": 146,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/store.js"
+    },
+    {
+      "serial": 147,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/router.js"
+    },
+    {
+      "serial": 148,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/preferences.js"
+    },
+    {
+      "serial": 149,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/components/index.js"
+    },
+    {
+      "serial": 150,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/harness.js"
+    },
+    {
+      "serial": 151,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/services.js"
+    },
+    {
+      "serial": 152,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/pools.js"
+    },
+    {
+      "serial": 153,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/usage.js"
+    },
+    {
+      "serial": 154,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/reliability.js"
+    },
+    {
+      "serial": 155,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/settings.js"
+    },
+    {
+      "serial": 156,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/secondary-pages.js"
+    },
+    {
+      "serial": 157,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/mode.js"
+    },
+    {
+      "serial": 158,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/harnesses.js"
+    },
+    {
+      "serial": 159,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/api.js"
+    },
+    {
+      "serial": 160,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/drafts.js"
+    },
+    {
+      "serial": 161,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/components/modal.js"
+    },
+    {
+      "serial": 162,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/models.js"
+    },
+    {
+      "serial": 163,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/ui-vnext/js/pages/connections.js"
+    },
+    {
+      "serial": 164,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 165,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 166,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 167,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 168,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 169,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 170,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 171,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 172,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 174,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 175,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/connections/fixture/conn_0123456789abcdef/discover"
+    },
+    {
+      "serial": 176,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 177,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 179,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 180,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/services"
+    },
+    {
+      "serial": 181,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 182,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 183,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 184,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 185,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 186,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 187,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 188,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 189,
+      "method": "DELETE",
+      "url": "http://127.0.0.1:34387/api/services/svc_5R9pCx_mjsplkFDK"
+    },
+    {
+      "serial": 190,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 191,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 192,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 193,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 194,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 195,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 196,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 197,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 198,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 201,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 203,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harnesses"
+    },
+    {
+      "serial": 204,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 205,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/harnesses/preview"
+    },
+    {
+      "serial": 207,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 208,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 209,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/services"
+    },
+    {
+      "serial": 210,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 211,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 212,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 213,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 214,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 215,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 216,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 217,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 218,
+      "method": "DELETE",
+      "url": "http://127.0.0.1:34387/api/services/svc_J1-d-FLz_1VOJ-Qv"
+    },
+    {
+      "serial": 219,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "serial": 220,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/aggregation/health"
+    },
+    {
+      "serial": 221,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/model-stats?days=7"
+    },
+    {
+      "serial": 222,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/usage/summary?days=7"
+    },
+    {
+      "serial": 223,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/models"
+    },
+    {
+      "serial": 224,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "serial": 225,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/harness-bindings"
+    },
+    {
+      "serial": 226,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 227,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/services"
+    },
+    {
+      "serial": 229,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 230,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 231,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 232,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 233,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 234,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 235,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 236,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/route-preview"
+    },
+    {
+      "serial": 238,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 239,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 240,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/route-preview"
+    },
+    {
+      "serial": 242,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/route-preview"
+    },
+    {
+      "serial": 243,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 244,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/connections/fixture/conn_0123456789abcdef/discover"
+    },
+    {
+      "serial": 246,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/connections/fixture/conn_0123456789abcdef/discover"
+    },
+    {
+      "serial": 247,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 248,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/logs/structured?limit=100&q="
+    },
+    {
+      "serial": 250,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/logs/structured?limit=100&q="
+    },
+    {
+      "serial": 251,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/policies/effective"
+    },
+    {
+      "serial": 252,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 253,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 255,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "serial": 256,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/config/backups"
+    },
+    {
+      "serial": 257,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/favicon.ico"
+    },
+    {
+      "serial": 258,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/backups"
+    },
+    {
+      "serial": 260,
+      "method": "POST",
+      "url": "http://127.0.0.1:34387/api/config/backups"
+    },
+    {
+      "serial": 261,
+      "method": "GET",
+      "url": "http://127.0.0.1:34387/api/config/backups"
+    }
+  ],
+  "httpErrors": [
+    {
+      "status": 401,
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "status": 403,
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "status": 404,
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "status": 500,
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "status": 500,
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "status": 500,
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "status": 401,
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "status": 403,
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "status": 403,
+      "url": "http://127.0.0.1:34387/api/harnesses/preview"
+    },
+    {
+      "status": 409,
+      "url": "http://127.0.0.1:34387/api/services"
+    },
+    {
+      "status": 428,
+      "url": "http://127.0.0.1:34387/api/services"
+    },
+    {
+      "status": 422,
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "status": 422,
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "status": 422,
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "status": 422,
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "status": 500,
+      "url": "http://127.0.0.1:34387/api/route-preview"
+    },
+    {
+      "status": 500,
+      "url": "http://127.0.0.1:34387/api/connections/fixture/conn_0123456789abcdef/discover"
+    },
+    {
+      "status": 500,
+      "url": "http://127.0.0.1:34387/api/logs/structured?limit=100&q="
+    },
+    {
+      "status": 500,
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "status": 500,
+      "url": "http://127.0.0.1:34387/api/config/backups"
+    }
+  ],
+  "networkErrors": [
+    {
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "text": "Failed to load resource: net::ERR_INTERNET_DISCONNECTED",
+      "url": "http://127.0.0.1:34387/api/capabilities"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      "url": "http://127.0.0.1:34387/api/pools"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+      "url": "http://127.0.0.1:34387/api/harnesses/preview"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 409 (Conflict)",
+      "url": "http://127.0.0.1:34387/api/services"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 428 (Precondition Required)",
+      "url": "http://127.0.0.1:34387/api/services"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 422 (Unprocessable Entity)",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 422 (Unprocessable Entity)",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 422 (Unprocessable Entity)",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 422 (Unprocessable Entity)",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      "url": "http://127.0.0.1:34387/api/route-preview"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      "url": "http://127.0.0.1:34387/api/connections/fixture/conn_0123456789abcdef/discover"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      "url": "http://127.0.0.1:34387/api/logs/structured?limit=100&q="
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      "url": "http://127.0.0.1:34387/api/config/preview"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      "url": "http://127.0.0.1:34387/api/config/backups"
+    }
+  ],
+  "jsErrors": [],
+  "cdpErrors": [],
+  "nativeDialogs": [],
+  "heldRequests": [
+    {
+      "serial": 8,
+      "method": "GET",
+      "path": "/api/capabilities",
+      "action": "held",
+      "status": null
+    },
+    {
+      "serial": 18,
+      "method": "GET",
+      "path": "/api/capabilities",
+      "action": "held",
+      "status": null
+    },
+    {
+      "serial": 26,
+      "method": "GET",
+      "path": "/api/capabilities",
+      "action": "fulfilled",
+      "status": 401
+    },
+    {
+      "serial": 35,
+      "method": "GET",
+      "path": "/api/capabilities",
+      "action": "fulfilled",
+      "status": 403
+    },
+    {
+      "serial": 44,
+      "method": "GET",
+      "path": "/api/capabilities",
+      "action": "fulfilled",
+      "status": 404
+    },
+    {
+      "serial": 53,
+      "method": "GET",
+      "path": "/api/capabilities",
+      "action": "fulfilled",
+      "status": 500
+    },
+    {
+      "serial": 62,
+      "method": "GET",
+      "path": "/api/capabilities",
+      "action": "aborted",
+      "status": null
+    },
+    {
+      "serial": 78,
+      "method": "GET",
+      "path": "/api/pools",
+      "action": "fulfilled",
+      "status": 500
+    },
+    {
+      "serial": 111,
+      "method": "GET",
+      "path": "/api/capabilities",
+      "action": "fulfilled",
+      "status": null
+    },
+    {
+      "serial": 113,
+      "method": "GET",
+      "path": "/api/model-stats",
+      "action": "fulfilled",
+      "status": null
+    },
+    {
+      "serial": 121,
+      "method": "GET",
+      "path": "/api/usage/summary",
+      "action": "fulfilled",
+      "status": null
+    },
+    {
+      "serial": 122,
+      "method": "GET",
+      "path": "/api/models",
+      "action": "fulfilled",
+      "status": null
+    },
+    {
+      "serial": 123,
+      "method": "GET",
+      "path": "/api/pools",
+      "action": "fulfilled",
+      "status": null
+    },
+    {
+      "serial": 124,
+      "method": "GET",
+      "path": "/api/harness-bindings",
+      "action": "fulfilled",
+      "status": null
+    },
+    {
+      "serial": 131,
+      "method": "GET",
+      "path": "/api/config/backups",
+      "action": "fulfilled",
+      "status": null
+    },
+    {
+      "serial": 136,
+      "method": "GET",
+      "path": "/api/capabilities",
+      "action": "fulfilled",
+      "status": null
+    },
+    {
+      "serial": 173,
+      "method": "POST",
+      "path": "/api/config/preview",
+      "action": "held",
+      "status": null
+    },
+    {
+      "serial": 178,
+      "method": "POST",
+      "path": "/api/config/preview",
+      "action": "fulfilled",
+      "status": 500
+    },
+    {
+      "serial": 199,
+      "method": "POST",
+      "path": "/api/config/preview",
+      "action": "fulfilled",
+      "status": 401
+    },
+    {
+      "serial": 202,
+      "method": "POST",
+      "path": "/api/config/preview",
+      "action": "fulfilled",
+      "status": 403
+    },
+    {
+      "serial": 206,
+      "method": "POST",
+      "path": "/api/harnesses/preview",
+      "action": "fulfilled",
+      "status": 403
+    },
+    {
+      "serial": 228,
+      "method": "POST",
+      "path": "/api/services",
+      "action": "fulfilled",
+      "status": 428
+    },
+    {
+      "serial": 237,
+      "method": "POST",
+      "path": "/api/route-preview",
+      "action": "held",
+      "status": null
+    },
+    {
+      "serial": 241,
+      "method": "POST",
+      "path": "/api/route-preview",
+      "action": "fulfilled",
+      "status": 500
+    },
+    {
+      "serial": 245,
+      "method": "POST",
+      "path": "/api/connections/fixture/conn_0123456789abcdef/discover",
+      "action": "fulfilled",
+      "status": 500
+    },
+    {
+      "serial": 249,
+      "method": "GET",
+      "path": "/api/logs/structured",
+      "action": "fulfilled",
+      "status": 500
+    },
+    {
+      "serial": 254,
+      "method": "POST",
+      "path": "/api/config/preview",
+      "action": "fulfilled",
+      "status": 500
+    },
+    {
+      "serial": 259,
+      "method": "POST",
+      "path": "/api/config/backups",
+      "action": "fulfilled",
+      "status": 500
+    }
+  ],
+  "fixture": {
+    "services": 1,
+    "models": 1,
+    "pools": 1,
+    "bindings": 1,
+    "backups": 1,
+    "upstreamHits": 2,
+    "upstreamMethods": {
+      "GET": 2
+    }
+  },
+  "coverage": {
+    "loading": true,
+    "empty": true,
+    "noResults": true,
+    "stale": true,
+    "error": true,
+    "partialSuccess": true,
+    "cancellation": true,
+    "retry": true,
+    "conflict409": true,
+    "conflict428": true,
+    "conflict422": true,
+    "auth401": true,
+    "forbidden403": true,
+    "offline": true,
+    "http500": true,
+    "slowRequest": true,
+    "focusPreserved": true,
+    "realPagesAndDialogs": true,
+    "resourceDialogs": [
+      "service",
+      "model",
+      "connection",
+      "pool",
+      "binding",
+      "policy",
+      "harness",
+      "backup",
+      "logs",
+      "route-preview",
+      "discovery"
+    ]
+  },
+  "limitations": [
+    "401/403 and selected 5xx/428 states are deliberate CDP fixtures because the current loopback control plane has no administrator-token gate; they are not real account-auth evidence.",
+    "Offline is injected at the isolated browser network boundary; the real gateway process remains available for retry.",
+    "No real vendor, Codex Desktop, paid model, production HOME/config, or inference request is used."
+  ],
+  "chrome": {
+    "browser": "Chrome/153.0.8010.36",
+    "protocol": "1.3",
+    "debuggingPort": 33091
+  },
+  "summary": {
+    "cases": 11,
+    "checks": 72,
+    "passed": 72,
+    "failed": 0,
+    "jsErrors": 0,
+    "nativeDialogs": 0,
+    "inferenceRequests": 0,
+    "upstreamWrites": 0
+  },
+  "productFindings": [],
+  "result": "PASS_FIXTURE",
+  "cleanup": {
+    "browser": "process-group-stopped",
+    "gateway": "stopped",
+    "upstream": "stopped",
+    "tempDirs": "removed"
+  },
+  "finishedAt": "2026-11-25T05:37:32.994Z",
+  "sourceFingerprintAfter": {
+    "algorithm": "sha256(path+NUL+bytes)",
+    "files": 175,
+    "sha256": "4ab8600e166a1957eca890b6a21ebb39e7347b1558b88f26214a5a4488012834"
+  }
+}

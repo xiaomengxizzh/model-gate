@@ -50,7 +50,7 @@ test('UI contract: /api/config is editable, lossless and versioned', { timeout: 
   cfg.virtualModels[0].expiresAt = '2026-12-31'
   cfg.virtualModels[0].note = 'ui-contract'
   cfg.models.demo.alias = ['demo-alias', 'demo-2']
-  const save = await gw.post('/api/config/save', {
+  const save = await gw.write('/api/config/save', {
     version: cfg.configVersion,
     providers: cfg.providers,
     models: cfg.models,
@@ -70,7 +70,7 @@ test('UI contract: /api/config is editable, lossless and versioned', { timeout: 
   assert.equal(second.defaults.affinityTtlMs, 4321)
 
   // Stale version must 409 and must not write.
-  const stale = await gw.post('/api/config/save', { version: cfg.configVersion, defaults: { proxyMode: 'auto' } }, AUTH)
+  const stale = await gw.write('/api/config/save', { version: cfg.configVersion, defaults: { proxyMode: 'auto' } }, AUTH)
   assert.equal(stale.status, 409)
   const conflict = await stale.json()
   assert.equal(conflict.currentVersion, second.configVersion)
@@ -83,7 +83,7 @@ test('UI contract: secrets never echoed and keys are versioned separately', { ti
   const gw = await startGateway({ name: 'ui-secrets', env: { MG_ADMIN_TOKEN: TOKEN }, config: seedConfig() })
   t.after(() => gw.stop())
   const before = await (await gw.get('/api/config', AUTH)).json()
-  const keySave = await gw.post('/api/keys', { id: 'mock', key: 'sk-ui-contract-secret-9000', version: before.configVersion }, AUTH)
+  const keySave = await gw.write('/api/keys', { id: 'mock', key: 'sk-ui-contract-secret-9000', version: before.configVersion }, AUTH)
   assert.equal(keySave.status, 200)
   const after = await (await gw.get('/api/config', AUTH)).json()
   assert.ok(after.configVersion > before.configVersion, 'key save advances configVersion')
@@ -99,7 +99,7 @@ test('UI contract: secrets never echoed and keys are versioned separately', { ti
   // clientKey is write-only: masked on read, not stored in plaintext in the projection.
   const cfg = await (await gw.get('/api/config', AUTH)).json()
   cfg.defaults.clientKey = 'client-secret-value-42'
-  const saved = await gw.post('/api/config/save', { version: cfg.configVersion, defaults: cfg.defaults }, AUTH)
+  const saved = await gw.write('/api/config/save', { version: cfg.configVersion, defaults: cfg.defaults }, AUTH)
   assert.equal(saved.status, 200)
   const reread = await (await gw.get('/api/config', AUTH)).json()
   assert.equal(reread.defaults.clientKey, '********', 'clientKey masked on read')

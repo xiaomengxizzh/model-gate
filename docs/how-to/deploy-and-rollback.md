@@ -2,12 +2,12 @@
 
 本页只写操作步骤与判据。运行排错见[运维指南](operations.md)，字段含义见[配置参考](../reference/configuration.md)，版本与平台边界见[兼容矩阵](../reference/compatibility.md)。
 
-前提：Node.js >= 18（`package.json` 的 `engines`）。仓库**运行时零第三方依赖**（没有 `dependencies` / `devDependencies`），所以安装与升级都**不需要也不应该**跑 `npm install` / `npm ci`。任何新增依赖动作先按[资源门禁](../../RESOURCE_APPROVAL.md)盘点并取得用户授权。
+前提：Node.js >= 24（`package.json` 的 `engines`）。仓库**运行时零第三方依赖**（没有 `dependencies` / `devDependencies`），所以安装与升级都**不需要也不应该**跑 `npm install` / `npm ci`。任何新增依赖动作先按[资源门禁](../../RESOURCE_APPROVAL.md)盘点并取得用户授权。
 
 ## 安装
 
 ```bash
-node --version                 # 必须 >= 18
+node --version                 # 必须 >= 24
 git clone <仓库地址> /opt/model-gateway
 cd /opt/model-gateway
 npm run check                  # 语法自检，不起服务
@@ -50,6 +50,8 @@ MG_CONFIG_DIR="$MG_DEMO_DIR" MG_CONFIG="$MG_DEMO_DIR/gateway.json" node src/inde
 另开终端 `curl --fail http://127.0.0.1:8792/healthz` 应返回 `ok`，`/v1/models` 返回空列表。Ctrl+C 结束自己启动的进程。
 
 投入生产时只需设置 `MG_CLIENT_KEY`（数据面）；管理令牌已删除，不再需要 `MG_ADMIN_TOKEN`（2026-11-18 所有者授权安全降级，管理面仅回环 + Host/Origin 保护）。再用你的服务管理器启动。**源码就位不等于生产已部署**：必须重启实际运行该源码的进程，JavaScript 才生效（管理的面板 HTML 是逐请求读盘，属例外）。生产端口 8787、systemd 单元与真实上游账号都是本机部署事实，不由仓库状态证明。
+
+根 `/` 302 到 `/ui-vnext/`；`/ui-next/` 仅保留为回滚入口。切换根入口必须修改源码并重启实际服务，不能靠 systemd 环境变量。
 
 ## 升级
 

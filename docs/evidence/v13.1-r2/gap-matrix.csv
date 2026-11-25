@@ -1,0 +1,19 @@
+﻿ID,阶段,功能,当前源码状态,差距/风险,复用路径,目标契约,验收,状态
+G01,A0,输入基线,74文件哈希通过;V13.1字符数描述偏差,R2元数据把V13字符数写成V13.1,input/manifest与SHA256SUMS,固定SHA与真实/模拟边界,A0报告,PASS
+G02,A2,统一启动投影,capabilities与19页面预览已实现,旧status/config敏感字段已收敛;完整section stale仍可改进,src/index.js buildStatus,GET /api/capabilities,隔离HTTP+真实浏览器,V01/V03/V04,CORE_PASS_REAL_BLOCKED
+G03,A2,六项导航与共享组件,ui-vnext模块化shell/Modal/store/router,旧status/config敏感字段已收敛;完整section stale仍可改进,新src/ui-vnext,mg-ui-vnext/1,真实origin导航/刷新/离线,U02/V03/V06,PASS_FIXTURE
+G04,A3,服务生命周期,稳定serviceId+持久预览确认CRUD/启停+在途删除保护已实现,真实账户未验,现有事务+providers+in-flight,DNS固定与Service资源命令,同模板两实例CRUD/冲突,U03/U04,CORE_PASS_REAL_BLOCKED
+G05,A3,账户与认证,独立connectionId/Key/并发/冷却/额度域与加密Key授权流已实现,真实额度未验;OAuth不在当前Key授权契约,resolveKey+keys+aggregation discovery,Connection与ConnectionModel,U03/U07,PASS_FIXTURE
+G06,A3,模板与发现,63版本化模板+连接目录发现已实现,模板非实时账户目录;通用协议发现有限,registry/discovery/catalog,ProviderTemplate版本/证据/差异同步,U01/U03,CORE_PASS_REAL_BLOCKED
+G07,A3,模型生命周期,稳定modelId/启停/引用保护/legacy迁移与服务内定位已实现,真实账户目录未验,现有models/router,Model(modelId,serviceId,upstreamModelId),删除/失效/重加历史,U03/U04,PASS_FIXTURE
+G08,A4,命名多池,poolId/slug/成员权重轮询/扩展保留已实现,真实候选校准待补;大规模fixture已通过,virtualModels+router+forward,Pool/PoolMember稳定slug与revision,U05/U06/V05,PASS_FIXTURE
+G09,A4,双向应用引用,HarnessBinding desired资源+Codex角色目标已实现,通用Harness实际应用依赖各自adapter,aggregation switch+profiles,HarnessBinding roleTargets,U05/U10,CORE_PASS_REAL_BLOCKED
+G10,A4,统一预算,RequestLedger接入真实发送/重试/回退/恢复/等待,真实流量校准未完成;持久回执与U08压力已实现,budget+retry-policy+decision+ledger,单请求ledger与故障阶段预算,U06/U07/U08/U09,CORE_PASS_REAL_BLOCKED
+G11,A4,纯路由预演,role/capability/scenario/budget同核预演已实现,真实执行与账户权限仍需真实验收,router.resolve/decision/RequestLedger,POST /api/route-preview扩展,零上游且与执行同核,U06,PASS_FIXTURE
+G12,A5,Codex三模式,角色model/pool目标/consent/state已实现,真实生效/重启未验,desktop-integration+aggregation api,官方直连/纯路由/聚合,U10/U11,CODE_PASS_REAL_BLOCKED
+G13,A5,原生父子与压缩,历史重建/native compaction边界保持,真实GUI/同子恢复/native compact未同树验收,responses-continuation+interop,Codex原生能力不回退,U11/MG-R005/R006,BLOCKED_REAL_AUTH
+G14,A6,真实用量,持久logical/attempt/token/restart统计已实现,费用/额度/全部维度仍未知,stats/native-usage,UsageEvent统一logical/attempt/success,U12,CORE_PASS_REAL_BLOCKED
+G15,A6,结构化日志,脱敏文本+持久JSONL事件过滤分页已实现,真实长期保留策略与容量仍需运营校准,logger+observability+persist store,脱敏结构化分页/导出,U12/U14,PASS_FIXTURE
+G16,A6,通用备份恢复,脱敏文件/导入预览应用/回滚与秘密掩码保留已实现,秘密重新授权需真实账户;真实客户端流程待验,config-transaction/catalog history,预览/迁移/冲突/回滚,U13/U14,PASS_FIXTURE
+G17,A6,其他Harness,Claude/OpenCode/DSH配置适配器已实现,真实客户端未测;xmxz无官方资料,format/router+官方协议,独立Adapter能力/证据矩阵,U17,CORE_PASS_REAL_BLOCKED
+G18,A7,安全与证据,多租户/持久操作/DNS固定/在途保护/U02/G11/G15/U08/V04/安全审计/183套件与浏览器Orca证据已强化;8787已切Node24+ui-vnext;样例布局35/35,V07权威清单/真实场景/人工签收未完成,现有安全边界+证据生成器,同SHA U/V/MG-R+人工批准,U01-U17/V01-V07,LOCAL_SWITCH_DONE_BLOCKED_SIGNOFF
